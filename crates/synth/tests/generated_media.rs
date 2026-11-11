@@ -515,6 +515,110 @@ fn broken_files_give_errors_not_panics() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A box of type `t` holding `payload`.
+fn bx(t: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut b = u32::try_from(payload.len() + 8)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    b.extend_from_slice(t);
+    b.extend_from_slice(payload);
+    b
+}
+
+/// A full box of type `t` and `version`, with no flags, holding `payload`.
+fn full(t: &[u8; 4], version: u8, payload: &[u8]) -> Vec<u8> {
+    bx(t, &[&[version, 0, 0, 0][..], payload].concat())
+}
+
+/// FFmpeg's `mov_read_sv3d` reads `sv3d`'s boxes in one order and gives
+/// up on the whole box at the first it doesn't find there; the damage
+/// check names each `sv3d` FFmpeg ignores (F124). Each row is read by
+/// FFmpeg's own demuxer, which must show no sphere, and by the damage
+/// check, which must name it. A mesh FFmpeg ignores too, but as a
+/// projection it doesn't know, which isn't damage (D15).
+///
+/// Controls: the writer's own `sv3d`, which FFmpeg reads, has its sphere
+/// and is not named.
+#[test]
+fn ffmpeg_and_the_damage_check_agree_on_sv3d_layouts() {
+    use spherecut_media::Source;
+    use spherecut_media::inject::{self, EntryEdit, TrackKind};
+    use spherecut_media::mp4;
+    use spherecut_media::spherical::{StereoMode, write};
+    use spherecut_testkit::control::must_fail;
+
+    let dir = tmp("sv3d-layouts");
+    let flat = media::write(&small("t-sv3d", Codec::H264, 8, Audio::None, false), &dir).unwrap();
+    // The flat clip with `st3d` and `sv3d` and no V1, as `name`.
+    let tagged = |name: &str, sv3d: Vec<u8>| {
+        let out = dir.join(format!("{name}.mp4"));
+        let boxes = [write::st3d(StereoMode::Mono), sv3d].concat();
+        let edit = EntryEdit {
+            track: TrackKind::Video,
+            boxes,
+        };
+        inject::inject(&flat, &out, &[edit]).unwrap();
+        out
+    };
+    // The damage check names it as an `sv3d` FFmpeg ignores.
+    let names_it = |path: &Path| {
+        mp4::read_file(path)
+            .unwrap()
+            .damage()
+            .iter()
+            .any(|d| d.ends_with(", so FFmpeg ignores its projection"))
+    };
+    // FFmpeg's own demuxer gives the video stream no sphere.
+    let flat_to_ffmpeg = |path: &Path| {
+        let view = probe::demuxer_view(Source::path(path), None).unwrap();
+        let video = view.streams.iter().find(|s| s.kind == StreamKind::Video);
+        video.unwrap().spherical.is_none()
+    };
+    let svhd = |v| full(b"svhd", v, b"test\0");
+    let prhd = |v| full(b"prhd", v, &[0; 12]);
+    let equi = |v| full(b"equi", v, &[0; 16]);
+    let cbmp = |layout: u32| full(b"cbmp", 0, &[layout.to_be_bytes(), [0; 4]].concat());
+    let proj = |children: &[Vec<u8>]| bx(b"proj", &children.concat());
+    let sv3d = |children: &[Vec<u8>]| bx(b"sv3d", &children.concat());
+    // Each read by our boxes' parser, and each ignored by FFmpeg's
+    // `mov_read_sv3d`, which reads the boxes in this order: `svhd` of
+    // version 0, `proj`, `prhd` of version 0, then the projection.
+    let ignored = [
+        ("proj-first", sv3d(&[proj(&[prhd(0), equi(0)]), svhd(0)])),
+        ("equi-first", sv3d(&[svhd(0), proj(&[equi(0), prhd(0)])])),
+        ("svhd-v1", sv3d(&[svhd(1), proj(&[prhd(0), equi(0)])])),
+        ("prhd-v1", sv3d(&[svhd(0), proj(&[prhd(1), equi(0)])])),
+        ("equi-v1", sv3d(&[svhd(0), proj(&[prhd(0), equi(1)])])),
+        ("header-only", sv3d(&[svhd(0), proj(&[prhd(0)])])),
+        (
+            "prhd-28-bytes",
+            sv3d(&[svhd(0), proj(&[full(b"prhd", 0, &[0; 16]), equi(0)])]),
+        ),
+        ("cbmp-layout-1", sv3d(&[svhd(0), proj(&[prhd(0), cbmp(1)])])),
+    ];
+    for (name, sv3d) in ignored {
+        let out = tagged(name, sv3d);
+        assert!(flat_to_ffmpeg(&out), "{name}: FFmpeg reads a sphere");
+        assert!(names_it(&out), "{name}");
+    }
+    // A mesh FFmpeg doesn't read either, but it isn't damage (D15).
+    let mesh = tagged(
+        "mshp",
+        sv3d(&[svhd(0), proj(&[prhd(0), full(b"mshp", 0, &[0; 8])])]),
+    );
+    assert!(flat_to_ffmpeg(&mesh));
+    assert!(!names_it(&mesh));
+    // The writer's own `sv3d` is neither.
+    let good = tagged("equirect", write::sv3d_equirect("test"));
+    must_fail(
+        "FFmpeg reads no sphere in the writer's sv3d",
+        flat_to_ffmpeg(&good),
+    );
+    must_fail("the damage check names the writer's sv3d", names_it(&good));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Write a MOV at `path` holding one track of 48 kHz stereo PCM silence
 /// (sample entry `sowt`).
 // PCM, which Mp4Writer doesn't write, muxed with ffmpeg-next alone.

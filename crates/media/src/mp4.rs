@@ -879,14 +879,15 @@ fn renamed_traks(moov: &Mp4Box, out: &mut Vec<String>) {
     }
 }
 
-/// List each `sv3d` in the tracks' sample entries that lacks a box FFmpeg
-/// needs to read it: `svhd`, `proj`, or the `prhd` in `proj`. FFmpeg then
-/// ignores the whole `sv3d`, so a `proj` whose type reads `qroj` loses the
-/// projection with no more than a line in its log. Also list each child
-/// of a sample entry with a printable type other than `sv3d` whose
-/// payload starts with `svhd`, which only `sv3d` holds: an `sv3d` whose
-/// type was damaged into another printable one, such as `rv3d`, which
-/// FFmpeg skips with the projection, as it does a type that is not text.
+/// List each `sv3d` in the tracks' sample entries that FFmpeg ignores
+/// ([`ignored_sv3d`]): its `mov_read_sv3d` reads the boxes in one order
+/// and gives up on the whole `sv3d` at the first it doesn't find there,
+/// so a `proj` whose type reads `qroj` loses the projection with no more
+/// than a line in its log. Also list each child of a sample entry with a
+/// printable type other than `sv3d` whose payload starts with `svhd`,
+/// which only `sv3d` holds: an `sv3d` whose type was damaged into another
+/// printable one, such as `rv3d`, which FFmpeg skips with the projection,
+/// as it does a type that is not text.
 fn lost_projections(moov: &Mp4Box, out: &mut Vec<String>) {
     let entries = moov
         .children_of(b"trak")
@@ -903,27 +904,75 @@ fn lost_projections(moov: &Mp4Box, out: &mut Vec<String>) {
             }
         }
         for sv3d in entry.children_of(b"sv3d") {
-            let proj = sv3d.child(b"proj");
-            let missing: Vec<&str> = [
-                (sv3d.child(b"svhd").is_some(), "`svhd`"),
-                (proj.is_some(), "`proj`"),
-                (
-                    proj.is_none_or(|p| p.child(b"prhd").is_some()),
-                    "`proj/prhd`",
-                ),
-            ]
-            .into_iter()
-            .filter_map(|(have, name)| (!have).then_some(name))
-            .collect();
-            if !missing.is_empty() {
+            if let Some(why) = ignored_sv3d(sv3d) {
                 out.push(format!(
-                    "`sv3d` at offset {} in `{}` has no {}, so FFmpeg ignores its projection",
-                    sv3d.offset,
-                    entry.fourcc,
-                    missing.join(" or ")
+                    "`sv3d` at offset {} in `{}` {why}, so FFmpeg ignores its projection",
+                    sv3d.offset, entry.fourcc
                 ));
             }
         }
+    }
+}
+
+/// Why FFmpeg ignores `sv3d`, if it does, as its `mov_read_sv3d` reads it
+/// (`libavformat/mov.c` in 6.1.1, 7.1, 8.1 and 9.0.2): `svhd` first, of
+/// version 0; then `proj`; in `proj`, `prhd` first, of version 0, from
+/// which it reads the pose and no more, so it must be 24 bytes; then the
+/// projection box, of version 0, and a `cbmp` of layout 0. FFmpeg also
+/// ignores a projection type it doesn't know, such as `mshp`, but that is
+/// not damage: it says so in its log, and the file may use a newer one.
+fn ignored_sv3d(sv3d: &Mp4Box) -> Option<String> {
+    let version = |b: &Mp4Box| b.payload.first().copied().unwrap_or(0);
+    let found = (|| {
+        let svhd = nth(sv3d, 0, b"svhd", "svhd")?;
+        if version(svhd) != 0 {
+            return Err(format!("has an `svhd` of version {}", version(svhd)));
+        }
+        let proj = nth(sv3d, 1, b"proj", "proj")?;
+        let prhd = nth(proj, 0, b"prhd", "proj/prhd")?;
+        if version(prhd) != 0 {
+            return Err(format!("has a `proj/prhd` of version {}", version(prhd)));
+        }
+        if prhd.size != 24 {
+            return Err(format!(
+                "has a `proj/prhd` of {} bytes, where FFmpeg reads 24",
+                prhd.size
+            ));
+        }
+        let Some(projection) = proj.children.get(1) else {
+            return Err("has no projection box after its `proj/prhd`".into());
+        };
+        let t = projection.fourcc;
+        if matches!(&t.0, b"equi" | b"cbmp") && version(projection) != 0 {
+            return Err(format!(
+                "has a `proj/{t}` of version {}",
+                version(projection)
+            ));
+        }
+        if t.0 == *b"cbmp" {
+            let layout = projection
+                .payload
+                .get(4..8)
+                .map_or(0, |l| u32::from_be_bytes([l[0], l[1], l[2], l[3]]));
+            if layout != 0 {
+                return Err(format!("has a `proj/cbmp` of layout {layout}"));
+            }
+        }
+        Ok(())
+    })();
+    found.err()
+}
+
+/// The `n`th child of `parent`, where FFmpeg reads `want` (named `name`
+/// in `sv3d`), or why FFmpeg doesn't find it there.
+fn nth<'a>(parent: &'a Mp4Box, n: usize, want: &[u8; 4], name: &str) -> Result<&'a Mp4Box, String> {
+    match parent.children.get(n) {
+        Some(b) if b.fourcc.0 == *want => Ok(b),
+        Some(b) if parent.child(want).is_some() => Err(format!(
+            "has `{}` where FFmpeg reads its `{name}`",
+            b.fourcc
+        )),
+        _ => Err(format!("has no `{name}`")),
     }
 }
 
@@ -3174,6 +3223,20 @@ pub(crate) mod tests {
         // A projection we do not know is not damage: FFmpeg says so in its
         // log, and the file may use a newer one.
         assert!(with(b"equi", b"mshp").is_empty());
+        // FFmpeg reads the boxes in one order, of version 0 (F124).
+        let ignored = |why: &str| {
+            [format!(
+                "`sv3d` at offset {sv3d} in `hvc1` {why}, so FFmpeg ignores its projection"
+            )]
+        };
+        let svhd = f.windows(4).position(|w| w == b"svhd").unwrap() + 4;
+        let mut g = f.clone();
+        g[svhd] = 1;
+        assert_eq!(damage_of(g), ignored("has an `svhd` of version 1"));
+        let prhd = f.windows(4).position(|w| w == b"prhd").unwrap() + 4;
+        let mut g = f.clone();
+        g[prhd] = 2;
+        assert_eq!(damage_of(g), ignored("has a `proj/prhd` of version 2"));
 
         // FFmpeg skips an `sv3d` under another type, and the projection
         // with it, without a word. Every one-bit flip of the type is found:

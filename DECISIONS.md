@@ -861,11 +861,15 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   retyping it looks the same as a damaged one, so such a file fails
   `probe` and `inject` refuses it, rather than a stream going missing
   without a word. No such file turned up in the sweeps;
-- an `sv3d` in a sample entry without `svhd`, without `proj`, or with a
-  `proj` that has no `prhd`. FFmpeg then ignores the whole `sv3d`, saying
-  no more than "Missing projection box" in its log, so a `proj` renamed
-  to `qroj` loses the projection. A projection box FFmpeg does not know,
-  such as `mshp`, is not damage;
+- an `sv3d` in a sample entry that FFmpeg's `mov_read_sv3d` ignores. It
+  reads the boxes in one order and gives up on the whole `sv3d` at the
+  first it doesn't find there: `svhd` first, of version 0; then `proj`;
+  in `proj`, `prhd` first, of version 0 and 24 bytes, since it reads the
+  pose and no more; then a projection box, of version 0 for `equi` and
+  `cbmp`, and a `cbmp` of layout 0. It says no more than "Missing
+  projection box" or the like in its log, so a `proj` renamed to `qroj`
+  loses the projection. A projection box FFmpeg does not know, such as
+  `mshp`, is not damage;
 - a child of a sample entry whose type is printable but not `sv3d` and
   whose payload starts with an `svhd` box, which only `sv3d` holds: an
   `sv3d` renamed to `rv3d` or `sv3D`, which FFmpeg skips with the
@@ -1005,6 +1009,20 @@ damaged trailers among them, never panic, and whatever trailer comes
 back is checked against the bytes themselves. At 100,000 cases they
 take 1.4 s and 0.9 s in a debug build on the cloud box (4 Xeon cores,
 camera at opt-level 2).
+
+*Updated 2026-11-11 (review-fix slice):* the `sv3d` check above now
+follows the order in which FFmpeg reads the boxes (F124). It used to
+ask only that `svhd`, `proj` and `prhd` be there, so an `sv3d` with
+`proj` before `svhd`, the projection before `prhd`, or an `svhd` of
+version 1 passed, though FFmpeg 6.1.1 ignores each. It reads the same
+in 7.1, 8.1 and 9.0.2. `generated_media.rs`'s
+`ffmpeg_and_the_damage_check_agree_on_sv3d_layouts` builds each such
+`sv3d`, a `proj` with only its header and a 28-byte `prhd` among them,
+and checks that FFmpeg's own demuxer gives the stream no sphere and
+that the check names it. A mesh FFmpeg ignores too but isn't named, and
+the writer's own `sv3d` is neither. Our reader of `sv3d` stays lenient
+and the check is what tells. The export's `sa3d` check also wants what
+FFmpeg 6.1 takes (D52).
 
 ## D16. `inject` and `Mp4Writer` write atomically
 
@@ -8224,7 +8242,10 @@ What, as `crates/export` does it:
   a spherical box, `probe::SPHERICAL_COMPLAINTS`; such a line is listed
   however long the log is). A complaint fails the export for now: one
   constant, `SPHERICAL_COMPLAINT_FAILS`, would make it a warning, which
-  is Pat's call.
+  is Pat's call. `sa3d` also wants what FFmpeg 6.1's reader takes
+  (F124): version 0, no head-locked stereo, and the identity channel map
+  (`0..channels`); the 360 export test's copies with `SA3D` of version 1
+  or a reordered map fail it.
 - **Parity floors** (item 31, section 11): an export decoded again is
   held to `StillRenderer` of the same views of the same source frame in
   the encoder's planes, every frame, by luma PSNR and SSIM. Each floor

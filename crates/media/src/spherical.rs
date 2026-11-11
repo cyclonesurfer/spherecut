@@ -287,6 +287,12 @@ fn fixed16(v: i32) -> f64 {
     v as f64 / 65536.0
 }
 
+/// `sv3d` as the specification lays it out, read leniently: `svhd`,
+/// `proj` and `prhd` wherever they are among their siblings, any version,
+/// and the first box in `proj` other than `prhd` as the projection. So
+/// this can give a projection that FFmpeg's demuxer, which is strict
+/// about the order and the versions, ignores; the damage check says when
+/// it does (`mp4::lost_projections`, D15), and probe fails such a file.
 fn parse_sv3d(b: &Mp4Box) -> SphericalV2 {
     let metadata_source = b.child(b"svhd").map(|h| {
         let mut c = Cursor::new(&h.payload);

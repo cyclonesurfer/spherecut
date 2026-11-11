@@ -19,7 +19,7 @@ use spherecut_core::project::Codec;
 use spherecut_core::time::{FrameRate, Time};
 use spherecut_media::Source;
 use spherecut_media::probe::{self, DemuxerView, StreamInfo, StreamKind};
-use spherecut_media::spherical::{Projection, SphericalV2, StereoMode};
+use spherecut_media::spherical::{Projection, SpatialAudio, SphericalV2, StereoMode};
 
 use crate::error::{ExportError, Stage};
 
@@ -283,14 +283,37 @@ pub fn check(
                 || format!("{}, {} Hz, {} channels", a.codec, a.rate, a.channels),
             )?;
             if a.ambix {
+                // As FFmpeg 6.1's `mov_read_SA3D` takes it (F124): it
+                // ignores another version, head-locked stereo and a
+                // channel map that reorders.
                 let sa = s.spherical.spatial_audio.as_ref();
+                let identity =
+                    |sa: &SpatialAudio| sa.channel_map.iter().copied().eq(0..u32::from(a.channels));
                 c.expect(
                     "sa3d",
-                    sa.is_some_and(|sa| sa.is_ambix() && sa.ambisonic_order == 1),
-                    sa.map_or("no SA3D".into(), |sa| {
-                        format!("order {}, ambiX {}", sa.ambisonic_order, sa.is_ambix())
+                    sa.is_some_and(|sa| {
+                        sa.version == 0
+                            && !sa.head_locked_stereo
+                            && sa.is_ambix()
+                            && sa.ambisonic_order == 1
+                            && identity(sa)
                     }),
-                    || "first-order ambiX".into(),
+                    sa.map_or("no SA3D".into(), |sa| {
+                        format!(
+                            "version {}, order {}, ambiX {}, head-locked stereo {}, channel map {:?}",
+                            sa.version,
+                            sa.ambisonic_order,
+                            sa.is_ambix(),
+                            sa.head_locked_stereo,
+                            sa.channel_map
+                        )
+                    }),
+                    || {
+                        format!(
+                            "version 0, first-order ambiX with no head-locked stereo, channel map {:?}",
+                            (0..u32::from(a.channels)).collect::<Vec<_>>()
+                        )
+                    },
                 )?;
             }
         }

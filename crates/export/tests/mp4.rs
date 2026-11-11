@@ -125,6 +125,7 @@ fn a_360_export_has_the_moov_first_v1_and_v2_and_no_video_edit_list() {
             ambix: true,
         }),
     };
+    let flag = || Arc::new(AtomicBool::new(false));
     let read = |path: &Path| probe::demuxer_view(Source::path(path), None).unwrap();
     let layout = |view: &DemuxerView| {
         let a = view.streams.iter().find(|s| s.kind == StreamKind::Audio);
@@ -234,6 +235,12 @@ fn a_360_export_has_the_moov_first_v1_and_v2_and_no_video_edit_list() {
                 let e = must_fail(name, r).to_string();
                 assert!(e.starts_with(&format!("check: {check}: ")), "{name}: {e}");
             }
+        }
+        // Our own parser's checks name what FFmpeg ignores in `SA3D` too
+        // (F124).
+        if name.starts_with("sa3d-v") || name == "sa3d-map" {
+            let e = must_fail(name, check(&doctored, &want, flag())).to_string();
+            assert!(e.starts_with("check: sa3d: "), "{name}: {e}");
         }
         let log = view.ffmpeg_log.join("\n");
         match name {
