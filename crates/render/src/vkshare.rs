@@ -17,6 +17,7 @@
 //! queue wgpu doesn't know, and buffers handed to wgpu.
 
 use std::ffi::CStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ash::vk;
@@ -553,19 +554,33 @@ pub fn buffer_layout(regions: &[PlaneRegion]) -> (Vec<BufferPlane>, u64) {
 
 /// A picture's planes, copied into a buffer of the copier's. The buffer
 /// goes back to the copier's pool when this is dropped, which must be
-/// after the GPU is done reading it (`Queue::on_submitted_work_done`).
+/// after the GPU is done reading it (`Queue::on_submitted_work_done`),
+/// and only if [`Copier::wait`] saw the copy done. One it didn't (the
+/// wait timed out or failed, or nobody waited) may still be writing the
+/// buffer, which wgpu doesn't know of, so the buffer is leaked instead:
+/// neither the next copy nor wgpu's free can reach it.
 #[derive(Debug)]
 pub struct Copied {
     pub buffer: wgpu::Buffer,
     pub planes: Vec<BufferPlane>,
     /// The copier's semaphore value the copy signals.
     value: u64,
+    /// Whether [`Copier::wait`] saw the copy done.
+    waited: AtomicBool,
     raw: vk::Buffer,
     free: Arc<Mutex<Vec<PooledBuffer>>>,
 }
 
 impl Drop for Copied {
     fn drop(&mut self) {
+        if !self.waited.load(Ordering::Acquire) {
+            tracing::warn!(
+                value = self.value,
+                "a copy out of the decoder wasn't seen done; its buffer is leaked"
+            );
+            std::mem::forget(self.buffer.clone());
+            return;
+        }
         let mut free = lock(&self.free);
         if free.len() < KEEP_BUFFERS {
             free.push(PooledBuffer {
@@ -627,6 +642,24 @@ impl std::fmt::Debug for Inner {
 /// `RenderError::Import` for a Vulkan call that failed.
 fn vk_err(what: &str) -> impl Fn(vk::Result) -> RenderError + '_ {
     move |e| RenderError::Import(format!("{what}: {e}"))
+}
+
+/// The error for a Vulkan call of a copy's that failed (`what` it was
+/// doing): a hung or lost GPU (`TIMEOUT` after [`COPY_TIMEOUT_NS`],
+/// `ERROR_DEVICE_LOST`) is the device's failure and no memory is out of
+/// memory, as wgpu's own calls would say; only the rest is `Import`, a
+/// frame the copy path takes instead. [`Copier::new`]'s calls keep
+/// [`vk_err`]: their error only says why the device isn't shared.
+fn copy_err(what: &'static str) -> impl Fn(vk::Result) -> RenderError {
+    move |e| match e {
+        vk::Result::TIMEOUT | vk::Result::ERROR_DEVICE_LOST => {
+            RenderError::Device(format!("{what}: {e}"))
+        }
+        vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
+            RenderError::OutOfMemory("a copy out of the decoder")
+        }
+        e => RenderError::Import(format!("{what}: {e}")),
+    }
 }
 
 impl Copier {
@@ -748,12 +781,14 @@ impl Copier {
             buffer: buffer.buffer,
             planes: layout,
             value,
+            waited: AtomicBool::new(false),
             raw: buffer.raw,
             free: self.free.clone(),
         })
     }
 
-    /// Waits, on the CPU, for `copied`'s copy to be done. Blocks.
+    /// Waits, on the CPU, for `copied`'s copy to be done, and marks it so
+    /// (its buffer goes back to the pool only then). Blocks.
     pub fn wait(&self, copied: &Copied) -> Result<(), RenderError> {
         spherecut_core::may_block("waiting for a GPU copy");
         let (raw, timeline) = {
@@ -768,12 +803,15 @@ impl Copier {
         // SAFETY: the semaphore is the copier's, alive while it is (the
         // caller has the copier).
         match unsafe { raw.wait_semaphores(&info, COPY_TIMEOUT_NS) } {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                copied.waited.store(true, Ordering::Release);
+                Ok(())
+            }
             Err(vk::Result::TIMEOUT) => Err(RenderError::Device(format!(
                 "a copy out of the decoder took over {} s",
                 COPY_TIMEOUT_NS / 1_000_000_000
             ))),
-            Err(e) => Err(vk_err("waiting for a copy out of the decoder")(e)),
+            Err(e) => Err(copy_err("waiting for a copy out of the decoder")(e)),
         }
     }
 
@@ -806,6 +844,12 @@ impl Copier {
         }
     }
 
+    /// How many buffers wait in the pool.
+    #[cfg(test)]
+    fn pooled(&self) -> usize {
+        lock(&self.free).len()
+    }
+
     /// A free buffer of `size` bytes, or a new one.
     fn buffer(&self, size: u64) -> Result<PooledBuffer, RenderError> {
         {
@@ -834,7 +878,7 @@ impl Inner {
         };
         // SAFETY: a valid create info on a live device.
         let buffer = unsafe { self.raw.create_buffer(&info, None) }
-            .map_err(vk_err("making a copy buffer"))?;
+            .map_err(copy_err("making a copy buffer"))?;
         // SAFETY: `buffer` is the device's own.
         let req = unsafe { self.raw.get_buffer_memory_requirements(buffer) };
         let destroy = |e: RenderError| {
@@ -859,20 +903,14 @@ impl Inner {
             .allocation_size(req.size)
             .memory_type_index(ty as u32);
         // SAFETY: a type the buffer takes, of the device's own.
-        let memory = unsafe { self.raw.allocate_memory(&alloc, None) }.map_err(|e| {
-            destroy(match e {
-                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY => {
-                    RenderError::OutOfMemory("a copy buffer out of the decoder")
-                }
-                e => vk_err("allocating a copy buffer")(e),
-            })
-        })?;
+        let memory = unsafe { self.raw.allocate_memory(&alloc, None) }
+            .map_err(|e| destroy(copy_err("allocating a copy buffer")(e)))?;
         // SAFETY: `memory` is as large as the buffer needs, of a type it
         // takes, and bound once.
         if let Err(e) = unsafe { self.raw.bind_buffer_memory(buffer, memory, 0) } {
             // SAFETY: neither was used.
             unsafe { self.raw.free_memory(memory, None) };
-            return Err(destroy(vk_err("binding a copy buffer")(e)));
+            return Err(destroy(copy_err("binding a copy buffer")(e)));
         }
         // SAFETY: wgpu takes the buffer and its memory, and frees both when
         // the last handle to it goes; the copier only records copies into
@@ -912,7 +950,7 @@ impl Inner {
         unsafe {
             self.raw
                 .reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                .map_err(vk_err("resetting the copier's command buffer"))?;
+                .map_err(copy_err("resetting the copier's command buffer"))?;
         }
         let planes = picture.planes().to_vec();
         let value = self.last + 1;
@@ -973,7 +1011,7 @@ impl Inner {
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // SAFETY: `cmd` was reset and isn't in use.
         unsafe { self.raw.begin_command_buffer(cmd, &begin) }
-            .map_err(vk_err("recording a copy"))?;
+            .map_err(copy_err("recording a copy"))?;
         // Each image into TRANSFER_SRC_OPTIMAL, its planes' aspects at once.
         // The semaphore wait orders this after FFmpeg's work on it and makes
         // that work's writes available and visible; the barrier names that
@@ -1046,7 +1084,7 @@ impl Inner {
             };
         }
         // SAFETY: `cmd` is recording.
-        unsafe { self.raw.end_command_buffer(cmd) }.map_err(vk_err("recording a copy"))?;
+        unsafe { self.raw.end_command_buffer(cmd) }.map_err(copy_err("recording a copy"))?;
         let waits: Vec<vk::SemaphoreSubmitInfo> = states
             .iter()
             .map(|s| {
@@ -1085,7 +1123,7 @@ impl Inner {
         unsafe {
             self.raw
                 .queue_submit2(self.queue, &[submit], vk::Fence::null())
-                .map_err(vk_err("submitting a copy"))
+                .map_err(copy_err("submitting a copy"))
         }
     }
 
@@ -1098,7 +1136,7 @@ impl Inner {
             .values(&values);
         // SAFETY: the copier's own semaphore.
         unsafe { self.raw.wait_semaphores(&info, COPY_TIMEOUT_NS) }
-            .map_err(vk_err("waiting for an earlier copy"))
+            .map_err(copy_err("waiting for an earlier copy"))
     }
 }
 
@@ -1811,6 +1849,74 @@ mod tests {
         // Its control: a frame that locks is copied, and the check fails.
         let why = spherecut_testkit::control::must_fail("a frame that locks", refused(&pic));
         assert!(why.starts_with("copied"), "{why}");
+    }
+
+    /// A copy no [`Copier::wait`] saw done (its wait timed out, or nobody
+    /// waited) may still be writing its buffer, so dropping it leaves the
+    /// buffer out of the pool, where the next copy would take it.
+    #[test]
+    fn a_copy_not_seen_done_isnt_pooled() {
+        // SAFETY: one thing at a time on the device, from this thread.
+        let gpu = unsafe { single_queue_gpu(&crate::AdapterChoice::Cpu) }.unwrap();
+        let shared = gpu.shared_video().unwrap().clone();
+        let copier = &shared.copier;
+        let size = (64, 32);
+        let pic = picture(
+            &gpu,
+            &[(vk::Format::R8_UNORM, size)],
+            &[(0, vk::ImageAspectFlags::COLOR, size, 1)],
+            &[vec![5u8; 64 * 32]],
+        );
+        let regions = [PlaneRegion {
+            bytes_per_texel: 1,
+            size,
+        }];
+        // The check: dropping the copy leaves the pool as it was.
+        let left_out = |copied: Copied| -> Result<(), String> {
+            let before = copier.pooled();
+            drop(copied);
+            match copier.pooled() {
+                n if n == before => Ok(()),
+                n => Err(format!("the pool went from {before} to {n}")),
+            }
+        };
+        left_out(copier.copy(&pic, &regions).unwrap()).unwrap();
+        // Its control: a copy waited for goes back to the pool.
+        let waited = copier.copy(&pic, &regions).unwrap();
+        copier.wait(&waited).unwrap();
+        spherecut_testkit::control::must_fail("a copy waited for", left_out(waited));
+    }
+
+    /// The copier's errors after it is made: a hung or lost GPU is a
+    /// device failure, no memory is out of memory, and only the rest is a
+    /// refusal of the decoder's frame, which the copy path then takes.
+    #[test]
+    fn the_copiers_failures_are_told_apart() {
+        // The check: each result's code.
+        let codes = |map: &dyn Fn(vk::Result) -> RenderError| -> Result<(), String> {
+            let want = [
+                (vk::Result::ERROR_DEVICE_LOST, "gpu_failed"),
+                (vk::Result::TIMEOUT, "gpu_failed"),
+                (vk::Result::ERROR_OUT_OF_DEVICE_MEMORY, "out_of_gpu_memory"),
+                (vk::Result::ERROR_OUT_OF_HOST_MEMORY, "out_of_gpu_memory"),
+                (vk::Result::ERROR_INITIALIZATION_FAILED, "import_failed"),
+                (vk::Result::ERROR_FORMAT_NOT_SUPPORTED, "import_failed"),
+            ];
+            for (r, code) in want {
+                let got = map(r);
+                if got.code() != code {
+                    return Err(format!("{r:?} is {} ({got}), not {code}", got.code()));
+                }
+            }
+            Ok(())
+        };
+        codes(&copy_err("submitting a copy")).unwrap();
+        // Its control: the mapping the copier's making keeps, under which
+        // everything is a refusal.
+        spherecut_testkit::control::must_fail(
+            "every failure a refusal",
+            codes(&vk_err("submitting a copy")),
+        );
     }
 
     #[test]
