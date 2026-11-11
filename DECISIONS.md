@@ -1868,6 +1868,14 @@ belt was at 86 % and 81 %, path B at 96 % and 94 %, the frames'
 download and upload being the traffic the belt leaves on the one queue
 the window presents from (`docs/perf.md`, odin's seventh run).
 
+*Noted 2026-11-11 (M3.8, D77).* On odin's RX 7600, D67's pair check
+found a kept frame's luma wrong in 3.3 % of frames on both paths, and
+0.17 % of copied ones, in 4×2 blocks of the slot's R8 plane, and none
+under `RADV_DEBUG=nodcc`. RADV's DCC on the slots' 8-bit planes is the
+likely mechanism, so those planes can no longer be rendered to, which
+keeps DCC off them (D77). Path A's old "19 of 2764800" flake is probably
+the same fault.
+
 Revisit if: path B fails or is refused on a GPU that doctor said could
 share its device (the copy path takes over, said once a file); huginn's
 numbers favour VA-API imported over the copy there (then path A becomes
@@ -3338,17 +3346,19 @@ What:
   encode pass returns its target's nearest code, and into an f16 target
   the nearest half (both below, after odin's third run).
 - **Mips**: one area-weighted shader for all four formats, a render pass
-  per level, reading the level above with `textureLoad` and weighting
-  each texel by its overlap in integer arithmetic, so odd sizes come out
-  exact. At 8 bits the mean of the codes is an integer division too,
-  rounded to the nearest code with ties to even (amended 2026-10-28,
+  per level (for the 8-bit ones a compute pass and a copy since D77, on
+  the same means), reading the level above with `textureLoad` and
+  weighting each texel by its overlap in integer arithmetic, so odd sizes
+  come out exact. At 8 bits the mean of the codes is an integer division
+  too, rounded to the nearest code with ties to even (amended 2026-10-28,
   below). Levels per plane are clamp(1 + ⌊log2(max / 64)⌋, 1, 8).
 - **Slots**: `GpuFrame` holds a frame's planes with their mips, its
   `Source` uniform and its bind group, for a `SlotShape` (plane formats
   and sizes; the depth may differ, since the ingest normalises it). Level
   0 of each plane is an ordinary texture that a buffer copy, a texture
-  copy or a render pass can fill, so a frame already on the GPU (slice
-  5b) fills a slot without `VideoPlanes`: it writes level 0 of
+  copy or a render pass can fill (a render pass only a deep plane's,
+  since D77), so a frame already on the GPU (slice 5b) fills a slot
+  without `VideoPlanes`: it writes level 0 of
   `GpuFrame::plane_texture`, records the mips with
   `Uploader::record_mips` and sets the uniform with
   `GpuFrame::set_source`, as an upload does (a Tier 1 test fills a slot
@@ -3824,6 +3834,15 @@ frame's mips take 1.01 ms of GPU time, against 0.62 ms at be38fa4 when
 the stores were the driver's, and a 3840² pair's ingest and mips 0.89
 ms a frame, against 0.59. P010's mips, on the f16 path, take 0.51 ms
 either way.
+
+*Amended 2026-11-11 (M3.8): 8-bit mips by a compute pass (D77).* A
+slot's R8 and Rg8 planes can no longer be rendered to, which keeps
+RADV's DCC off them after odin's wrong luma blocks, so their levels come
+from `shaders/mips8.wgsl`'s compute pass into a buffer, and a copy into
+each level. It takes this amendment's means from the same function
+(`mean_codes`, shared with `fs_mip`), and a Tier 1 test holds it to the
+render passes byte for byte at every level, down to 1×1; the stored
+goldens didn't change. Deep planes keep the render pass.
 
 ## D32. Golden images
 
@@ -10468,6 +10487,191 @@ plan's 707 MB; a camera's lenses start apart (`LockSpec.offset`) or
 come in a container without tables; a display rate near a whole
 multiple of a clip's counts its drops as skips; or M3.14's LRV proxy
 needs the group's members over one stream.
+
+## D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
+
+*2026-11-11, M3 slice M3.8's fix round. Updates D25 and D31. What it
+says of Mesa's code is recalled, not read: the cloud box's proxy turns
+away gitlab.freedesktop.org and GitHub's Mesa mirror, so each such
+statement is marked, and the guards below check it on odin.*
+
+The fault:
+
+- **Where.** odin: an AMD Radeon RX 7600 (Navi 33, GFX11), Fedora 44,
+  kernel 7.2.9, Mesa 26.2.5 (RADV), FFmpeg 8.1.3, wgpu 30.0.1.
+- **The rates** (PR #32, three runs of `zero_copy_pair_matches_copy`,
+  D67's check of every slot byte for byte against the copy path): 141
+  wrong frames, 118 of them kept on the GPU by path B, 16 kept by path
+  A, 6 copied on path B's runs and 1 on path A's. A frame, that is
+  3.3 % of the frames kept on the GPU, paths A and B alike, and 0.17 % of
+  the frames copied through memory.
+- **The signature.** Luma only, an `R8Unorm` plane (3840×3840, 6
+  levels), never chroma (`Rg8Unorm`, 1920×1920, 5 levels), though both
+  are written in the same submissions. Almost always one 4×2 block, at
+  x mod 8 in 4..7 and y mod 4 in 2..3 of an aligned 8×4 cell; now and
+  then its right half (4×4) or the whole cell. Read again, the same
+  wrong bytes; the frame in the cache is right; never on a slot's first
+  write; no position twice. The unlocked, lens-alone, read-while-quiet
+  and pool-watched variants fail alike.
+- **PR #33.** Under `RADV_DEBUG=nodcc` the test passed both runs; a
+  plain run between them failed with 45 wrong frames, about the 47 a run
+  the old rates give.
+- **The analysis** (the fix round's, from both PRs' logs). The damage
+  is after the source bytes, in the slot: in the GPU's write of level 0
+  (a buffer-to-image copy from the staging belt or path B's buffer, an
+  image copy from path A's import), or in every read of it alike. The
+  verdict is about 95 % sure of that, about 75 % that it is the write,
+  and about even (50 %) that DCC is the mechanism, since `nodcc` turns
+  off more than the slot's DCC. It ranks a RADV or GFX11 fault (a driver
+  bug or a hardware erratum) first: the decoded bytes, the cache, the
+  belt and the copies' sources are right, and frames copied through
+  memory, which take no import and no `Copier`, fail too, a twentieth
+  as often. Not known: write side or read side, and driver or
+  hardware. No sync validation run has cleared our
+  side yet; the round's other unit tightens path A's and path B's
+  hand-over to wgpu anyway.
+- **The M1 flake.** Path A's "19 of 2764800 values differ"
+  (`zero_copy_matches_copy_path`, odin's H3 run at 0d491ae and M2's at
+  0663e05), never explained, is probably this fault.
+- A third odin run is queued: `radv_disable_dcc_mips`, `RADV_DEBUG=img`
+  and vulkaninfo.
+
+The workaround:
+
+- **No `RENDER_ATTACHMENT` on 8-bit planes.** `GpuFrame::new` makes a
+  slot's R8 and Rg8 planes `TEXTURE_BINDING | COPY_DST | COPY_SRC`;
+  deep planes (R16F, Rg16F) keep `RENDER_ATTACHMENT`, which the ingest
+  pass and their mips draw into. Read in wgpu 30.0.1: wgpu-core adds
+  `COLOR_TARGET` of its own only to a texture without `COPY_DST`
+  (`conv::map_texture_usage_for_texture`), so none comes back, and a
+  plane's lazy clear is a buffer copy now, not a render pass; wgpu-hal
+  (`vulkan::conv::map_texture_usage`) then asks Vulkan for
+  `TRANSFER_SRC | TRANSFER_DST | SAMPLED` for an 8-bit plane, where it
+  asked for `COLOR_ATTACHMENT` too, and for all four for a deep one. Both
+  with flags 0, optimal tiling, exclusive sharing and no `pNext`.
+- **The RADV rule relied on, recalled, not read.** RADV gives DCC, and
+  fast clears, only to images with `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`:
+  for a single-sample image without a DRM modifier,
+  `radv_image_use_fast_clear_for_image_early` is false without that bit
+  (unless `RADV_DEBUG=forcecompress`), and `radv_use_dcc_for_image_early`
+  gives no DCC where it is false. A later Mesa could compress such
+  images; `RADV_DEBUG=img` (below) would show it.
+- **What writes a slot's planes now.** Level 0 of an 8-bit plane only
+  by copies: the upload's `write_texture` or the belt's
+  buffer-to-texture copy, path A's texture copy from the DMA-BUF import
+  (`upload_imported`), path B's buffer copy (`upload_from_buffer`), and
+  in tests a frame filled on the GPU. Level 0 of a deep plane by the
+  ingest render pass, from a scratch texture of integers. Levels 1 and
+  on: an 8-bit plane's by the compute pass and a copy (next), a deep
+  one's by the render pass as before. What reads them: the projection,
+  through the slot's bind group (the viewer, overview frames,
+  `StillRenderer` and `render_still`, the export, and the YUV pass after
+  it), the mip passes' `textureLoad` of the level above, and readback
+  (tests, and Tier 2's checks). Nothing renders into an 8-bit plane.
+- **The mips by compute.** `shaders/mips8.wgsl`'s `cs_mip8` reads level
+  n − 1 with `textureLoad` and takes each texel's mean with
+  `mean_codes`, D31's integer area mean to the nearest code, ties to
+  even, now shared with `fs_mip` in `shaders/mips.wgsl`. It packs four
+  R8 or two Rg8 codes into a u32, the first in the low byte as a copy
+  reads them, into level n's region of a storage buffer, each row padded
+  to 256 bytes (`COPY_BYTES_PER_ROW_ALIGNMENT`); a copy then puts the
+  region into level n, which the next level's pass reads. The uploader
+  keeps one buffer a plane index, a region a level, and makes it again
+  when a plane's format or size changes (4.9 MB for a 3840² luma plane,
+  whose level 1 is 3.7 MB). `Uploader::record_mips` keeps its signature
+  and its place inside the upload's GPU timer span.
+
+Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
+
+- `the_eight_bit_mip_pass_is_the_render_passes_byte_for_byte` makes
+  every level of noise NV24 frames (R8 luma and Rg8 chroma at full
+  size) at 3840×3840, 1920×1920, 3840×1920, 1001×777, 15×15, 2×1 and
+  1×1, each down to 1×1, through the compute pass and through the render
+  passes it replaced, into slots made as before (`GpuFrame::renderable`
+  and `EightBitMips::RenderPass`, hidden, made for this test alone):
+  every byte of every level agrees. Its control, the compute pass with
+  each mean truncated, must fail, and is 12776841 bytes off (1381789 of
+  them at level 1 of the 3840² luma). 3.3 to 4.5 s.
+- `eight_bit_slot_planes_cant_be_rendered_to` checks a slot of NV12,
+  NV24, I420, grey, GBRP, P010, 10-bit 4:2:2 and 16-bit grey, before and
+  after an upload: 8-bit planes without `RENDER_ATTACHMENT`, deep ones
+  with it. Its control, an NV12 slot made as before, must fail at plane
+  0 (R8).
+- D31's mip tests pass on the compute pass unchanged:
+  `eight_bit_mips_are_the_references_code_for_code`,
+  `eight_bit_mips_are_exact_at_the_largest_sizes` (16383×2051,
+  16384×2049 and 2051×16383, past a u32's sum) and
+  `mips_are_area_means_at_odd_sizes`. The goldens pass three runs in a
+  row with nothing blessed, so the stored images, and the levels they
+  read, didn't move.
+- `the_bench_sees_a_steps_own_blocks` now runs on slots and mips made as
+  before: on lavapipe, whose one memory type holds both, the mip pass's
+  buffer lands in the first step's 128 MiB staging block and keeps it,
+  so no later step makes a block and the test would have nothing to see.
+- The cost on lavapipe (`upload_bench_smoke`, three runs before and
+  after, median GPU ms): 640×320 NV12 ingest and mips 2.76 to 2.20 with
+  `write_texture` and 2.27 to 2.10 with the belt; the 320² NV12 pair
+  1.26 to 1.01 and 1.25 to 1.08 a frame; mips alone 2.19 to 2.08; P010,
+  whose path didn't change, 2.65 to 2.41 and 1.33 to 1.36. No slower,
+  within lavapipe's noise; odin's rows (below) are the ones that count.
+
+The guards, on odin:
+
+- `zero_copy_pair_matches_copy` stays strict: byte for byte on every
+  slot, path and variant, with no tolerance, retry, skip or allowlist.
+  Three plain runs in a row must pass.
+- One run under `RADV_DEBUG=img` must show the slots' R8 3840×3840
+  6-level and RG8 1920×1920 5-level surfaces with no DCC (the form of
+  RADV's print is recalled: an `Image:` block with `width=`, `height=`
+  and `levels=`, and a `DCC:` line under a surface that has it).
+- The goldens on the RX 7600 (`goldens_on_gpu_match_reference`) and on
+  odin's llvmpipe (`goldens_on_host_llvmpipe`) as before.
+- `bench_upload_5k7`'s 8-bit rows (at 918d031, D31: the 5.7K NV12
+  frame's mips 1.01 ms, the 3840² pair's ingest and mips 0.89 ms a
+  frame), its 10-bit rows, which shouldn't move, and its project rows,
+  which now sample planes without DCC; and the real-time rows
+  (`bench_playback_realtime_5k7_8bit`,
+  `bench_playback_realtime_8k_8bit`, `bench_playback_x5_raw`'s P-LOCK
+  rows, `bench_x5_8k30_zero_copy_vs_copy`).
+
+Not done, and why:
+
+- `RADV_DEBUG=nodcc` or `radv_disable_dcc_mips` set at start-up: an
+  environment stopgap that reaches every image and every Mesa only by
+  name, kept for if this doesn't hold.
+- An image of our own with compression control set to disabled
+  (`VK_EXT_image_compression_control`): outside wgpu.
+- RADV may still write a copy into an 8-bit plane through a graphics
+  blit, since (as recalled) it picks the engine by whether the format
+  can be rendered, not by the image's usage, so this doesn't by itself
+  change what writes level 0; it takes DCC off the image, which is what
+  `nodcc` changed.
+
+Upstream: a Mesa report is drafted, for Pat to file or not. Its title:
+"radv/gfx11 (Navi 33): sporadic wrong 4x2 texel blocks in a mipmapped
+R8_UNORM color image after transfer copies". It gives the hardware and
+versions above; the image (R8_UNORM, 3840×3840, 6 levels, optimal,
+`TRANSFER_SRC | TRANSFER_DST | SAMPLED | COLOR_ATTACHMENT`, exclusive,
+six reused in turn); a frame's submission (a barrier, a buffer-to-image
+or image copy of all of level 0, then for levels 1 to 5 a barrier and a
+render pass that draws level n from n − 1 with `texelFetch`); the
+readback; the signature and rates above; what was tried (`syncshaders`
+no change, `nodcc` clean, `radv_disable_dcc_mips`, `img` and sync
+validation to fill in from odin's third run); and a reproducer without
+video decode (six such images, a natural 8-bit luma sequence copied in
+turn from a device-local buffer, the mips drawn, level 0 read back and
+compared, about 10,000 frames with and without `nodcc`). Not tested:
+other GFX11 parts, RDNA2, GFX12, Mesa 26.3 or main.
+
+Revisit if: `zero_copy_pair_matches_copy` fails on odin with this in
+(DCC was not the mechanism, or not the only one: the analysis's next
+experiments, from `RADV_DEBUG=nobinning` to a reproducer without
+FFmpeg under sync validation); `RADV_DEBUG=img` shows DCC on a slot's
+8-bit plane (a Mesa that compresses images that can't be rendered to);
+a deep plane, which keeps `COLOR_ATTACHMENT` and so DCC, shows the
+signature (PR #32's wrong frames were all R8, and its perf pair is
+8-bit); odin's rows show the compute mips or uncompressed sampling
+costing real-time play; or a Mesa with the fault fixed ships.
 
 ## Open
 
