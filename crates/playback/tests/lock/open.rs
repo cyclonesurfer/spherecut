@@ -17,7 +17,8 @@ use spherecut_core::{Clock, FrameRate, ManualClock};
 use spherecut_media::backend::{FfmpegBackend, HwKind, MediaBackend};
 use spherecut_playback::lock::field;
 use spherecut_playback::{
-    CacheBudget, DecoderPreference, LockSpec, LockStatus, Player, PlayerConfig, PlayerEvent,
+    CacheBudget, DecoderPreference, LockSpec, LockStatus, LockTest, Player, PlayerConfig,
+    PlayerEvent,
 };
 use spherecut_synth::fake::Gate;
 use spherecut_synth::media::{PAIR_64_GOP_FAULT, PAIR_64_MATCHED, pairs_64, write_pair};
@@ -423,6 +424,89 @@ fn a_member_that_fails_its_first_frame_once_locked_refuses_the_lock() {
     assert_eq!((status, heard), (LockStatus::Locked, Vec::new()));
     assert_eq!(shown, [10, 10]);
     common::join(player);
+}
+
+/// How a pair that never locked or ended played on, played with the
+/// clock past its end: `Ok` with the clock's frame and the pair shown
+/// once it ended, `Err` with them once it played on.
+type Played = Result<(i64, Vec<i64>), (i64, Vec<i64>)>;
+
+/// A member that fails once it has handed out a frame of the open ends
+/// the pair at its last frame, as a shorter lens does, though the group
+/// was still pending when it failed (V1's other side): which of the
+/// failure and the partner's open came first doesn't change it. Lens 0,
+/// unreadable from frame 20, decodes to its error while lens 1's open is
+/// held; once lens 1 opens, the pair locks with nothing refused, and
+/// played with the clock at 25 it ends at [19, 19] with the clock on 19,
+/// and says so. Its control, a failure that doesn't end the pair, locks
+/// too but plays on with [19, 19] up and the clock at 25, once lens 1 has
+/// decoded to its last frame.
+#[test]
+fn a_member_that_fails_after_its_first_frame_while_pending_ends_the_pair() {
+    let _time = timed("a_member_that_fails_after_its_first_frame_while_pending_ends_the_pair");
+    let run = |test: LockTest| -> (Played, Vec<Said>, bool) {
+        let gate = Gate::new();
+        let backend = PerStream::new(vec![
+            Lens::default().read_error_at(20),
+            Lens::default().held_by(&gate),
+        ]);
+        let clock = crate::held::clock();
+        let player = common::player(backend, clock.clone(), crate::held::config());
+        let spec = LockSpec {
+            test,
+            ..LockSpec::default()
+        };
+        player.open_locked(LENSES.into(), [0, 1], spec);
+        let failed = until(WAIT, || {
+            let _ = player.present(Instant::now());
+            let s = snapshot(&player);
+            s.streams.first()?.error.as_ref()?;
+            Some(s.lock.map(|l| l.status))
+        });
+        assert_eq!(
+            failed,
+            Some(Some(LockStatus::Pending)),
+            "lens 0 never failed while lens 1's open was held"
+        );
+        gate.release();
+        assert_eq!(settled(&player), LockStatus::Locked);
+        let up = until(WAIT, || {
+            (pts(&player.present(Instant::now())?) == [0, 0]).then_some(())
+        });
+        assert!(up.is_some(), "the first pair never showed");
+        player.play();
+        clock.set(crate::held::at(25), Instant::now());
+        let played = until(WAIT, || {
+            let shown = pts(&player.present(Instant::now())?);
+            let s = snapshot(&player);
+            let now = (crate::held::frame_of(s.clock), shown.clone());
+            if shown != [19, 19] {
+                None
+            } else if s.at_end {
+                Some(Ok(now))
+            } else {
+                let decoded = s.streams.get(1)?.last == Some(crate::held::at(29));
+                decoded.then_some(Err(now))
+            }
+        })
+        .expect("neither the end nor lens 1's last frame came");
+        let events = player.events();
+        let ended = events.iter().any(|e| matches!(e, PlayerEvent::Ended));
+        common::join(player);
+        (played, of_lock(events), ended)
+    };
+    assert_eq!(
+        run(LockTest::default()),
+        (Ok((19, vec![19, 19])), Vec::new(), true)
+    );
+    // Control: nothing ends the pair, and it plays on at 25.
+    let off = LockTest {
+        no_end_on_failure: true,
+        ..LockTest::default()
+    };
+    let (played, said, ended) = run(off);
+    let on = must_fail("no end on failure", played);
+    assert_eq!((on, said, ended), ((25, vec![19, 19]), Vec::new(), false));
 }
 
 /// Lens 1 a frame short locks (the count isn't compared), and the player
