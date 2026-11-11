@@ -2,9 +2,16 @@
 //! (`st3d`/`sv3d` on video, `SA3D` on audio), without touching the media
 //! data.
 //!
-//! Only `moov` changes size. Its ancestors' size fields are patched in
-//! place, and when `moov` sits before `mdat` ("faststart") every chunk
-//! offset that points past `moov` is shifted by the size change.
+//! [`inject`] changes only the sample entries. [`rewrite_into`] with a
+//! [`Finish`] is also the export's last pass over its file: it adds the
+//! V1 `uuid` to the video `trak`, drops the video's identity edit list,
+//! and can move `moov` ahead of the media data, as faststart does.
+//!
+//! Only `moov` changes size. The size fields of each box an edit is in
+//! are patched in place. Every chunk offset then moves with the
+//! top-level box it points into, wherever that box lands once `moov` is
+//! placed (`place`), and a `stco` entry the move takes past 4 GiB makes
+//! its table a `co64`, which `moov` grows by.
 //!
 //! The output is written to a temporary file next to it and renamed into
 //! place (`spherecut_core::fs::TempFile`, D16), so it is always either
@@ -540,8 +547,7 @@ fn patch_size(buf: &mut [u8], off: usize, header_len: u64, delta: i64) -> Result
     Ok(())
 }
 
-/// Where a chunk table is in `moov`'s bytes: its offset and whether it is
-/// a `co64`.
+/// Where a `stco` is in `moov`'s bytes: its offset there.
 type ChunkTable = usize;
 
 /// Move every `stco`/`co64` entry with `moved`, its new place. `Some` of
