@@ -764,12 +764,74 @@ fn the_smoke_flags_need_their_output_and_a_display() {
         text(&out.stderr)
     );
     assert!(!json.exists());
+    // The decode-behind run's flags (D40) need --smoke too.
+    for args in [
+        &["--smoke-decoder", "vaapi"][..],
+        &["--smoke-decode-floor-ms", "50"],
+        &["--smoke-control-ui-waits"],
+    ] {
+        let out = run(args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    // With it they parse, and the run ends where every smoke run does
+    // without a display.
+    let with = |extra: &[&str]| {
+        let mut args = vec!["--smoke", "clip.mp4", "--smoke-out", json.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let parses =
+        |out: &Output| out.status.code() == Some(3) && text(&out.stderr).contains("no display");
+    for extra in [
+        &[
+            "--smoke-decoder",
+            "vaapi",
+            "--smoke-decode-floor-ms",
+            "50",
+            "--smoke-control-ui-waits",
+        ][..],
+        &["--smoke-decoder", "auto"],
+        &["--smoke-decoder", "software"],
+        &["--smoke-decoder", "vulkan"],
+        &["--smoke-decode-floor-ms", "1"],
+        &["--smoke-decode-floor-ms", "500"],
+    ] {
+        let out = with(extra);
+        assert!(parses(&out), "{extra:?}: {}", text(&out.stderr));
+    }
+    // The parser's controls: a floor out of its range, or a decoder it
+    // doesn't know, is a usage error.
+    for (name, extra) in [
+        ("a decode floor of 0 ms", ["--smoke-decode-floor-ms", "0"]),
+        (
+            "a decode floor of 501 ms",
+            ["--smoke-decode-floor-ms", "501"],
+        ),
+        ("a decoder named nonesuch", ["--smoke-decoder", "nonesuch"]),
+    ] {
+        let out = with(&extra);
+        must_fail(name, parses(&out));
+        assert_eq!(out.status.code(), Some(2), "{name}: {}", text(&out.stderr));
+    }
+    assert!(!json.exists());
     // Hidden from the help.
     let help = text(&run(&["--help"]).stdout);
     assert!(
         help.contains("--adapter") && !help.contains("--smoke"),
         "{help}"
     );
+    for flag in [
+        "--smoke-decoder",
+        "--smoke-decode-floor-ms",
+        "--smoke-control-ui-waits",
+    ] {
+        assert!(!help.contains(flag), "{flag}: {help}");
+    }
 }
 
 #[test]
