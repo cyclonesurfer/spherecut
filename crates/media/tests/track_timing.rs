@@ -8,7 +8,10 @@
 //! checked against counting sample by sample. Files that FFmpeg's own
 //! muxer wrote (`Mp4Writer`) are timed as FFmpeg's demuxer reads them
 //! (`PacketReader`), an instrument that shares no code with the box
-//! reader. No bytes, and no cut of a file, make it panic.
+//! reader. No bytes, and no cut of a file, make it panic. The frame lock
+//! reads them through `FfmpegBackend::track_timing`, which answers an MP4
+//! track's tables, and no tables for another container or a fragmented
+//! file (M3 plan section 9 and amendment 3).
 //!
 //! Budget (M3 plan 4.1 rule 5): 3 s for the suite at the default 256
 //! cases, which each test prints its time against; the property tests
@@ -27,8 +30,11 @@ use proptest::collection::vec;
 use proptest::option;
 use proptest::prelude::*;
 use spherecut_core::FrameRate;
+use spherecut_media::MediaError;
+use spherecut_media::backend::{FfmpegBackend, MediaBackend};
 use spherecut_media::encode::{
     AudioTrack, ColorTags, Mp4Writer, MuxOptions, PixelLayout, VideoSettings, YuvPlanes,
+    remux_to_matroska,
 };
 use spherecut_media::mp4::{self, Edit, EditList, Mp4Box, Mp4Error, TrackTiming};
 use spherecut_media::packets::{NextPacket, PacketInfo, PacketReader};
@@ -1005,17 +1011,97 @@ fn a_fragmented_file_is_its_own_error() {
 /// numbers streams, and `Ok(None)` for any other container (M3 plan
 /// section 9).
 #[test]
-#[ignore = "M3.8 unit (a)"]
 fn ffmpeg_answers_mp4_tables_and_none_elsewhere() {
-    todo!()
+    let _time = timed("ffmpeg_answers_mp4_tables_and_none_elsewhere");
+    let dir = temp_dir("track-timing-backend");
+    let backend = FfmpegBackend::new();
+    let answer = |path: &Path, stream| backend.track_timing(path, stream);
+    // A file FFmpeg's muxer wrote: the tables the box reader reads.
+    let gop6 = written(
+        &dir.0,
+        "gop6",
+        &[("g", "6"), ("bf", "0")],
+        0,
+        &MuxOptions::default(),
+    );
+    let tables = mp4::track_timing(&gop6, 0).unwrap();
+    let is_gop6 = |path: &Path| answer(path, 0).unwrap() == Some(tables.clone());
+    assert!(is_gop6(&gop6));
+    // Streams numbered as FFmpeg numbers them: a camera's second lens is
+    // stream 1, and its audio, stream 2, isn't a video track.
+    let lens1 = Spec {
+        stss: Some(vec![1, 11]),
+        ..x5_lens()
+    };
+    let f = file(1000, &[x5_lens().boxes(), lens1.boxes(), audio(10)]);
+    let camera = dir.0.join("camera.mp4");
+    std::fs::write(&camera, &f).unwrap();
+    assert_eq!(answer(&camera, 1).unwrap(), Some(timing(&f, 1).unwrap()));
+    match answer(&camera, 2) {
+        Err(MediaError::Open { path, reason }) => {
+            assert_eq!(path, camera);
+            assert!(
+                reason.contains("it is a `soun` track, not video"),
+                "{reason}"
+            );
+        }
+        other => panic!("audio answered {other:?}"),
+    }
+    // Matroska has no such tables, and a file that isn't there can't be
+    // read.
+    let mkv = remux_to_matroska(&gop6, &dir.0.join("gop6.mkv")).unwrap();
+    assert_eq!(answer(&mkv, 0).unwrap(), None);
+    match answer(&dir.0.join("gone.mp4"), 0) {
+        Err(MediaError::Io { error, .. }) => assert_eq!(error.kind(), io::ErrorKind::NotFound),
+        other => panic!("a missing file answered {other:?}"),
+    }
+    // Control: a track with another keyframe interval has other tables.
+    let gop4 = written(
+        &dir.0,
+        "gop4",
+        &[("g", "4"), ("bf", "0")],
+        0,
+        &MuxOptions::default(),
+    );
+    must_fail("a GOP of 4", is_gop6(&gop4));
+    let other = answer(&gop4, 0).unwrap().unwrap();
+    assert_eq!(other.stss_mismatch(&tables), Some(4));
 }
 
 /// `FfmpegBackend::track_timing` answers a fragmented MP4's track with
 /// `Ok(None)`, not an error (M3 plan amendment 3).
 #[test]
-#[ignore = "M3.8 unit (a)"]
 fn ffmpeg_answers_a_fragmented_track_with_none() {
-    todo!()
+    let _time = timed("ffmpeg_answers_a_fragmented_track_with_none");
+    let dir = temp_dir("track-timing-fragmented");
+    let backend = FfmpegBackend::new();
+    // An `mvex` in `moov`, or a `moof` after it, as the suite's own
+    // fragmented files have them, around one of the X5's lens tracks.
+    let mvhd_box = bx(b"mvhd", &mvhd(1000));
+    let mvex = bx(b"mvex", &bx(b"trex", &words(&[0, 1, 1, 0, 0, 0])));
+    let moof = bx(b"moof", &bx(b"mfhd", &words(&[0, 1])));
+    let plain = file_of(&[mvhd_box.clone(), trak(1, &x5_lens().boxes())]);
+    let files = [
+        (
+            "mvex",
+            file_of(&[mvhd_box, trak(1, &x5_lens().boxes()), mvex]),
+        ),
+        ("moof", [plain.clone(), moof].concat()),
+        ("plain", plain.clone()),
+    ];
+    let answers: Vec<Option<TrackTiming>> = files
+        .iter()
+        .map(|(name, f)| {
+            let path = dir.0.join(format!("{name}.mp4"));
+            std::fs::write(&path, f).unwrap();
+            backend.track_timing(&path, 0).unwrap()
+        })
+        .collect();
+    let no_tables = |a: &Option<TrackTiming>| a.is_none();
+    assert!(no_tables(&answers[0]) && no_tables(&answers[1]));
+    // Control: the same track unfragmented has its tables.
+    must_fail("unfragmented", no_tables(&answers[2]));
+    assert_eq!(answers[2], Some(timing(&plain, 0).unwrap()));
 }
 
 #[test]

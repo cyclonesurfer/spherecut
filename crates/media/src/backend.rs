@@ -1253,10 +1253,24 @@ impl MediaBackend for FfmpegBackend {
 
     /// From [`crate::mp4::track_timing`] for a stream of an MP4 or MOV
     /// file, `Ok(None)` for any other container and for a fragmented MP4
-    /// ([`crate::mp4::Mp4Error::Fragmented`], M3 plan amendment 3).
-    #[expect(unused_variables, reason = "M3.8 unit (a) writes the body")]
+    /// ([`crate::mp4::Mp4Error::Fragmented`], M3 plan amendment 3). A
+    /// file that can't be read is [`MediaError::Io`]; tables that are
+    /// wrong, or a stream that isn't a video track, are
+    /// [`MediaError::Open`], naming the box or the track.
     fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
-        todo!()
+        use crate::mp4::Mp4Error;
+        match crate::mp4::track_timing(path, stream) {
+            Ok(t) => Ok(Some(t)),
+            Err(Mp4Error::NotMp4(_) | Mp4Error::Fragmented { .. }) => Ok(None),
+            Err(Mp4Error::Io(error)) => Err(MediaError::Io {
+                path: path.to_path_buf(),
+                error,
+            }),
+            Err(e) => Err(MediaError::Open {
+                path: path.to_path_buf(),
+                reason: format!("reading the timing tables: {e}"),
+            }),
+        }
     }
 }
 
