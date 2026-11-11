@@ -2,7 +2,8 @@
 //! lavapipe and a `ManualClock` wherever wall time would make a test
 //! flaky: the presenter shows the latest frame at or before the clock
 //! with a variable frame rate; hitches are intervals over 1.5 times the
-//! median; frames passed over while playing are counted as dropped; a
+//! median; frames passed over while playing are counted as dropped,
+//! but those a display slower than the clip passes over as skipped; a
 //! decoder that falls behind catches up without making the frames it
 //! passes; a slot is reused only once nothing else holds its frame; a
 //! seek keeps the frame on screen until the new one is ready and frees
@@ -17,7 +18,10 @@
 //! slots and starts the clock once the next two frames are Ready, or at
 //! once at the last frame; the clock run past the end stops on the last
 //! frame, which comes up once it is uploaded, or a frame before the
-//! container's duration before decoding reached the end; a fallback
+//! container's duration before decoding reached the end; after the end,
+//! a seek or a step the cache answers plays on past the run it lands
+//! in, on one stream and on two, while one in the run that reaches the
+//! end stays ended; a fallback
 //! reaches the snapshot, from a fault and from `Auto` picking
 //! Vulkan on lavapipe; the audio seam holds playback for its preroll;
 //! and a 5.7K source plays inside a 256 MiB cache.
@@ -304,6 +308,124 @@ fn frames_are_dropped_only_while_playing() {
     show(&player, 45);
     assert_eq!(player.perf().count(Counter::Dropped), 0);
     common::join(player);
+}
+
+/// A 120 fps clip played with a present every `interval`, at instants
+/// given (so that the median present interval is `interval`): the clock
+/// moved on 2 frames before each of 60 presents, once the frame there is
+/// Ready in a slot, then a stall, one present 4 intervals on with the
+/// clock 8 frames on, once the next 3 frames are Ready. The frames shown,
+/// and the skipped and dropped counts after the 60 presents and after the
+/// stall.
+fn at_a_cadence(interval: Duration) -> (Vec<i64>, [(u64, u64); 2]) {
+    let rate = FrameRate::new(Rational::from_integer(120)).unwrap();
+    let at = |k: i64| rate.frame_to_time(k).unwrap();
+    let backend = SyntheticBackend::new(SyntheticClip {
+        rate,
+        frames: 240,
+        ..SyntheticClip::default()
+    });
+    let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+    let player = player(
+        backend,
+        clock.clone(),
+        PlayerConfig {
+            gpu_slots: 6,
+            ..config(64)
+        },
+    );
+    player.open("clip.synthetic".into());
+    let first = until(WAIT, || {
+        (pts(&player.present(Instant::now())?) == [0]).then_some(())
+    });
+    assert!(first.is_some(), "frame 0 never came up");
+    // More presents than the median is taken over, all `interval` apart.
+    let mut now = Instant::now();
+    for _ in 0..40 {
+        now += interval;
+        let _ = player.present(now);
+    }
+    let epoch = snapshot(&player).epoch;
+    let ready = |k: i64| {
+        let up = until(WAIT, || {
+            let views = player.slots().views();
+            views
+                .iter()
+                .any(|v| v.state == SlotState::Ready && v.frame.epoch == epoch && v.frame.pts == k)
+                .then_some(())
+        });
+        assert!(up.is_some(), "frame {k} never went up");
+    };
+    // A present gives the cache its playhead only if the cache's lock is
+    // free: presented again at the same instant until it has it, as the
+    // next UI frame would, the upload thread then frees the slots behind
+    // it. The few zero intervals this adds leave the median as it is.
+    let present = |now: Instant, k: i64| {
+        let p = player.present(now).expect("a frame presented");
+        let given = until(WAIT, || {
+            (player.cache().playhead() == at(k))
+                .then_some(())
+                .or_else(|| player.present(now).and(None))
+        });
+        assert!(given.is_some(), "the playhead never reached {k}");
+        p
+    };
+    let perf = player.perf().clone();
+    let counts = || (perf.count(Counter::Skipped), perf.count(Counter::Dropped));
+    player.play();
+    let mut shown = vec![0];
+    for k in (2..=120).step_by(2) {
+        ready(k);
+        clock.set(at(k), now);
+        now += interval;
+        shown.push(pts(&present(now, k))[0]);
+    }
+    let steady = counts();
+    for k in 121..=123 {
+        ready(k);
+    }
+    clock.set(at(128), now);
+    now += interval * 4;
+    let p = player.present(now).expect("a frame presented");
+    shown.push(pts(&p)[0]);
+    let stalled = counts();
+    common::join(player);
+    (shown, [steady, stalled])
+}
+
+/// The frames a display slower than the clip passes over are skipped,
+/// not dropped: a 120 fps clip presented at 60 Hz shows every other
+/// frame, and the 60 frames a second it passes over are skipped, none
+/// dropped. A stall still drops what it passes over beyond the one frame
+/// a present skips. Its control, the same presents at 120 Hz, counts
+/// each frame passed over as dropped, since nothing then is the
+/// cadence's.
+#[test]
+fn frames_a_slower_display_passes_over_are_skipped_not_dropped() {
+    let (shown, [steady, stalled]) = at_a_cadence(Duration::from_nanos(16_666_667));
+    let stall = shown.last().copied().unwrap();
+    assert_eq!(
+        shown[..61],
+        (0..=120).step_by(2).collect::<Vec<i64>>()[..],
+        "{shown:?}"
+    );
+    assert_eq!(steady, (60, 0));
+    // The stall passed over at least two frames: one skipped, the rest
+    // dropped.
+    assert!((123..=128).contains(&stall), "{shown:?}");
+    let passed = (stall - 121) as u64;
+    assert_eq!(stalled, (61, passed - 1));
+    assert!(stalled.1 >= 1);
+    // Control: at 120 Hz, the same frames passed over are dropped.
+    let (shown, [steady, _]) = at_a_cadence(Duration::from_nanos(8_333_333));
+    assert_eq!(shown.len(), 62);
+    let dropped = must_fail("presents at 120 Hz", is(steady, &(60, 0)));
+    assert_eq!(dropped, (0, 60));
+}
+
+/// `got`, if it is `want`; else the error.
+fn is<T: PartialEq + std::fmt::Debug>(got: T, want: &T) -> Result<(), T> {
+    if got == *want { Ok(()) } else { Err(got) }
 }
 
 #[test]
@@ -1020,6 +1142,273 @@ fn the_end_stops_on_the_last_frame_which_comes_up_once_uploaded() {
     common::join(player);
 }
 
+/// How long a control's wait sees no stream hand out a frame, with not
+/// every worker waiting for room in the cache (so idle), before it calls
+/// the player stuck. A check waits for all of [`WAIT`].
+const STILL: Duration = Duration::from_millis(300);
+
+/// Present until every one of `n` streams shows a frame at or after
+/// `goal`: what shows then. Giving up (a control's wait) once no stream
+/// has handed out a frame for [`STILL`] while not every worker waits for
+/// room in the cache, or after [`WAIT`], what shows then is the error.
+fn reaches(player: &Player, n: usize, goal: i64, give_up: bool) -> Result<Vec<i64>, Vec<i64>> {
+    let start = Instant::now();
+    let mut still: Option<(Instant, u64)> = None;
+    let mut seen = Vec::new();
+    loop {
+        if let Some(p) = player.present(Instant::now()) {
+            seen = pts(&p);
+            if seen.len() == n && seen.iter().all(|&f| f >= goal) {
+                return Ok(seen);
+            }
+        }
+        if start.elapsed() >= WAIT {
+            return Err(seen);
+        }
+        let s = player.snapshot();
+        if give_up && s.fresh {
+            let handed: u64 = s.streams.iter().map(|x| x.handed_out).sum();
+            let waiting = s.cache.map_or(0, |c| c.waiting);
+            match still {
+                Some((since, h)) if h == handed && waiting < n => {
+                    if since.elapsed() >= STILL {
+                        return Err(seen);
+                    }
+                }
+                _ => still = Some((Instant::now(), handed)),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// The skeptic's sequence for V18, on `n` streams of a 120-frame clip
+/// opened unlocked, the old idle rule with `old_idle`: with the window
+/// from 0 full, a seek to 110 played to 115, by when decoding has
+/// reached the end; paused, a seek back to 0, which the cache answers
+/// for every stream, and with `step` a step of 2 frames before a present,
+/// which goes on from the seek's time (whichever of the two a worker
+/// resolves, the cache answers it, the step last); played with the clock
+/// at 60. What every stream shows by frame 55, as [`reaches`] says.
+fn play_again_after_the_end(n: usize, step: bool, old_idle: bool) -> Result<Vec<i64>, Vec<i64>> {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = player(
+        clip(120),
+        clock.clone(),
+        PlayerConfig {
+            gpu_slots: 6,
+            ..config(64)
+        },
+    );
+    player.old_idle_rule(old_idle);
+    player.open_streams("clip.synthetic".into(), (0..n).map(Some).collect());
+    lands(&player, &vec![0; n]);
+    let full = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        (snapshot(&player).cache?.waiting == n).then_some(())
+    });
+    assert!(full.is_some(), "the window from 0 never filled");
+    player.seek(at(110), SeekMode::Exact);
+    lands(&player, &vec![110; n]);
+    player.play();
+    clock.set(at(115), Instant::now());
+    lands(&player, &vec![115; n]);
+    let ended = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        let s = snapshot(&player);
+        s.streams
+            .iter()
+            .all(|x| x.last == Some(at(119)))
+            .then_some(())
+    });
+    assert!(ended.is_some(), "decoding never reached the end");
+    player.pause();
+    let cached = |p: &Player| -> Vec<u64> {
+        let s = snapshot(p);
+        s.streams.iter().map(|x| x.seeks.from_cache).collect()
+    };
+    let before = cached(&player);
+    player.seek(at(0), SeekMode::Exact);
+    if step {
+        player.step(2);
+        lands(&player, &vec![2; n]);
+    } else {
+        lands(&player, &vec![0; n]);
+        let after = cached(&player);
+        assert!(
+            before.iter().zip(&after).all(|(b, a)| a > b),
+            "the seek back to 0 wasn't answered from the cache: {before:?}, then {after:?}"
+        );
+    }
+    player.play();
+    clock.set(at(60), Instant::now());
+    let got = reaches(&player, n, 55, old_idle);
+    common::join(player);
+    got
+}
+
+/// One stream whose decoder has reached the end plays on from a seek the
+/// cache answers, past the end of the run the cache holds (V18): the
+/// request's place to go on from takes the worker on from the end. Its
+/// control, the old idle rule, freezes at the end of the run from 0.
+#[test]
+fn one_stream_plays_on_from_a_seek_the_cache_answers_after_the_end() {
+    let shown = play_again_after_the_end(1, false, false)
+        .unwrap_or_else(|e| panic!("the stream froze at {e:?}"));
+    assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
+    let frozen = must_fail(
+        "the old idle rule",
+        play_again_after_the_end(1, false, true),
+    );
+    assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
+}
+
+/// Two streams opened unlocked play on from a seek the cache answers
+/// after the end, as one does (V18). Its control, the old idle rule,
+/// freezes both at the end of the run from 0.
+#[test]
+fn two_streams_play_on_from_a_seek_the_cache_answers_after_the_end() {
+    let shown = play_again_after_the_end(2, false, false)
+        .unwrap_or_else(|e| panic!("the streams froze at {e:?}"));
+    assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
+    let frozen = must_fail(
+        "the old idle rule",
+        play_again_after_the_end(2, false, true),
+    );
+    assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
+}
+
+/// A step the cache answers after the end takes decoding on too (V18,
+/// the step's cache path). Its control, the old idle rule, freezes.
+#[test]
+fn a_step_the_cache_answers_after_the_end_plays_on() {
+    let shown = play_again_after_the_end(1, true, false)
+        .unwrap_or_else(|e| panic!("the stream froze at {e:?}"));
+    assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
+    let frozen = must_fail("the old idle rule", play_again_after_the_end(1, true, true));
+    assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
+}
+
+/// A 90-frame clip on a cache that keeps every frame, played from 0 to
+/// 30 a frame at a time, so that the cache holds one run from 0 to where
+/// the window ahead reached, then paused and sought to 80, past it, until
+/// decoding reached the end (`StreamEnded`), the old idle rule with
+/// `old_idle`: the player, its clock, and the last frame of the run from
+/// 0.
+fn ended_past_a_run(old_idle: bool) -> (Player, Arc<ManualClock>, i64) {
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let player = opened(clip(90), clock.clone(), config(256));
+    player.old_idle_rule(old_idle);
+    player.play();
+    for k in 1..=30 {
+        clock.set(at(k), Instant::now());
+        show(&player, k);
+    }
+    let full = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        (snapshot(&player).cache?.waiting == 1).then_some(())
+    });
+    assert!(full.is_some(), "the window from 30 never filled");
+    player.pause();
+    let _ = player.events();
+    player.seek(at(80), SeekMode::Exact);
+    show(&player, 80);
+    let ended = until(WAIT, || {
+        let _ = player.present(Instant::now());
+        player
+            .events()
+            .iter()
+            .any(|e| matches!(e, PlayerEvent::StreamEnded { stream: 0 }))
+            .then_some(())
+    });
+    assert!(ended.is_some(), "decoding never reached the end");
+    let run = player.cache().run_end(0, at(0)).expect("the run from 0");
+    assert!(
+        (30..80).contains(&run.pts),
+        "the run from 0 ends at {}",
+        run.pts
+    );
+    (player, clock, run.pts)
+}
+
+/// The audit's sequence (V18): after the end, a seek back to 10, which
+/// the cache answers, plays on past the end of the run it lands in, the
+/// frames past it coming up with the clock 15 frames past it. Its
+/// control, the old idle rule, freezes at the run's end.
+#[test]
+fn a_seek_the_cache_answers_after_the_end_plays_on_past_its_run() {
+    let run = |old_idle: bool| {
+        let (player, clock, end) = ended_past_a_run(old_idle);
+        let before = snapshot(&player).streams[0].seeks.from_cache;
+        player.seek(at(10), SeekMode::Exact);
+        lands(&player, &[10]);
+        let after = snapshot(&player).streams[0].seeks.from_cache;
+        assert!(
+            after > before,
+            "the seek to 10 wasn't answered from the cache"
+        );
+        player.play();
+        clock.set(at(end + 15), Instant::now());
+        let got = reaches(&player, 1, end + 10, old_idle);
+        common::join(player);
+        (end, got)
+    };
+    let (end, shown) = run(false);
+    let shown =
+        shown.unwrap_or_else(|e| panic!("the stream froze at {e:?}, its run ending at {end}"));
+    assert!(shown[0] >= end + 10, "{shown:?}");
+    let (end, frozen) = run(true);
+    let frozen = must_fail("the old idle rule", frozen);
+    assert!(
+        frozen.iter().all(|&f| f <= end),
+        "{frozen:?}, the run ending at {end}"
+    );
+}
+
+/// A stream whose cached run already ends at its last frame stays ended
+/// after requests the cache answers in that run (V18): a seek to 85 and
+/// a step of 2 frames from it decode nothing and say `StreamEnded` no
+/// second time. Its control, a seek to 10, into the run that ends before
+/// the end, decodes on.
+#[test]
+fn requests_the_cache_answers_in_the_last_run_stay_ended() {
+    let (player, _clock, _) = ended_past_a_run(false);
+    // A seek to `k`, and with `step` a step of 2 frames from it: nothing
+    // decoded and no end said for STILL after it landed, else the frames
+    // handed out and the ends said meanwhile.
+    let stays = |k: i64, step: bool| -> Result<(), (u64, usize)> {
+        let handed = snapshot(&player).streams[0].handed_out;
+        let _ = player.events();
+        player.seek(at(k), SeekMode::Exact);
+        lands(&player, &[k]);
+        if step {
+            player.step(2);
+            lands(&player, &[k + 2]);
+        }
+        let start = Instant::now();
+        let mut ends = 0;
+        while start.elapsed() < STILL {
+            let _ = player.present(Instant::now());
+            ends += player
+                .events()
+                .iter()
+                .filter(|e| matches!(e, PlayerEvent::StreamEnded { .. }))
+                .count();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let more = snapshot(&player).streams[0].handed_out - handed;
+        if more == 0 && ends == 0 {
+            Ok(())
+        } else {
+            Err((more, ends))
+        }
+    };
+    assert_eq!(stays(85, true), Ok(()));
+    let (more, _) = must_fail("a seek into the run from 0", stays(10, false));
+    assert!(more > 0);
+    common::join(player);
+}
+
 /// The synthetic clip, its decoder letting `pass` frames through and
 /// holding the next until `pass` grows; `entered` counts the frames
 /// asked for, so that a test knows the decoder is held.
@@ -1661,8 +2050,10 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
 /// `FaultBackend` on a 2×64² two-track MP4 without the GOP fault, its
 /// plan on lens 1 only: the pair locks (no `LockRefused`), lens 0 stays
 /// on hardware, pairs keep coming under the pacing rule, and the notice
-/// comes exactly once (M3 plan section 9). Its control, the backend
-/// answering no tables, refuses the lock with `"timing"`.
+/// comes exactly once (M3 plan section 9). Its controls: the fault on
+/// both lenses, which falls lens 0 back too, so that the check of lens
+/// 0's path can fail; and the backend answering no tables, which refuses
+/// the lock with `"timing"`.
 #[test]
 fn a_fallback_on_one_lens_keeps_the_pair_locked() {
     let dir = TempDir::new("pair-fallback");
@@ -1677,7 +2068,7 @@ fn a_fallback_on_one_lens_keeps_the_pair_locked() {
     // (1 s ahead of the pair) gets there in play. Opened locked, with the
     // file's tables or none: the lock's status once both first frames
     // show, and the player.
-    let open = |tables: bool| {
+    let open = |tables: bool, only: Option<usize>| {
         let backend = FaultBackend {
             inner: FfmpegBackend::new(),
             plan: FaultPlan {
@@ -1685,7 +2076,7 @@ fn a_fallback_on_one_lens_keeps_the_pair_locked() {
                 fault: Fault::Decode,
                 stand_in: true,
             },
-            only: Some(1),
+            only,
             tables,
         };
         let clock = Arc::new(ManualClock::new(rate.frame_duration()));
@@ -1710,7 +2101,19 @@ fn a_fallback_on_one_lens_keeps_the_pair_locked() {
             }
         }
     };
-    let (player, clock, status) = open(true);
+    // Lens 0 on hardware, lens 1 fallen back.
+    let one_fell = |paths: &[Option<DecodePath>]| {
+        matches!(
+            paths,
+            [
+                Some(DecodePath::Hardware {
+                    kind: HwKind::VaApi
+                }),
+                Some(DecodePath::FellBack { .. })
+            ]
+        )
+    };
+    let (player, clock, status) = open(true, Some(1));
     let (mut fell, mut refused) = (Vec::new(), Vec::new());
     said(player.events(), &mut fell, &mut refused);
     assert_eq!((status, &refused[..]), (Some(LockStatus::Locked), &[][..]));
@@ -1731,21 +2134,23 @@ fn a_fallback_on_one_lens_keeps_the_pair_locked() {
     assert_eq!((fell, refused), (vec![1], vec![]));
     assert_eq!(snap.lock.map(|l| l.status), Some(LockStatus::Locked));
     let paths: Vec<_> = snap.streams.iter().map(|s| s.decode.clone()).collect();
-    assert!(
-        matches!(
-            paths[..],
-            [
-                Some(DecodePath::Hardware {
-                    kind: HwKind::VaApi
-                }),
-                Some(DecodePath::FellBack { .. })
-            ]
-        ),
-        "{paths:?}"
-    );
+    assert!(one_fell(&paths), "{paths:?}");
+
+    // Control: the fault on both lenses, and both fall back.
+    let (player, clock, status) = open(true, None);
+    assert_eq!(status, Some(LockStatus::Locked));
+    let _ = pacing::play_steady(&player, &clock, rate, 90, [0, 1], WAIT, |_, _| {});
+    let mut fell = Vec::new();
+    said(player.events(), &mut fell, &mut Vec::new());
+    let snap = snapshot(&player);
+    common::join(player);
+    let paths: Vec<_> = snap.streams.iter().map(|s| s.decode.clone()).collect();
+    must_fail("the fault on both lenses", one_fell(&paths));
+    fell.sort_unstable();
+    assert_eq!(fell, [0, 1], "{paths:?}");
 
     // Control: no tables, and the lock is refused.
-    let (player, _, status) = open(false);
+    let (player, _, status) = open(false, Some(1));
     let mut refused = Vec::new();
     said(player.events(), &mut Vec::new(), &mut refused);
     common::join(player);
