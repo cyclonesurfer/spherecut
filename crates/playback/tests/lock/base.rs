@@ -5,7 +5,8 @@
 //! the trailing lens was catching up to.
 //!
 //! The controls that wait for what never comes (a deadlock) wait until
-//! the player is stuck ([`Wait::Stuck`]) instead of for all of `WAIT`.
+//! the player is stuck ([`Wait::StuckFor`] [`STALL`]) instead of for all
+//! of `WAIT`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,16 @@ fn frame_of(t: Time) -> i64 {
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
+
+/// How long a control sees nothing move before it calls the player
+/// stuck, in place of `STUCK`: each control's freeze is for good, the
+/// old base the playhead or no resync to move it, and the clock is paused
+/// or set once, so a shorter wait loses nothing, as with `play.rs`'s
+/// controls. The resync check waits on the cache's own count, which
+/// moves at once, not on the perf counter the upload thread folds in
+/// every 250 ms: a window this short would call a resync not yet folded
+/// in stuck.
+const STALL: Duration = Duration::from_millis(500);
 
 /// A paused `ManualClock`.
 fn clock() -> Arc<ManualClock> {
@@ -279,7 +290,7 @@ fn a_seek_forward_while_lens_0_leads_lands_both() {
         old_base_in_seeks: true,
         ..LockTest::default()
     };
-    let (newest, landed) = seek(old, Wait::Stuck);
+    let (newest, landed) = seek(old, Wait::StuckFor(STALL));
     assert_eq!(newest, [Some(31), Some(10)]);
     assert_eq!(must_fail("the old base in seeks", landed), GaveUp::Stuck);
 }
@@ -526,26 +537,37 @@ fn a_shrinking_budget_mid_play_resyncs_the_pair() {
         backend.permit(1, u64::MAX);
         let base = wait_for(&player, wait, || {
             let _ = player.present(Instant::now());
-            let s = player.snapshot();
-            let base = s.lock?.base.filter(|&b| b > at(1))?;
-            (s.perf.counter(Counter::PairResyncs) >= 1).then_some(frame_of(base))
+            let base = player.snapshot().lock?.base.filter(|&b| b > at(1))?;
+            (player.cache().stats().resyncs >= 1).then_some(frame_of(base))
+        });
+        // The resync as the perf counters show it, once the upload thread
+        // folds the cache's counts in.
+        let counted = base.is_ok().then(|| {
+            until(WAIT, || {
+                let n = player.perf().count(Counter::PairResyncs);
+                (n >= 1).then_some(n)
+            })
         });
         common::join(player);
-        (caught, base)
+        (caught, base, counted.flatten())
     };
-    let (caught, base) = resync(LockTest::default(), Wait::Full);
+    let (caught, base, counted) = resync(LockTest::default(), Wait::Full);
     assert!(
         caught > 2,
         "lens 1 skipped nothing: it holds frame {caught}"
     );
     let base = base.unwrap();
     assert!(base >= 10, "the base moved only to {base}");
+    assert!(
+        counted.is_some(),
+        "the perf counters never showed the resync"
+    );
 
     // Control: no backstop, and both lenses wait for room for good.
     let off = LockTest {
         no_resync: true,
         ..LockTest::default()
     };
-    let (_, base) = resync(off, Wait::Stuck);
+    let (_, base, _) = resync(off, Wait::StuckFor(STALL));
     assert_eq!(must_fail("no backstop", base), GaveUp::Stuck);
 }
