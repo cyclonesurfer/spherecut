@@ -16,21 +16,23 @@
 // Left to the driver, the mean of four codes, often on a half code, came
 // out a code low on RADV, which packs a fragment's output to f16 toward
 // zero before converting it, and each level, made from the one above,
-// added to it.
+// added to it. Slots' 8-bit planes now take `mips8.wgsl`'s compute pass,
+// which stores the same codes (DECISIONS D77); this pass makes their
+// levels only as the reference a test holds that one to.
 override F16_TARGET: u32 = 0u;
 
 @group(0) @binding(0) var src: texture_2d<f32>;
 
 @fragment
 fn fs_mip(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
-    let ss = textureDimensions(src);
-    let ds = max(ss / 2u, vec2<u32>(1u));
     let j = vec2<u32>(frag.xy);
-    let lo = j * ss;
-    let hi = lo + ss;
-    let first = lo / ds;
-    let last = (hi - 1u) / ds;
     if F16_TARGET == 1u {
+        let ss = textureDimensions(src);
+        let ds = max(ss / 2u, vec2<u32>(1u));
+        let lo = j * ss;
+        let hi = lo + ss;
+        let first = lo / ds;
+        let last = (hi - 1u) / ds;
         var acc = vec4<f32>(0.0);
         for (var y = first.y; y <= last.y; y++) {
             let wy = f32(min(hi.y, (y + 1u) * ds.y) - max(lo.y, y * ds.y)) / f32(ss.y);
@@ -41,6 +43,21 @@ fn fs_mip(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
         }
         return round_f16(acc);
     }
+    return vec4<f32>(vec2<f32>(mean_codes(j, true)) / 255.0, 0.0, 1.0);
+}
+
+// The 8-bit mean of destination texel j, as codes, for two components (R8
+// and Rg8): what fs_mip returns over 255, and what the compute pass for
+// 8-bit planes (`mips8.wgsl`, DECISIONS D77) stores. To the nearest code,
+// ties to even, when `to_nearest`; truncated otherwise, which only a
+// test's control asks for.
+fn mean_codes(j: vec2<u32>, to_nearest: bool) -> vec2<u32> {
+    let ss = textureDimensions(src);
+    let ds = max(ss / 2u, vec2<u32>(1u));
+    let lo = j * ss;
+    let hi = lo + ss;
+    let first = lo / ds;
+    let last = (hi - 1u) / ds;
     // The mean is Σ ox·oy·code / (Sx·Sy), the overlaps summing to Sx
     // across and Sy down. At 16384 a side that sum reaches 255 · 2^28,
     // past a u32, so each row's h = Σ ox·code (at most 255·Sx) is split
@@ -66,6 +83,6 @@ fn fs_mip(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     // To nearest, ties to even, as `reference::halve_codes` rounds (D31).
     let twice = 2u * (n % area);
     let up = (twice > area) | ((twice == area) & ((k & vec2<u32>(1u)) == vec2<u32>(1u)));
-    k += select(vec2<u32>(0u), vec2<u32>(1u), up);
-    return vec4<f32>(vec2<f32>(k) / 255.0, 0.0, 1.0);
+    k += select(vec2<u32>(0u), vec2<u32>(1u), up & vec2<bool>(to_nearest));
+    return k;
 }

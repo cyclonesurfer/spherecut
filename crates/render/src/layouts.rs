@@ -10,10 +10,17 @@ pub const PROJECT_WGSL: &str = concat!(
     include_str!("shaders/common.wgsl"),
     include_str!("shaders/project.wgsl")
 );
-/// The mip pass.
+/// The mip pass: a render pass a level, for deep planes.
 pub const MIPS_WGSL: &str = concat!(
     include_str!("shaders/common.wgsl"),
     include_str!("shaders/mips.wgsl")
+);
+/// The mip pass for 8-bit planes: a compute pass a level into a buffer,
+/// on `shaders/mips.wgsl`'s means (DECISIONS D77).
+pub const MIPS8_WGSL: &str = concat!(
+    include_str!("shaders/common.wgsl"),
+    include_str!("shaders/mips.wgsl"),
+    include_str!("shaders/mips8.wgsl")
 );
 /// The ingest pass for deep planes.
 pub const INGEST_WGSL: &str = concat!(
@@ -103,11 +110,33 @@ pub(crate) fn sampler(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// The mip pass: the level above, read with `textureLoad`.
+/// The mip pass, group 0: the level above, read with `textureLoad`, by
+/// the render pass of a deep plane or the compute pass of an 8-bit one.
 pub(crate) fn mip_input(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("mip input"),
-        entries: &[texture(0, UNFILTERED)],
+        entries: &[wgpu::BindGroupLayoutEntry {
+            visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+            ..texture(0, UNFILTERED)
+        }],
+    })
+}
+
+/// The 8-bit mip pass, group 1: the region of a buffer it writes a level
+/// into, before a copy puts it in the level.
+pub(crate) fn mip_output(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mip output"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(4),
+            },
+            count: None,
+        }],
     })
 }
 
