@@ -42,8 +42,9 @@
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
 //!   its two lenses as two streams: M3's 8K budget, recorded, failing
 //!   when an unthrottled pass stalls (no frame for 5 s), as it does when
-//!   the engine stops, or P-LOCK's verdict is Kill. Then hw-test's two-track perf clips, both tracks
-//!   opened as a sample's are, unthrottled only: on Auto's hardware as
+//!   the engine stops, or P-LOCK's verdict is Kill. Then hw-test's
+//!   two-track perf clips, both tracks opened as a sample's are,
+//!   unthrottled only: on Auto's hardware as
 //!   the app plays it by default, and again with `SPHERECUT_ZERO_COPY=1`
 //!   where that imports VA-API's frames (path A), with notes on path A
 //!   against the copy and on K2's engine half (M3 plan 4.3), from the
@@ -67,9 +68,10 @@
 //!   The engine counts a locked pair's drops (and skips) once a pair and
 //!   an unlocked player's for each stream, so the unlocked count is
 //!   divided by its streams; the frames the presents' cadence passes over
-//!   (4K120 at 60 Hz, one a present) are skipped, not dropped. A real-time pass whose frame stands still for 5 s while its
-//!   clock runs has stalled, which with a pair apart or the lock undone
-//!   is Kill; a note sums every mode's verdict up.
+//!   (4K120 at 60 Hz, one a present) are skipped, not dropped. A
+//!   real-time pass whose frame stands still for 5 s while its clock runs
+//!   has stalled, which with a pair apart or the lock undone is Kill; a
+//!   note sums every mode's verdict up.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
