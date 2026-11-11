@@ -10428,11 +10428,11 @@ Tested:
     49.35 % a lens locked against 98.61 % unlocked (1124 and 2246
     frames). By hand under these rules: about 1133 new pairs after the
     first second over at most 1140 presents owing one (60 a second for
-    19 s, the loops' standing presents owing none), so 99.4 % or more
-    presented; the 1124 frames passed over locked and the 1123 a lens
-    unlocked are one a pair shown, the cadence of 119.88 fps at 60 Hz,
-    so skipped, and dropped about 0 on both sides: Pass, pending odin's
-    rerun.
+    19 s, the loops' standing presents owing none), so about 99.4 %
+    (1133 of at most 1140) or more presented; the 1124 frames passed
+    over locked and the 1123 a lens unlocked are one a pair shown, the
+    cadence of 119.88 fps at 60 Hz, so skipped, and dropped about 0 on
+    both sides: Pass, pending odin's rerun.
 - The suite's time on the cloud box (4 Xeon cores, lavapipe): 5.3 to
   5.7 s alone (3 runs), within the plan's 10 s, and 6.7 to 7.1 s beside
   4 busy loops (10 runs, none failed).
@@ -10451,12 +10451,15 @@ Tested:
     failed. Over all 33 runs a pacing case counted 1 late present 3
     times in 132, and 0 otherwise, and the publish-delay control counted
     8 to 10 late against 24 or 25 handed out every time.
-  - The floor's and the failure's controls call the player stuck after
-    0.5 s of nothing moving, not the 1.5 s of `STUCK` the other controls
-    wait: each control's freeze is for good, and the slots die before
-    it. Beside the busy loops the floor's mid-seek case once found the
-    seek's frames up before its failures were planted; the failures go
-    in first, once the open's frames are up.
+  - Every control whose freeze is for good calls the player stuck after
+    0.5 s of nothing moving (`Wait::StuckFor`): `base.rs`'s seek forward
+    with the old base in seeks and its resync without the backstop, and
+    `play.rs`'s floor and failure controls, where the slots die before
+    the freeze. `STUCK`'s 1.5 s is left to the floor test's own checks,
+    which give up there rather than wait out `WAIT`. Beside the busy
+    loops the floor's mid-seek case once found the seek's frames up
+    before its failures were planted; the failures go in first, once the
+    open's frames are up.
 
 Revisit if: P-LOCK redirects (8 slots for a pair) or kills (a design
 note on the upload schedule before M3.10); odin shows a pair apart by
