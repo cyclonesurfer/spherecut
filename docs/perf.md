@@ -2,8 +2,9 @@
 
 Measured numbers per machine, so regressions show up. Each row comes from a
 `cargo xtask hw-test` report (release build), except rows marked "rerun, no
-report"; the report's commit is in the table. Numbers from the GPU-less cloud
-workspace are not recorded here.
+report"; the report's commit is in the table. The numbers are odin's and
+huginn's; the GPU-less cloud workspace's software decode appears only as a
+reference, at the end.
 
 ## Targets (from `docs/PROMPT.md`)
 
@@ -1013,7 +1014,10 @@ as fast as the copy, and the 8-bit clip a sixth faster, unthrottled;
 its real-time decode keeps no more than the decoder's surfaces ahead
 (12 to 46 a second), where the copy fills the cache at up to 61. These
 runs had memory to spare, so they don't show the copy path's slump.
-`zero_copy_matches_copy_path` passed 10 of 10 meanwhile.
+`zero_copy_matches_copy_path` passed 10 of 10 meanwhile. It mismatched
+again in M2's full run at 0663e05, on the same frame and view (below):
+of its 22 runs on odin up to 04d15be, those two, both in full-suite
+runs, are its only failures, and D77 gives the probable cause.
 
 M2's runs, the export (6993987 to 04d15be). The ordinals above and
 below count odin's decode and playback runs; these are M2's export and

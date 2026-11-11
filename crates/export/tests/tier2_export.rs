@@ -393,6 +393,12 @@ fn export_360_8k_vaapi() {
     let r = export_on(&gpu, &p, EncoderChoice::Vaapi, &out);
     assert_eq!((r.encoder, r.size, r.frames), (encoder, (7680, 3840), 60));
     assert_eq!(r.fallback, None);
+    // FFmpeg's own demuxer read the file before it was put in place. The
+    // perf clip has no audio, so there is no ffmpeg_ambix.
+    let names: Vec<&str> = r.checks.iter().map(|c| c.name).collect();
+    for name in ["ffmpeg_sphere", "ffmpeg_log"] {
+        assert!(names.contains(&name), "no {name} among {names:?}");
+    }
     let fps = r.frames as f64 / r.elapsed.as_secs_f64();
     let mbps = r.bytes as f64 * 8.0 / r.duration.to_secs_f64() / 1e6;
     eprintln!(
