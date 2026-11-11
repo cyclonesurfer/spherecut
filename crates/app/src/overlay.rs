@@ -130,6 +130,11 @@ pub struct Readings {
     pub shown: u64,
     pub dropped: u64,
     pub decode_dropped: u64,
+    /// Presents at which the streams showed different clip times, and
+    /// how far a locked pair shown trailed the clock (M3 plan section 9):
+    /// on the video line with two streams or more.
+    pub unpaired: u64,
+    pub pair_wait: StageSummary,
     /// The A/V offset's median and p95 over the last second.
     pub av: Option<(f32, f32)>,
     pub cache: Option<CacheStats>,
@@ -185,6 +190,8 @@ impl Readings {
             shown: p.counter(Counter::FramesShown),
             dropped: p.counter(Counter::Dropped),
             decode_dropped: p.counter(Counter::DecodeDropped),
+            unpaired: p.counter(Counter::UnpairedPresents),
+            pair_wait: *p.stage(Stage::PairWait),
             av,
             cache: snap.cache,
             slots: snap.slots,
@@ -248,6 +255,19 @@ impl Readings {
             || "-".into(),
             |(m, p95)| format!("{m:+.0} ms (p95 {p95:.0})"),
         );
+        let pairs = if self.streams >= 2 {
+            let wait = match self.pair_wait.p50 {
+                Some(_) => format!(
+                    "{} (max {})",
+                    ms(self.pair_wait.p50),
+                    num(self.pair_wait.max)
+                ),
+                None => "-".into(),
+            };
+            format!("   unpaired {}   pair_wait {wait}", self.unpaired)
+        } else {
+            String::new()
+        };
         let cache = self.cache.as_ref().map_or_else(
             || "-".into(),
             |c| {
@@ -290,7 +310,7 @@ impl Readings {
                 self.hitches
             ),
             format!(
-                "video     shown {}   dropped {} ({pct:.2}%)   decode-dropped {}   A/V {av}",
+                "video     shown {}   dropped {} ({pct:.2}%){pairs}   decode-dropped {}   A/V {av}",
                 self.shown, self.dropped, self.decode_dropped
             ),
             format!(
@@ -576,6 +596,8 @@ mod tests {
             shown: 1798,
             dropped: 2,
             decode_dropped: 0,
+            unpaired: 0,
+            pair_wait: StageSummary::default(),
             av: Some((4.0, 9.0)),
             cache: None,
             slots: SlotStats {
@@ -642,6 +664,35 @@ mod tests {
         assert_eq!(r.lines()[7], "audio     starting");
         r.memory = None;
         assert_eq!(r.lines()[8], "memory    -");
+    }
+
+    #[test]
+    fn two_streams_show_their_pairs_beside_the_drops() {
+        let mut r = readings();
+        r.unpaired = 3;
+        r.pair_wait = StageSummary {
+            recorded: 10,
+            p50: Some(12.0),
+            max: Some(40.0),
+            ..StageSummary::default()
+        };
+        // One stream has no pairs to show.
+        assert_eq!(
+            r.lines()[5],
+            "video     shown 1798   dropped 2 (0.11%)   decode-dropped 0   A/V +4 ms (p95 9)"
+        );
+        r.streams = 2;
+        assert_eq!(
+            r.lines()[5],
+            "video     shown 1798   dropped 2 (0.11%)   unpaired 3   pair_wait 12.0 ms (max 40.0)   decode-dropped 0   A/V +4 ms (p95 9)"
+        );
+        // An unlocked pair records no waits.
+        r.pair_wait = StageSummary::default();
+        assert!(
+            r.lines()[5].contains("unpaired 3   pair_wait -   decode"),
+            "{}",
+            r.lines()[5]
+        );
     }
 
     #[test]

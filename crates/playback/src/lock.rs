@@ -9,10 +9,10 @@
 //! refused by the [`field`] that differs and they play unlocked. Once
 //! locked, the presenter shows the newest time both lenses hold at or
 //! before the clock ([`pick_pair`]), both slots or neither
-//! ([`show_pair`]); the frame cache runs from the group base, the newest
-//! time both hold, so that such a time always exists; one catch-up time
-//! serves the group, so that the lenses skip to the same frame; and the
-//! pair ends at its shorter lens.
+//! ([`show_pair`], [`show_pair_over`]); the frame cache runs from the
+//! group base, the newest time both hold, so that such a time always
+//! exists; one catch-up time serves the group, so that the lenses skip
+//! to the same frame; and the pair ends at its shorter lens.
 //!
 //! The group's members are player streams, by their place in what was
 //! opened (`[0, 1]` for a pair of file streams), not file streams: the
@@ -25,7 +25,7 @@
 
 use spherecut_core::Time;
 
-use crate::slots::SlotView;
+use crate::slots::{SlotState, SlotView};
 
 /// How a pair is locked, given to [`Player::open_locked`].
 ///
@@ -141,24 +141,84 @@ pub mod field {
 /// member 0's first; `None` when no such time exists. A pure function of
 /// what it is given (M3 plan section 9; the plan's slot ids are the
 /// views here).
-#[expect(unused_variables, reason = "M3.8 unit (b) writes the body")]
+///
+/// Where a member has two slots at T (its frame uploaded again after a
+/// seek back while the old one is on screen), it takes the Shown one, so
+/// that the frame on screen stays up, else the one with the higher place
+/// in its run, else the one in the lower slot.
 pub fn pick_pair(
     views: &[SlotView],
     members: [usize; 2],
     epoch: u64,
     t: Time,
 ) -> Option<[SlotView; 2]> {
-    todo!()
+    let held = |m: usize| {
+        views.iter().filter(move |v| {
+            matches!(v.state, SlotState::Ready | SlotState::Shown)
+                && v.frame.epoch == epoch
+                && v.frame.stream == m
+                && v.frame.time <= t
+        })
+    };
+    // Member `m`'s slot at exactly `time`, by the rule above.
+    let at = |m: usize, time: Time| {
+        held(m).filter(|v| v.frame.time == time).max_by(|a, b| {
+            let rank = |v: &SlotView| (v.state == SlotState::Shown, v.frame.seq);
+            rank(a).cmp(&rank(b)).then_with(|| b.index.cmp(&a.index))
+        })
+    };
+    let common = held(members[0])
+        .map(|v| v.frame.time)
+        .filter(|&time| at(members[1], time).is_some())
+        .max()?;
+    Some([*at(members[0], common)?, *at(members[1], common)?])
 }
 
 /// Show both slots of `pair` or neither: each through `try_show`, and if
 /// the second fails, the first given back through `give_back`. Both
 /// frames, member 0's first, or `None` with nothing left shown.
-#[expect(unused_variables, reason = "M3.8 unit (b) writes the body")]
+///
+/// `give_back` gets the view of the first slot as it was read: a caller
+/// gives back a slot its `try_show` moved from Ready to Shown, and
+/// leaves one that was Shown already (the frame on screen) as it is, as
+/// [`show_pair_over`] does for the presenter.
 pub fn show_pair<G>(
     pair: &[SlotView; 2],
-    try_show: impl FnMut(&SlotView) -> Option<G>,
-    give_back: impl FnMut(&SlotView),
+    mut try_show: impl FnMut(&SlotView) -> Option<G>,
+    mut give_back: impl FnMut(&SlotView),
 ) -> Option<[G; 2]> {
-    todo!()
+    let first = try_show(&pair[0])?;
+    match try_show(&pair[1]) {
+        Some(second) => Some([first, second]),
+        None => {
+            give_back(&pair[0]);
+            None
+        }
+    }
+}
+
+/// [`show_pair`] over the frames a presenter has on screen: a member
+/// that shows its slot in `pair` already keeps that frame (`on_screen`),
+/// and the other's slot goes up through `try_show`. If the second can't,
+/// the first is given back through `unshow`, but only if this call moved
+/// it from Ready to Shown: never the frame on screen, nor a slot that was
+/// Shown already. Both frames, member 0's first, or `None` with the slots
+/// as they were. A pure function of what it is given.
+pub fn show_pair_over<G>(
+    pair: &[SlotView; 2],
+    on_screen: [Option<G>; 2],
+    mut try_show: impl FnMut(&SlotView) -> Option<G>,
+    mut unshow: impl FnMut(&SlotView),
+) -> Option<[G; 2]> {
+    let moved = on_screen[0].is_none() && pair[0].state == SlotState::Ready;
+    let mut kept = on_screen.into_iter();
+    show_pair(
+        pair,
+        |v| kept.next().flatten().or_else(|| try_show(v)),
+        |v| {
+            if moved {
+                unshow(v);
+            }
+        },
+    )
 }

@@ -128,6 +128,9 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     let frames = &r["frames"];
     assert!(frames["shown"].as_u64().unwrap() >= 5, "{frames}");
     assert!(frames["expected"].as_f64().unwrap() > 40.0, "{frames}");
+    // One stream is never shown apart from another.
+    assert_eq!(frames["unpaired"], 0, "{frames}");
+    assert_eq!(frames["pair_resyncs"], 0, "{frames}");
     // Late passes are late for a refresh rate, which kittest hasn't.
     assert_eq!(r["late"], serde_json::json!([]));
     assert_eq!(r["streams"][0]["decoder"], "software");
@@ -170,6 +173,11 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
         (&settled["ui"]["frames"], &ui["frames"]),
         (&settled["ui"]["passes"], &ui["passes"]),
         (&settled["frames"]["shown"], &r["frames"]["shown"]),
+        (&settled["frames"]["unpaired"], &r["frames"]["unpaired"]),
+        (
+            &settled["frames"]["pair_resyncs"],
+            &r["frames"]["pair_resyncs"],
+        ),
     ] {
         assert!(
             part.as_u64().unwrap() <= whole.as_u64().unwrap(),
@@ -367,6 +375,9 @@ fn the_smoke_run_plays_a_cameras_lenses_together() {
         shown + frames["dropped"].as_u64().unwrap() >= 80,
         "{frames}"
     );
+    // Opened unlocked: the lenses may show apart, and nothing resyncs.
+    assert!(frames["unpaired"].as_u64().is_some(), "{frames}");
+    assert_eq!(frames["pair_resyncs"], 0, "{frames}");
 }
 
 /// The watchdog's exit, as a test sees it: the status, on a channel.

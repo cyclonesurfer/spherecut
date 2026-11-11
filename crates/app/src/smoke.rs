@@ -791,6 +791,8 @@ impl Run {
                 shown: since(Counter::FramesShown),
                 dropped: since(Counter::Dropped),
                 decode_dropped: since(Counter::DecodeDropped),
+                unpaired: since(Counter::UnpairedPresents),
+                pair_resyncs: since(Counter::PairResyncs),
                 expected: rates.map(|f| f * secs),
             },
         }
@@ -1087,6 +1089,11 @@ pub struct Frames {
     pub shown: u64,
     pub dropped: u64,
     pub decode_dropped: u64,
+    /// Presents at which the streams showed frames of different clip
+    /// times, and times a locked pair sought both lenses to catch up
+    /// (M3 plan section 9).
+    pub unpaired: u64,
+    pub pair_resyncs: u64,
     /// Every stream's frames in `played_s`, at their rates, as `shown`
     /// counts each stream's.
     pub expected: Option<f64>,
@@ -1310,6 +1317,8 @@ impl SmokeDriver {
                 shown: counted(Counter::FramesShown),
                 dropped: counted(Counter::Dropped),
                 decode_dropped: counted(Counter::DecodeDropped),
+                unpaired: counted(Counter::UnpairedPresents),
+                pair_resyncs: counted(Counter::PairResyncs),
                 expected: rates.map(|f| f * played_s),
             },
             streams,
