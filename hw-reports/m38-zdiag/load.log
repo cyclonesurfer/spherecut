@@ -1,0 +1,95 @@
+===== zc-1 2026-11-11T01:18:06-08:00
+ 01:18:06 up 31 days,  6:15,  1 user,  load average: 1.24, 0.70, 0.63
+top - 01:18:06 up 31 days,  6:15,  1 user,  load average: 1.24, 0.70, 0.63
+Tasks: 620 total, 1 running, 619 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  2.1 us,  1.3 sy,  0.0 ni, 96.6 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st 
+MiB Mem :  64197.8 total,   4872.1 free,  28757.9 used,  28945.4 buff/cache     
+MiB Swap:   8192.0 total,   2663.4 free,   5528.6 used.  35439.9 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4536 pat       20   0   11.3g 480976 188028 S  13.5   0.7     34,09 gnome-s+
+3368385 pat       20   0 5660352 308988 115056 S  13.5   0.5   0:02.88 2.1.312
+ 174326 pat       20   0   14.9g   2.0g 390268 S   9.0   3.2     35,37 firefox
+ 131508 pat       20   0 5634628 173688  39156 S   4.5   0.3  78:07.95 claude
+ 756433 pat       20   0 3822316 809428 134340 S   4.5   1.2  56:16.52 Isolate+
+2352187 pat       20   0 3433240 547232 123724 S   4.5   0.8   2:42.23 Isolate+
+3368677 pat       20   0  236284   6248   4020 R   4.5   0.0   0:00.03 top
+      1 root      20   0   42048  14568   9660 S   0.0   0.0   1:51.24 systemd
+MemAvailable:   36292896 kB
+LockedHint=no
+===== zc-2 2026-11-11T01:19:54-08:00
+ 01:19:54 up 31 days,  6:17,  1 user,  load average: 2.10, 1.28, 0.86
+top - 01:19:55 up 31 days,  6:17,  1 user,  load average: 2.10, 1.28, 0.86
+Tasks: 660 total, 3 running, 657 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  7.5 us,  2.3 sy,  0.0 ni, 89.7 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7341.1 free,  28703.6 used,  26516.4 buff/cache     
+MiB Swap:   8192.0 total,   2612.3 free,   5579.7 used.  35494.2 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 594075 pat       20   0 6728924   3.0g 134348 R  98.3   4.8 222:07.50 Isolate+
+   4536 pat       20   0   11.3g 478880 187836 R  13.4   0.7     34,09 gnome-s+
+ 174326 pat       20   0   14.9g   2.0g 390160 S   8.9   3.2     35,37 firefox
+3369784 pat       20   0  236284   6248   4016 R   8.9   0.0   0:00.03 top
+   1508 root      20   0   19884   8860   7736 S   4.5   0.0   0:04.25 systemd+
+   1510 root      20   0   17144   7036   6612 S   4.5   0.0   1:26.65 systemd+
+ 365897 pat       20   0 3726588  90660  37004 S   4.5   0.1 127:28.81 bridge-+
+ 550462 pat       20   0 6638892   2.5g 154248 S   4.5   3.9     35,43 Isolate+
+MemAvailable:   36346096 kB
+LockedHint=no
+===== zc-3 2026-11-11T01:21:30-08:00
+ 01:21:30 up 31 days,  6:19,  1 user,  load average: 2.77, 1.72, 1.06
+top - 01:21:30 up 31 days,  6:19,  1 user,  load average: 2.77, 1.72, 1.06
+Tasks: 660 total, 4 running, 656 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  8.1 us,  2.1 sy,  0.0 ni, 89.6 id,  0.0 wa,  0.0 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   6520.5 free,  29694.6 used,  26419.8 buff/cache     
+MiB Swap:   8192.0 total,   2612.4 free,   5579.6 used.  34503.3 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 594075 pat       20   0 6706396   3.0g 134348 R  95.0   4.8 222:22.75 Isolate+
+   4536 pat       20   0   11.3g 478880 187836 R  13.6   0.7     34,09 gnome-s+
+ 174326 pat       20   0   14.9g   2.0g 390160 S   9.0   3.2     35,37 firefox
+3370589 pat       20   0  236284   6288   4056 R   9.0   0.0   0:00.03 top
+ 124091 pat       20   0 2421656  15808   7364 S   4.5   0.0  15:38.67 podman
+ 524792 pat       20   0 4982732   1.7g 138600 S   4.5   2.7 183:50.55 Isolate+
+2002722 pat       20   0   11.2g 332444 135288 S   4.5   0.5   9:53.12 Isolate+
+      1 root      20   0   42048  14532   9624 S   0.0   0.0   1:51.26 systemd
+MemAvailable:   35331336 kB
+LockedHint=no
+===== one-zc 2026-11-11T01:23:07-08:00
+ 01:23:07 up 31 days,  6:20,  1 user,  load average: 3.18, 2.11, 1.26
+top - 01:23:07 up 31 days,  6:20,  1 user,  load average: 3.18, 2.11, 1.26
+Tasks: 660 total, 2 running, 658 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  7.0 us,  2.3 sy,  0.0 ni, 90.2 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7910.0 free,  28821.5 used,  25759.2 buff/cache     
+MiB Swap:   8192.0 total,   2458.0 free,   5734.0 used.  35376.3 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 550462 pat       20   0 6640988   2.5g 154248 R  90.2   4.0     35,43 Isolate+
+   4536 pat       20   0   11.3g 478580 187536 S   9.0   0.7     34,10 gnome-s+
+ 174326 pat       20   0   14.9g   2.0g 383004 S   9.0   3.1     35,38 firefox
+3371349 pat       20   0  236284   6344   4112 R   4.5   0.0   0:00.03 top
+      1 root      20   0   42048  14516   9608 S   0.0   0.0   1:51.26 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.78 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+MemAvailable:   36225360 kB
+LockedHint=no
+===== one-shared 2026-11-11T01:23:24-08:00
+ 01:23:24 up 31 days,  6:20,  1 user,  load average: 5.93, 2.76, 1.49
+top - 01:23:24 up 31 days,  6:20,  1 user,  load average: 5.93, 2.76, 1.49
+Tasks: 660 total, 1 running, 659 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  1.6 us,  1.6 sy,  0.0 ni, 96.6 id,  0.0 wa,  0.3 hi,  0.0 si,  0.0 st 
+MiB Mem :  64197.8 total,   8032.3 free,  28668.0 used,  25790.5 buff/cache     
+MiB Swap:   8192.0 total,   2458.0 free,   5734.0 used.  35529.9 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4536 pat       20   0   11.3g 478648 187536 S  13.7   0.7     34,10 gnome-s+
+ 174326 pat       20   0   14.9g   2.0g 383004 S   4.6   3.1     35,38 firefox
+ 365897 pat       20   0 3726588  90316  36660 S   4.6   0.1 127:30.14 bridge-+
+ 594323 pat       20   0 4242040 585408 144196 S   4.6   0.9  28:48.95 Isolate+
+2035888 pat       20   0 3356100 435052 127536 S   4.6   0.7  16:38.70 Isolate+
+2040555 root      20   0       0      0      0 I   4.6   0.0   4:42.40 kworker+
+3373051 pat       20   0  236284   6384   4156 R   4.6   0.0   0:00.02 top
+      1 root      20   0   42048  14516   9608 S   0.0   0.0   1:51.27 systemd
+MemAvailable:   36383796 kB
+LockedHint=no
