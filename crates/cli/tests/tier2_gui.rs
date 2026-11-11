@@ -15,11 +15,17 @@
 //!   compositor didn't draw the window (a locked session, or one on
 //!   another VT), so nothing else the run measured counts; with fewer,
 //!   the window was drawn and the UI was slow;
-//! - more than 0.1% of the frames were dropped;
+//! - more than 0.1% of the frames were dropped: of pairs for a locked
+//!   pair, whose drops count once a pair and frames shown once a lens
+//!   (the frames a display slower than the clip passes over by design
+//!   are `skipped`, apart);
 //! - the UI's p99 is over 1.5 × the refresh period;
 //! - on the sync clip, |A/V|'s p95 is 20 ms or more;
 //! - an HEVC stream decodes in software where doctor's check says VA-API
-//!   decodes its profile.
+//!   decodes its profile;
+//! - on the X5 raw view, the lenses didn't lock, or over the whole run a
+//!   present showed them at different frames (`unpaired`) or the pair
+//!   resynced (`pair_resyncs`), M3 plan section 9.
 //!
 //! The first run also exports the clip's first 2 s while it plays
 //! (`--smoke-export`, M2 plan section 11); the second exports them as an
@@ -77,6 +83,7 @@ use spherecut_media::doctor::{self, CheckResult};
 use spherecut_media::probe::{self, StreamKind};
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, PERF_5K7_8BIT, PERF_5K7_10BIT, Spec};
+use spherecut_testkit::control::must_fail;
 use spherecut_testkit::tier2;
 
 /// How long each run plays.
@@ -114,6 +121,8 @@ struct Clip {
     path: PathBuf,
     /// The sync clip, whose A/V offset gates.
     sync: bool,
+    /// A camera's raw file, whose lenses must lock ([`judge_pair`]).
+    pair: bool,
 }
 
 /// What each run's document is judged by, besides the clip.
@@ -166,11 +175,17 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
             f(&r["ui"]["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
         ));
     }
-    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0);
+    // A locked pair's drops count once a pair and its frames shown once
+    // a lens: the share is of pairs, as the overlay's.
+    let (lenses, unit) = match r["streams"].as_array().map_or(1, Vec::len) {
+        n @ 2.. if r["lock"]["status"] == "locked" => (n as f64, "pairs"),
+        _ => (1.0, "frames"),
+    };
+    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0) / lenses;
     let dropped = f(&judged["frames"]["dropped"]).unwrap_or(0.0);
     if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
         why.push(format!(
-            "{dropped} of {} frames dropped ({:.2}%, over {:.1}%)",
+            "{dropped} of {} {unit} dropped ({:.2}%, over {:.1}%)",
             shown + dropped,
             100.0 * dropped / (shown + dropped),
             MAX_DROPPED * 100.0
@@ -215,6 +230,39 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
     why
 }
 
+/// Why a camera's raw file's run fails as a pair (M3 plan section 9),
+/// over the whole run: its lenses didn't lock, a present showed them at
+/// different frames, or the backstop resynced them; empty when it
+/// passes.
+fn judge_pair(doc: &Value) -> Vec<String> {
+    let r = &doc["result"];
+    let mut why = Vec::new();
+    if r["lock"]["status"] != "locked" {
+        why.push(format!(
+            "the lenses didn't lock: {}",
+            match (r["lock"]["status"].as_str(), r["lock"]["field"].as_str()) {
+                (Some(status), Some(field)) => format!("{status} on {field}"),
+                (Some(status), None) => status.into(),
+                _ => "no lock in the document".into(),
+            }
+        ));
+    }
+    let count = |k: &str| r["frames"][k].as_u64();
+    match count("unpaired") {
+        Some(0) => {}
+        Some(n) => why.push(format!(
+            "{n} presents showed the lenses at different frames"
+        )),
+        None => why.push("no unpaired count in the document".into()),
+    }
+    match count("pair_resyncs") {
+        Some(0) => {}
+        Some(n) => why.push(format!("the pair resynced {n} times")),
+        None => why.push("no pair_resyncs count in the document".into()),
+    }
+    why
+}
+
 /// The camera files under the samples directory, by layout: each
 /// stitched equirect, and the longest X5 raw file with two lenses.
 fn sample_clips(dir: &Path) -> (Vec<Clip>, Option<Clip>) {
@@ -252,6 +300,7 @@ fn sample_clips(dir: &Path) -> (Vec<Clip>, Option<Clip>) {
                 label: format!("stitched sample {name}"),
                 path: p,
                 sync: false,
+                pair: false,
             }),
             Some(Layout::Insta360DualFisheye)
                 if videos == 2 && raw.as_ref().is_none_or(|(size, _)| r.file_size > *size) =>
@@ -268,6 +317,7 @@ fn sample_clips(dir: &Path) -> (Vec<Clip>, Option<Clip>) {
         ),
         path: p,
         sync: false,
+        pair: true,
     });
     (stitched, raw)
 }
@@ -390,6 +440,7 @@ fn gui_smoke() {
                 label: label.into(),
                 path,
                 sync: false,
+                pair: false,
             }),
             Err(why) => not_run.push((label.into(), why)),
         }
@@ -414,11 +465,13 @@ fn gui_smoke() {
         label: "seam 3840×1920 HEVC".into(),
         path: seam,
         sync: false,
+        pair: false,
     });
     clips.push(Clip {
         label: "sync flash and beep".into(),
         path: media::write(&media::sync_flash_beep(), &made).unwrap(),
         sync: true,
+        pair: false,
     });
     match tier2::samples_dir() {
         Some(dir) => {
@@ -481,12 +534,16 @@ fn gui_smoke() {
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         let mut why = match &doc {
-            Some(d) if export.is_some() => {
+            Some(d) => {
                 let mut why = judge(d, clip.sync, &gates);
-                why.extend(judge_export(d));
+                if export.is_some() {
+                    why.extend(judge_export(d));
+                }
+                if clip.pair && d["ok"] == true {
+                    why.extend(judge_pair(d));
+                }
                 why
             }
-            Some(d) => judge(d, clip.sync, &gates),
             None => vec![format!(
                 "no document (exit {status:?}): {}",
                 stderr.lines().last().unwrap_or("")
@@ -993,6 +1050,58 @@ fn the_gates_fail_what_they_say() {
         vaapi_hevc: vec!["HEVC Main".into()],
     };
     assert!(judge(&sw, false, &only8).is_empty());
+
+    // A locked pair: 600 pairs shown, 1200 frames of its lenses, and a
+    // drop counted once a pair is 1 in 601 pairs, over 0.1%; the same
+    // counts unlocked, each stream's, are 1 in 1201 frames, under it.
+    let mut pair = good();
+    pair["result"]["streams"] = json!([
+        {"format": "hevc 3840×3840 yuv420p limited/709", "decoder": "vaapi", "decode": "VA-API"},
+        {"format": "hevc 3840×3840 yuv420p limited/709", "decoder": "vaapi", "decode": "VA-API"},
+    ]);
+    pair["result"]["lock"] = json!({"status": "locked", "field": null});
+    pair["result"]["frames"] =
+        json!({"shown": 1200, "dropped": 0, "skipped": 600, "unpaired": 0, "pair_resyncs": 0});
+    assert!(judge(&pair, false, &gates).is_empty());
+    assert!(judge_pair(&pair).is_empty());
+    pair["result"]["frames"]["dropped"] = json!(1);
+    must_fail(
+        "a locked pair dropping 1 in 601 pairs",
+        judge(&pair, false, &gates).is_empty(),
+    );
+    fails(&pair, false, "1 of 601 pairs dropped");
+    let mut apart = pair.clone();
+    apart["result"]["lock"] = json!({"status": "refused", "field": "slots"});
+    let why = judge(&apart, false, &gates);
+    assert!(why.is_empty(), "1 in 1201 frames: {why:?}");
+    // Skipped frames, by design, aren't drops.
+    pair["result"]["frames"]["dropped"] = json!(0);
+    pair["result"]["frames"]["skipped"] = json!(1200);
+    assert!(judge(&pair, false, &gates).is_empty());
+    // The X5 raw view's pair gates, each on a document made to fail it.
+    let pair_fails = |d: &Value, has: &str| {
+        let why = judge_pair(d);
+        assert!(
+            why.iter().any(|w| w.contains(has)),
+            "{has:?} not in {why:?}"
+        );
+    };
+    let mut unpaired = pair.clone();
+    unpaired["result"]["frames"]["unpaired"] = json!(3);
+    pair_fails(
+        &unpaired,
+        "3 presents showed the lenses at different frames",
+    );
+    let mut resynced = pair.clone();
+    resynced["result"]["frames"]["pair_resyncs"] = json!(2);
+    pair_fails(&resynced, "the pair resynced 2 times");
+    pair_fails(&apart, "the lenses didn't lock: refused on slots");
+    let mut unlocked = pair.clone();
+    unlocked["result"]["lock"] = Value::Null;
+    pair_fails(&unlocked, "no lock in the document");
+    unlocked["result"]["frames"] = json!({"shown": 1200, "dropped": 0});
+    pair_fails(&unlocked, "no unpaired count");
+    pair_fails(&unlocked, "no pair_resyncs count");
 }
 
 #[test]
