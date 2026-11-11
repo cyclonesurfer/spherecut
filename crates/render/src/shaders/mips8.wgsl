@@ -3,7 +3,8 @@
 // (`src`), each texel `mean_codes`, as fs_mip computes it, packed into
 // `dst`, a region of a buffer that a copy then puts into level n. Slots
 // make these planes without RENDER_ATTACHMENT, which keeps RADV from
-// compressing them (DCC), so no fragment pass can write them.
+// compressing them (DCC; Mesa's rule as recalled, not read), so no
+// fragment pass can write them.
 //
 // A word holds four R8 texels or two Rg8 ones, the first in its low byte,
 // as a copy reads them. A row of level n starts every arrayLength(&dst) /

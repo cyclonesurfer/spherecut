@@ -70,7 +70,9 @@ pub enum EightBitMips {
     #[default]
     Compute,
     /// A render pass a level, as before D77, into a slot made by
-    /// [`GpuFrame::renderable`]: the reference the compute pass is held to.
+    /// [`GpuFrame::renderable`]: the reference the compute pass is held
+    /// to, and the old layout the upload bench's test of a step's own
+    /// blocks runs on.
     RenderPass,
     /// The compute pass with each mean truncated, one code off wherever it
     /// rounds up: the control that holding it to the reference fails.
@@ -148,8 +150,9 @@ impl Uploader {
     }
 
     /// An uploader on `path` whose 8-bit mips are made as `eight_bit`
-    /// says: for the tests that hold the compute pass to the render
-    /// passes it replaced.
+    /// says, for tests only: the one that holds the compute pass to the
+    /// render passes it replaced, and the upload bench's test of a step's
+    /// own blocks.
     #[doc(hidden)]
     pub fn with_eight_bit_mips(gpu: &Gpu, path: UploadPath, eight_bit: EightBitMips) -> Uploader {
         let device = &gpu.device;

@@ -78,10 +78,12 @@ impl GpuFrame {
     }
 
     /// A slot whose every plane can be rendered to, 8-bit ones too, as
-    /// slots were made before D77: for the test that holds the 8-bit mip
-    /// pass to the render passes it replaced
-    /// ([`EightBitMips::RenderPass`](crate::upload::EightBitMips)), and
-    /// that test's control. Nothing else makes one.
+    /// slots were made before D77. Only tests make one: the test that
+    /// holds the 8-bit mip pass to the render passes it replaced
+    /// ([`EightBitMips::RenderPass`](crate::upload::EightBitMips)), the
+    /// control of the test that 8-bit planes can't be rendered to, and
+    /// the upload bench's test of a step's own blocks, which needs the
+    /// old layout on lavapipe.
     #[doc(hidden)]
     pub fn renderable(gpu: &Gpu, shape: &SlotShape) -> Result<GpuFrame, RenderError> {
         Self::make(gpu, shape, true)
