@@ -10685,6 +10685,36 @@ signature (PR #32's wrong frames were all R8, and its perf pair is
 8-bit); odin's rows show the compute mips or uncompressed sampling
 costing real-time play; or a Mesa with the fault fixed ships.
 
+*Measured on odin at 04d15be (PR #34, 2026-11-11).*
+`zero_copy_pair_matches_copy` passed five runs of five (three plain,
+one under `RADV_DEBUG=img`, one in hw-test) with 0 wrong frames on
+every slot, path and variant, where every default-environment run
+before had failed (141 wrong frames over PR #32's three runs, 45 in PR
+#33's plain one). Both changes landed together, so whether dropping
+`RENDER_ATTACHMENT` (which, by the Mesa rule recalled, takes DCC off)
+or the compute mips ended it isn't known. Of the third run queued
+above, `RADV_DEBUG=img` and vulkaninfo ran; `radv_disable_dcc_mips`
+didn't. RADV's `img` print shows the recalled `Image:` blocks with
+`width=`, `height=` and `levels=`, but no DCC line for any image of
+that run, not only the slots, so the form of a DCC line is
+unconfirmed, the print can't tell these slots from earlier ones, and
+the upstream report's `img` blank can't be filled from it. The slots'
+surfaces (216 R8 3840² at 6 levels and 216 RG8 1920² at 5) carry flags
+0x22410301, whose bit 22 is, as recalled, `RADEON_SURF_DISABLE_DCC`.
+odin's vulkaninfo lists `VK_EXT_image_compression_control`. The
+goldens and yuv on the RX 7600 pass; `goldens_on_host_llvmpipe` didn't
+run. On the RX 7600 the compute mips cost more, where lavapipe found
+them no slower: the 5.7K NV12 frame's mips 0.70 ms against 0.62 to
+0.63 by render passes (odin's runs from 43abcda to 0663e05; 918d031's
+1.01, above, was that one run's and didn't recur), its ingest and mips
+1.10 against 1.00 to 1.01 (by `write_texture`), a 3840² pair's 0.95 a
+frame against 0.88 to 0.89, 0.06 to 0.10 ms more in all, while P010's
+rows, which this didn't touch, came out about 4 % faster in the same
+run. The project rows, sampling planes made without
+`RENDER_ATTACHMENT`, read 0.22 and 0.77 ms at 1920×1080 and 3840×2160
+rectilinear, within the 0.19 to 0.22 and 0.73 to 0.81 odin measured
+from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
