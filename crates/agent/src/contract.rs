@@ -621,7 +621,8 @@ pub struct RenderAudio {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderCheck {
     /// `probe`, `layout`, `codec`, `size`, `frames`, `duration`, `rate`,
-    /// `st3d`, `sv3d`, `v1`, `spherical`, `audio` or `sa3d`.
+    /// `st3d`, `sv3d`, `v1`, `spherical`, `audio` or `sa3d`, then FFmpeg's
+    /// own reading: `ffmpeg_sphere`, `ffmpeg_ambix` or `ffmpeg_log`.
     pub name: &'static str,
     pub found: String,
 }

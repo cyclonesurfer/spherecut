@@ -20,7 +20,7 @@ use crate::ff;
 use crate::ffi;
 use crate::hwprobe;
 use crate::mp4::{self, FirstBox, FourCc, Mp4Box};
-use crate::spherical::{self, TrackSpherical};
+use crate::spherical::{self, SphericalV2, TrackSpherical};
 use crate::{MediaError, Source, TooLarge, init};
 
 #[derive(Debug, Clone, Serialize)]
@@ -523,13 +523,21 @@ const MAX_LOG_LINES: usize = 32;
 /// more than once. A damaged stream can make it log the same line for
 /// every packet it reads.
 fn tally(lines: Vec<String>) -> Vec<String> {
+    tally_keeping(lines, |_| false)
+}
+
+/// [`tally`], listing every line that `keep` holds past the limit too:
+/// only the other lines count towards it.
+fn tally_keeping(lines: Vec<String>, keep: fn(&str) -> bool) -> Vec<String> {
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut others = 0;
     let mut dropped = 0;
     for line in lines {
         if let Some(&i) = seen.get(&line) {
             counts[i].1 += 1;
-        } else if counts.len() < MAX_LOG_LINES {
+        } else if keep(&line) || others < MAX_LOG_LINES {
+            others += usize::from(!keep(&line));
             seen.insert(line.clone(), counts.len());
             counts.push((line, 1));
         } else {
@@ -544,6 +552,159 @@ fn tally(lines: Vec<String>) -> Vec<String> {
         out.push(format!("{dropped} more lines not listed"));
     }
     out
+}
+
+/// What FFmpeg's own demuxer reads of a file's streams from its header,
+/// and nothing from our box reader: a second reading of a file's
+/// spherical metadata, beside [`ProbeReport`]'s, which for an MP4 is our
+/// own (D4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemuxerView {
+    pub streams: Vec<DemuxedStream>,
+    /// The warnings and errors FFmpeg logged while it read the header, as
+    /// in [`ProbeReport::ffmpeg_log`], with every line
+    /// [`spherical_complaints`](Self::spherical_complaints) gives listed
+    /// however many others there are.
+    pub ffmpeg_log: Vec<String>,
+}
+
+/// One stream of a [`DemuxerView`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemuxedStream {
+    pub index: usize,
+    pub kind: StreamKind,
+    /// The demuxer's spherical mapping, with its stereo mode when it has
+    /// one, as V2's fields; `None` when it has no spherical mapping.
+    pub spherical: Option<SphericalV2>,
+    /// An audio stream's channel layout as FFmpeg describes it, such as
+    /// "ambisonic 1" or "4 channels"; `None` for other streams.
+    pub channel_layout: Option<String>,
+}
+
+/// Parts of what FFmpeg's mov demuxer logs when it gives up on a
+/// spherical box, from its readers of `st3d`, `sv3d`, the V1 `uuid` and
+/// `SA3D` (`libavformat/mov.c` in FFmpeg 6.1.1, 7.1, 8.1 and 9.0.2:
+/// "Ambisonic channel reordering is not supported" is 6.1's alone, and
+/// "Invalid channel index" is 7.1's on). The line for a box read past its
+/// end counts for those boxes only: mov.c names the box in it, and the
+/// line comes for any box.
+pub const SPHERICAL_COMPLAINTS: &[&str] = &[
+    "Empty stereoscopic video box",
+    "Unknown st3d mode value",
+    "Empty spherical video box",
+    "Missing spherical video header",
+    "Unknown spherical version",
+    "Missing projection box",
+    "Missing projection header box",
+    "Unsupported cubemap layout",
+    "Invalid bounding rectangle coordinates",
+    "Unknown projection type",
+    "Invalid spherical metadata found",
+    "SA3D audio box too small",
+    "Unsupported SA3D box version",
+    "Unsupported ambisonic type",
+    "Unsupported channel_order",
+    "Unsupported normalization",
+    "Invalid number of channels",
+    "Ambisonic channel reordering is not supported",
+    "Invalid channel index",
+    "overread end of atom 'sv3d'",
+    "overread end of atom 'st3d'",
+    "overread end of atom 'SA3D'",
+];
+
+impl DemuxerView {
+    /// The lines of the log in which the mov demuxer complains of a
+    /// spherical box: each carries its tag and one of
+    /// [`SPHERICAL_COMPLAINTS`].
+    pub fn spherical_complaints(&self) -> Vec<&str> {
+        self.ffmpeg_log
+            .iter()
+            .map(String::as_str)
+            .filter(|l| is_spherical_complaint(l))
+            .collect()
+    }
+}
+
+/// Whether `line`, one of FFmpeg's log lines as
+/// [`hwprobe::capture_ffmpeg_log`] gives it ("[mov,mp4,m4a,3gp,3g2,mj2]
+/// ...", or with the context's address after the name), is the mov
+/// demuxer's and holds one of [`SPHERICAL_COMPLAINTS`].
+fn is_spherical_complaint(line: &str) -> bool {
+    let Some(rest) = line
+        .strip_prefix('[')
+        .and_then(|l| l.strip_prefix(ffi::MOV_DEMUXER))
+    else {
+        return false;
+    };
+    (rest.starts_with("] ") || rest.starts_with(" @ "))
+        && SPHERICAL_COMPLAINTS.iter().any(|c| rest.contains(c))
+}
+
+/// The kind of a stream of `t`.
+fn stream_kind(t: ff::media::Type) -> StreamKind {
+    match t {
+        ff::media::Type::Video => StreamKind::Video,
+        ff::media::Type::Audio => StreamKind::Audio,
+        ff::media::Type::Data => StreamKind::Data,
+        ff::media::Type::Subtitle => StreamKind::Subtitle,
+        ff::media::Type::Attachment => StreamKind::Attachment,
+        _ => StreamKind::Unknown,
+    }
+}
+
+/// Read a file's streams as FFmpeg's demuxer reads its header, without
+/// `avformat_find_stream_info` (so an `SA3D` box's audio is still
+/// "ambisonic 1", not the AAC decoder's "4.0"), under the same
+/// confinement as [`probe`], and with nothing from our box reader. FFmpeg stops reading once `cancel` is
+/// set. A file FFmpeg can't open fails as it does for [`probe`], with
+/// what FFmpeg logged.
+pub fn demuxer_view(
+    src: Source<'_>,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<DemuxerView, ProbeError> {
+    spherecut_core::may_block("reading a media file's header");
+    init();
+    let Source { open, name } = src;
+    // The mov demuxer reads the header on this thread, so its log is
+    // caught.
+    let (streams, log) = hwprobe::capture_ffmpeg_log(|| {
+        let ictx = ffi::open_header(open, cancel)?;
+        Ok::<_, ffi::OpenError>(
+            ictx.streams()
+                .map(|st| {
+                    let par = st.parameters();
+                    let f = ffi::codecpar_fields(&par);
+                    DemuxedStream {
+                        index: st.index(),
+                        kind: stream_kind(ffi::media_type(&par)),
+                        spherical: f.spherical.as_ref().map(spherical::from_ffmpeg),
+                        channel_layout: f.channel_layout,
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    let ffmpeg_log = tally_keeping(log, is_spherical_complaint);
+    match streams {
+        Ok(streams) => Ok(DemuxerView {
+            streams,
+            ffmpeg_log,
+        }),
+        Err(e) => {
+            let not_media = matches!(e, ffi::OpenError::Ffmpeg(ff::Error::InvalidData));
+            let error = MediaError::opening(name, e, |e| describe_open_error(e, false, &[]));
+            Err(ProbeError {
+                code: if not_media {
+                    codes::NOT_MEDIA
+                } else {
+                    error.code()
+                },
+                error,
+                ffmpeg_log,
+            })
+        }
+    }
 }
 
 fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeReport, Failed> {
@@ -682,14 +843,7 @@ fn probe_file(src: Source<'_>, cancel: Option<Arc<AtomicBool>>) -> Result<ProbeR
     for st in ictx.streams() {
         let par = st.parameters();
         let f = ffi::codecpar_fields(&par);
-        let kind = match ffi::media_type(&par) {
-            ff::media::Type::Video => StreamKind::Video,
-            ff::media::Type::Audio => StreamKind::Audio,
-            ff::media::Type::Data => StreamKind::Data,
-            ff::media::Type::Subtitle => StreamKind::Subtitle,
-            ff::media::Type::Attachment => StreamKind::Attachment,
-            _ => StreamKind::Unknown,
-        };
+        let kind = stream_kind(ffi::media_type(&par));
         let tb = rational(st.time_base()).unwrap_or(Rational::ONE);
         let st_tags = tags(st.metadata());
         let idx = st.index();
@@ -2073,6 +2227,77 @@ mod tests {
         ] {
             must_fail(&format!("the {what}, printed as it is, clean"), clean(raw));
         }
+    }
+
+    /// A spherical complaint is a line of the mov demuxer's holding one of
+    /// [`SPHERICAL_COMPLAINTS`], with or without the context's address.
+    ///
+    /// Controls: an overread of a box that isn't spherical, another
+    /// context's line with a complaint's words, and a tag that only starts
+    /// with the demuxer's name are not complaints.
+    #[test]
+    fn spherical_complaints_are_the_mov_demuxers_on_spherical_boxes() {
+        use spherecut_testkit::control::must_fail;
+
+        for line in [
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] overread end of atom 'sv3d' by 12 bytes",
+            "[mov,mp4,m4a,3gp,3g2,mj2] Unknown spherical version 1",
+            "[mov,mp4,m4a,3gp,3g2,mj2] Ambisonic channel reordering is not supported (2 times)",
+        ] {
+            assert!(is_spherical_complaint(line), "{line}");
+        }
+        for (what, line) in [
+            (
+                "an overread of another box",
+                "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] overread end of atom 'mdat' by 4 bytes",
+            ),
+            (
+                "another context's line",
+                "[aac @ 0x1] Invalid number of channels",
+            ),
+            (
+                "another demuxer's line",
+                "[mov,mp4,m4a,3gp,3g2,mj2x] Unknown spherical version 1",
+            ),
+        ] {
+            must_fail(what, is_spherical_complaint(line));
+        }
+    }
+
+    /// The demuxer view lists a spherical complaint however many other
+    /// lines come before it, so that a long log can't hide one from the
+    /// export's `ffmpeg_log` check.
+    ///
+    /// Control: probe's own tally, which lists the first 32 lines, drops
+    /// it.
+    #[test]
+    fn a_spherical_complaint_is_listed_past_the_log_limit() {
+        use spherecut_testkit::control::must_fail;
+
+        let complaint = "[mov,mp4,m4a,3gp,3g2,mj2] Unknown spherical version 1";
+        let mut lines: Vec<String> = (0..2 * MAX_LOG_LINES)
+            .map(|i| format!("[h264] {i}"))
+            .collect();
+        lines.push(complaint.into());
+        let view = DemuxerView {
+            streams: Vec::new(),
+            ffmpeg_log: tally_keeping(lines.clone(), is_spherical_complaint),
+        };
+        assert_eq!(view.spherical_complaints(), [complaint]);
+        assert_eq!(view.ffmpeg_log.len(), MAX_LOG_LINES + 2);
+        assert_eq!(
+            view.ffmpeg_log[MAX_LOG_LINES + 1],
+            "32 more lines not listed"
+        );
+        // Tallied as probe's own log is, it is cut.
+        let cut = DemuxerView {
+            streams: Vec::new(),
+            ffmpeg_log: tally(lines),
+        };
+        must_fail(
+            "the complaint kept by probe's own tally",
+            cut.spherical_complaints() == [complaint],
+        );
     }
 
     #[test]

@@ -224,9 +224,10 @@ pub fn read_track(trak: &Mp4Box) -> TrackSpherical {
     out
 }
 
-/// V2's metadata as FFmpeg's demuxer exported it, for a file whose boxes
-/// we don't read: Matroska and WebM's `Projection` and `StereoMode`
-/// elements. FFmpeg's stereo types beyond the three V2 names become
+/// V2's metadata as FFmpeg's demuxer exported it: for a file whose boxes
+/// we don't read, Matroska and WebM's `Projection` and `StereoMode`
+/// elements, and for [`probe::demuxer_view`](crate::probe::demuxer_view)
+/// of any file. FFmpeg's stereo types beyond the three V2 names become
 /// `StereoCustom` ("determined elsewhere"), and right-left is `st3d`'s
 /// value 4.
 pub(crate) fn from_ffmpeg(f: &crate::ffi::FfSpherical) -> SphericalV2 {

@@ -356,7 +356,9 @@ fn a_render_is_a_start_line_progress_lines_and_its_result() {
             "duration",
             "rate",
             "spherical",
-            "audio"
+            "audio",
+            "ffmpeg_sphere",
+            "ffmpeg_log"
         ]
     );
 

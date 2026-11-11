@@ -837,7 +837,10 @@ three. Once the muxer has finished, one last pass of media's injector
 it with V2 and `SA3D` for 360, the V1 `uuid`, no video edit list and
 the moov first; `check::check` reads it back through the probe (codec,
 size, frames, duration, rate, layout, the spherical boxes, the audio),
-and only then is it persisted at the output. A failure at any step, or
+then a second time through FFmpeg's own demuxer, `probe::demuxer_view`
+(its spherical side data, its "ambisonic 1" layout for ambiX, and no
+complaint of a spherical box in its log), and only then is it persisted
+at the output. A failure at any step, or
 a cancel, removes both temporary files. Before it starts, the export
 sweeps its folder of a killed export's temporary files (their locks are
 free, D16) and refuses a disk with less free space than two copies of

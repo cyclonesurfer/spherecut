@@ -405,6 +405,22 @@ video's identity edit, and puts the moov first with every chunk offset
 moved, as faststart would; the export reads the result back with the
 same parser before it is put in place.
 
+*Updated 2026-11-11 (review-fix slice):* reading back with our own
+parser alone validated our boxes against our own reading of them
+(F123): a box FFmpeg reads otherwise, or gives up on, passed. The
+export now reads the file a second time through FFmpeg's own demuxer,
+`probe::demuxer_view`, which opens the header alone under probe's
+confinement (`ffi::open_header`, without `avformat_find_stream_info`)
+and returns each stream's spherical side data and channel layout with
+the log. Its checks are `ffmpeg_sphere`, `ffmpeg_ambix` and
+`ffmpeg_log` (D52). The validation above becomes a test: the 360
+export test reads the file through `demuxer_view`, and copies with one
+box renamed `free` or one field changed fail the check that names them
+(`SA3D` version 1 or a reordered channel map, `svhd` version 1, `st3d`
+gone, `sv3d` and the V1 `uuid` both gone); a copy that loses only
+`sv3d`, or only the V1 `uuid`, still passes, since FFmpeg takes the
+sphere from the other.
+
 ## D5. glam for vectors and quaternions
 
 *2026-10-22, M0. Research: `docs/research/gpu-ui-stack.md` §8.*
@@ -1149,6 +1165,14 @@ audio RFC puts no requirement on the AAC channel configuration.
 Cost: FFmpeg's mov demuxer reads our `SA3D` as "ambisonic 1", but
 `avformat_find_stream_info` then replaces it with the AAC decoder's 4.0,
 so players that ignore `SA3D` play it as 4.0 surround.
+
+*Updated 2026-11-11 (review-fix slice):* the export's `ffmpeg_ambix`
+check (D52, F123) reads the header alone (`ffi::open_header`), before
+`avformat_find_stream_info`, so that it sees the demuxer's "ambisonic
+1" and not the decoder's 4.0; that is still so on FFmpeg 6.1.1, 7.1.3,
+8.1.3 and 9.0.2. A file whose `SA3D` FFmpeg ignores keeps the layout
+the demuxer gave the AAC stream before it, "4 channels", which fails
+the check.
 
 Revisit for M2/M6: Opus with channel mapping family 2 (ffprobe 6.1 reports
 "ambisonic 1" for it in MP4). It needs packed-float audio in `Mp4Writer`
@@ -8188,6 +8212,19 @@ What, as `crates/export` does it:
   stitched, equirectangular) and `SA3D` first-order ambiX on ambiX
   audio; a flat export must have no spherical metadata. The `Report`
   lists each check with what it found.
+
+  *Updated 2026-11-11 (review-fix slice):* the checks above are our own
+  parser's reading (D4), so a box FFmpeg reads otherwise passed them
+  (F123). Three more checks follow, of what FFmpeg's own demuxer reads
+  of the header (`probe::demuxer_view`, `check::check_demuxer_view`):
+  `ffmpeg_sphere` (the one video stream's spherical side data is the
+  whole sphere, equirect, mono, at no pose for 360, and absent for
+  flat), `ffmpeg_ambix` for ambiX audio (the audio stream's layout is
+  "ambisonic 1") and `ffmpeg_log` (no line of FFmpeg's log complains of
+  a spherical box, `probe::SPHERICAL_COMPLAINTS`; such a line is listed
+  however long the log is). A complaint fails the export for now: one
+  constant, `SPHERICAL_COMPLAINT_FAILS`, would make it a warning, which
+  is Pat's call.
 - **Parity floors** (item 31, section 11): an export decoded again is
   held to `StillRenderer` of the same views of the same source frame in
   the encoder's planes, every frame, by luma PSNR and SSIM. Each floor
