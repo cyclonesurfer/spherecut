@@ -296,18 +296,19 @@ fn a_seek_forward_while_lens_0_leads_lands_both() {
 }
 
 /// The group's `until` is raised to the clock's time by a member more
-/// than 2 frames behind it, but never past the newest frame every other
-/// member holds, so the trailing lens's next frame always pairs.
+/// than 2 frames behind it, but, while the other lens is within 2 frames
+/// of the clock, never past the newest frame that lens holds, so the
+/// trailing lens's next frame always pairs.
 #[test]
 fn the_group_until_stays_within_the_other_lens() {
     let _time = timed("the_group_until_stays_within_the_other_lens");
     // Paused at the pair on frame 0, lens 0 hands out frames 1 to 31,
     // all it may, and the window (1 s, 30 frames) holds 1 to 30, while
     // lens 1 holds its frame 1 for a permit. Played with the clock at
-    // frame 40, then 50, and lens 1's frame 1 let go, lens 1 is far
-    // behind the clock and catches up. The frame lens 1 caught up to, the
-    // group's `until` then, the frames lens 0 held, and the one it holds
-    // for a permit.
+    // frame 33, 2 frames past lens 0's newest, and lens 1's frame 1 let
+    // go, lens 1 is far behind the clock and catches up. The frame lens 1
+    // caught up to, the group's `until` then, the frames lens 0 held, and
+    // the one it holds for a permit.
     let catch_up = |test: LockTest| {
         let backend = Permits::new(
             PerStream::pair(Lens::default().frames(90), Lens::default().frames(90)),
@@ -322,18 +323,16 @@ fn the_group_until_stays_within_the_other_lens() {
         });
         assert!(filled.is_some(), "lens 0 never filled its window");
         player.play();
-        for k in [40, 50] {
-            clock.set(at(k), Instant::now());
-            // Until lens 0 goes no further: it holds a frame for a
-            // permit, or waits for room behind a group base at 0.
-            let still = until(WAIT, || {
-                let _ = player.present(Instant::now());
-                let c = player.cache().stats();
-                let stuck = c.waiting == 1 && c.base == Some(Time::ZERO);
-                (c.playhead == at(k) && (backend.holding(0).is_some() || stuck)).then_some(())
-            });
-            assert!(still.is_some(), "lens 0 never settled at frame {k}");
-        }
+        clock.set(at(33), Instant::now());
+        // Until lens 0 goes no further: it holds a frame for a permit, or
+        // waits for room behind a group base at 0.
+        let still = until(WAIT, || {
+            let _ = player.present(Instant::now());
+            let c = player.cache().stats();
+            let stuck = c.waiting == 1 && c.base == Some(Time::ZERO);
+            (c.playhead == at(33) && (backend.holding(0).is_some() || stuck)).then_some(())
+        });
+        assert!(still.is_some(), "lens 0 never settled at frame 33");
         backend.permit(1, 1);
         let caught =
             until(WAIT, || backend.holding(1).filter(|&f| f > 1)).expect("lens 1 never caught up");
@@ -354,9 +353,9 @@ fn the_group_until_stays_within_the_other_lens() {
     assert!(held.contains(&caught), "lens 0 holds {held:?}");
     assert_eq!(next, Some(32));
 
-    // Control: no group base and no group `until`. Lens 0 caught up to
-    // the clock at 40 and holds that frame for a permit, and lens 1
-    // catches up to the clock at 50, a frame lens 0 hasn't got to.
+    // Control: no group base and no group `until`. Lens 0, 2 frames
+    // behind, holds frame 32 for a permit, and lens 1 catches up to the
+    // clock at 33, a frame lens 0 hasn't got to.
     let no_base = LockTest {
         no_group_base: true,
         ..LockTest::default()
@@ -365,7 +364,7 @@ fn the_group_until_stays_within_the_other_lens() {
     must_fail("no group base or until", held.contains(&caught));
     assert_eq!(
         (caught, until, held.last(), next),
-        (50, None, Some(&31), Some(40))
+        (33, None, Some(&31), Some(32))
     );
 }
 
