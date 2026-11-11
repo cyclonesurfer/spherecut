@@ -1342,7 +1342,7 @@ rest, with the versions in `Cargo.lock`:
 | image 0.25.10 (png only) | render; app, agent (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame`, look's PNGs and the goldens; agent's tests decode look's PNGs with it. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, one of the binary's two FFI modules (D28): the handler only stores to an atomic. `_exit(2)` in `cli::exit`, the other, for `spherecut mcp` when a call is stuck (D44). In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
-| rustix 1.1.5 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
+| rustix 1.1.6 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate; 1.1.6 since 2026-11-11 (from 1.1.5), for RUSTSEC-2026-0486 in rustix's xattr functions, which nothing here calls |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
 | serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render, playback, audio, agent, camera | Typed library errors without hand-written `Display` impls |
@@ -7048,11 +7048,11 @@ What:
   server sends. Tests hold each to its Rust request type: every
   property in the schema deserializes, nothing else does, and the
   required ones are required.
-- **rustix** (`=1.1.5`, the version the lock already has through
-  tempfile and Wayland; features `std`, `fs` and `stdio`) for `openat2`,
-  for reading a directory through its descriptor, and for the stdout
-  guard; its `net` feature gives `SO_PEERCRED` in A3. The agent crate
-  has no `unsafe`.
+- **rustix** (`=1.1.5`, now `=1.1.6` (D22), the version the lock
+  already has through tempfile and Wayland; features `std`, `fs` and
+  `stdio`) for `openat2`, for reading a directory through its
+  descriptor, and for the stdout guard; its `net` feature gives
+  `SO_PEERCRED` in A3. The agent crate has no `unsafe`.
 
 Why, from the prototypes (scratch crates in the cloud workspace,
 kernel 6.18, 2026-10-30):

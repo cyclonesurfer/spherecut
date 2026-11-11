@@ -71,7 +71,7 @@ ron = "0.12"
 # openat2 below a root, a directory read through its descriptor, and the
 # stdout guard of `spherecut mcp` (D43). Already in the tree through
 # tempfile.
-rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs", "stdio"] }
+rustix = { version = "=1.1.6", default-features = false, features = ["std", "fs", "stdio"] }
 serde = { version = "1.0.228", features = ["derive"] }
 # float_roundtrip: a project file's floats read back bit for bit (D47).
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
