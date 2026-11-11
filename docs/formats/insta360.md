@@ -639,9 +639,15 @@ which of the three angles is the yaw, the pitch or the roll (the third is about 
 lenses, §4.5), that V3's five terms are k1 k2 k3 then p1 p2 (the order §4.3's V3 model takes; on
 Pat's files the last two are the small ones), or what V2's c0 to c3 and V6's d0 to d12 are
 (§4.3). These stay **unsettled**: M3's plan reads them through generic spaces (6.1, 6.2), and
-Spherecut's parser keeps the terms in token order. Units are pixels of the calibration canvas,
-degrees and metres, which the sizes of Pat's numbers fit (lens 1's tz, 32 mm, is about the
-lenses' spacing, §4.2). `w h` is the **whole side-by-side canvas**, not one lens, and lens 1's
+Spherecut's parser keeps the terms in token order. One label is in no space: V3's pair order.
+Synth and sphere both take V3's last two terms as p1 then p2, the order of Gyroflow's
+`insta360.rs` and video-types' `BrownV3` [code] (one author) and of OpenCV's omnidir model, the
+model's source, and nothing contradicts it; but only V6's pair order is varied, never V3's.
+Swapped, they would move a pixel of Pat's V3 at 3840² under C by up to 6.35 px on lens 0 and
+10.2 px on lens 1 at 90° off axis (7.39 and 11.86 at 100°), as a first harmonic around the seam
+that is mostly across it (DECISIONS D63). Units are pixels of the calibration canvas, degrees
+and metres, which the sizes of Pat's numbers fit (lens 1's tz, 32 mm, is about the lenses'
+spacing, §4.2). `w h` is the **whole side-by-side canvas**, not one lens, and lens 1's
 `cx` includes the width of lens 0's area. [bytes] (X5: canvas 10752×5376; lens 1 `cx` =
 8069.000 = 5376 + 2693.000 on Pat's V3, and 8082.1 = 5376 + 2706.1 on the GyroView fixture)
 

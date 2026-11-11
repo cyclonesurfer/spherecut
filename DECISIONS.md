@@ -9585,6 +9585,23 @@ well as a rule for θ_max; and leaving the ring black and saying so.
 `sphere::rig`'s docs cite D64 for the rig, which is M3.5's and takes
 this note over when it is written.
 
+*Updated 2026-11-11 (review-fix slice):* "Every reading of the camera's
+terms maps onto it" holds for V6, not for V3's tangential pair.
+`Canonical::v3` takes V3's fourth and fifth terms as p1 then p2, as
+synth's `brown` does, and nothing varies that order the way
+`V6Reading` varies V6's. It is an assumption, taken from Gyroflow's and
+video-types' V3 model (one author, [code] in `docs/formats/insta360.md`
+§4.3) and OpenCV's omnidir, and no source contradicts it. Swapped on
+Pat's V3 at 3840² under reading C, a pixel moves by up to 6.35 px (lens
+0) and 10.2 px (lens 1) at 90° off axis, 7.39 and 11.86 px at 100°:
+a first harmonic around the seam, mostly across it, which stage J's
+free rotation largely takes up; the part along it (2.12 px on lens 0,
+3.40 on lens 1, at 90°) is above the 0.3 px margin by which take 14
+ranks V3 against V6. So the order bears only on plan 3.2's U7 (V3 or
+V6), and a misread V3 scores worse, which pushes towards V6, U7's
+default. Revisit if: take 14 scores V3 within a few pixels of V6; then
+score both V3 orders.
+
 ## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 
 *2026-11-10, M3 slice M3.4. The M3 plan, `docs/design/m3-plan.md`
