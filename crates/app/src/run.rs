@@ -154,7 +154,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
         brand::APP_NAME,
         options,
         Box::new(move |cc| {
-            spherecut_core::blocking::mark_ui_thread();
+            spherecut_core::blocking::mark_ui_thread_with(crate::smoke::ui_thread_policy(
+                args.smoke.as_ref(),
+            ));
             let rs = cc
                 .wgpu_render_state
                 .as_ref()

@@ -387,7 +387,8 @@ impl SpherecutApp {
     /// show picked. eframe calls only this while the window is minimized
     /// or occluded: the presenter moves the cache's playhead and ends the
     /// clip, so playback goes on hidden. It asks for the next pass while
-    /// anything moves. Never waits.
+    /// anything moves. Never waits, but for the smoke run's control
+    /// (`--smoke-control-ui-waits`, D40).
     pub fn logic(&mut self, ctx: &egui::Context) {
         let s = &mut self.state;
         // The last pass has presented, painted or not (D41).

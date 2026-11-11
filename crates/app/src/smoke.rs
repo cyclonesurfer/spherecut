@@ -23,13 +23,15 @@
 //! frame a floor ([`with_decode_floor`]), so that decode falls behind a
 //! clip whose frames come faster. `--smoke-control-ui-waits` is the
 //! control of that run: while the clip plays, each pass of eframe's
-//! logic waits for the next decoded frame
-//! ([`wait_for_a_decoded_frame`]), as a UI that waited on decode would,
-//! so the UI's gates must fail. It breaks D34's rule that the UI thread
+//! logic waits, at most [`CONTROL_WAIT`], for the next decoded frame
+//! (`wait_for_a_decoded_frame`), as a UI that waited on decode would, so
+//! the UI's gates must fail. It breaks D34's rule that the UI thread
 //! never waits, on purpose and only under `--smoke`; each wait is a
-//! blocking call on the UI thread, which `blocked_on_ui_thread` counts,
-//! and in a debug build, whose UI thread panics on one, the control
-//! can't run. The document's `asked` says which of them the run had.
+//! blocking call on the UI thread, which `blocked_on_ui_thread` counts.
+//! A debug build's UI thread panics on one, so the control's is marked
+//! to count them in any build ([`ui_thread_policy`]), and the control
+//! runs under `cargo xtask hw-test --quick` too. The document's `asked`
+//! says which of them the run had.
 //!
 //! The numbers are the overlay's ([`PerfStats`]), over the whole run: each
 //! pass gathers the samples every stage recorded since the last
@@ -57,6 +59,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use spherecut_core::StopToken;
+use spherecut_core::blocking::OnBlock;
 use spherecut_core::fs::TempFile;
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
@@ -144,8 +147,8 @@ pub struct SmokeArgs {
     /// Each stream's decode held to at most one frame in this long
     /// ([`with_decode_floor`]); none without it.
     pub decode_floor: Option<Duration>,
-    /// The control of a run with decode behind: the UI waits for each
-    /// decoded frame while the clip plays ([`wait_for_a_decoded_frame`]).
+    /// The control of a run with decode behind: the UI waits, at most
+    /// [`CONTROL_WAIT`], for each decoded frame while the clip plays.
     pub control_ui_waits: bool,
 }
 
@@ -346,6 +349,21 @@ fn hold_until(until: Instant, stop: &StopToken) {
             return;
         }
         std::thread::sleep(left.min(FLOOR_STEP));
+    }
+}
+
+/// How the UI thread of a run with `smoke` takes a blocking call
+/// ([`mark_ui_thread_with`]): as this build does, but in the control of a
+/// run with decode behind (`--smoke-control-ui-waits`), whose waits are
+/// counted and logged in any build. A debug build's UI thread panics on
+/// one, which would end the control before its document says it waited.
+///
+/// [`mark_ui_thread_with`]: spherecut_core::blocking::mark_ui_thread_with
+pub fn ui_thread_policy(smoke: Option<&SmokeArgs>) -> OnBlock {
+    if smoke.is_some_and(|s| s.control_ui_waits) {
+        OnBlock::Log
+    } else {
+        OnBlock::for_this_build()
     }
 }
 
@@ -1912,6 +1930,49 @@ mod tests {
         let plain = with_decode_floor(inner.clone(), None);
         assert!(Arc::ptr_eq(&plain, &inner));
         must_fail("ten frames without a floor", held(ten(&plain)));
+    }
+
+    /// The control's UI thread counts each wait and goes on, in any
+    /// build, so that it runs in hw-test's `--quick` (debug) build too;
+    /// its control, the same wait in a run without
+    /// `--smoke-control-ui-waits`, panics, as this debug build's UI
+    /// thread does.
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "each wait is marked on a thread of the test's own, which it joins"
+    )]
+    fn the_controls_ui_thread_counts_its_waits_in_any_build() {
+        use spherecut_core::blocking::{blocked_on_ui_thread, mark_ui_thread_with};
+        use spherecut_testkit::control::must_fail;
+
+        let wait = |args: SmokeArgs| {
+            std::thread::spawn(move || {
+                mark_ui_thread_with(ui_thread_policy(Some(&args)));
+                let before = blocked_on_ui_thread();
+                spherecut_core::may_block("the control's wait");
+                blocked_on_ui_thread() > before
+            })
+            .join()
+        };
+        let control = SmokeArgs {
+            clip: PathBuf::from("clip.mp4"),
+            seconds: 1.0,
+            out: PathBuf::from("smoke.json"),
+            screenshot: None,
+            export: None,
+            decoder: None,
+            decode_floor: Some(Duration::from_millis(50)),
+            control_ui_waits: true,
+        };
+        assert!(matches!(wait(control.clone()), Ok(true)));
+        must_fail(
+            "a run without the control waiting on its UI thread",
+            wait(SmokeArgs {
+                control_ui_waits: false,
+                ..control
+            }),
+        );
     }
 
     #[test]
