@@ -13,13 +13,14 @@ use std::ffi::OsString;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::ScopedJoinHandle;
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, FrameRate, ManualClock, Rounding, Time};
 use spherecut_media::backend::SeekMode;
 use spherecut_playback::{
-    CacheBudget, Counter, DecoderPreference, LockSpec, LockStatus, LockTest, Player, PlayerConfig,
-    PlayerEvent, Presented, ShownFrame, SlotFrame,
+    CacheBudget, Counter, DecoderPreference, LockSpec, LockStatus, LockTest, PREROLL_FRAMES,
+    Player, PlayerConfig, PlayerEvent, Presented, ShownFrame, SlotFrame,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_testkit::control::must_fail;
@@ -212,6 +213,11 @@ impl Mismatches {
     }
 }
 
+/// What the scoped thread `run` returned, or its panic, passed on.
+fn joined<T>(run: ScopedJoinHandle<'_, T>) -> T {
+    run.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 /// A seed's stream of numbers (SplitMix64), for a run that can be
 /// replayed.
 struct Rng(u64);
@@ -240,6 +246,13 @@ const MIXED_FRAMES: i64 = 120;
 /// seek forward while lens 0 leads.
 const SEEDS: u64 = 64;
 const ACTIONS: usize = 3;
+
+/// How long a locked play's clock may take to start, and how long, once
+/// the play is paused, its pair may stand short of the clock's frame with
+/// nothing handed out, uploaded or shown, before the play is called
+/// frozen ([`Mixed::played`]). Its lenses decode a frame in under a
+/// millisecond.
+const FROZEN: Duration = Duration::from_millis(500);
 
 /// One seed's run of the mixed test on a player, its presents checked,
 /// lens 1 behind `hold`.
@@ -296,22 +309,108 @@ impl Mixed<'_> {
     }
 
     /// Play `frames` on, the clock a frame every `period`, or to the end.
-    fn play(&mut self, frames: i64, period: Duration) {
+    /// With `follow`, for a locked pair, the play is checked, and
+    /// fails with why it froze ([`Mixed::played`]).
+    fn play(&mut self, frames: i64, period: Duration, follow: bool) {
+        if let Err(e) = self.played(frames, period, follow) {
+            panic!("seed {}: {e}", self.seed);
+        }
+    }
+
+    /// [`Mixed::play`], and its check with `follow`: the clock runs within
+    /// [`FROZEN`] of `play`, and once paused where the play got to, the
+    /// pair comes to the clock's frame ([`Mixed::reaches`]); then it plays
+    /// on, but at the end, as the actions after it found it before the
+    /// check. A pair that stands still while its clock runs on fails
+    /// within `FROZEN`: one did after a play again from the end, its
+    /// workers idle past a run the cache answered (D34). Unlocked, on
+    /// three slots, a preroll may wait out the player's limit, and the
+    /// play isn't checked.
+    fn played(&mut self, frames: i64, period: Duration, follow: bool) -> Result<(), String> {
         self.player.play();
         let to = (frame_of(self.clock.now()) + frames).min(MIXED_FRAMES);
         let began = Instant::now();
         let mut moved = Instant::now();
+        let mut started = None;
+        let mut at_end = false;
         while !(self.clock.is_running() && frame_of(self.clock.now()) >= to) {
             tick(self.clock, &mut moved, period, to);
+            if started.is_none() && self.clock.is_running() {
+                started = Some(began.elapsed());
+            }
             self.seen.present(self.player);
             if snapshot(self.player).at_end {
-                return;
+                at_end = true;
+                break;
+            }
+            if follow && started.is_none() && began.elapsed() >= FROZEN {
+                return Err(format!(
+                    "a play's clock never started in {FROZEN:?}, showing {:?}: {:?}",
+                    self.seen.shown,
+                    snapshot(self.player)
+                ));
             }
             assert!(
                 began.elapsed() < WAIT,
                 "seed {}: play never reached frame {to}: {:?}",
                 self.seed,
                 snapshot(self.player)
+            );
+            std::thread::sleep(ms(1));
+        }
+        if !follow {
+            return Ok(());
+        }
+        self.player.pause();
+        let reached = self.reaches()?;
+        let started = started.unwrap_or_default();
+        if started.max(reached) >= ms(100) {
+            eprintln!(
+                "seed {}: a play's clock started after {started:?}, its pair at the clock {reached:?} \
+                 after the pause",
+                self.seed
+            );
+        }
+        if !at_end {
+            self.player.play();
+        }
+        Ok(())
+    }
+
+    /// The check of a paused play: the pair comes to the clock's frame,
+    /// the clip's last at the end, with a frame handed out, uploaded or
+    /// shown at least every [`FROZEN`] until it does. How long that took.
+    fn reaches(&mut self) -> Result<Duration, String> {
+        let k = frame_of(self.clock.now()).min(MIXED_FRAMES - 1);
+        let began = Instant::now();
+        let mut last = None;
+        let mut since = Instant::now();
+        loop {
+            let p = self.seen.present(self.player);
+            let shown = p.and_then(|p| <[i64; 2]>::try_from(pts(&p)).ok());
+            if shown == Some([k, k]) {
+                return Ok(began.elapsed());
+            }
+            let s = snapshot(self.player);
+            let handed: Vec<u64> = s.streams.iter().map(|x| x.handed_out).collect();
+            let now = Some((
+                handed,
+                self.player.perf().count(Counter::FramesUploaded),
+                shown,
+            ));
+            if now != last {
+                last = now;
+                since = Instant::now();
+            } else if since.elapsed() >= FROZEN {
+                return Err(format!(
+                    "the pair stood at {shown:?} with the clock paused at frame {k}, nothing \
+                     handed out, uploaded or shown for {FROZEN:?}: {s:?}"
+                ));
+            }
+            assert!(
+                began.elapsed() < WAIT,
+                "seed {}: the pair never came to frame {k}: {s:?}",
+                self.seed
             );
             std::thread::sleep(ms(1));
         }
@@ -375,7 +474,7 @@ impl Mixed<'_> {
                 }
                 3 | 4 => {
                     let period = ms(1 << rng.within(0, 3));
-                    self.play(rng.within(4, 12), period);
+                    self.play(rng.within(4, 12), period, lock.is_some());
                 }
                 _ => {
                     self.player.pause();
@@ -390,26 +489,27 @@ impl Mixed<'_> {
 /// Lens 1 2.5 to 3 times slower than lens 0, jittered, 64 seeds of
 /// random seeks, plays, steps, pauses and rates: at every present both
 /// slots are read back and hold the same frame, the one their tags name,
-/// and after every seek and step both lenses land within `WAIT`. Its
-/// control, the same run through `open_streams`, counts mismatches by
-/// tag and by content.
+/// after every seek and step both lenses land within `WAIT`, and every
+/// play's pair follows its clock ([`Mixed::played`]). Its control, the
+/// same run through `open_streams`, counts mismatches by tag and by
+/// content; the plays' controls hold lens 1 back as a play begins.
 #[test]
 fn a_locked_pair_never_shows_mismatched_frames() {
     let _alone = alone();
     let _time = timed("a_locked_pair_never_shows_mismatched_frames");
+    // Lens 0 at 0.2 ms a frame, and lens 1 at 0.5 ms.
+    let lens = |cost: u64| {
+        Lens::default()
+            .frames(MIXED_FRAMES as u64)
+            .cost(Duration::from_micros(cost))
+    };
     // What the runs of `seeds` showed, locked or not, on a player of
     // their own, the presents it counted unpaired, and the seeds run: all
-    // of them, or until `enough`. Lens 0 at 0.2 ms a frame, and lens 1 at
-    // 0.5 ms with up to 0.1 ms more drawn for each frame from its seed
-    // and open: lens 1 at 2.5 to 3 times lens 0's cost, and behind a
-    // hold until each seed's lead. The player is opened again for each
-    // seed, on three slots: locked, it takes six.
+    // of them, or until `enough`. Lens 1 with up to 0.1 ms more drawn for
+    // each frame from its seed and open: at 2.5 to 3 times lens 0's cost,
+    // and behind a hold until each seed's lead. The player is opened
+    // again for each seed, on three slots: locked, it takes six.
     let runs = |lock: Option<LockSpec>, seeds: Range<u64>, enough: fn(&Mismatches) -> bool| {
-        let lens = |cost: u64| {
-            Lens::default()
-                .frames(MIXED_FRAMES as u64)
-                .cost(Duration::from_micros(cost))
-        };
         let hold = Hold::at(i64::MAX);
         let lens1 = lens(500)
             .jitter(seeds.end, Duration::from_micros(100))
@@ -436,19 +536,45 @@ fn a_locked_pair_never_shows_mismatched_frames() {
         common::join(player);
         (seen, unpaired, run)
     };
-    // Half the seeds on each of two players at once, and the control
+    // A locked play of 8 frames from the open's frame, checked, with
+    // lens 1 held at frame `held` as it begins, after a seek to the
+    // frame on screen with `seek`: the plays' check's control.
+    let held_back = |held: i64, seek: bool| {
+        let hold = Hold::at(held);
+        let backend = PerStream::pair(lens(200), lens(500).hold(&hold));
+        let (player, clock) = player(backend, 3, 64 << 20);
+        let mut seen = Mismatches::default();
+        open(&player, Some(LockSpec::default()), &mut seen);
+        if seek {
+            player.seek(at(0), SeekMode::Exact);
+        }
+        let played = Mixed {
+            player: &player,
+            clock: &clock,
+            hold: &hold,
+            seed: 0,
+            seen: &mut seen,
+        }
+        .played(8, ms(2), true);
+        hold.release(i64::MAX);
+        common::join(player);
+        played
+    };
+    // Half the seeds on each of two players at once, and the controls
     // beside them: unlocked, lens 0's frames show before lens 1's come,
     // by the slots' tags and by what they hold, and its seeds run until
-    // both are seen.
+    // both are seen; and the held plays.
     let lock = Some(LockSpec::default());
     let both = |s: &Mismatches| s.by_tag > 0 && s.by_content > 0;
-    let [first, second, unlocked] = std::thread::scope(|s| {
-        [
+    let ([first, second, unlocked], held) = std::thread::scope(|s| {
+        let held = [(0, true), (PREROLL_FRAMES as i64, false)]
+            .map(|(h, seek)| s.spawn(move || held_back(h, seek)));
+        let runs = [
             s.spawn(|| runs(lock, 0..SEEDS / 2, |_| false)),
             s.spawn(|| runs(lock, SEEDS / 2..SEEDS, |_| false)),
             s.spawn(|| runs(None, 0..SEEDS, both)),
-        ]
-        .map(|run| run.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+        ];
+        (runs.map(joined), held.map(joined))
     });
     for (seen, unpaired, seeds) in [first, second] {
         let presents = seen.unmixed(unpaired).unwrap();
@@ -460,6 +586,16 @@ fn a_locked_pair_never_shows_mismatched_frames() {
     let apart = must_fail("the lenses unlocked", seen.unmixed(unpaired));
     eprintln!("unlocked, over {seeds} seeds: {apart}");
     assert!(both(&seen) && unpaired > 0, "{apart}");
+
+    // Controls of the plays' check: lens 1 held at the frame on screen
+    // and sought there, so that the seek's preroll waits for its frames
+    // ahead and the clock never starts; and held `PREROLL_FRAMES` on, so
+    // that the clock starts and runs on while the pair stands there.
+    let [on_screen, ahead] = held;
+    let e = must_fail("lens 1 held at the frame sought", on_screen);
+    assert!(e.contains("never started"), "{e}");
+    let e = must_fail("lens 1 held past the preroll's frames", ahead);
+    assert!(e.contains("the pair stood at Some([2, 2])"), "{e}");
 }
 
 /// A case of the pacing test: its lenses, its clock, and its cache of
@@ -555,9 +691,11 @@ struct Played {
 /// trailing, and the presents late; a run that hands out a frame fewer
 /// than [`pacing::JUDGED`] after the warm-up is too few to judge; the
 /// fourth case's run with every third pair passed over has too few
-/// pairs; and, at a slow case's own length, a pair whose freezes double
-/// at the clock, and one whose catch-ups take five times its lag, fail
-/// the freeze, though they keep to the rule.
+/// pairs; at a slow case's own length, a pair whose freezes double at
+/// the clock, and one whose catch-ups take five times its lag, fail the
+/// freeze, though they keep to the rule; and the fourth case with each
+/// slot published 4 ms late (`LockTest::publish_delay`) has too many
+/// presents late.
 #[test]
 fn a_locked_pair_paces_to_its_slowest_lens() {
     let _alone = alone();
@@ -837,10 +975,16 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         let decoding = vec![Duration::ZERO; slide.len()];
         must_fail(name, unfrozen(slow_case, &slide, &decoding));
     }
-    // Control, to come with the engine's planted publish delay (unit A's
-    // `LockTest::publish_delay`, written in by unit C once merged): the
-    // fourth case run again with each slot published 4 ms late must fail
-    // `settled`, its pair late at about one present in three.
+    // Control: the fourth case again with each member's slot published
+    // 4 ms late, a pair 8 ms after its frames come: its pair late at
+    // about one present in three, too many.
+    let delayed = LockTest {
+        publish_delay: Some(ms(4)),
+        ..LockTest::default()
+    };
+    let up = run(&cases[3], delayed);
+    let e = must_fail("each slot published 4 ms late", settled(&[&up]));
+    eprintln!("{}, each slot published 4 ms late: {e}", cases[3].name);
 }
 
 /// A run of a pair that keeps up with the clock, a pair at each of its
