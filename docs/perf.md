@@ -1,19 +1,20 @@
 # Performance
 
 Measured numbers per machine, so regressions show up. Each row comes from a
-`cargo xtask hw-test` report (release build); the report's commit is in the
-table. Numbers from the GPU-less cloud workspace are not recorded here.
+`cargo xtask hw-test` report (release build), except rows marked "rerun, no
+report"; the report's commit is in the table. Numbers from the GPU-less cloud
+workspace are not recorded here.
 
 ## Targets (from `docs/PROMPT.md`)
 
 | Target | Measured by |
 |---|---|
 | The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (odin pending); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
-| 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
-| 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw` and `bench_playback_realtime_8k_8bit` (recorded, M3's budget), and the decode rows on 8K samples and their LRV proxies |
+| 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `bench_playback_realtime_5k7_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
+| 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw`'s `Vulkan (Auto, zero copy)` rows (the app's path on odin); its copy rows and `bench_playback_realtime_8k_8bit` (copy path only) are recorded; and the decode rows on 8K samples and their LRV proxies (`bench_samples_realtime_decode`) |
 | A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
-| Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | export benchmark (M2) |
-| Frame caches are bounded, sized from available memory, configurable | cache tests (M1) |
+| Reframed 4K30 exports at or above real time with hardware encode on odin and huginn | `bench_export_4k30_vaapi` (the gate, M2.5: H.264 at High from the 5.7K clip at 30 fps or more; HEVC, the draft and the LRV's recorded) and `bench_export_vaapi_levels` (recorded); `gui_smoke`'s export while it plays (runs 0 to 2, D56) |
+| Frame caches are bounded, sized from available memory, configurable | the cache tests (M1, D34: `crates/playback/tests/cache.rs` and the unit tests in `crates/playback/src/budget.rs`) on any machine; on the hardware every playback benchmark plays under `Auto`'s budget, a quarter of `MemAvailable` within 512 MiB to 8 GiB, which `bench_playback_x5_raw` notes as each pass begins |
 
 ## How the benchmarks work
 
@@ -140,8 +141,9 @@ Current benchmarks:
   stream's decode path and every stage's p50/p95 in ms (`decode`,
   `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`,
   `render_gpu`, `ui_frame`, `shown_interval`, `av_offset`).
-  - `bench_playback_realtime_5k7_8bit` and `_10bit` play the 5.7K perf
-    clips (below) and **gate**: on `Auto`'s hardware as the app plays
+  - `bench_playback_realtime_5k7_8bit` and
+    `bench_playback_realtime_5k7_10bit` play the 5.7K perf clips (below)
+    and **gate**: on `Auto`'s hardware as the app plays
     it by default (D42), 0 dropped and 0 decode-dropped after the first
     second of 60 s, every unthrottled second at 1.2 × 29.97 = 35.96 fps
     or more, and every stream on that hardware throughout. Where `Auto`
@@ -185,6 +187,40 @@ Current benchmarks:
     flagged **too easy** over 150 fps; a two-track clip a lens at a
     time, `perf clip <name> lens <k>: software decode`, so that each
     track is flagged on its own.
+- **`bench_export_4k30_vaapi`** (M2.5, DECISIONS D52,
+  `crates/export/tests/tier2_export.rs`): a reframed 4K30 export, flat
+  16:9 at 3840×2160, of the first 10 s of the 5.7K 8-bit perf clip
+  (below), through VA-API alone, decoding on VA-API, on the GPU the
+  tests render on, once to warm up and then `SPHERECUT_BENCH_RUNS`
+  times. Rows: `export 4k30 h264_vaapi high` (H.264 at High, Mesa's
+  quality level 29: the quality preset with pre-encode and VBAQ),
+  `export 4k30 hevc_vaapi high` (HEVC at High, level 29), `export 4k30
+  h264_vaapi draft` (H.264 as `--draft` exports it: Mesa's speed preset,
+  level 1, at the draft's 1920×1080) and `export 4k30 from lrv h264_vaapi
+  high` (H.264 at High from the first `.lrv` proxy among the samples, up
+  to 10 s of it; a note names the file, and without one the row says
+  why). Each is frames a second over the whole export, with each stage's
+  busy time a frame in ms (`…: decode`, `render`, `readback`, `encode`,
+  `finish`): decode, render and encode run at once on threads of their
+  own, so the busiest sets the pace. A note per row gives its frames,
+  size, encoder and where it decoded. It **gates** on the first row
+  only, H.264 at High from the 5.7K clip at 30 fps or more (PLAN's
+  real-time export); the other three are recorded.
+- **`bench_export_vaapi_levels`** (M2.5, M2 plan section 8.3, same
+  file): each of Mesa's quality levels for VA-API's encoders, as
+  FFmpeg's `compression_level` sets them (`quality_level` in
+  `crates/export/src/encoder.rs`: bit 0 says the rest is set, bits 1
+  and 2 are the preset, bit 3 pre-encode and bit 4 VBAQ): speed (1),
+  balanced (3), balanced with VBAQ (19), quality (5), quality with
+  pre-encode (13), quality with pre-encode and VBAQ (29) and high
+  quality with pre-encode and VBAQ (31), in H.264, HEVC and AV1 where
+  doctor finds each working, each exporting 2 s of the 5.7K 8-bit clip
+  to 3840×2160 once: `export levels <encoder> <level> (<n>): speed`
+  (fps), `…: worst luma PSNR` (dB, frames 0, 10, … 50 against the
+  parity reference rendered on the same GPU) and `…: bitrate` (Mb/s). It
+  gates nothing: a level that fails is noted as not measured. The
+  export uses 29 for High and 3 for Medium and Small
+  (`EncoderSetup::vaapi`).
 - **`bench_export_pair_decode`** (M3.1, M3 plan 4.3's P-DEC,
   `crates/export/tests/tier2_pair_decode.rs`): the export's pair decode
   as section 12 runs it, two `HwOutput::Download` decoders on a
@@ -233,6 +269,12 @@ Current benchmarks:
   after the path decoded here, or a device turning down a clip it
   decoded. It skips only when no K was decided, naming them. On odin it
   should take about 25 minutes, most of it software's gated rows.
+- **`bench_render_lens_x5_like_pair`** (M3.3, `crates/synth/src/lens.rs`,
+  the CPU only): what synth's lens renderer takes for one frame of the
+  X5-like rig, both lenses at 768² with 2 × 2 samples a pixel (`ss` 2),
+  on up to 16 threads, which a note gives: `render_lens: X5-like, 2 ×
+  768², ss 2`, in seconds. M3 plan 7.1 guessed about 2 s on 4 threads;
+  no report has run it yet.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
@@ -288,6 +330,20 @@ Current benchmarks:
   pair made on such a run is stamped "x265: not known".
 
 Not benchmarks, but their numbers are in the same notes:
+`export_vaapi_matches_software` (M2.5, `tier2_export.rs`) exports each
+format doctor's encode checks find working on VA-API (H.264, HEVC Main
+and Main 10, AV1 in 8 and 10 bits) through the VA-API encoder and
+through its software twin (libx264, libx265, libsvtav1), the same
+project each time with the source decoded on VA-API, and notes each
+export's worst luma PSNR and SSIM over every frame against the parity
+reference rendered on the same GPU, and its bitrate; VA-API's floors
+are odin's measures less 3 dB and 0.003, software's PLAN's 40 dB and
+0.98. `export_360_8k_vaapi` exports 2 s of the 8K perf clip to 360 at
+7680×3840 through av1_vaapi where doctor finds it working, else
+hevc_vaapi, reads V1 and V2 back and has A1's `check` pass it for
+`youtube_360`; since M3's review fixes it records its frames a second
+and bitrate (`360 8k export <encoder>` and `…: bitrate`), which went
+only to stderr before.
 `list_adapters_and_features` notes each Vulkan adapter's info (with its
 PCI bus id and timestamp period), the features of the formats the
 renderer uses, and its features, downlevel flags and limits;
@@ -389,6 +445,17 @@ The first run, at a9128cf on 2026-10-22
 timed each benchmark once, with no warm-up, and gave 1.18× for X5 8K30 on
 VA-API. Its Vulkan Video skip read "Operation not permitted", which was
 how Spherecut's refusal of a software fallback showed before 9300fc0.
+
+Pending huginn (hw-run-8.md, sent 2026-11-01): huginn hasn't run
+hw-test since 4cd8a0f (M0). The request for its run of M1, M2 and M3.1
+asks for these rows among the rest; none is in a report yet:
+
+| Row | Measured by | Asks |
+|---|---|---|
+| 4K30 export, pending huginn | `bench_export_4k30_vaapi` | H.264 at High from the 5.7K clip at 30 fps or more (the gate, M2.5), and the recorded rows |
+| The toolkit check, pending huginn | `gui_proto` (D53) | at each egui zoom, 99 % presented, a work p99 under the refresh period and an interval p99 of at most 1.5 periods, and every action landing; at 100 % and again at 125 % |
+| K2, pending huginn | `bench_export_pair_decode`'s `pair-hevc8-2880-2997-noisy-20s` rows (the export half) and `bench_playback_x5_raw`'s K2 note (the engine half) | VA-API decodes the 2×2880² pair at 29.97 at 36 fps a lens or more, beside an `h264_vaapi` encode and in the player |
+| K4, pending huginn | `bench_export_pair_decode`'s clip 9 rows | the same for the X5's 8K30 pair in the export |
 
 ### odin (RX 7600, Fedora 44)
 
@@ -610,7 +677,9 @@ pass's decoded fps per second, unthrottled and in real time, then what
 dropped after the first second and the stages at p50 / p95 in ms. The
 5.7K rows are from odin's reruns at 1991a98 over Remote Control, after
 the fixes (10-bit Vulkan Video's from the third, the rest from the
-second); the 8K rows are the fifth run's, at 43abcda:
+second) (rerun, no report: a Remote Control rerun; no report was
+committed, so these rows can't be checked from the repo); the 8K rows
+are the fifth run's, at 43abcda:
 
 | Clip, decoder | Unthrottled | Real time | Dropped, decode-dropped | `download` | `upload_cpu` |
 |---|---:|---:|---:|---:|---:|
@@ -924,8 +993,10 @@ p99 at 17.0 to 17.2 ms and nothing dropped, the gate's longest wait
   how (below); the cause isn't known.
 
 At 8d5c943 (branch `m1/h3`, over Remote Control), with about 15.5 GB
-free and no compaction, both gates passed twice, on path B. Each gated
-run's 60 s, and `Auto`'s copy path recorded for 20 s, run 1 / run 2:
+free and no compaction, both gates passed twice, on path B (rerun, no
+report: a Remote Control rerun; no report was committed, so these rows
+can't be checked from the repo). Each gated run's 60 s, and `Auto`'s
+copy path recorded for 20 s, run 1 / run 2:
 
 | Clip, path | Unthrottled | Real time, decoded | Dropped, decode-dropped, late | `decode` p50 / p95 | `upload_cpu` p50 / p95 | `upload_gpu` p50 / p95 |
 |---|---:|---:|---:|---:|---:|---:|
@@ -944,13 +1015,209 @@ its real-time decode keeps no more than the decoder's surfaces ahead
 runs had memory to spare, so they don't show the copy path's slump.
 `zero_copy_matches_copy_path` passed 10 of 10 meanwhile.
 
-Ninth run, M3.1's pair decode:
-[`hw-reports/odin-0444568-k1k3.log`](../hw-reports/odin-0444568-k1k3.log)
-at 0444568 (branch `m3/decode`, over Remote Control), 2026-11-01 (PR
-#27). `bench_export_pair_decode` on clip 9 (the X5's 8K30, 2×3840²),
-600 frames a lens, in 1131 s; MemFree read 0 GB before it, with about
-44 GB of page cache. K1, beside a VA-API H.264 encode of a 3840×2160
-frame at 30 fps, the slower lens's fps (runs; median):
+M2's runs, the export (6993987 to 04d15be). The ordinals above and
+below count odin's decode and playback runs; these are M2's export and
+its GUI, from M2.5's run at 6993987 to M3.8's at 04d15be, each with
+Mesa 26.2.5 and FFmpeg 8.1.3.
+
+`bench_export_4k30_vaapi`, frames a second (median of 3 runs, and
+range), from
+[`odin-6993987-m25.md`](../hw-reports/odin-6993987-m25.md):145-168
+(M2.5, `--only tier2_export`, 2026-10-31, PR #17),
+[`odin-0663e057fe.md`](../hw-reports/odin-0663e057fe.md):175-198 (M2's
+full run, below) and
+[`odin-5316176-pace.md`](../hw-reports/odin-5316176-pace.md):156-179
+(M2.10's first rerun, PR #20). The gate, the first row at 30 fps or
+more, passed each time:
+
+| Export | 6993987 | 0663e05 | 5316176 |
+|---|---:|---:|---:|
+| H.264 at High (the gate) | 32.46 (31.72 to 34.15) | 33.96 (33.96 to 33.97) | 33.92 (32.69 to 33.92) |
+| HEVC at High | 44.38 (44.18 to 44.39) | 44.05 (43.99 to 44.05) | 44.16 (44.12 to 44.38) |
+| H.264 draft, to 1920×1080 | 54.87 (53.86 to 54.92) | 53.76 (53.69 to 54.09) | 53.13 (52.93 to 53.81) |
+| H.264 at High from the LRV (114 frames) | 46.76 (46.33 to 47.30) | 46.84 (46.67 to 47.81) | 47.42 (46.82 to 47.82) |
+
+Each stage's busy time a frame, in ms, from the same lines, **unstable**
+where the report marks it:
+
+| Export, report | decode | render | readback | encode |
+|---|---:|---:|---:|---:|
+| H.264 at High, 6993987 | 29.93 | 9.71 | 3.01 | 6.61 **unstable** |
+| H.264 at High, 0663e05 | 28.53 | 9.85 | 2.94 | 6.70 |
+| H.264 at High, 5316176 | 28.58 | 9.95 | 3.17 **unstable** | 6.95 **unstable** |
+| HEVC at High, 6993987 | 22.05 | 10.30 | 2.94 | 6.98 |
+| HEVC at High, 0663e05 | 22.22 | 10.30 | 3.03 | 6.91 |
+| HEVC at High, 5316176 | 22.19 | 10.31 | 3.15 | 6.88 |
+| H.264 draft, 6993987 | 17.84 | 8.97 | 3.32 | 2.79 **unstable** |
+| H.264 draft, 0663e05 | 18.17 | 9.08 | 3.30 | 2.70 |
+| H.264 draft, 5316176 | 18.43 | 7.99 | 1.23 | 2.08 |
+| H.264 at High from the LRV, 6993987 | 15.71 | 5.54 **unstable** | 13.54 **unstable** | 15.90 |
+| H.264 at High from the LRV, 0663e05 | 15.72 | 4.89 **unstable** | 14.41 **unstable** | 16.11 |
+| H.264 at High from the LRV, 5316176 | 15.53 | 6.13 **unstable** | 12.97 **unstable** | 15.92 |
+
+Decode dominates: on the 5.7K clip its time a frame is within a
+millisecond of the whole export's (1000 / fps) in every run, while the
+render thread's (render and readback, 9 to 13.5 ms) and encode's (2 to 7
+ms) are well under it, so the gate is decode-bound. From the LRV the
+render thread, about 19 ms a frame, is the busiest.
+
+`bench_export_vaapi_levels` at 6993987 (`odin-6993987-m25.md`:169-231):
+frames a second, with 0663e05's in brackets
+(`odin-0663e057fe.md`:199-261), then the worst luma PSNR in dB and the
+bitrate in Mb/s, which 0663e05 repeated to the digit. Each is one 2 s
+export, where the 4K30 bench's are 10 s.
+
+| Level | h264_vaapi | hevc_vaapi | av1_vaapi |
+|---|---:|---:|---:|
+| speed (1) | 35.26 (35.17) / 45.20 / 36.60 | 38.16 (40.03) / 47.16 / 28.91 | 38.51 (39.64) / 43.02 / 15.04 |
+| balanced (3) | 37.54 (37.37) / 44.71 / 28.52 | 39.17 (39.40) / 46.44 / 25.70 | 39.66 (40.45) / 43.55 / 20.61 |
+| balanced vbaq (19) | 29.97 (37.28) / 45.20 / 33.50 | 39.29 (39.37) / 47.16 / 27.98 | 29.86 (35.23) / 43.65 / 20.77 |
+| quality (5) | 25.38 (26.61) / 44.71 / 28.59 | 35.55 (39.25) / 46.44 / 25.60 | 32.52 (33.04) / 43.56 / 20.66 |
+| quality pre-encode (13) | 27.63 (26.14) / 44.71 / 26.66 | 36.68 (40.25) / 46.44 / 26.19 | 30.84 (31.62) / 43.00 / 14.84 |
+| quality pre-encode vbaq (29) | 25.91 (24.99) / 45.20 / 36.20 | 36.91 (37.08) / 47.16 / 27.44 | 25.51 (31.50) / 43.03 / 15.74 |
+| high quality pre-encode vbaq (31) | 27.24 (30.64) / 45.20 / 36.20 | 37.02 (39.92) / 47.16 / 27.90 | 18.73 (20.37) / 43.03 / 16.36 |
+
+The export uses 29 for High and 3 for Medium and Small
+(`EncoderSetup::vaapi`).
+
+Parity, `export_vaapi_matches_software`: the worst luma PSNR in dB and
+SSIM over every frame, VA-API against its software twin, with each
+export's bitrate in Mb/s, and the VA-API floor (odin's measure less 3
+dB and 0.003, in `tier2_export.rs`). The H.264 and HEVC rows are
+6993987's (`odin-6993987-m25.md`:243-248); that run failed on AV1, whose
+1080 × 1080 export VCN 4 padded to 1088 × 1082 (:133). The AV1 cases
+moved to 2560 × 1440 and 3840 × 1920, which it doesn't pad, and the
+rerun at 6ed8172
+([`odin-6ed8172-m25b.md`](../hw-reports/odin-6ed8172-m25b.md):127-136,
+PR #18) passed, its H.264 and HEVC rows 6993987's to the digit; 0663e05
+(:685-694) and 5316176 (:190-199) repeated every row.
+
+| Format | VA-API | Software | VA-API's floor |
+|---|---:|---:|---:|
+| H.264 | 50.78 / 0.99729 (5.9) | libx264 52.32 / 0.99817 (2.6) | 47.7 / 0.994 |
+| HEVC Main | 53.15 / 0.99808 (5.8) | libx265 53.07 / 0.99834 (1.0) | 50.1 / 0.995 |
+| HEVC Main 10 | 54.30 / 0.99914 (9.3) | libx265 58.95 / 0.99962 (1.7) | 51.3 / 0.996 |
+| AV1 | 49.95 / 0.99673 (2.4) | libsvtav1 51.60 / 0.99778 (1.6) | 46.9 / 0.993 |
+| AV1, 10-bit | 47.28 / 0.99663 (2.5) | libsvtav1 60.37 / 0.99969 (1.6) | 44.2 / 0.993 |
+
+M2's full run: [`odin-0663e057fe.md`](../hw-reports/odin-0663e057fe.md)
+at 0663e05, 2026-10-31 (PR #19, 6810 s), with
+[`odin-0663e05-125.md`](../hw-reports/odin-0663e05-125.md) for the GUI
+at GNOME's 125 %. Tier 1 on odin: 1183 passed (:28). Tier 2: 44
+passed, 2 failed and 1 skipped (:26): `gui_smoke` failed while the
+export ran (below); `zero_copy_matches_copy_path` (path A) failed on an
+X5 lens's frame 26, 19 of 2 764 800 channel values off by 0.0863 at
+most, which rendered again as the copy (:153-160), as at 0d491ae; and
+the stitched-samples bench skipped (no clip 12). Every export test
+passed (:87-90). Its playback rows (:283-348 and :403-420): the gated
+5.7K runs on path B, and `Auto`'s copy path (`Vulkan (Auto)`), VA-API
+and software recorded:
+
+| Clip, decoder | Unthrottled | Real time, decoded | Dropped, decode-dropped, late |
+|---|---:|---:|---:|
+| 5.7K 8-bit, zero copy (the gate) | 129 (128 to 130) | 30 | 0, 0, 0 |
+| 5.7K 8-bit, Vulkan (Auto) | 78 (17 to 124) | 29 | 1, 0, 0 |
+| 5.7K 8-bit, VA-API | 26 (24 to 31) | 27.5 | 265, 265, 1138 |
+| 5.7K 8-bit, software | 48 (39 to 57) | 30 | 0, 0, 0 |
+| 5.7K 10-bit, zero copy (the gate) | 128 (128 to 129) | 30 | 0, 0, 0 |
+| 5.7K 10-bit, Vulkan (Auto) | 14 (8 to 94) | 24.5 | 228, 227, 562 |
+| 5.7K 10-bit, VA-API | 14 (12 to 18) | 24 | 453, 456, 1138 |
+| 5.7K 10-bit, software | 35 (25 to 39) | 30 | 0, 0, 34 |
+| 8K 8-bit, Vulkan (Auto) | 77.5 (59 to 83) | 30 | 0, 0, 0 |
+| 8K 8-bit, VA-API | 12 (10 to 16) | 24 | 458, 458, 1138 |
+| 8K 8-bit, software | 30 (25 to 34) | 30 | 143, 109, 531 |
+| X5 8K30 pair, Vulkan (Auto) | 76 (10 to 79) | 30 | 112, 105, 155 |
+| X5 8K30 pair, VA-API | 38 (37.5 to 39.5) | 30 | 347, 346, 1140 |
+| X5 8K30 pair, software | 11.25 (10 to 24.5) | 0 | 426, 426, 1140 |
+
+The copy path's drops over odin's runs are below, after M3.8's.
+
+The GUI while exporting: `gui_smoke`'s runs 0 to 2 export the project
+while they play, run 0 the noisy 5.7K 8-bit clip beside a 1080p H.264
+export, run 1 the 10-bit one beside an 8K 360 HEVC export, run 2 the
+3840×1920 seam beside a 4K flat H.264 export with motion blur. Each
+cell is the report's "The export while it played" line: the UI frames
+presented while it ran, the UI's p99 in ms, the video frames dropped
+and the export's seconds. The gates are `gui_smoke`'s own: 90 %
+presented, a p99 of at most 1.5 refresh periods (25.0 ms at odin's 60
+Hz) and at most 0.1 % dropped; the last column is the whole
+`gui_smoke` verdict. Between the reports the export's pace changed
+(D56): 5316176 waits for the GPU without wgpu's lock and works in
+smaller units, 3c1a727 renders on a device of its own, 5c3e3a3 lets the
+viewer keep its lead, b77e65a takes turns with it, from a177ea9 the
+export stands aside while the viewer plays, and from 5b907e3 nothing of
+it starts until the viewer stops. From a177ea9 the line counts the time
+it ran while the viewer played; a177ea9's export seconds include about
+19 s standing aside (9 s in the blur run), and from 5b907e3 they are
+about the time it ran once the viewer stopped.
+
+| Report | 1080p, H.264 | 8K 360, HEVC | 4K flat with blur, H.264 | `gui_smoke` | Lines |
+|---|---:|---:|---:|---|---|
+| [0663e05](../hw-reports/odin-0663e057fe.md) | 91 %, 82.8, 1, 1.8 | 85 %, 40.9, 1, 7.8 | 58 %, 65.1, 28, 6.0 | FAIL | 866, 876, 886 |
+| [5316176](../hw-reports/odin-5316176-pace.md) | 94 %, 83.2, 1, 1.6 | 95 %, 33.6, 3, 6.1 | 66 %, 100.2, 0, 13.9 | FAIL | 223, 233, 243 |
+| [3c1a727](../hw-reports/odin-3c1a727-pace2.md) | 89 %, 83.2, 2, 1.8 | 90 %, 37.2, 3, 6.4 | 99 %, 30.8, 0, 6.3 | FAIL | 174, 184, 194 |
+| [5c3e3a3](../hw-reports/odin-5c3e3a3-pace3.md) | 90 %, 83.1, 2, 1.7 | 94 %, 34.5, 3, 6.5 | 99 %, 29.8, 0, 6.3 | FAIL | 174, 184, 194 |
+| [b77e65a](../hw-reports/odin-b77e65a-share.md) | 96 %, 33.5, 1, 4.3 | 93 %, 34.7, 1, 6.6 | 99 %, 29.8, 0, 6.7 | FAIL | 173, 183, 193 |
+| [a177ea9](../hw-reports/odin-a177ea9-pause.md) | 100 %, 17.4, 1, 20.3 | 100 %, 17.0, 1, 25.2 | 100 %, 17.1, 0, 14.4 | FAIL | 169, 179, 189 |
+| [5b907e3](../hw-reports/odin-5b907e3-pause2.md) | 100 %, 17.3, 0, 1.4 | 100 %, 17.0, 0, 6.3 | 100 %, 17.3, 0, 5.4 | PASS | 146, 156, 166 |
+| [0c0296b](../hw-reports/odin-0c0296b-a2.md) | 100 %, 17.1, 0, 1.5 | 100 %, 17.2, 0, 6.6 | 100 %, 17.2, 0, 5.5 | PASS | 147, 157, 167 |
+| [9ab8091](../hw-reports/odin-9ab8091-m38.md) | 99 %, 17.2, 1, 1.6 | 99 %, 17.2, 2, 7.1 | 100 %, 17.9, 0, 5.5 | FAIL | 653, 663, 673 |
+| [04d15be](../hw-reports/odin-04d15be-m38b.md) | 100 %, 17.2, 0, 1.4 | 100 %, 17.2, 0, 6.3 | 100 %, 17.2, 0, 5.5 | PASS | 1309, 1319, 1329 |
+
+9ab8091's runs 0 and 1 failed the drop gate alone, on 1 and 2 frames
+of 569 (:641-642), which PROGRESS puts down to the desktop's load. The
+twins at GNOME's 125 %, `<report>-125.md`, `gui_smoke` and `gui_proto`
+only:
+
+| Report | 1080p, H.264 | 8K 360, HEVC | 4K flat with blur, H.264 | `gui_smoke` | Lines |
+|---|---:|---:|---:|---|---|
+| [0663e05](../hw-reports/odin-0663e05-125.md) | 90 %, 83.0, 3, 1.7 | 85 %, 50.3, 3, 7.8 | 45 %, 83.9, 50, 5.9 | FAIL | 179, 189, 199 |
+| [5316176](../hw-reports/odin-5316176-pace-125.md) | 54 %, 83.1, 12, 2.6 | 91 %, 44.7, 3, 6.5 | 64 %, 100.3, 0, 13.9 | FAIL | 178, 188, 198 |
+| [3c1a727](../hw-reports/odin-3c1a727-pace2-125.md) | 94 %, 66.6, 1, 1.6 | 90 %, 50.1, 6, 6.5 | 99 %, 19.2, 0, 6.3 | FAIL | 172, 182, 192 |
+| [5c3e3a3](../hw-reports/odin-5c3e3a3-pace3-125.md) | 94 %, 65.8, 1, 1.6 | 96 %, 34.1, 2, 6.6 | 99 %, 33.0, 0, 6.3 | FAIL | 173, 183, 193 |
+| [b77e65a](../hw-reports/odin-b77e65a-share-125.md) | 95 %, 33.2, 3, 4.3 | 90 %, 50.2, 1, 6.6 | 100 %, 19.2, 0, 6.7 | FAIL | 172, 182, 192 |
+| [a177ea9](../hw-reports/odin-a177ea9-pause-125.md) | 100 %, 17.1, 1, 20.3 | 100 %, 17.1, 1, 25.3 | 100 %, 17.9, 0, 14.4 | FAIL | 169, 179, 189 |
+| [5b907e3](../hw-reports/odin-5b907e3-pause2-125.md) | 100 %, 17.0, 0, 1.4 | 100 %, 17.0, 0, 6.4 | 100 %, 17.4, 0, 5.5 | PASS | 146, 156, 166 |
+
+The toolkit check, `gui_proto` (D53): the timeline prototype's script
+(zoom, drag, ripple trim, pan; 500 clips on 6 tracks) for 20 s at each
+egui zoom; after its first second a run must present 99 % of the
+frames, each pass's own work must have a p99 under the refresh period
+and the interval between passes a p99 of at most 1.5 periods, and
+every action must land. Every run passed, at 60 Hz, at a9d7028 (M2.2b,
+2026-10-30, PR #15), its twin at GNOME's 125 % and 0663e05 with its
+twin:
+
+| Report | Run | Pixels a point | Presented | Late | Interval p50 / p99 ms | Work p50 / p99 ms | Building p99 ms |
+|---|---|---:|---:|---:|---:|---:|---:|
+| [a9d7028](../hw-reports/odin-a9d7028-proto.md):133 | egui zoom 1 | 1 | 99.8 % | 2 | 16.7 / 17.6 | 0.6 / 1.7 | 0.3 |
+| a9d7028:134 | egui zoom 1.25 | 1.25 | 100.0 % | 0 | 16.7 / 17.1 | 0.5 / 1.6 | 0.3 |
+| a9d7028:135 | egui zoom 1.5 | 1.5 | 100.0 % | 0 | 16.7 / 17.1 | 0.6 / 1.7 | 0.3 |
+| [a9d7028 at 125 %](../hw-reports/odin-a9d7028-proto-125.md):133 | egui zoom 1 | 1.25 | 100.0 % | 0 | 16.7 / 17.1 | 0.6 / 1.6 | 0.3 |
+| [0663e05](../hw-reports/odin-0663e057fe.md):916 | egui zoom 1 | 1 | 99.9 % | 1 | 16.7 / 17.0 | 0.9 / 2.5 | 0.5 |
+| 0663e05:917 | egui zoom 1.25 | 1.25 | 100.0 % | 0 | 16.7 / 17.0 | 0.9 / 2.1 | 0.4 |
+| 0663e05:918 | egui zoom 1.5 | 1.5 | 100.0 % | 0 | 16.7 / 17.0 | 0.9 / 2.4 | 0.4 |
+| [0663e05 at 125 %](../hw-reports/odin-0663e05-125.md):229 | egui zoom 1 | 1.25 | 100.0 % | 0 | 16.7 / 17.0 | 0.9 / 2.1 | 0.4 |
+
+D52's 4K30 figures (DECISIONS.md) are 6993987's above, rounded, and its
+AV1 parity 6ed8172's. Its "8K 360 export through av1_vaapi ran at 10.0
+fps, 35.3 Mb/s" is in no report: `export_360_8k_vaapi` printed it to
+stderr, which the test harness drops when a test passes. The test now
+records both as `360 8k export <encoder>` rows, so odin's next report
+carries them.
+
+Ninth run, M3.1's pair decode: at 0444568 (branch `m3/decode`, over
+Remote Control), 2026-11-01 (PR #27). Its log,
+`hw-reports/odin-0444568-k1k3.log`, holds only cargo's output (rerun, no
+report: a Remote Control rerun; no report was committed, so these rows
+can't be checked from the repo); the same code's K1 and K3 rows are in
+[`odin-b27c0f9-m31.md`](../hw-reports/odin-b27c0f9-m31.md):137-187 (the
+tenth run, below) and its verdicts in
+[`odin-3fe071e-m31b.md`](../hw-reports/odin-3fe071e-m31b.md):320-325
+(the eleventh). `bench_export_pair_decode` on clip 9 (the X5's 8K30,
+2×3840²), 600 frames a lens, in 1131 s; MemFree read 0 GB before it,
+with about 44 GB of page cache. K1, beside a VA-API H.264 encode of a
+3840×2160 frame at 30 fps, the slower lens's fps (runs; median):
 
 | Path | Serial | A thread a lens |
 |---|---:|---:|
@@ -1138,6 +1405,35 @@ images; the Vulkan copy row decodes 116 frames a lens and replays from
 the cache, so it is no control, and the VA-API copy row decoded 232 a
 lens and dropped 54, all in decode. A rerun with Firefox closed and
 `SPHERECUT_PLAYBACK_TIMELINE` set, beside a2a0de8, is still to do.
+
+The copy path's drops over odin's runs. The playback benchmarks' `Vulkan
+(Auto)` rows play Vulkan Video with zero copy off, the path the app
+takes where the device can't be shared or with `SPHERECUT_ZERO_COPY=0`.
+Up to H3 (0d491ae) the 5.7K rows were the gated run; since D42 they are
+recorded, not gated. Frames dropped after the first second in real time,
+and how many of those decode dropped:
+
+| Report | 5.7K 10-bit | 5.7K 8-bit | 8K 8-bit | X5 8K30 pair | Lines |
+|---|---:|---:|---:|---:|---|
+| [43abcda](../hw-reports/odin-43abcdad28.md), before H1's fixes | 181 / 158 | 14 / 2 | 34 / 34 | 0 / 0 | 154-155, 172-173, 190-191, 262-263 |
+| [303e364](../hw-reports/odin-303e3644be.md) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 136-137, 154-155, 172-173, 244-245 |
+| [c9a4a55](../hw-reports/odin-c9a4a55c18.md) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | 168-169, 186-187, 204-205, 276-277 |
+| [0d491ae](../hw-reports/odin-0d491ae.md) | 69 / 69 | 0 / 0 | 0 / 0 | 0 / 0 | 180-181, 198-199, 216-217, 288-289 |
+| [0663e05](../hw-reports/odin-0663e057fe.md) | 228 / 227 | 1 / 0 | 0 / 0 | 112 / 105 | 292-293, 316-317, 334-335, 406-407 |
+| [b27c0f9](../hw-reports/odin-b27c0f9-m31.md) (0444568's code) | | | | 52 / 42 | 359-360 |
+| [9ab8091](../hw-reports/odin-9ab8091-m38.md) | 0 / 0 | 0 / 0 | 0 / 0 | 28 / 26 | 187-188, 211-212, 229-230, 412-413 |
+| [04d15be](../hw-reports/odin-04d15be-m38b.md) | 138 / 138 | 61 / 61 | 67 / 56 | 73 / 72 | 155-157, 183-185, 204-206, 474-476 |
+
+The X5's 2×2880² at 59.94 and 2×3840² at 25 copy rows dropped none in
+any of these runs. At 04d15be the X5 8K30 pair's copy row decoded 73.75
+frames a second a lens unthrottled (12 to 79.5, :471), and
+`MemAvailable`, which counts the page cache, read 33,314 to 35,213 MiB
+as the X5 rows' copy passes began (:236, :319, :402, :485; the 5.7K and
+8K benchmarks don't record it). The same run's path B, the app's path
+on odin, decoded the pair at 81 (80 to 82.5) and dropped nothing
+(:486-492). Whether direct compaction makes these drops, as it made
+H3's (the eighth run above), isn't known: the attribution waits on
+vmstat deltas (M3.11).
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
