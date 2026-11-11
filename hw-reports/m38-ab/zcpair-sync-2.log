@@ -1,0 +1,33 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/playback/src/shared.rs:529:14
+    |
+529 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+529 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+529 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+    |
+
+warning: `spherecut-playback` (lib) generated 1 warning (run `cargo fix --lib -p spherecut-playback` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.10s
+     Running tests/tier2_playback.rs (target/release/deps/tier2_playback-d55baaae506854be)
+
+running 1 test
+test zero_copy_pair_matches_copy ... rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+
+thread 'zero_copy_pair_matches_copy' (3330761) panicked at crates/playback/tests/tier2_playback.rs:3857:37:
+clip 9 (handheld_flips), Vulkan, path B, locked against the copy: stream 1's frame at pts 3003 differs from the copy's
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    zero_copy_pair_matches_copy
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 7.04s
+
+error: test failed, to rerun pass `-p spherecut-playback --test tier2_playback`
