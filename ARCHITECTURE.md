@@ -840,17 +840,17 @@ size, frames, duration, rate, layout, the spherical boxes, the audio),
 then a second time through FFmpeg's own demuxer, `probe::demuxer_view`
 (its spherical side data, its "ambisonic 1" layout for ambiX, and no
 complaint of a spherical box in its log), and only then is it persisted
-at the output. A failure at any step, or
-a cancel, removes both temporary files. Before it starts, the export
-sweeps its folder of a killed export's temporary files (their locks are
-free, D16) and refuses a disk with less free space than two copies of
-the size estimate. `Progress` counts frames muxed and then the last
-pass's bytes; the `Report` holds what was made and each check passed.
-`prepare` (the preset, the frame plan, the encoders) and `needed_bytes`
-(two copies of the estimate) are public so that the agent's `render`
-refuses what `start` would before it queues (D58), and `planned` (the
-file the last pass checks for, and the audio choice) so that `check`
-with a project checks what a render would write (D59);
+at the output. A failure at any step, or a cancel, removes both
+temporary files. Before it starts, the export sweeps its folder of a
+killed export's temporary files (their locks are free, D16) and refuses
+a disk with less free space than two copies of the size estimate.
+`Progress` counts frames muxed and then the last pass's bytes; the
+`Report` holds what was made and each check passed. `prepare` (the
+preset, the frame plan, the encoders) and `needed_bytes` (two copies of
+the estimate) are public so that the agent's `render` refuses what
+`start` would before it queues (D58), and `planned` (the file the last
+pass checks for, and the audio choice) so that `check` with a project
+checks what a render would write (D59);
 `ExportJob::exact` takes the output path as given, never following a link at it, for a
 path through `/proc/self/fd`. The sweep takes files older than
 `core::fs::SWEEP_AGE`, 10 s.

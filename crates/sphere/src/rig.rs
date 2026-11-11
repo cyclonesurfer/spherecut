@@ -500,12 +500,12 @@ pub struct LensCalib {
     /// Pat's V6). It and `cy` are read as corner-origin, pixel (i, j)
     /// covering [i, i + 1) × [j, j + 1), as a slot's pixels are, so that a
     /// canvas map scales the centre as it scales the side. That is an
-    /// assumption about the camera, and M3.6's fit cannot test it: counted
-    /// from pixel centres, as OpenCV counts, both blocks' centres would move
-    /// 0.5 canvas px along each axis, and an equal shift of both centres is
-    /// a relative tilt to the fit (plan 8.4, 0.0375° per canvas px), about
-    /// 0.02° about each axis, under stage J's 0.05°. It is taken as below
-    /// the fit's floor at that size.
+    /// assumption about the camera, plan 3.2's unknown U15, and M3.6's fit
+    /// cannot test it: counted from pixel centres, as OpenCV counts, both
+    /// blocks' centres would move 0.5 canvas px along each axis, and an
+    /// equal shift of both centres is a relative tilt to the fit (plan 8.4,
+    /// 0.0375° per canvas px), about 0.019° about each axis, under stage
+    /// J's 0.05°. U15 accepts it below the fit's floor.
     pub cx: f64,
     pub cy: f64,
     /// The stored yaw, pitch and roll, in degrees.

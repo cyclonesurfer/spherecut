@@ -765,9 +765,9 @@ V6, both lenses, both axes) by +23.1 to +23.4 px at 3840² from A, B and C (+17.
 look like a relative tilt, at 0.0375° per canvas px (plan 8.4), so about 1.2°. Two things argue
 against D, and neither has been checked on footage:
 
-- Under D the stored centres would sit +29 to +57 canvas px right of and below the 5312
-  window's centre. Measured from the 5376 square's centre they sit −8 to +25 (V3: +13, +4, +5,
-  −3). A maker would centre the window on the optical axis.
+- Under D the stored centres would sit +24 to +57 canvas px right of and below the 5312
+  window's centre (V3: +45, +36, +37, +29). Measured from the 5376 square's centre they sit −8
+  to +25 (V3: +13, +4, +5, −3). A maker would centre the window on the optical axis.
 - Every source that has checked a reading against pictures puts the centres where A, B and C
   do: orbis by seam correlation on the X5 and the X2 (on the X2, D would be about 80 canvas px
   off) and raw360 on an X3 and an X4. [reported]
