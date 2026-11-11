@@ -3294,11 +3294,13 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// section 9). Every pair is the frame its tags name, every seek lands
 /// both lenses on the frame that holds it, none is shown apart by the
 /// engine's count or the harness's, the lock holds on six slots, and the
-/// real-time pass keeps its samples for the pacing rule. The controls:
-/// the pair opened unlocked holds no lock, lens 0's slot read for both
-/// fails the codes' check, lens 1 a frame late in one present fails the
-/// harness's count, and lens 1 where another seek left it fails the
-/// landing's.
+/// real-time pass keeps its samples for the pacing rule; and
+/// [`slot_hashes`] hashes the locked pair's first pairs. The controls:
+/// the pair opened unlocked holds no lock, which `slot_hashes` calls
+/// broken (a failure in `zero_copy_pair_matches_copy`, never a skip),
+/// lens 0's slot read for both fails the codes' check, lens 1 a frame
+/// late in one present fails the harness's count, and lens 1 where
+/// another seek left it fails the landing's.
 #[test]
 fn the_bench_harness_plays_a_locked_pair() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -3325,7 +3327,8 @@ fn the_bench_harness_plays_a_locked_pair() {
     let limit = Duration::from_secs(60);
     let u = unthrottled_with(&rig, &path, &streams, &run, limit, Some(&mut each)).unwrap();
     let r = realtime(&rig, &path, &streams, &run, Duration::from_millis(2500)).unwrap();
-    let unlocked = unthrottled(&rig, &path, &streams, &Run::software(), limit).unwrap();
+    let hashed = slot_hashes(&rig, &path, &streams, &run, 4);
+    let unlocked = slot_hashes(&rig, &path, &streams, &Run::software(), 4);
     let landings = seek_landings(&rig, &path, &streams, &run, Some((&mut reader, rate))).unwrap();
     std::fs::remove_dir_all(&dir).ok();
 
@@ -3355,11 +3358,16 @@ fn the_bench_harness_plays_a_locked_pair() {
         landed_together(l).unwrap();
         assert!(l.codes.is_some(), "{l:?}");
     }
+    let hashed = hashed.unwrap();
+    let hashed_pts = |s: usize| hashed.keys().filter(move |k| k.0 == s).map(|k| k.1);
+    assert_eq!(hashed_pts(0).count(), 4, "{hashed:?}");
+    assert!(hashed_pts(0).eq(hashed_pts(1)), "{hashed:?}");
 
     // Controls.
-    must_fail(
-        "the pair opened unlocked holds a lock",
-        unlocked.lock == Some(LockStatus::Locked),
+    let unlocked = must_fail("the pair opened unlocked holds a lock", unlocked);
+    assert!(
+        matches!(&unlocked, NoHashes::Broken(why) if why.contains("the lock ended None")),
+        "{unlocked:?}"
     );
     let (tag, codes) = read[5];
     must_fail(
@@ -3694,18 +3702,29 @@ fn samples_lens_pairs_frame_locked() {
     }
 }
 
+/// Why [`slot_hashes`] has no hashes.
+#[derive(Debug)]
+enum NoHashes {
+    /// A zero-copy run took no frame on the GPU, or had one refused:
+    /// what this GPU can't do, which skips.
+    NotKept(String),
+    /// The run failed, stalled, or the lock didn't hold: a failure.
+    Broken(String),
+}
+
 /// Each slot's planes of the first `count` pairs a locked pair shows,
 /// opened as `run` on `rig` and played unthrottled, read back from the
 /// GPU and hashed (level 0, which the mips are made from): by stream and
-/// pts. Fails when the lock doesn't hold, or a zero-copy run took no frame
-/// on the GPU or had one refused.
+/// pts. Broken when the run fails or stalls or the lock doesn't hold;
+/// not kept when a zero-copy run took no frame on the GPU or had one
+/// refused.
 fn slot_hashes(
     rig: &Rig,
     path: &Path,
     streams: &[Option<usize>],
     run: &Run,
     count: usize,
-) -> Result<BTreeMap<(usize, i64), Vec<u64>>, String> {
+) -> Result<BTreeMap<(usize, i64), Vec<u64>>, NoHashes> {
     let mut hashes = BTreeMap::new();
     let mut pairs = 0;
     let mut each = |p: &Presented| {
@@ -3727,20 +3746,24 @@ fn slot_hashes(
             ControlFlow::Continue(())
         })
     };
-    let u = unthrottled_with(rig, path, streams, run, GATED_UNTHROTTLED, Some(&mut each))?;
+    let u = unthrottled_with(rig, path, streams, run, GATED_UNTHROTTLED, Some(&mut each))
+        .map_err(NoHashes::Broken)?;
+    if let Some(why) = &u.stalled {
+        return Err(NoHashes::Broken(format!("the pass stalled: {why}")));
+    }
     if u.lock != Some(LockStatus::Locked) || u.unpaired > 0 {
-        return Err(format!(
+        return Err(NoHashes::Broken(format!(
             "the lock ended {:?} with {} unpaired presents",
             u.lock, u.unpaired
-        ));
+        )));
     }
     if run.zero_copy != ZeroCopy::Off && (u.imported == 0 || u.refused > 0) {
-        return Err(format!(
+        return Err(NoHashes::NotKept(format!(
             "{} frames taken on the GPU, {} refused{}",
             u.imported,
             u.refused,
             because(u.refusal.as_ref())
-        ));
+        )));
     }
     Ok(hashes)
 }
@@ -3776,7 +3799,8 @@ fn same_slots(
 /// plan section 9). The control plants a mismatch: the copy's lenses
 /// swapped must differ. Skips, with the reasons, when no path keeps the
 /// frames on the GPU here or a file isn't; never a pass with one left
-/// out.
+/// out. A run that fails, stalls or shows the lenses apart fails it, on
+/// either path.
 #[test]
 #[ignore = "tier2: needs a GPU that keeps decoded frames on it, and the X5 samples or hw-test's perf pairs"]
 fn zero_copy_pair_matches_copy() {
@@ -3820,13 +3844,14 @@ fn zero_copy_pair_matches_copy() {
             let copy = Run::only(kind).locked();
             let got = slot_hashes(on, path, &streams, &kept, ZERO_COPY_FRAMES);
             let want = slot_hashes(&rig, path, &streams, &copy, ZERO_COPY_FRAMES)
-                .unwrap_or_else(|e| panic!("{name}, {}: {e}", copy.label));
+                .unwrap_or_else(|e| panic!("{name}, {}: {e:?}", copy.label));
             let got = match got {
                 Ok(g) => g,
-                Err(why) => {
+                Err(NoHashes::NotKept(why)) => {
                     missing.push(format!("{name}, {}: {why}", kept.label));
                     continue;
                 }
+                Err(NoHashes::Broken(why)) => panic!("{name}, {}: {why}", kept.label),
             };
             let n = same_slots(&got, &want)
                 .unwrap_or_else(|e| panic!("{name}, {} against the copy: {e}", kept.label));
