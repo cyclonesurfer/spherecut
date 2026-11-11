@@ -65,6 +65,11 @@ deny = [
     { crate = "rustls", reason = "no network access at runtime" },
     { crate = "native-tls", reason = "no network access at runtime" },
     { crate = "openssl", reason = "no network access at runtime" },
+    { crate = "socket2", reason = "no network access at runtime" },
+    { crate = "async-std", reason = "no network access at runtime" },
+    { crate = "async-net", reason = "no network access at runtime" },
+    { crate = "hickory-resolver", reason = "no network access at runtime" },
+    { crate = "trust-dns-resolver", reason = "no network access at runtime" },
     { crate = "wry", reason = "no webviews" },
     { crate = "tauri", reason = "no webviews" },
     { crate = "webkit2gtk", reason = "no webviews" },
@@ -91,6 +96,15 @@ deny = ["web", "webgpu", "webgl", "angle", "glsl", "spirv", "static-dxc", "vulka
 [[bans.features]]
 crate = "image"
 allow = ["png"]
+
+# tokio comes in only for wasm targets (wasm-bindgen-futures, through
+# winit); its sockets and DNS (`net`) never (D8, D24). mio's `net` stays:
+# cpal's PulseAudio host, pulseaudio 0.3.2, reaches the sound server
+# over a Unix socket (`mio::net::UnixStream`, its client.rs:6) and
+# refuses a PULSE_SERVER that isn't `unix:` (its lib.rs:32-38).
+[[bans.features]]
+crate = "tokio"
+deny = ["net"]
 
 # The PulseAudio protocol host only, with ALSA, which cpal always builds
 # on Linux (D35): `pipewire` and `jack` link libraries no build machine

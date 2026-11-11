@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 mod check;
 mod compat;
+mod controls;
 mod gen_media;
 mod gui_report;
 mod hw_test;

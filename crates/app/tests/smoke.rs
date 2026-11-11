@@ -84,6 +84,9 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
         export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let app = smoke_app(&gpu, &rs, args.clone());
     // 1600 × 1000 pixels: the screenshot comes out 960 × 600.
@@ -101,6 +104,11 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     let r = &doc["result"];
     assert_eq!(r["clip"], clip().display().to_string());
     assert_eq!(r["seconds"], 1.5);
+    // Nothing held decode back, nor made the UI wait for it (D40).
+    assert_eq!(
+        r["asked"],
+        serde_json::json!({"decoder": null, "decode_floor_ms": null, "control_ui_waits": false})
+    );
     let played = r["played_s"].as_f64().unwrap();
     assert!((1.5..4.0).contains(&played), "played {played} s");
     assert_eq!(r["adapter"]["cpu"], true);
@@ -232,6 +240,9 @@ fn the_smoke_run_exports_while_it_plays_then_stops_and_waits_for_the_export() {
             blur: true,
             ..SmokeExport::to(out.clone())
         }),
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let app = smoke_app(&gpu, &rs, args.clone());
     let mut h = common::harness(app, &rs, [960.0, 600.0], 1.0);
@@ -303,6 +314,9 @@ fn a_clip_that_cant_open_ends_the_run_with_its_code() {
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
         export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     run_to_end(&mut h);
@@ -359,6 +373,9 @@ fn the_smoke_run_plays_a_cameras_lenses_together() {
             out: dir.join(format!("{name}.json")),
             screenshot: None,
             export: None,
+            decoder: None,
+            decode_floor: None,
+            control_ui_waits: false,
         };
         let rs = common::render_state(&gpu);
         let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
@@ -437,6 +454,9 @@ fn the_watchdog_ends_a_run_whose_window_has_no_pass() {
         out: dir.join("smoke.json"),
         screenshot: Some(dir.join("smoke.png")),
         export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let mut d = SmokeDriver::new(args.clone(), "Bgra8UnormSrgb".into());
     let (hook, exited) = exit_hook();
@@ -472,6 +492,9 @@ fn the_watchdog_tells_a_hidden_window_from_a_stuck_one() {
         out: dir.join("smoke.json"),
         screenshot: None,
         export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     // One UI pass, then logic alone.
@@ -520,6 +543,9 @@ fn the_watchdog_leaves_a_finished_runs_document() {
         out: dir.join("smoke.json"),
         screenshot: None,
         export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
     };
     let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
     let (hook, exited) = exit_hook();
