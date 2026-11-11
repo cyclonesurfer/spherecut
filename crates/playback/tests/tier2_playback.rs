@@ -15,9 +15,10 @@
 //!
 //! Each full second of a pass gives the frames decoded (per stream) and
 //! shown; the real-time pass also counts the frames the presenter passed
-//! over (dropped), the frames a decoder behind the clock skipped
-//! (decode-dropped), and the presents whose frame had already ended when
-//! it went on screen (late). A note gives each stage's p50 and p95 over
+//! over, up to the presents' cadence (skipped: a clip faster than the
+//! presents passes them over by design) and beyond it (dropped), the
+//! frames a decoder behind the clock skipped (decode-dropped), and the
+//! presents whose frame had already ended when it went on screen (late). A note gives each stage's p50 and p95 over
 //! the real-time pass, the loops, the UI ticks missed and where each
 //! stream decoded. With `SPHERECUT_PLAYBACK_TIMELINE` naming a
 //! directory, each pass also writes its [`Timeline`] there, tick by tick.
@@ -63,9 +64,10 @@
 //!   a later one since the present before, short of the end, or when it
 //!   is a loop's first after the seek back, so a rate above the presents'
 //!   and the loops of a short master owe only what can be shown ([`Owed`]).
-//!   The engine counts a locked pair's drops once a pair and an unlocked
-//!   player's for each stream, so the unlocked count is divided by its
-//!   streams. A real-time pass whose frame stands still for 5 s while its
+//!   The engine counts a locked pair's drops (and skips) once a pair and
+//!   an unlocked player's for each stream, so the unlocked count is
+//!   divided by its streams; the frames the presents' cadence passes over
+//!   (4K120 at 60 Hz, one a present) are skipped, not dropped. A real-time pass whose frame stands still for 5 s while its
 //!   clock runs has stalled, which with a pair apart or the lock undone
 //!   is Kill; a note sums every mode's verdict up.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
@@ -549,10 +551,13 @@ struct Second {
     shown: u64,
     /// Presents of the real-time pass that owed a new frame ([`Owed`]).
     due: u64,
-    /// Frames passed over, as the engine counts them: once a pair for a
-    /// locked pair, summed over the streams otherwise
-    /// ([`Pass::drops_over`]).
+    /// Frames passed over beyond the presents' cadence, as the engine
+    /// counts them: once a pair for a locked pair, summed over the streams
+    /// otherwise ([`Pass::drops_over`]).
     dropped: u64,
+    /// Frames passed over up to the presents' cadence (a clip faster than
+    /// the presents), counted as `dropped` is.
+    skipped: u64,
     /// Frames a decoder behind the clock skipped, summed over the
     /// streams: each worker counts its own.
     decode_dropped: u64,
@@ -576,9 +581,9 @@ struct Pass {
     /// Why an unthrottled pass stopped before the end, or why a real-time
     /// pass stood still while its clock ran ([`Standing`]), if it did.
     stalled: Option<String>,
-    /// The streams played, and the streams `dropped` sums over: 1 for a
-    /// locked pair, whose frames passed over count once a pair (D67),
-    /// else every stream's. A share a lens divides by it.
+    /// The streams played, and the streams `dropped` and `skipped` sum
+    /// over: 1 for a locked pair, whose frames passed over count once a
+    /// pair (D67), else every stream's. A share a lens divides by it.
     streams: usize,
     drops_over: usize,
     /// `MemAvailable` as the pass began, in bytes, where `/proc/meminfo`
@@ -693,13 +698,13 @@ struct Meter {
     begun: Instant,
     second: Instant,
     /// Counts at the start of the pass, and of the second: decoded,
-    /// dropped, decode-dropped.
-    base: [u64; 3],
+    /// dropped, decode-dropped, skipped.
+    base: [u64; 4],
     /// Frames imported and imports refused at the start of the pass.
     imports: [u64; 2],
     /// Unpaired presents and pair resyncs at the start of the pass.
     pairs: [u64; 2],
-    at: [u64; 3],
+    at: [u64; 4],
     current: Second,
     seen: [u64; Stage::ALL.len()],
     pass: Pass,
@@ -713,10 +718,10 @@ impl Meter {
             streams: streams.max(1) as f64,
             begun: now,
             second: now,
-            base: [0; 3],
+            base: [0; 4],
             imports: [0; 2],
             pairs: [0; 2],
-            at: [0; 3],
+            at: [0; 4],
             current: Second::default(),
             seen,
             pass: Pass::default(),
@@ -740,11 +745,12 @@ impl Meter {
         ]
     }
 
-    fn counts(&self) -> [u64; 3] {
+    fn counts(&self) -> [u64; 4] {
         [
             Counter::FramesDecoded,
             Counter::Dropped,
             Counter::DecodeDropped,
+            Counter::Skipped,
         ]
         .map(|c| self.perf.count(c))
     }
@@ -795,6 +801,7 @@ impl Meter {
                 decoded: (c[0] - self.at[0]) as f64 / self.streams,
                 dropped: c[1] - self.at[1],
                 decode_dropped: c[2] - self.at[2],
+                skipped: c[3] - self.at[3],
                 ..self.current
             };
             self.pass.seconds.push(s);
@@ -919,8 +926,8 @@ impl Timeline {
             .collect();
         let mut csv = String::from(
             "t_ms,clock_s,shown_s,playing,at_end,loops,decoded,uploaded,shown,dropped,\
-             decode_dropped,cache_waits,cache_frames,cache_ahead,cache_mib,slots_ready,\
-             slots_writing,slots_free,minflt",
+             skipped,decode_dropped,cache_waits,cache_frames,cache_ahead,cache_mib,\
+             slots_ready,slots_writing,slots_free,minflt",
         );
         for s in TIMELINE_STAGES {
             csv.push_str(&format!(",{0}_n,{0}_max_ms", s.name()));
@@ -951,7 +958,7 @@ impl Timeline {
         let slots = &snap.slots;
         let _ = write!(
             self.csv,
-            "{:.2},{:.4},{shown},{},{},{loops},{},{},{},{},{},{},{frames},{ahead},{},{},{},{},{}",
+            "{:.2},{:.4},{shown},{},{},{loops},{},{},{},{},{},{},{},{frames},{ahead},{},{},{},{},{}",
             now.saturating_duration_since(self.begun).as_secs_f64() * 1000.0,
             snap.clock.to_secs_f64(),
             u8::from(snap.playing),
@@ -960,6 +967,7 @@ impl Timeline {
             count(Counter::FramesUploaded),
             count(Counter::FramesShown),
             count(Counter::Dropped),
+            count(Counter::Skipped),
             count(Counter::DecodeDropped),
             count(Counter::CacheWaits),
             bytes >> 20,
@@ -1665,6 +1673,11 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
         "frames",
     );
     bench::record(
+        &format!("{name}: skipped after 1 s"),
+        after(|s| s.skipped),
+        "frames",
+    );
+    bench::record(
         &format!("{name}: decode-dropped after 1 s"),
         after(|s| s.decode_dropped),
         "frames",
@@ -1706,7 +1719,7 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
 /// unpaired presents over them all, each lens's decodes since the open,
 /// path B's pool and the slots in the last; of a real-time pass, the share
 /// of the presents that owed a frame that put one up, the frames dropped
-/// a lens and `MemAvailable` as it began; of a locked run, its pair
+/// and skipped a lens and `MemAvailable` as it began; of a locked run, its pair
 /// resyncs, the pairs it presented, `pair_wait` and its lock. Both runs
 /// record their slots, since the lock takes all of `MAX_SLOTS` and the
 /// unlocked player its default.
@@ -1752,6 +1765,9 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
         }
         if let Some(share) = dropped_share(last) {
             bench::record(&format!("{name}: dropped a lens after 1 s"), share, "%");
+        }
+        if let Some(share) = skipped_share(last) {
+            bench::record(&format!("{name}: skipped a lens after 1 s"), share, "%");
         }
         if let Some(bytes) = last.mem_available {
             bench::record(
@@ -1810,14 +1826,23 @@ fn presented_share(r: &Pass) -> Option<f64> {
     Some(100.0 * r.after_first(|s| s.shown) as f64 / due_after_first(r)?)
 }
 
-/// The frames passed over a lens in those seconds, as a share of those
-/// presents, in %: the engine counts a locked pair's once a pair and an
-/// unlocked player's for every stream, so the count is divided by
-/// [`Pass::drops_over`]. Until `Counter::Skipped` takes them out, the
-/// frames a clip faster than the presents passes over at each one count
-/// too, on both sides of the comparison.
+/// The frames passed over a lens in those seconds beyond the presents'
+/// cadence, as a share of those presents, in %: the engine counts a
+/// locked pair's once a pair and an unlocked player's for every stream,
+/// so the count is divided by [`Pass::drops_over`]. The frames a clip
+/// faster than the presents passes over at each one by design are
+/// skipped ([`skipped_share`]), on both sides of the comparison.
 fn dropped_share(r: &Pass) -> Option<f64> {
     let a_lens = r.after_first(|s| s.dropped) as f64 / r.drops_over.max(1) as f64;
+    Some(100.0 * a_lens / due_after_first(r)?)
+}
+
+/// The frames passed over a lens in those seconds up to the presents'
+/// cadence, as [`dropped_share`] counts those beyond it: about 100 % for
+/// 4K120 at 60 Hz, a frame a present, and 0 at or below the present
+/// rate.
+fn skipped_share(r: &Pass) -> Option<f64> {
+    let a_lens = r.after_first(|s| s.skipped) as f64 / r.drops_over.max(1) as f64;
     Some(100.0 * a_lens / due_after_first(r)?)
 }
 
@@ -1876,9 +1901,12 @@ fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
         );
     };
     let was = presented_share(unlocked).unwrap_or(f64::NAN);
+    let skips = [r, unlocked].map(|p| skipped_share(p).unwrap_or(f64::NAN));
     let line = format!(
         "0 unpaired, presented {shown:.2} % of the presents that owed a frame after 1 s \
-         against {was:.2} % unlocked, dropped {dropped:.2} % a lens against {before:.2} %"
+         against {was:.2} % unlocked, dropped {dropped:.2} % a lens against {before:.2} % \
+         (skipped {:.2} % against {:.2} %)",
+        skips[0], skips[1]
     );
     if shown >= 99.0 && dropped - before <= 1.0 {
         (Verdict::Pass, line)
@@ -5982,7 +6010,9 @@ fn zero_copy_pair_matches_copy() {
 /// waiting on a lens would; a `jumped` one finds the clock a frame
 /// further on, as after a tick the UI thread missed, and passes a frame
 /// over. The engine counts frames passed over once for a locked pair and
-/// for each of `streams` otherwise.
+/// for each of `streams` otherwise: at each present, as skipped up to the
+/// presents' cadence (one fewer than the clip's frames in a tick, rounded
+/// up, so 1 at 119.88 fps and 0 at 59.94) and as dropped beyond it.
 fn simulated(
     mode: Mode,
     frames: i64,
@@ -5998,6 +6028,7 @@ fn simulated(
     let at = |f: i64| rate.frame_to_time(f).unwrap();
     let end = at(frames);
     let counted = if locked { 1 } else { streams as u64 };
+    let cadence = (TICK.as_secs_f64() * rate.to_f64() - 1e-3).ceil() as u64 - 1;
     let mut owed = Owed::default();
     let mut pass = Pass {
         seconds: vec![Second::default(); 20],
@@ -6045,7 +6076,8 @@ fn simulated(
         let second = &mut pass.seconds[usize::try_from(w / 1_000_000_000).unwrap()];
         second.due += u64::from(owed.at(time, rate, playing, at_end, Some(end)));
         second.shown += u64::from(new);
-        second.dropped += passed * counted;
+        second.skipped += passed.min(cadence) * counted;
+        second.dropped += (passed - passed.min(cadence)) * counted;
         pass.shown += u64::from(new);
     }
     pass
@@ -6079,8 +6111,9 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     let pair = (2, true);
     let apart = (2, false);
     // 4K120 at 60 Hz: 4.89 s of 586 frames, every present owing one and
-    // passing one over, which counts as dropped on both sides until
-    // `Counter::Skipped` takes it out.
+    // passing one over, which the presents' cadence skips on both sides;
+    // dropped only at each loop's restart, whose first present after the
+    // landing finds the clock and its latency two ticks on, at frame 3.
     let k4 = |held: &dyn Fn(u64, i64) -> bool, (streams, locked): (usize, bool)| {
         simulated(Mode::K4_120, 586, 4, (streams, locked), held, never)
     };
@@ -6093,7 +6126,10 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     assert!(presented_share(r).unwrap() >= 99.9, "{line}");
     assert!(wall_second_share(r) < 51.0, "{}", wall_second_share(r));
     let (dropped, before) = (dropped_share(r).unwrap(), dropped_share(&unlocked).unwrap());
-    assert!((dropped - before).abs() < 0.5, "{line}");
+    assert_eq!(dropped, before, "{line}");
+    assert!(r.after_first(|s| s.dropped) <= r.loops, "{line}");
+    let skipped = skipped_share(r).unwrap();
+    assert!((99.0..=100.0).contains(&skipped), "{skipped:.2} % skipped");
     // The control: a pair held back at one present in 20, short of the
     // presents owed (and dropping its frame at the present after).
     let short = (unthrottled(), k4(&|k, _| k % 20 == 7, pair));
@@ -6118,6 +6154,7 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     assert_eq!(verdict, Verdict::Pass, "5.7K60: {line}");
     let r = &locked.1;
     assert!(r.loops >= 5, "5.7K60 looped {} times", r.loops);
+    assert_eq!(skipped_share(r), Some(0.0), "5.7K60 skips nothing at 60 Hz");
     assert!(wall_second_share(r) < 99.0, "{}", wall_second_share(r));
     eprintln!(
         "5.7K60 locked: {line}; wall seconds would say {:.2} %",
