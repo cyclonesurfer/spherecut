@@ -45,14 +45,16 @@ use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwPromise, HwSupport, PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError,
-    PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState, StreamStatus,
+    HwPromise, HwSupport, LockSpec, LockStatus, PREROLL_FRAMES, PlaySpan, PlayState, Player,
+    PlayerConfig, PlayerError, PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState,
+    StreamStatus,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
 use spherecut_synth::media::{self, Codec, Gop, Spec, VFR_TIMESCALE, vfr_ticks};
 use spherecut_testkit::control::must_fail;
 
+use common::pacing;
 use common::{gpu, player, pts, snapshot, until};
 
 const RATE: FrameRate = FrameRate::FPS_30;
@@ -1521,11 +1523,16 @@ fn a_keyframe_seek_back_with_the_cache_full_lands_on_its_keyframe() {
 }
 
 /// FFmpeg's backend, with a device stood in for by software that fails
-/// frame `plan.frame` "as hardware" (as synth's fallback tests do).
+/// frame `plan.frame` "as hardware" (as synth's fallback tests do): on
+/// every stream, or on stream `only` alone, the others stood in for by
+/// software that fails nowhere. Its timing tables are the file's, or
+/// none without `tables`, as a backend that reads none answers.
 #[derive(Debug)]
 struct FaultBackend {
     inner: FfmpegBackend,
     plan: FaultPlan,
+    only: Option<usize>,
+    tables: bool,
 }
 
 impl MediaBackend for FaultBackend {
@@ -1542,13 +1549,22 @@ impl MediaBackend for FaultBackend {
         path: &Path,
         req: &VideoRequest,
     ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        let failing = self.only.is_none_or(|s| req.stream.unwrap_or(0) == s);
+        let plan = if failing {
+            self.plan
+        } else {
+            FaultPlan {
+                frame: u64::MAX,
+                ..self.plan
+            }
+        };
         let req = VideoRequest {
             decode: DecodeMode::Hardware {
                 kind: HwKind::VaApi,
                 device: None,
                 fallback: Fallback::Software,
             },
-            fault: Some(self.plan),
+            fault: Some(plan),
             ..req.clone()
         };
         self.inner.open_video(path, &req)
@@ -1563,7 +1579,11 @@ impl MediaBackend for FaultBackend {
     }
 
     fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
-        self.inner.track_timing(path, stream)
+        if self.tables {
+            self.inner.track_timing(path, stream)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -1597,6 +1617,8 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
             fault: Fault::Decode,
             stand_in: true,
         },
+        only: None,
+        tables: true,
     };
     let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
     let player = player(backend, clock.clone(), config(64));
@@ -1639,11 +1661,102 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
 /// `FaultBackend` on a 2×64² two-track MP4 without the GOP fault, its
 /// plan on lens 1 only: the pair locks (no `LockRefused`), lens 0 stays
 /// on hardware, pairs keep coming under the pacing rule, and the notice
-/// comes exactly once (M3 plan section 9).
+/// comes exactly once (M3 plan section 9). Its control, the backend
+/// answering no tables, refuses the lock with `"timing"`.
 #[test]
-#[ignore = "M3.8 unit (d)"]
 fn a_fallback_on_one_lens_keeps_the_pair_locked() {
-    todo!()
+    let dir = TempDir::new("pair-fallback");
+    let spec = media::pairs_64()
+        .into_iter()
+        .find(|p| p.name == media::PAIR_64_MATCHED)
+        .unwrap()
+        .scaled(64, 90);
+    let path = media::write_pair(&spec, &dir.0).unwrap();
+    let rate = FrameRate::FPS_29_97;
+    // Lens 1's stand-in device fails its 45th frame, once the window
+    // (1 s ahead of the pair) gets there in play. Opened locked, with the
+    // file's tables or none: the lock's status once both first frames
+    // show, and the player.
+    let open = |tables: bool| {
+        let backend = FaultBackend {
+            inner: FfmpegBackend::new(),
+            plan: FaultPlan {
+                frame: 45,
+                fault: Fault::Decode,
+                stand_in: true,
+            },
+            only: Some(1),
+            tables,
+        };
+        let clock = Arc::new(ManualClock::new(rate.frame_duration()));
+        let player = player(backend, clock.clone(), config(64));
+        player.open_locked(path.clone(), [0, 1], LockSpec::default());
+        let paired = until(WAIT, || {
+            let p = player.present(Instant::now())?;
+            let times: Vec<_> = p.frames.iter().map(|f| f.frame.time).collect();
+            (times == [Time::ZERO; 2]).then_some(())
+        });
+        assert!(paired.is_some(), "the first pair never showed");
+        let status = snapshot(&player).lock.map(|l| l.status);
+        (player, clock, status)
+    };
+    // What the player said of the lock, and of fallbacks, by stream.
+    let said = |events: Vec<PlayerEvent>, fell: &mut Vec<usize>, refused: &mut Vec<_>| {
+        for e in events {
+            match e {
+                PlayerEvent::FellBack { stream, .. } => fell.push(stream),
+                PlayerEvent::LockRefused { field } => refused.push(field),
+                _ => {}
+            }
+        }
+    };
+    let (player, clock, status) = open(true);
+    let (mut fell, mut refused) = (Vec::new(), Vec::new());
+    said(player.events(), &mut fell, &mut refused);
+    assert_eq!((status, &refused[..]), (Some(LockStatus::Locked), &[][..]));
+    // Played to the end, the clock moving on a frame once both lenses'
+    // frames there are up: the other tests here share lavapipe's one
+    // device, and while they use it an upload can take longer than a
+    // frame, so a clock on the wall would outrun the slots whatever the
+    // lock did. A pair that froze at the fallback would still stop the
+    // clock short of the end.
+    let samples = pacing::play_steady(&player, &clock, rate, 90, [0, 1], WAIT, |_, _| {});
+    let paced = pacing::pacing(&samples, rate);
+    said(player.events(), &mut fell, &mut refused);
+    let snap = snapshot(&player);
+    common::join(player);
+    if let Err(e) = paced {
+        panic!("{e:?}");
+    }
+    assert_eq!((fell, refused), (vec![1], vec![]));
+    assert_eq!(snap.lock.map(|l| l.status), Some(LockStatus::Locked));
+    let paths: Vec<_> = snap.streams.iter().map(|s| s.decode.clone()).collect();
+    assert!(
+        matches!(
+            paths[..],
+            [
+                Some(DecodePath::Hardware {
+                    kind: HwKind::VaApi
+                }),
+                Some(DecodePath::FellBack { .. })
+            ]
+        ),
+        "{paths:?}"
+    );
+
+    // Control: no tables, and the lock is refused.
+    let (player, _, status) = open(false);
+    let mut refused = Vec::new();
+    said(player.events(), &mut Vec::new(), &mut refused);
+    common::join(player);
+    must_fail("no tables", status == Some(LockStatus::Locked));
+    assert_eq!(
+        (status, refused),
+        (
+            Some(LockStatus::Refused { field: "timing" }),
+            vec!["timing"]
+        )
+    );
 }
 
 /// FFmpeg's backend, with every Vulkan decode on FFmpeg's device on
