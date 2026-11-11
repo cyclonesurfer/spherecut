@@ -321,7 +321,8 @@ The other modules are safe Rust:
   from a snapped Matroska default duration that the first 64 blocks and
   the Cues keep to; the end of the stream from the container, else the
   last frame's interval; the frame count from the MP4 index; the mapping
-  from the track's spherical boxes). Streams whose timestamps tie or go
+  from the track's spherical boxes, or for Matroska and WebM from FFmpeg's
+  spherical side data). Streams whose timestamps tie or go
   backwards seek by the tie rule, the latter by decoding from the start.
   Playing on, `next_frame` says a failed read once, as a `Damaged` event
   with its cause, before the first frame the decoder drains after it or

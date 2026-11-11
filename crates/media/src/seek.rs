@@ -2342,7 +2342,18 @@ impl StreamFacts {
         let frame_count = mov
             .then(|| ffi::index_shown(input, index))
             .filter(|&n| n > 0);
-        let mapping = trak_facts.map(|(_, s)| mapping(&s)).unwrap_or_default();
+        // Our own reading of an MP4's boxes, else what FFmpeg's demuxer
+        // exported (Matroska and WebM), as probe reads them.
+        let mapping = match trak_facts {
+            Some((_, s)) => mapping(&s),
+            None => mapping(&spherical::TrackSpherical {
+                v2: st
+                    .as_ref()
+                    .and_then(|s| ffi::codecpar_fields(&s.parameters()).spherical)
+                    .map(|f| spherical::from_ffmpeg(&f)),
+                ..Default::default()
+            }),
+        };
         StreamFacts {
             end_pts,
             timing,

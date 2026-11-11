@@ -2250,6 +2250,18 @@ Revisit if: a caller needs codes on doctor's issues or one document per
 file of a long run; or A1's schemas want another time or error shape, in
 which case that is a version 2 of these schemas, never a silent change.
 
+*Updated 2026-11-11 (review-fix slice):* the Codes bullet's Matroska
+message is gone (F070, F128). Since A1.6 probe reads a Matroska or WebM
+file's `Projection` and `StereoMode` elements from FFmpeg's side data
+(D46), so frame has treated a tagged Matroska equirect as an equirect
+since then, and only one without a `Projection` element reached that
+message, which blamed metadata left unread. Such a file now gets what an
+MP4 without `sv3d` gets: `not_equirect`, saying it is 2:1 with no
+spherical metadata and may not be an equirect (or what else it is), and
+`--equirect` renders it. `crates/cli/tests/frame.rs`'s
+`a_matroska_file_is_equirect_when_its_projection_says_so` renders a
+tagged remux with no flag and refuses an untagged one.
+
 ## D28. Crate layout, rust-version 1.95 and where unsafe may appear
 
 *2026-10-24, M1 slice 3b. The M1 plan's D26 (section 2); updates D1,
@@ -7646,6 +7658,21 @@ failing a file over advice.
 Revisit if: YouTube's pages change (refetch them), or M2's exports
 exist (name them in the fixes), or Pat's footage shows a camera file
 `archive` misreads.
+
+*Updated 2026-11-11 (review-fix slice):* the decoder now reads a
+Matroska or WebM file's projection as probe does (F070). Its stream facts
+(`VideoStreamInfo::mapping`) came from an MP4 track's boxes alone, so
+every Matroska file got the default mapping, and the still renderer, the
+viewer, the raw view's choice and the export rendered a tagged
+top-bottom, cropped or posed Matroska equirect whole, uncropped and
+unposed, with no warning, though probe and `check` named its layout.
+Without an MP4 track, the mapping now comes from FFmpeg's spherical and
+stereo side data, through the same `spherical::from_ffmpeg` as probe's.
+`synth/tests/generated_media.rs` checks the decoder's mapping of a mono
+and a top-bottom remux against the MP4's, and `crates/cli/tests/frame.rs`
+renders the top-bottom, left-right, cropped, posed and plain rows of its
+warnings test from Matroska remuxes too (st3d's custom layout has no
+Matroska `StereoMode`), with the same pictures and warnings.
 
 ## D47. The project file: JSON with a schema number
 

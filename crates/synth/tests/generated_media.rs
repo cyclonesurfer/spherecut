@@ -155,8 +155,10 @@ fn lossless_hevc10_round_trips_frames_timing_and_metadata() {
 
 #[test]
 fn matroska_keeps_the_projection_and_probe_reads_it_from_ffmpeg() {
+    use spherecut_media::backend::{FfmpegBackend, MediaBackend, SourceMapping, VideoRequest};
     use spherecut_media::inject::{self, EntryEdit, TrackKind};
     use spherecut_media::spherical::{Projection, StereoMode, write};
+    use spherecut_testkit::control::must_fail;
     let dir = tmp("mkv-spherical");
     let mono = media::write(&small("t-sph", Codec::H264, 8, Audio::None, true), &dir).unwrap();
     // A stereo one: the same picture tagged top-bottom.
@@ -176,6 +178,25 @@ fn matroska_keeps_the_projection_and_probe_reads_it_from_ffmpeg() {
         }],
     )
     .unwrap();
+    // How the decoder maps a file's picture onto the sphere, which the
+    // renderer follows.
+    let mapping = |path: &Path| -> SourceMapping {
+        FfmpegBackend::default()
+            .open_video(path, &VideoRequest::default())
+            .unwrap()
+            .info()
+            .mapping
+            .clone()
+    };
+    let has_projection = |m: &SourceMapping| {
+        m.projection
+            == Some(Projection::Equirect {
+                top: 0,
+                bottom: 0,
+                left: 0,
+                right: 0,
+            })
+    };
     for (mp4, stereo) in [(&mono, StereoMode::Mono), (&tb, StereoMode::TopBottom)] {
         let mkv = media::remux_to_mkv(mp4, &dir).unwrap();
         let r = probe::probe(&mkv).unwrap();
@@ -203,7 +224,18 @@ fn matroska_keeps_the_projection_and_probe_reads_it_from_ffmpeg() {
             "{mkv:?}"
         );
         assert_eq!(r.camera.as_ref().unwrap().layout, Layout::EquirectTagged);
+        // The decoder reads it as probe does, so the picture is mapped as
+        // the MP4's is.
+        let m = mapping(&mkv);
+        assert!(has_projection(&m), "{mkv:?}: {m:?}");
+        assert_eq!(m.stereo, stereo, "{mkv:?}");
+        assert_eq!(m, mapping(mp4), "{mkv:?}");
     }
+    let flat_mkv = media::remux_to_mkv(&flat, &dir).unwrap();
+    must_fail(
+        "an untagged Matroska file has a projection",
+        has_projection(&mapping(&flat_mkv)),
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
