@@ -132,35 +132,51 @@ struct Gates {
     vaapi_hevc: Vec<String>,
 }
 
-/// Why the run in `doc` fails, by the gates; empty when it passes.
-fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
-    let mut why = Vec::new();
-    if doc["ok"] != true {
-        why.push(format!(
-            "the run failed: {} ({})",
-            doc["error"]["message"].as_str().unwrap_or("no message"),
-            doc["error"]["code"].as_str().unwrap_or("no code")
-        ));
-        return why;
-    }
-    let r = &doc["result"];
-    let f = |v: &Value| v.as_f64();
-    // After the first second, while the cache fills, as the playback
-    // benches judge; the whole run where it ended sooner.
-    let judged = if r["settled"].is_object() {
+/// What the gates judge of the result `r`: after the first second,
+/// while the cache fills, as the playback benches judge; the whole run
+/// where it ended sooner.
+fn judged(r: &Value) -> &Value {
+    if r["settled"].is_object() {
         &r["settled"]
     } else {
         r
-    };
+    }
+}
+
+/// How many lenses a frame shown counts once a lens for, and what a
+/// drop counts: a locked pair's drops count once a pair and its frames
+/// shown once a lens.
+fn per_lens(r: &Value) -> (f64, &'static str) {
+    match r["streams"].as_array().map_or(1, Vec::len) {
+        n @ 2.. if r["lock"]["status"] == "locked" => (n as f64, "pairs"),
+        _ => (1.0, "frames"),
+    }
+}
+
+/// Whether the UI in `judged` presented too few frames because the
+/// compositor didn't draw the window: eframe runs passes without the UI
+/// while the compositor draws nothing of the window, and a window drawn
+/// but slow has none.
+fn undrawn(judged: &Value) -> bool {
+    let ui = &judged["ui"];
+    let f = |v: &Value| v.as_f64().unwrap_or(0.0);
+    let frames = f(&ui["frames"]);
+    f(&ui["presented"]) < MIN_PRESENTED
+        && f(&ui["passes"]) - frames >= (f(&ui["expected"]) - frames) / 2.0
+}
+
+/// Why the UI in `judged` (the result `r`'s part the gates judge)
+/// misses the UI's gates: fewer than 90% of the UI frames expected
+/// presented, said alone when the compositor didn't draw the window,
+/// since nothing else counts then; and a p99 over 1.5 refresh periods.
+/// Empty when it holds them.
+fn ui_gates(r: &Value, judged: &Value) -> Vec<String> {
+    let mut why = Vec::new();
+    let f = |v: &Value| v.as_f64();
     let ui = &judged["ui"];
     let presented = f(&ui["presented"]).unwrap_or(0.0);
     if presented < MIN_PRESENTED {
-        // eframe runs passes without the UI while the compositor draws
-        // nothing of the window; a window drawn but slow has none.
-        let expected = f(&ui["expected"]).unwrap_or(0.0);
-        let frames = f(&ui["frames"]).unwrap_or(0.0);
-        let hidden = f(&ui["passes"]).unwrap_or(0.0) - frames;
-        if hidden >= (expected - frames) / 2.0 {
+        if undrawn(judged) {
             why.push(format!(
                 "{:.0}% of the UI frames expected were presented: the compositor didn't draw \
                  the window (a locked session, or one on another VT), so the rest doesn't count",
@@ -168,27 +184,12 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
             ));
             return why;
         }
+        let hidden = f(&ui["passes"]).unwrap_or(0.0) - f(&ui["frames"]).unwrap_or(0.0);
         why.push(format!(
             "{:.0}% of the UI frames expected were presented, the window drawn ({hidden:.0} \
              passes without the UI): the UI was slow, each pass's own work {} ms at p95",
             presented * 100.0,
             f(&r["ui"]["work"]["p95"]).map_or("unmeasured".into(), |w| format!("{w:.1}"))
-        ));
-    }
-    // A locked pair's drops count once a pair and its frames shown once
-    // a lens: the share is of pairs, as the overlay's.
-    let (lenses, unit) = match r["streams"].as_array().map_or(1, Vec::len) {
-        n @ 2.. if r["lock"]["status"] == "locked" => (n as f64, "pairs"),
-        _ => (1.0, "frames"),
-    };
-    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0) / lenses;
-    let dropped = f(&judged["frames"]["dropped"]).unwrap_or(0.0);
-    if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
-        why.push(format!(
-            "{dropped} of {} {unit} dropped ({:.2}%, over {:.1}%)",
-            shown + dropped,
-            100.0 * dropped / (shown + dropped),
-            MAX_DROPPED * 100.0
         ));
     }
     if let (Some(hz), Some(p99)) = (f(&r["refresh_hz"]), f(&ui["p99"])) {
@@ -198,6 +199,38 @@ fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
                 "UI p99 {p99:.1} ms, over {MAX_UI_P99_PERIODS} × the {hz:.0} Hz period ({limit:.1} ms)"
             ));
         }
+    }
+    why
+}
+
+/// Why the run in `doc` fails, by the gates; empty when it passes.
+fn judge(doc: &Value, clip_is_sync: bool, gates: &Gates) -> Vec<String> {
+    if doc["ok"] != true {
+        return vec![format!(
+            "the run failed: {} ({})",
+            doc["error"]["message"].as_str().unwrap_or("no message"),
+            doc["error"]["code"].as_str().unwrap_or("no code")
+        )];
+    }
+    let r = &doc["result"];
+    let f = |v: &Value| v.as_f64();
+    let judged = judged(r);
+    let mut why = ui_gates(r, judged);
+    if undrawn(judged) {
+        return why;
+    }
+    // A locked pair's drops count once a pair and its frames shown once
+    // a lens: the share is of pairs, as the overlay's.
+    let (lenses, unit) = per_lens(r);
+    let shown = f(&judged["frames"]["shown"]).unwrap_or(0.0) / lenses;
+    let dropped = f(&judged["frames"]["dropped"]).unwrap_or(0.0);
+    if shown + dropped > 0.0 && dropped / (shown + dropped) > MAX_DROPPED {
+        why.push(format!(
+            "{dropped} of {} {unit} dropped ({:.2}%, over {:.1}%)",
+            shown + dropped,
+            100.0 * dropped / (shown + dropped),
+            MAX_DROPPED * 100.0
+        ));
     }
     if clip_is_sync {
         match f(&r["av"]["p95_abs_ms"]) {
@@ -322,14 +355,22 @@ fn sample_clips(dir: &Path) -> (Vec<Clip>, Option<Clip>) {
     (stitched, raw)
 }
 
-/// The run's process: the window in `session`, killed if it hangs.
-fn smoke(
-    session: &tier2::GraphicalSession,
-    clip: &Path,
-    json: &Path,
-    png: &Path,
-    export: Option<&Export>,
-) -> (Option<i32>, String) {
+/// What doctor's check says VA-API decodes of HEVC ("HEVC Main", "HEVC
+/// Main 10"), on the render node hw-test decodes on.
+fn vaapi_hevc() -> Vec<String> {
+    let node = tier2::render_node().unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"));
+    doctor::run(&node)
+        .decode_checks
+        .iter()
+        .filter(|c| {
+            c.path == "vaapi" && c.result == CheckResult::Works && c.format.starts_with("HEVC")
+        })
+        .map(|c| c.format.clone())
+        .collect()
+}
+
+/// The run's process, for [`window`] to run in the session.
+fn smoke_cmd(clip: &Path, json: &Path, png: &Path, export: Option<&Export>) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
     cmd.arg("--smoke")
         .arg(clip)
@@ -347,7 +388,7 @@ fn smoke(
             cmd.arg("--smoke-export-blur");
         }
     }
-    window(session, cmd)
+    cmd
 }
 
 /// A run's export while it plays.
@@ -415,18 +456,8 @@ fn gui_smoke() {
         panic!("{LOCKED}");
     }
 
-    // What doctor says VA-API decodes.
-    let node = tier2::render_node().unwrap_or_else(|| PathBuf::from("/dev/dri/renderD128"));
-    let report = doctor::run(&node);
     let gates = Gates {
-        vaapi_hevc: report
-            .decode_checks
-            .iter()
-            .filter(|c| {
-                c.path == "vaapi" && c.result == CheckResult::Works && c.format.starts_with("HEVC")
-            })
-            .map(|c| c.format.clone())
-            .collect(),
+        vaapi_hevc: vaapi_hevc(),
     };
 
     let mut clips = Vec::new();
@@ -529,7 +560,10 @@ fn gui_smoke() {
             }));
             continue;
         }
-        let (status, stderr) = smoke(&session, &clip.path, &json, &png, export.as_ref());
+        let (status, stderr) = window(
+            &session,
+            smoke_cmd(&clip.path, &json, &png, export.as_ref()),
+        );
         let doc = std::fs::read(&json)
             .ok()
             .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
