@@ -22,7 +22,7 @@ use spherecut_render::readback::read_texture;
 use spherecut_testkit::control::must_fail;
 
 use crate::common::pacing::{self, Pace, Sample};
-use crate::common::per_stream::{Lens, PerStream};
+use crate::common::per_stream::{Hold, Lens, PerStream};
 use crate::common::{self, pts, snapshot};
 use crate::{GaveUp, WAIT, Wait, timed, wait_for};
 
@@ -238,10 +238,12 @@ const MIXED_FRAMES: i64 = 120;
 const SEEDS: u64 = 64;
 const ACTIONS: usize = 3;
 
-/// One seed's run of the mixed test on a player, its presents checked.
+/// One seed's run of the mixed test on a player, its presents checked,
+/// lens 1 behind `hold`.
 struct Mixed<'a> {
     player: &'a Player,
     clock: &'a ManualClock,
+    hold: &'a Hold,
     seed: u64,
     seen: &'a mut Mismatches,
 }
@@ -315,37 +317,49 @@ impl Mixed<'_> {
     /// Seek forward while lens 0 leads lens 1, to a frame past every one
     /// either lens holds and more than 1 s past the pair on screen: the
     /// seek after which the old pair is still the newest time both hold,
-    /// and lens 0's landing lies past its window from it. Lens 0 decodes
-    /// faster, so it leads while the windows fill after a landing; a
-    /// seek back to the start fills them again if this missed it.
+    /// and lens 0's landing lies past its window from it. Lens 1 is held
+    /// at frame 1 from the open, so lens 0 leads once it has decoded two
+    /// frames, whatever the machine's load; the hold lets go once the seek
+    /// is asked for.
     fn lead(&mut self, rng: &mut Rng) {
-        for _ in 0..20 {
-            let began = Instant::now();
-            while began.elapsed() < ms(50) {
-                self.seen.present(self.player);
-                let s = snapshot(self.player);
-                let newest = [0, 1].map(|i| s.streams[i].newest.map(frame_of));
-                if let ([Some(n0), Some(n1)], Some([shown, _])) = (newest, self.seen.shown)
-                    && n0 > n1
-                {
-                    let past = (n0.max(n1) + 2).max(shown + 31);
-                    if past < MIXED_FRAMES {
-                        self.seek(rng.within(past, MIXED_FRAMES), SeekMode::Exact);
-                        return;
-                    }
-                }
-                std::thread::sleep(ms(1));
+        let began = Instant::now();
+        loop {
+            self.seen.present(self.player);
+            let s = snapshot(self.player);
+            let newest = [0, 1].map(|i| s.streams[i].newest.map(frame_of));
+            if let ([Some(n0), Some(n1)], Some([shown, _])) = (newest, self.seen.shown)
+                && n0 > n1
+            {
+                let past = (n0.max(n1) + 2).max(shown + 31);
+                assert!(
+                    past < MIXED_FRAMES,
+                    "seed {}: lens 0 led to {n0}",
+                    self.seed
+                );
+                let k = rng.within(past, MIXED_FRAMES);
+                self.player.seek(at(k), SeekMode::Exact);
+                self.hold.release(i64::MAX);
+                self.lands(&format!("a seek to {k} while lens 0 led"), |got| {
+                    got == [k, k]
+                });
+                return;
             }
-            self.seek(0, SeekMode::Exact);
+            assert!(
+                began.elapsed() < WAIT,
+                "seed {}: lens 0 never led: {:?}",
+                self.seed,
+                s.streams
+            );
+            std::thread::sleep(ms(1));
         }
-        panic!("seed {}: lens 0 never led", self.seed);
     }
 
-    /// The seed's run: open, the seek forward while lens 0 leads, then
-    /// [`ACTIONS`] random seeks, steps, plays and pauses, the plays at a
-    /// frame every 1, 2 or 4 ms.
+    /// The seed's run: open with lens 1 held at frame 1, the seek forward
+    /// while lens 0 leads, then [`ACTIONS`] random seeks, steps, plays and
+    /// pauses, the plays at a frame every 1, 2 or 4 ms.
     fn run(&mut self, lock: Option<LockSpec>) {
         let mut rng = Rng(self.seed);
+        self.hold.release(1);
         open(self.player, lock, self.seen);
         self.lead(&mut rng);
         for _ in 0..ACTIONS {
@@ -384,15 +398,19 @@ fn a_locked_pair_never_shows_mismatched_frames() {
     // their own, the presents it counted unpaired, and the seeds run: all
     // of them, or until `enough`. Lens 0 at 0.2 ms a frame, and lens 1 at
     // 0.5 ms with up to 0.1 ms more drawn for each frame from its seed
-    // and open: lens 1 at 2.5 to 3 times lens 0's cost. The player is
-    // opened again for each seed, on three slots: locked, it takes six.
+    // and open: lens 1 at 2.5 to 3 times lens 0's cost, and behind a
+    // hold until each seed's lead. The player is opened again for each
+    // seed, on three slots: locked, it takes six.
     let runs = |lock: Option<LockSpec>, seeds: Range<u64>, enough: fn(&Mismatches) -> bool| {
         let lens = |cost: u64| {
             Lens::default()
                 .frames(MIXED_FRAMES as u64)
                 .cost(Duration::from_micros(cost))
         };
-        let lens1 = lens(500).jitter(seeds.end, Duration::from_micros(100));
+        let hold = Hold::at(i64::MAX);
+        let lens1 = lens(500)
+            .jitter(seeds.end, Duration::from_micros(100))
+            .hold(&hold);
         let backend = PerStream::pair(lens(200), lens1);
         let (player, clock) = player(backend, 3, 64 << 20);
         let mut seen = Mismatches::default();
@@ -401,6 +419,7 @@ fn a_locked_pair_never_shows_mismatched_frames() {
             Mixed {
                 player: &player,
                 clock: &clock,
+                hold: &hold,
                 seed,
                 seen: &mut seen,
             }

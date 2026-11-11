@@ -10,18 +10,20 @@
 //! frame cost is charged for every frame decoded, handed out or passed
 //! over, as at 8K, where every frame is a reference frame; a lens's
 //! jitter adds to it, from a seeded stream, so that a run can be
-//! replayed.
+//! replayed. A lens behind a [`Hold`] hands out no frame past the one it
+//! lets go, so that it lags the other by as much as a test says, whatever
+//! the machine's load.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{FrameRate, StopToken, Time};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
     AudioDecode, AudioRequest, DecodePath, DecodeStats, DecoderEvent, MediaBackend, NextFrame,
-    SeekMode, SeekOutcome, VideoDecode, VideoRequest, VideoStreamInfo,
+    SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
@@ -50,8 +52,36 @@ pub struct Lens {
     /// Opens wait for this gate, or the request's shutdown flag, on
     /// which they fail.
     pub held_by: Option<Gate>,
+    /// The lens hands out no frame past the one this lets go.
+    pub hold: Option<Hold>,
     /// What [`MediaBackend::track_timing`] answers.
     pub tables: Tables,
+}
+
+/// How far a [`Lens`] behind it may go: the last frame it hands out, by
+/// pts (a frame's index). A frame past it waits, decoded, until the hold
+/// lets it go or the decoder is told to stop; stopped, it is kept for the
+/// next `next_frame`, so that none is lost, and a seek drops it. Clones
+/// share it.
+#[derive(Debug, Clone)]
+pub struct Hold(Arc<AtomicI64>);
+
+impl Hold {
+    /// A hold at frame `frame`.
+    pub fn at(frame: i64) -> Self {
+        Hold(Arc::new(AtomicI64::new(frame)))
+    }
+
+    /// Let the lens hand out its frames up to `frame`, and hold those
+    /// after it.
+    pub fn release(&self, frame: i64) {
+        self.0.store(frame, Ordering::Release);
+    }
+
+    /// Whether the lens may hand out the frame at pts `pts`.
+    pub fn lets(&self, pts: i64) -> bool {
+        pts <= self.0.load(Ordering::Acquire)
+    }
 }
 
 /// The timing tables a [`Lens`] answers.
@@ -86,6 +116,7 @@ impl Lens {
             read_error_at: None,
             open_fails: false,
             held_by: None,
+            hold: None,
             tables: Tables::Derived,
         }
     }
@@ -143,6 +174,12 @@ impl Lens {
     /// Opens wait until `gate` is released.
     pub fn held_by(mut self, gate: &Gate) -> Self {
         self.held_by = Some(gate.clone());
+        self
+    }
+
+    /// The lens hands out no frame past the one `hold` lets go.
+    pub fn hold(mut self, hold: &Hold) -> Self {
+        self.hold = Some(hold.clone());
         self
     }
 
@@ -277,6 +314,8 @@ impl MediaBackend for PerStream {
             }),
             read_error_at: lens.read_error_at,
             decoded: 0,
+            hold: lens.hold.clone(),
+            pending: None,
         }))
     }
 
@@ -319,8 +358,8 @@ impl Jitter {
 }
 
 /// A lens being decoded: the clip's decoder, its info carrying the
-/// stream's index, charging the lens's jitter and failing at its read
-/// error.
+/// stream's index, charging the lens's jitter, failing at its read error
+/// and waiting at its hold.
 #[derive(Debug)]
 struct LensVideo {
     inner: Box<dyn VideoDecode>,
@@ -330,6 +369,9 @@ struct LensVideo {
     read_error_at: Option<u64>,
     /// The inner decoder's frames decoded, as last charged for.
     decoded: u64,
+    hold: Option<Hold>,
+    /// A frame past the hold when a stop came, for the next `next_frame`.
+    pending: Option<Arc<VideoFrame>>,
 }
 
 impl LensVideo {
@@ -352,6 +394,25 @@ impl LensVideo {
             }
             std::thread::sleep(left.min(Duration::from_millis(1)));
         }
+    }
+
+    /// Wait until the hold lets the frame at `pts` go (true), or `stop`
+    /// says to stop (false), looking every millisecond.
+    fn wait(&self, pts: i64, stop: &StopToken) -> bool {
+        let Some(hold) = &self.hold else {
+            return true;
+        };
+        if hold.lets(pts) {
+            return true;
+        }
+        spherecut_core::may_block("a lens held back by its test");
+        while !hold.lets(pts) {
+            if stop.is_stopped() {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        true
     }
 
     /// The read error, if frame pts `pts` is at or after it.
@@ -384,23 +445,39 @@ impl VideoDecode for LensVideo {
         mode: SeekMode,
         stop: &StopToken,
     ) -> Result<SeekOutcome, MediaError> {
+        self.pending = None;
         let got = self.inner.seek(at, mode, stop);
         self.charge(stop);
         let got = got?;
         if let SeekOutcome::Frame { frame, .. } = &got {
             self.read(frame.pts)?;
+            if !self.wait(frame.pts, stop) {
+                return Ok(SeekOutcome::Stopped);
+            }
         }
         Ok(got)
     }
 
     fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
-        let got = self.inner.next_frame(stop);
-        self.charge(stop);
-        let got = got?;
-        if let NextFrame::Frame(frame) = &got {
-            self.read(frame.pts)?;
+        let frame = match self.pending.take() {
+            Some(frame) => frame,
+            None => {
+                let got = self.inner.next_frame(stop);
+                self.charge(stop);
+                match got? {
+                    NextFrame::Frame(frame) => {
+                        self.read(frame.pts)?;
+                        frame
+                    }
+                    other => return Ok(other),
+                }
+            }
+        };
+        if !self.wait(frame.pts, stop) {
+            self.pending = Some(frame);
+            return Ok(NextFrame::Stopped);
         }
-        Ok(got)
+        Ok(NextFrame::Frame(frame))
     }
 
     fn catch_up(&mut self, until: Option<Time>) {
