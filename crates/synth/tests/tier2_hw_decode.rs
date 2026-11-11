@@ -6,8 +6,9 @@
 //! The decoder is not allowed to fall back to software: a frame that wasn't
 //! decoded on the device fails the test.
 //!
-//! VA-API is the hardware decoder Spherecut relies on. Vulkan Video is
-//! optional, and not every driver has it, so its tests skip with FFmpeg's
+//! VA-API is the hardware decoder on integrated GPUs and the fallback on
+//! discrete ones, where the player prefers Vulkan Video (D34). Vulkan Video
+//! is optional, and not every driver has it, so its tests skip with FFmpeg's
 //! reason when the driver can't decode the format, and fail on any other
 //! error. They run on the GPU behind VA-API's render node, or the first
 //! GPU, never on llvmpipe (`open_vulkan_device`, DECISIONS D38).

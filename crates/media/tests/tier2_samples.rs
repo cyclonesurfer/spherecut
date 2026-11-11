@@ -5,8 +5,9 @@
 //! decode on the GPU exactly as it does in software. The benchmark measures
 //! whether each recording mode decodes in real time.
 //!
-//! VA-API is the hardware decoder Spherecut relies on. Vulkan Video is
-//! optional: where the driver can't decode a format, its test skips with
+//! VA-API is the hardware decoder on integrated GPUs and the fallback on
+//! discrete ones, where the player prefers Vulkan Video (D34). Vulkan Video
+//! is optional: where the driver can't decode a format, its test skips with
 //! FFmpeg's reason and its benchmark rows are left out with it. It runs on
 //! the GPU behind VA-API's render node, or the first GPU, never on
 //! llvmpipe (`open_vulkan_device`, DECISIONS D38).

@@ -1285,6 +1285,24 @@ above, as the `result` of a `spherecut.doctor/1` document. An issue of
 severity error makes `ok` false, with the code `doctor_errors`, and still
 exits 1; a command line that doesn't parse exits 2.
 
+*Updated 2026-11-11 (review-fix slice):* "a Vulkan Video decode problem
+is a note, because VA-API is the first hardware decoder" holds only on an
+integrated GPU (F125). On a discrete GPU the player prefers Vulkan Video
+(D34), since VA-API's frames are copied out of video memory there: on
+odin's RX 7600, VA-API played 5.7K 8-bit at 28 fps unthrottled and
+dropped 33 frames in 20 s, 409 at 5.7K 10-bit and 445 at 8K, while
+Vulkan Video dropped none at 5.7K (`docs/perf.md`'s playback tables:
+only Vulkan Video plays 5.7K in real time there). So when FFmpeg's
+Vulkan device is a discrete GPU, a format that Vulkan Video can't decode,
+or decodes wrongly, and that VA-API decodes in its place makes the issue
+a warning, whose impact says that VA-API's frames are copied out of
+video memory, which drops frames at 5.7K and up. The rest is as before:
+VA-API unable for every format is a note (VA-API's own issue is the
+warning), and Vulkan Video's wrong output where VA-API can't decode is a
+warning. On an integrated GPU nothing changed, word for word. Doctor
+judges the GPU by FFmpeg's Vulkan device and the player by wgpu's
+adapter, so on a machine with two GPUs the two can differ.
+
 ## D19. How `cargo xtask hw-test` reports Tier 2 tests
 
 *2026-10-23, M0. Makes D9's "never a pass and never a mystery failure"
@@ -6663,6 +6681,15 @@ the driver doesn't support the format, not FFmpeg's reason.
 
 Revisit if: doctor or the app should decode on the same device (the app
 will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
+
+*Updated 2026-11-11 (review-fix slice):* where FFmpeg can't open a
+Vulkan device at all, doctor's Fedora fix installed `mesa-vulkan-drivers`
+whatever was there (F133). With `mesa-vulkan-drivers-freeworld`
+installed, which conflicts with it, the fix is now `sudo dnf install
+vulkan-loader`, keeping that driver, and `VK_LOADER_DEBUG=error,warn
+vulkaninfo --summary`, which shows why no Vulkan device opens, as the
+fix for a Vulkan that runs only on the CPU already asks. Where no GPU is
+visible, the pass-through line still comes first.
 
 ## D39. `frame --decoder auto` tries VA-API on the rendering GPU, then software
 

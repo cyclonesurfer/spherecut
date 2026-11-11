@@ -236,8 +236,10 @@ pub struct Issue {
 pub enum Severity {
     /// Some sources can't be opened at all.
     Error,
-    /// Sources open, but something is slow (a software fallback), missing
-    /// (such as an export or audio codec) or wrong (a driver's output).
+    /// Sources open, but something is slow (a software fallback), or
+    /// slower than it should be, such as VA-API's copy on a discrete GPU,
+    /// missing (such as an export or audio codec) or wrong (a driver's
+    /// output).
     Warning,
     Info,
 }
@@ -1146,6 +1148,14 @@ impl Fixes<'_> {
     /// A Vulkan driver for the GPU.
     fn vulkan_driver(&self) -> String {
         let driver = match self.distro {
+            // RPM Fusion's driver conflicts with Fedora's, so it stays.
+            Distro::Fedora if self.has("mesa-vulkan-drivers-freeworld") => {
+                "sudo dnf install vulkan-loader   (mesa-vulkan-drivers-freeworld is the Vulkan \
+                 driver here; it conflicts with mesa-vulkan-drivers)\n\
+                 VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (shows why no Vulkan device \
+                 opens)"
+                    .into()
+            }
             Distro::Fedora => {
                 "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
                     .into()
@@ -1563,6 +1573,11 @@ const NO_VULKAN_GPU: &str = "the viewer and exports render with Vulkan, and on t
                              that is far too slow for 360 video; Vulkan Video decode is \
                              unavailable";
 
+/// What VA-API decoding in Vulkan Video's place costs on a discrete GPU,
+/// where the player prefers Vulkan Video (D34).
+const COPIED: &str = "but on a discrete GPU its frames are copied out of video memory, which \
+                      drops frames at 5.7K and up";
+
 fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
     if !r.hw_device_types.iter().any(|t| t == "vulkan") {
         out.push(Issue {
@@ -1636,11 +1651,16 @@ fn vulkan_issues(r: &DoctorReport, env: &Env, fx: &Fixes<'_>, out: &mut Vec<Issu
 }
 
 /// What Vulkan Video can't decode, or decodes wrongly, on FFmpeg's Vulkan
-/// device, a GPU. VA-API is the hardware decoder, and Vulkan Video the
-/// second one, so these are notes. The exception is wrong output where
-/// VA-API can't decode: Vulkan Video's wrong pictures are used there, which
-/// is a warning, as VA-API's own wrong output is.
+/// device, a GPU. On an integrated GPU VA-API is the hardware decoder, and
+/// Vulkan Video the second one, so these are notes. On a discrete GPU the
+/// player prefers Vulkan Video and VA-API's frames are copied out of video
+/// memory (D34), so a format VA-API decodes in Vulkan Video's place is a
+/// warning. Wrong output where VA-API can't decode is a warning on either:
+/// Vulkan Video's wrong pictures are used there, as VA-API's own wrong
+/// output is.
 fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) {
+    let dev = r.vulkan_devices.iter().find(|d| d.used_by_ffmpeg);
+    let discrete = dev.is_some_and(|d| d.device_type == VulkanDeviceType::DiscreteGpu);
     // `formats` split by what VA-API, which comes first, does with them:
     // decodes them, decodes them wrongly, or can't.
     fn on_vaapi<'a>(r: &DoctorReport, formats: &[&'a str]) -> [Vec<&'a str>; 3] {
@@ -1665,7 +1685,11 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
     let impact = |formats: &[&str], vulkan_wrong: bool| -> String {
         let [works, wrong, unable] = on_vaapi(r, formats);
         if works.len() == formats.len() {
-            return "none while VA-API decodes them, as it does here".into();
+            return if discrete {
+                format!("VA-API decodes them instead, {COPIED}")
+            } else {
+                "none while VA-API decodes them, as it does here".into()
+            };
         }
         if unable.len() == formats.len() && !vulkan_wrong {
             return "with VA-API unable too, they decode on the CPU, which is far slower at \
@@ -1673,7 +1697,12 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
                 .into();
         }
         let mut parts = Vec::new();
-        if !works.is_empty() {
+        if !works.is_empty() && discrete {
+            parts.push(format!(
+                "VA-API still decodes {}, {COPIED}",
+                and_list(&works)
+            ));
+        } else if !works.is_empty() {
             parts.push(format!("VA-API still decodes {}", and_list(&works)));
         }
         if !wrong.is_empty() {
@@ -1693,10 +1722,20 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
         }
         parts.join("; ")
     };
+    // A note, unless `warn` or VA-API decodes some of `formats` in Vulkan
+    // Video's place on a discrete GPU. VA-API unable for every one stays a
+    // note: VA-API's own issue is the warning.
+    let severity = |formats: &[&str], warn: bool| {
+        if warn || (discrete && !on_vaapi(r, formats)[0].is_empty()) {
+            Severity::Warning
+        } else {
+            Severity::Info
+        }
+    };
     let ffmpeg_dec = failed(&r.decode_checks, &r.decoders, "vulkan", Fault::Ffmpeg);
     if !ffmpeg_dec.is_empty() {
         out.push(Issue {
-            severity: Severity::Info,
+            severity: severity(&ffmpeg_dec, false),
             what: format!(
                 "this FFmpeg cannot use Vulkan Video to decode {}",
                 and_list(&ffmpeg_dec)
@@ -1705,7 +1744,6 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
             fix: fx.ffmpeg(),
         });
     }
-    let dev = r.vulkan_devices.iter().find(|d| d.used_by_ffmpeg);
     let on = dev.map_or_else(|| "the Vulkan device".to_string(), |d| d.name.clone());
     let refused = failures(&r.decode_checks, &r.decoders, "vulkan", Fault::Driver);
     if let [first, ..] = refused[..] {
@@ -1722,7 +1760,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
         };
         let formats = formats(&refused);
         out.push(Issue {
-            severity: Severity::Info,
+            severity: severity(&formats, false),
             what: format!(
                 "Vulkan Video on {on} cannot decode {}{why}",
                 and_list(&formats)
@@ -1743,11 +1781,7 @@ fn vulkan_decode_issues(r: &DoctorReport, fx: &Fixes<'_>, out: &mut Vec<Issue>) 
         let formats = formats(&wrong);
         let [.., unable] = on_vaapi(r, &formats);
         out.push(Issue {
-            severity: if unable.is_empty() {
-                Severity::Info
-            } else {
-                Severity::Warning
-            },
+            severity: severity(&formats, !unable.is_empty()),
             what: format!("Vulkan Video on {on} {}", wrongly("decodes", &wrong)),
             impact: impact(&formats, true),
             fix: fx.newer_driver(&driver),
@@ -1984,6 +2018,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use spherecut_testkit::control::must_fail;
 
     /// Every stream a check covers names one of the checks' formats, and
     /// nothing else is covered.
@@ -2485,58 +2520,122 @@ mod tests {
         );
     }
 
+    /// `r` with FFmpeg's Vulkan device on an integrated GPU, as huginn's,
+    /// where VA-API is the hardware decoder (D34).
+    fn integrated(r: &DoctorReport) -> DoctorReport {
+        let mut r = r.clone();
+        for d in r.vulkan_devices.iter_mut().filter(|d| d.used_by_ffmpeg) {
+            d.name = "AMD Radeon 8060S Graphics (RADV STRIX_HALO)".into();
+            d.device_type = VulkanDeviceType::IntegratedGpu;
+        }
+        r
+    }
+
+    /// A warning that VA-API decodes in Vulkan Video's place and copies
+    /// its frames out of video memory, as on a discrete GPU.
+    fn warns_of_copy(i: &Issue) -> bool {
+        i.severity == Severity::Warning && i.impact.contains(COPIED)
+    }
+
+    /// A note that VA-API decoding them costs nothing, as on an integrated
+    /// GPU.
+    fn notes_only(i: &Issue) -> bool {
+        i.severity == Severity::Info
+            && i.impact == "none while VA-API decodes them, as it does here"
+    }
+
     #[test]
-    fn vulkan_video_failures_on_a_gpu_are_notes_with_ffmpegs_reason() {
+    fn vulkan_video_failures_are_warnings_on_a_discrete_gpu_and_notes_on_an_integrated_one() {
+        // Fedora's stock Mesa on odin's discrete RX 7600: Vulkan Video
+        // refuses H.264 and HEVC, and VA-API decodes them. The player
+        // prefers Vulkan Video there, since VA-API's frames are copied out
+        // of video memory (D34), so that is a warning.
         let mut r = healthy(Distro::Fedora);
-        let hevc = ["HEVC Main", "HEVC Main 10"];
-        fail(&mut r.decode_checks, "vulkan", &hevc, Fault::Driver);
+        let h26x = ["H.264 High", "HEVC Main", "HEVC Main 10"];
+        fail(&mut r.decode_checks, "vulkan", &h26x, Fault::Driver);
         for c in r.decode_checks.iter_mut().filter(|c| c.path == "vulkan") {
             c.ffmpeg_log =
                 vec!["Device does not support the VK_KHR_video_decode_h265 extension!\n".into()];
         }
-        let i = only(&issues(&r, &Env::default())).clone();
-        assert_eq!(i.severity, Severity::Info);
+        let discrete = only(&issues(&r, &Env::default())).clone();
+        assert!(warns_of_copy(&discrete), "{discrete:?}");
         assert_eq!(
-            i.what,
-            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) cannot decode HEVC Main and \
-             HEVC Main 10 (FFmpeg: Device does not support the VK_KHR_video_decode_h265 \
-             extension!)"
+            discrete.what,
+            "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) cannot decode H.264 High, HEVC \
+             Main and HEVC Main 10 (FFmpeg: Device does not support the \
+             VK_KHR_video_decode_h265 extension!)"
         );
-        assert_eq!(i.impact, "none while VA-API decodes them, as it does here");
+        assert_eq!(
+            discrete.impact,
+            "VA-API decodes them instead, but on a discrete GPU its frames are copied out of \
+             video memory, which drops frames at 5.7K and up"
+        );
         // Fedora's Mesa: see fedoras_mesa_vulkan_video_gets_the_freeworld_driver.
         assert!(
-            i.fix.ends_with(
+            discrete.fix.ends_with(
                 "sudo dnf install mesa-vulkan-drivers-freeworld   (RPM Fusion \
              free: Fedora's Mesa leaves H.264 and HEVC out of Vulkan Video)"
             ),
-            "{i:?}"
+            "{discrete:?}"
         );
 
-        // VA-API can't decode HEVC Main either: the CPU does, and only that.
-        let vulkan_note = |r: &DoctorReport| {
+        // On an integrated GPU VA-API is the decoder, and that is a note.
+        let on_integrated = only(&issues(&integrated(&r), &Env::default())).clone();
+        assert!(notes_only(&on_integrated), "{on_integrated:?}");
+        assert_eq!(
+            on_integrated.what,
+            "Vulkan Video on AMD Radeon 8060S Graphics (RADV STRIX_HALO) cannot decode H.264 \
+             High, HEVC Main and HEVC Main 10 (FFmpeg: Device does not support the \
+             VK_KHR_video_decode_h265 extension!)"
+        );
+        must_fail(
+            "an integrated GPU's note warns of VA-API's copy",
+            warns_of_copy(&on_integrated),
+        );
+        must_fail(
+            "a discrete GPU's warning is only a note",
+            notes_only(&discrete),
+        );
+
+        // VA-API can't decode HEVC Main either: the CPU does, and VA-API
+        // still copies the rest.
+        let vulkan_issue = |r: &DoctorReport| {
             issues(r, &Env::default())
                 .into_iter()
                 .find(|i| i.what.starts_with("Vulkan Video"))
                 .unwrap()
         };
         fail(&mut r.decode_checks, "vaapi", &["HEVC Main"], Fault::Driver);
+        let i = vulkan_issue(&r);
+        assert_eq!(i.severity, Severity::Warning);
         assert_eq!(
-            vulkan_note(&r).impact,
-            "VA-API still decodes HEVC Main 10; the CPU decodes HEVC Main, which is far \
-             slower at 5.7K and up"
+            i.impact,
+            "VA-API still decodes H.264 High and HEVC Main 10, but on a discrete GPU its \
+             frames are copied out of video memory, which drops frames at 5.7K and up; the \
+             CPU decodes HEVC Main, which is far slower at 5.7K and up"
         );
-        fail(
-            &mut r.decode_checks,
-            "vaapi",
-            &["HEVC Main 10"],
-            Fault::Driver,
-        );
+        let i = vulkan_issue(&integrated(&r));
+        assert_eq!(i.severity, Severity::Info);
         assert_eq!(
-            vulkan_note(&r).impact,
-            "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K and up"
+            i.impact,
+            "VA-API still decodes H.264 High and HEVC Main 10; the CPU decodes HEVC Main, \
+             which is far slower at 5.7K and up"
         );
+        // VA-API unable for every one: VA-API's own issue is the warning,
+        // and this stays a note on either GPU.
+        fail(&mut r.decode_checks, "vaapi", &h26x, Fault::Driver);
+        for r in [r.clone(), integrated(&r)] {
+            let i = vulkan_issue(&r);
+            assert_eq!(i.severity, Severity::Info, "{i:?}");
+            assert_eq!(
+                i.impact,
+                "with VA-API unable too, they decode on the CPU, which is far slower at 5.7K \
+                 and up"
+            );
+        }
 
-        // A build without the Vulkan hwaccel is FFmpeg's fault.
+        // A build without the Vulkan hwaccel is FFmpeg's fault, and VA-API
+        // copies in its place on a discrete GPU too.
         let mut r = healthy(Distro::Arch);
         fail(&mut r.decode_checks, "vulkan", &[AV1], Fault::Ffmpeg);
         let i = only(&issues(&r, &Env::default())).clone();
@@ -2544,7 +2643,10 @@ mod tests {
             i.what,
             "this FFmpeg cannot use Vulkan Video to decode AV1 Main"
         );
+        assert!(warns_of_copy(&i), "{i:?}");
         assert_eq!(i.fix, "sudo pacman -S --needed ffmpeg");
+        let i = only(&issues(&integrated(&r), &Env::default())).clone();
+        assert!(notes_only(&i), "{i:?}");
     }
 
     #[test]
@@ -2640,20 +2742,24 @@ mod tests {
             "{:?}",
             is[0]
         );
-        assert_eq!(is[1].severity, Severity::Info);
         assert_eq!(
             is[1].what,
             "Vulkan Video on AMD Radeon RX 7600 (RADV NAVI33) decodes HEVC Main wrongly (12 \
              of 98304 samples differ from FFmpeg's software decoder)"
         );
-        assert_eq!(
-            is[1].impact,
-            "none while VA-API decodes them, as it does here"
-        );
+        // VA-API decodes it in Vulkan Video's place, which on this
+        // discrete GPU copies its frames; on an integrated one it is a note.
+        assert!(warns_of_copy(&is[1]), "{:?}", is[1]);
         assert_eq!(
             is[1].fix,
             "sudo dnf upgrade --refresh   (radv (Mesa 25.2.8) gets this wrong: a newer \
              release may fix it; if not, report it to its developers)"
+        );
+        let twin = issues(&integrated(&r), &Env::default());
+        assert!(notes_only(&twin[1]), "{:?}", twin[1]);
+        must_fail(
+            "the integrated twin's note warns of VA-API's copy",
+            warns_of_copy(&twin[1]),
         );
 
         // Several formats each give their reason.
@@ -2671,7 +2777,7 @@ mod tests {
              decoder; HEVC Main 10: decodes to 128x128 instead of 256x256)"
         );
 
-        // On VA-API, the main hardware decoder, it is a warning.
+        // On VA-API it is a warning on either kind of GPU.
         let mut r = healthy(Distro::Arch);
         wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
         let i = only(&issues(&r, &Env::default())).clone();
@@ -2728,10 +2834,11 @@ mod tests {
         };
         let hevc = ["HEVC Main", "HEVC Main 10"];
 
-        // Vulkan Video decodes wrongly where VA-API refuses: its pictures
-        // are used, since only a refusal falls back. That is a warning, as
-        // VA-API's wrong output is.
-        let mut r = healthy(Distro::Arch);
+        // On an integrated GPU, where VA-API is the decoder. Vulkan Video
+        // decodes wrongly where VA-API refuses: its pictures are used,
+        // since only a refusal falls back. That is a warning, as VA-API's
+        // wrong output is.
+        let mut r = integrated(&healthy(Distro::Arch));
         for f in hevc {
             wrong(&mut r.decode_checks, "vulkan", f, differ);
         }
@@ -2776,13 +2883,29 @@ mod tests {
         // The reverse: Vulkan Video refuses what VA-API decodes wrongly.
         // Nothing falls back from VA-API, so the CPU doesn't decode it. A
         // refusal is only a note.
-        let mut r = healthy(Distro::Arch);
+        let mut r = integrated(&healthy(Distro::Arch));
         fail(&mut r.decode_checks, "vulkan", &hevc, Fault::Driver);
         wrong(&mut r.decode_checks, "vaapi", "HEVC Main", differ);
         assert_eq!(vulkan_note(&r).severity, Severity::Info);
         assert_eq!(
             vulkan_note(&r).impact,
             "VA-API still decodes HEVC Main 10; VA-API decodes HEVC Main, but wrongly"
+        );
+        // On a discrete GPU VA-API copies what it decodes in Vulkan
+        // Video's place, which makes the refusal a warning.
+        let mut discrete = r.clone();
+        discrete.vulkan_devices = healthy(Distro::Arch).vulkan_devices;
+        let i = vulkan_note(&discrete);
+        assert_eq!(i.severity, Severity::Warning);
+        assert_eq!(
+            i.impact,
+            "VA-API still decodes HEVC Main 10, but on a discrete GPU its frames are copied \
+             out of video memory, which drops frames at 5.7K and up; VA-API decodes HEVC \
+             Main, but wrongly"
+        );
+        must_fail(
+            "the integrated GPU's note warns of VA-API's copy",
+            warns_of_copy(&vulkan_note(&r)),
         );
         fail(
             &mut r.decode_checks,
@@ -2826,6 +2949,44 @@ mod tests {
             i.fix,
             "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
         );
+
+        // RPM Fusion's driver installed, which conflicts with Fedora's: the
+        // fix keeps it and asks the loader why no device opens.
+        let fix = |env: &Env| only(&issues(&r, env)).fix.clone();
+        let keeps_freeworld = |fix: &str| {
+            fix.contains("sudo dnf install vulkan-loader")
+                && fix.contains("\nVK_LOADER_DEBUG=error,warn vulkaninfo --summary")
+                && !fix.contains("install mesa-vulkan-drivers ")
+        };
+        let with = fix(&installed(&["mesa-vulkan-drivers-freeworld"]));
+        assert!(keeps_freeworld(&with), "{with}");
+        assert_eq!(
+            with,
+            "sudo dnf install vulkan-loader   (mesa-vulkan-drivers-freeworld is the Vulkan \
+             driver here; it conflicts with mesa-vulkan-drivers)\n\
+             VK_LOADER_DEBUG=error,warn vulkaninfo --summary   (shows why no Vulkan device \
+             opens)"
+        );
+        // Without it, the fix is as it was.
+        let without = fix(&installed(&["mesa-vulkan-drivers"]));
+        assert_eq!(
+            without,
+            "sudo dnf install mesa-vulkan-drivers vulkan-loader   (RADV for AMD, ANV for Intel)"
+        );
+        must_fail(
+            "the fix without the freeworld driver keeps it",
+            keeps_freeworld(&without),
+        );
+        // No GPU passed through: that comes first, as before.
+        let env = Env {
+            node_error: Some((ErrorKind::NotFound, "not found".into())),
+            ..installed(&["mesa-vulkan-drivers-freeworld"])
+        };
+        let vulkan = issues(&r, &env)
+            .into_iter()
+            .find(|i| i.what.contains("Vulkan"))
+            .unwrap();
+        assert_eq!(vulkan.fix, format!("{PASS_THROUGH}\n{with}"));
     }
 
     #[test]
