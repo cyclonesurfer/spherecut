@@ -30,11 +30,12 @@ use std::path::Path;
 use std::sync::{OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-use spherecut_core::StopToken;
+use spherecut_core::{StopToken, Time};
 use spherecut_media::MediaError;
 use spherecut_media::backend::{
     MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoDecode, VideoRequest,
 };
+use spherecut_playback::{Landed, Player, PlayerSnapshot};
 use spherecut_synth::fake::{Gate, SyntheticBackend, frame_index};
 use spherecut_testkit::control::must_fail;
 
@@ -46,8 +47,83 @@ const BUDGET_S: f64 = 10.0;
 /// tests do.
 const WAIT: Duration = Duration::from_secs(20);
 
+/// How long a control's wait sees every worker waiting for room in the
+/// cache with nothing new before it calls the player stuck: in place of
+/// [`WAIT`], for a control that waits for what never comes.
+const STUCK: Duration = Duration::from_millis(1500);
+
 /// When the suite's first test began.
 static BEGAN: OnceLock<Instant> = OnceLock::new();
+
+/// How a test waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wait {
+    /// For as long as [`WAIT`]: a check.
+    Full,
+    /// For as long as [`WAIT`], or until the player is stuck
+    /// ([`STUCK`]): a control.
+    Stuck,
+}
+
+/// Why a wait gave up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GaveUp {
+    /// For [`STUCK`] straight, every live worker waited for room in the
+    /// cache while no stream handed out a frame or landed and the group
+    /// base stayed where it was.
+    Stuck,
+    /// [`WAIT`] passed.
+    TimedOut,
+}
+
+/// `f`'s first `Some`, asked every millisecond, waiting as `wait` says,
+/// or why it never came.
+fn wait_for<T>(player: &Player, wait: Wait, mut f: impl FnMut() -> Option<T>) -> Result<T, GaveUp> {
+    let start = Instant::now();
+    let mut still: Option<(Instant, Progress)> = None;
+    loop {
+        if let Some(t) = f() {
+            return Ok(t);
+        }
+        if start.elapsed() >= WAIT {
+            return Err(GaveUp::TimedOut);
+        }
+        if wait == Wait::Stuck {
+            let s = player.snapshot();
+            if s.fresh {
+                match (progress(&s), &still) {
+                    (Some(now), Some((since, seen))) if now == *seen => {
+                        if since.elapsed() >= STUCK {
+                            return Err(GaveUp::Stuck);
+                        }
+                    }
+                    (Some(now), _) => still = Some((Instant::now(), now)),
+                    (None, _) => still = None,
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// What the player has done so far: each stream's frames handed out and
+/// last landing, and the group base.
+type Progress = (Vec<(u64, Option<Landed>)>, Option<Time>);
+
+/// The player's [`Progress`] while every live worker waits for room in
+/// the cache; `None` while one doesn't.
+fn progress(s: &PlayerSnapshot) -> Option<Progress> {
+    let live = s
+        .streams
+        .iter()
+        .filter(|x| x.opened && x.error.is_none())
+        .count();
+    let waiting = s.cache?.waiting;
+    (live > 0 && waiting >= live).then(|| {
+        let streams = s.streams.iter().map(|x| (x.handed_out, x.landed));
+        (streams.collect(), s.lock.and_then(|l| l.base))
+    })
+}
 
 /// A test's clock, which prints as the test ends how long it took and
 /// how long the suite has run, against the suite's budget. The tests run
