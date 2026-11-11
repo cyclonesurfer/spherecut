@@ -3105,6 +3105,7 @@ dependencies = [
  "spherecut-render",
  "spherecut-sphere",
  "spherecut-synth",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
  "wgpu",
