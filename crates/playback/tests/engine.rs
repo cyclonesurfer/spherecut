@@ -1186,11 +1186,9 @@ fn reaches(player: &Player, n: usize, goal: i64, give_up: bool) -> Result<Vec<i6
 /// opened unlocked, the old idle rule with `old_idle`: with the window
 /// from 0 full, a seek to 110 played to 115, by when decoding has
 /// reached the end; paused, a seek back to 0, which the cache answers
-/// for every stream, and with `step` a step of 2 frames before a present,
-/// which goes on from the seek's time (whichever of the two a worker
-/// resolves, the cache answers it, the step last); played with the clock
-/// at 60. What every stream shows by frame 55, as [`reaches`] says.
-fn play_again_after_the_end(n: usize, step: bool, old_idle: bool) -> Result<Vec<i64>, Vec<i64>> {
+/// for every stream; played with the clock at 60. What every stream
+/// shows by frame 55, as [`reaches`] says.
+fn play_again_after_the_end(n: usize, old_idle: bool) -> Result<Vec<i64>, Vec<i64>> {
     let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
     let player = player(
         clip(120),
@@ -1229,17 +1227,12 @@ fn play_again_after_the_end(n: usize, step: bool, old_idle: bool) -> Result<Vec<
     };
     let before = cached(&player);
     player.seek(at(0), SeekMode::Exact);
-    if step {
-        player.step(2);
-        lands(&player, &vec![2; n]);
-    } else {
-        lands(&player, &vec![0; n]);
-        let after = cached(&player);
-        assert!(
-            before.iter().zip(&after).all(|(b, a)| a > b),
-            "the seek back to 0 wasn't answered from the cache: {before:?}, then {after:?}"
-        );
-    }
+    lands(&player, &vec![0; n]);
+    let after = cached(&player);
+    assert!(
+        before.iter().zip(&after).all(|(b, a)| a > b),
+        "the seek back to 0 wasn't answered from the cache: {before:?}, then {after:?}"
+    );
     player.play();
     clock.set(at(60), Instant::now());
     let got = reaches(&player, n, 55, old_idle);
@@ -1253,13 +1246,10 @@ fn play_again_after_the_end(n: usize, step: bool, old_idle: bool) -> Result<Vec<
 /// control, the old idle rule, freezes at the end of the run from 0.
 #[test]
 fn one_stream_plays_on_from_a_seek_the_cache_answers_after_the_end() {
-    let shown = play_again_after_the_end(1, false, false)
-        .unwrap_or_else(|e| panic!("the stream froze at {e:?}"));
+    let shown =
+        play_again_after_the_end(1, false).unwrap_or_else(|e| panic!("the stream froze at {e:?}"));
     assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
-    let frozen = must_fail(
-        "the old idle rule",
-        play_again_after_the_end(1, false, true),
-    );
+    let frozen = must_fail("the old idle rule", play_again_after_the_end(1, true));
     assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
 }
 
@@ -1268,24 +1258,10 @@ fn one_stream_plays_on_from_a_seek_the_cache_answers_after_the_end() {
 /// freezes both at the end of the run from 0.
 #[test]
 fn two_streams_play_on_from_a_seek_the_cache_answers_after_the_end() {
-    let shown = play_again_after_the_end(2, false, false)
-        .unwrap_or_else(|e| panic!("the streams froze at {e:?}"));
+    let shown =
+        play_again_after_the_end(2, false).unwrap_or_else(|e| panic!("the streams froze at {e:?}"));
     assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
-    let frozen = must_fail(
-        "the old idle rule",
-        play_again_after_the_end(2, false, true),
-    );
-    assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
-}
-
-/// A step the cache answers after the end takes decoding on too (V18,
-/// the step's cache path). Its control, the old idle rule, freezes.
-#[test]
-fn a_step_the_cache_answers_after_the_end_plays_on() {
-    let shown = play_again_after_the_end(1, true, false)
-        .unwrap_or_else(|e| panic!("the stream froze at {e:?}"));
-    assert!(shown.iter().all(|&f| f >= 55), "{shown:?}");
-    let frozen = must_fail("the old idle rule", play_again_after_the_end(1, true, true));
+    let frozen = must_fail("the old idle rule", play_again_after_the_end(2, true));
     assert!(frozen.iter().all(|&f| f <= 31), "{frozen:?}");
 }
 
@@ -1293,11 +1269,14 @@ fn a_step_the_cache_answers_after_the_end_plays_on() {
 /// 30 a frame at a time, so that the cache holds one run from 0 to where
 /// the window ahead reached, then paused and sought to 80, past it, until
 /// decoding reached the end (`StreamEnded`), the old idle rule with
-/// `old_idle`: the player, its clock, and the last frame of the run from
-/// 0.
-fn ended_past_a_run(old_idle: bool) -> (Player, Arc<ManualClock>, i64) {
+/// `old_idle`, decoded by `backend` (`clip(90)` or a wrapper of it): the
+/// player, its clock, and the last frame of the run from 0.
+fn ended_past_a_run(
+    backend: impl MediaBackend + 'static,
+    old_idle: bool,
+) -> (Player, Arc<ManualClock>, i64) {
     let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
-    let player = opened(clip(90), clock.clone(), config(256));
+    let player = opened(backend, clock.clone(), config(256));
     player.old_idle_rule(old_idle);
     player.play();
     for k in 1..=30 {
@@ -1338,7 +1317,7 @@ fn ended_past_a_run(old_idle: bool) -> (Player, Arc<ManualClock>, i64) {
 #[test]
 fn a_seek_the_cache_answers_after_the_end_plays_on_past_its_run() {
     let run = |old_idle: bool| {
-        let (player, clock, end) = ended_past_a_run(old_idle);
+        let (player, clock, end) = ended_past_a_run(clip(90), old_idle);
         let before = snapshot(&player).streams[0].seeks.from_cache;
         player.seek(at(10), SeekMode::Exact);
         lands(&player, &[10]);
@@ -1365,6 +1344,64 @@ fn a_seek_the_cache_answers_after_the_end_plays_on_past_its_run() {
     );
 }
 
+/// A step the cache answers after the end, the only request the worker
+/// takes on, plays on past the end of the run it lands in (V18, the
+/// step's cache path). After the end, a seek past the run from 0 is held
+/// in the decoder; meanwhile a seek to 10 and a step of 2 frames from it
+/// are sent, so that once the held seek lets go, stopped, the worker
+/// takes both at once and works only the step, which the cache answers
+/// at 12. Its control, the old idle rule, freezes at the run's end.
+#[test]
+fn a_step_the_cache_answers_after_the_end_plays_on() {
+    let run = |old_idle: bool| {
+        let hold = Arc::new(AtomicBool::new(false));
+        let held = Arc::new(AtomicU64::new(0));
+        let backend = SeekHeld {
+            inner: clip(90),
+            hold: hold.clone(),
+            held: held.clone(),
+        };
+        let (player, clock, end) = ended_past_a_run(backend, old_idle);
+        assert!(end + 1 < 80, "the run from 0 reaches the run from 80");
+        hold.store(true, Ordering::Release);
+        player.seek(at(end + 1), SeekMode::Exact);
+        let entered = until(WAIT, || (held.load(Ordering::Acquire) == 1).then_some(()));
+        assert!(entered.is_some(), "the seek past the run was never held");
+        let seeks = |p: &Player| snapshot(p).streams[0].seeks;
+        let before = seeks(&player);
+        player.seek(at(10), SeekMode::Exact);
+        player.step(2);
+        hold.store(false, Ordering::Release);
+        lands(&player, &[12]);
+        let after = seeks(&player);
+        // The held seek and the seek to 10 were stopped or replaced, and
+        // the step was the one request taken on.
+        assert_eq!(
+            (
+                after.started - before.started,
+                after.superseded - before.superseded
+            ),
+            (1, 2),
+            "{before:?}, then {after:?}"
+        );
+        player.play();
+        clock.set(at(end + 15), Instant::now());
+        let got = reaches(&player, 1, end + 10, old_idle);
+        common::join(player);
+        (end, got)
+    };
+    let (end, shown) = run(false);
+    let shown =
+        shown.unwrap_or_else(|e| panic!("the stream froze at {e:?}, its run ending at {end}"));
+    assert!(shown[0] >= end + 10, "{shown:?}");
+    let (end, frozen) = run(true);
+    let frozen = must_fail("the old idle rule", frozen);
+    assert!(
+        frozen.iter().all(|&f| f <= end),
+        "{frozen:?}, the run ending at {end}"
+    );
+}
+
 /// A stream whose cached run already ends at its last frame stays ended
 /// after requests the cache answers in that run (V18): a seek to 85 and
 /// a step of 2 frames from it decode nothing and say `StreamEnded` no
@@ -1372,7 +1409,7 @@ fn a_seek_the_cache_answers_after_the_end_plays_on_past_its_run() {
 /// the end, decodes on.
 #[test]
 fn requests_the_cache_answers_in_the_last_run_stay_ended() {
-    let (player, _clock, _) = ended_past_a_run(false);
+    let (player, _clock, _) = ended_past_a_run(clip(90), false);
     // A seek to `k`, and with `step` a step of 2 frames from it: nothing
     // decoded and no end said for STILL after it landed, else the frames
     // handed out and the ends said meanwhile.
@@ -1407,6 +1444,104 @@ fn requests_the_cache_answers_in_the_last_run_stay_ended() {
     let (more, _) = must_fail("a seek into the run from 0", stays(10, false));
     assert!(more > 0);
     common::join(player);
+}
+
+/// The synthetic clip, its decoder's seeks held while `hold` is set,
+/// whatever their stop tokens say, and stopped once let go if their
+/// tokens stopped meanwhile: so that the requests sent while a seek is
+/// held all wait for the worker's next take, which keeps only the
+/// latest. `held` counts the seeks that waited.
+#[derive(Debug)]
+struct SeekHeld {
+    inner: SyntheticBackend,
+    hold: Arc<AtomicBool>,
+    held: Arc<AtomicU64>,
+}
+
+#[derive(Debug)]
+struct SeekHeldVideo {
+    inner: Box<dyn VideoDecode>,
+    hold: Arc<AtomicBool>,
+    held: Arc<AtomicU64>,
+}
+
+impl VideoDecode for SeekHeldVideo {
+    fn info(&self) -> &VideoStreamInfo {
+        self.inner.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.inner.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        if self.hold.load(Ordering::Acquire) {
+            spherecut_core::may_block("a seek held by the test");
+            self.held.fetch_add(1, Ordering::AcqRel);
+            while self.hold.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            if stop.is_stopped() {
+                return Ok(SeekOutcome::Stopped);
+            }
+        }
+        self.inner.seek(at, mode, stop)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        self.inner.next_frame(stop)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.inner.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.inner.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        self.inner.stats()
+    }
+}
+
+impl MediaBackend for SeekHeld {
+    fn name(&self) -> &'static str {
+        "seek-held"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        Ok(Box::new(SeekHeldVideo {
+            inner: self.inner.open_video(path, req)?,
+            hold: self.hold.clone(),
+            held: self.held.clone(),
+        }))
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
 }
 
 /// The synthetic clip, its decoder letting `pass` frames through and
