@@ -5833,6 +5833,26 @@ the last frame before the end or loops to the start, and a play at or
 past the end starts at the start. Opening a file clears it, and
 `Player::close` empties the player.
 
+*Updated 2026-11-11 by D67 (M3.8):* `Player::open_locked` opens a
+camera's two lenses as a frame-locked pair, which changes five things
+above for that pair alone:
+
+- **Slots.** The ring uses all six slots while the pair is locked,
+  whatever `gpu_slots` says, until the next open or a close. A slot
+  dying below two live slots a lens unlocks the pair
+  (`LockRefused` with `"slots"`). "Two streams on few slots" then
+  applies, as it does to unlocked streams.
+- **The present.** It shows both lenses' slots at one clip time or
+  neither (`lock::pick_pair`), never a lens's frame as it arrives.
+- **The cache and catch-up.** The cache runs from the group base, the
+  newest time both lenses hold at or before the playhead, and the
+  group has one catch-up time.
+- **The end and fallback.** The pair ends at its shorter lens, or at
+  the last frame of a lens that can't decode on. A hardware failure
+  falls back to software on its own lens alone.
+- **The counters.** `PerfStats` gains `unpaired_presents` (over every
+  stream, locked or not), `pair_resyncs` and the `pair_wait` stage.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
@@ -6801,6 +6821,21 @@ footage; a camera writes its lenses in streams of different sizes (the
 raw view's reopen then doesn't fire); M3's stitcher replaces the raw
 view; or winit stops reporting the refresh rate on a compositor Pat
 uses.
+
+*Updated 2026-11-11 by D67 (M3.8):* the raw view's reopen opens
+exactly two lenses as a frame-locked pair (`Player::open_locked`), so
+its two columns show one clip time. Any other count opens with
+`open_streams`, as before. A pair whose tables differ, or a file
+without them (Matroska), is refused and plays unlocked as before.
+
+- `raw.rs`'s `the_raw_view_locks_an_mp4_pair` checks it on a two-lens
+  64² MP4. Its control is the Matroska file, refused with `"timing"`.
+- With two streams or more, the overlay's video line shows `unpaired`
+  and `pair_wait`.
+- The smoke document's frames gain `unpaired` and `pair_resyncs`
+  (`docs/cli-json.md`).
+- The app passes `LockRefused` and `LensShort` over until M3.10 gives
+  them notices.
 
 ## D41. The submit gate
 
@@ -9977,6 +10012,226 @@ the feather passes ±5°, so that the band leaves its 48 columns (the test
 fails and says so); the ideal's sampling changes, which moves `Grid`'s
 floors by a dB or more; footage shows a floor of the estimator wrong
 either way; or M3.6's fit needs a term the eight don't hold.
+
+## D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
+
+*2026-11-11, M3 slice M3.8. The M3 plan, `docs/design/m3-plan.md`
+section 9 and D67 in its section 23, has the detail; this is the lock
+as its four units built it. Updates D34 and D40.*
+
+What:
+
+- **The open.** `Player::open_locked(path, [s0, s1], LockSpec)` opens
+  two video streams of a file as a lock group, player streams 0 and 1,
+  beside `open_streams`. The open worker reads both tracks' timing
+  through `MediaBackend::track_timing` before it chooses decoders,
+  whatever the preference. The trait method has no default body, so
+  every backend answers it and every wrapper passes it on.
+  `FfmpegBackend` answers from P-TRK's `media::mp4::track_timing` for
+  an MP4 or MOV track, and `None` for any other container and for a
+  fragmented MP4.
+  - The worker that opens second compares the lenses under the status
+    lock, in this order: tables at all (`"timing"`), time base, start
+    (after `LockSpec.offset`, 0 for the X5), constant rate, size, and
+    `stts` and `stss` over the common prefix. The first field that
+    differs refuses the group, said once
+    (`PlayerEvent::LockRefused {field}`, the names in
+    `playback::lock::field`).
+  - A member that can't open, or can't decode while the group is
+    pending, refuses it with `"open"`.
+  - The frame count is not compared. Once locked, a lens with fewer
+    frames is said once (`LensShort {stream, frames}`) and ends the
+    pair.
+  - Nothing of the pair shows while the group is pending. Refused,
+    the lenses show as `open_streams` shows them.
+  - The snapshot's `lock` (`LockSnapshot`) gives the status
+    (`Pending`, `Locked` or `Refused {field}`), the group base and the
+    group's `until`.
+- **The present.** `lock::pick_pair` takes the largest clip time at
+  or before the clock's at which both members have a Ready or Shown
+  slot of the open's epoch at exactly that time. Of a member's two
+  slots at that time, it takes the Shown one, else the higher place in
+  its run, else the lower slot.
+  - `show_pair_over` shows both slots or neither, and gives the first
+    back when the second can't go up. A pair that can't go up leaves
+    the pair on screen up.
+  - A seek's landings show together before the clock is set to them,
+    and an instant step's frames show only at one time.
+  - The branch that shows each stream's frame as it arrives stays, for
+    unlocked streams and refused groups.
+- **The counters.**
+  - `unpaired_presents` counts presents that show the player's
+    streams at different clip times, over every stream, locked or not.
+  - The `pair_wait` stage is the clock less the pair's time, at each
+    present of a running locked pair.
+  - `pair_resyncs` counts the backstop's seeks (below).
+  - A pair's frames passed over count as dropped once, by member 0's.
+  - With two streams or more, the overlay's video line shows
+    `unpaired` and `pair_wait`. The smoke document's frames gain
+    `unpaired` and `pair_resyncs`.
+- **The group base.** Once the pair locks, the cache learns the group
+  (`FrameCache::set_group`). It runs its rules from Tg instead of from
+  the presenter's playhead: each stream's current frame, its window,
+  eviction, back-pressure and `playhead()`, which the upload thread
+  starts its wanted list from. Tg is the newest time at or before the
+  playhead at which both members hold a frame, worked out again as
+  frames go in and the playhead moves.
+  - From a seek or a step until every member has landed or failed, Tg
+    is held at the playhead.
+  - The group has one `until`. A member more than 2 frames behind the
+    clock raises it to the clock's time, never past the newest frame
+    the other member holds.
+- **Seeks and the end.**
+  - Keyframe landings that differ send both lenses exactly to the
+    later one. The re-seek isn't counted as a second seek.
+  - After an exact seek or a step, landings at different times (a lens
+    that ran out) send both to the earlier.
+  - A locked pair's clock is set from the earliest landing.
+  - `check_end` ends the pair at the member that ends first.
+- **The backstop.** When every member waits for room decoding ahead
+  and no common time lies past Tg, the cache holds Tg at the trailing
+  member's newest frame. It tells each member to seek there
+  (`Insert::Resync`), leaving the clock where it is, and counts a
+  `pair_resync`.
+  - A waiter whose token has stopped isn't counted.
+  - Each waiter carries the count of waits at which it began, so a
+    late stopped waiter of an earlier open takes out only its own
+    entry.
+- **Slots.** A locked pair uses all of `MAX_SLOTS`, 6, whatever
+  `gpu_slots` says (`SlotRing::set_pair`). That holds from the moment
+  its lenses lock until the next open or a close, and through an
+  unlock.
+  - `SLOT_FLOOR` is 2 live slots a member, 4 for the pair. A slot
+    dying below it unlocks the pair with `LockRefused {field: "slots"}`
+    and lets the cache's group go (`set_group(None)`) under the same
+    status lock. Each lens's frame then shows as it comes, as D34's
+    "two streams on few slots" says.
+  - `Player::fail_slot_allocations(n)`, doc-hidden, plants the GPU
+    running out of memory for the next `n` slot allocations.
+  - The 8 slots of P-LOCK's redirect aren't built.
+- **Fallback and failure.**
+  - A hardware failure on one lens moves only that lens to software,
+    in place, through media's fallback wrapper (D14). The other lens
+    stays on hardware, the lock holds, and the fallback is said once.
+  - A locked member that can't decode on after any fallback
+    (`DecodeFailed`) ends the pair at its last frame: its end is set
+    for the presenter's check of the end. The end is put back if the
+    member decodes past it after all (a seek past damage).
+- **The app.** The raw view opens exactly two lenses with
+  `open_locked(…, LockSpec::default())`, and any other count with
+  `open_streams`. It passes `LockRefused` and `LensShort` over until
+  M3.10 gives them notices.
+- **The controls' switches.** `LockSpec.test` (`LockTest`,
+  doc-hidden) turns rules off for the tests' controls: `no_group_base`,
+  `old_base_in_seeks`, `no_later_landing`, `no_resync`, `no_floor` and
+  `no_end_on_failure`. All are off by default.
+- `LockSpec.columns`, for the LRV proxy's two members over one stream
+  (D71), waits for M3.14.
+
+Why: picking each stream's frame on its own tears the seam unseen. An
+all-or-none present on per-stream upload freezes the view whenever a
+lens lags, since the lagging lens's partner frame is freed or evicted
+before it arrives. The group base makes a common time always exist, and
+the group `until` makes both lenses skip to the same frame. At 8K every
+frame but the IDRs is a reference frame, so a slow lens can't catch up
+by skipping decodes, and the pair must pace to it.
+
+The slots: with 3, the pair on screen holds 2 Shown slots, one lens's
+next frame takes the third, and the other lens's never gets one, since
+the lock never shows a lens alone. That is M1's two-stream deadlock.
+The plan says nothing of the ring after an unlock: it keeps its six,
+the dead slots out of the live count, until the next open or a close
+sets it from the setting again.
+
+The fallback: reopening both lenses would gain nothing. Every X5
+sample decodes bit for bit the same on VA-API, Vulkan Video and
+software. Two software 8K decoders together run at 0.42× real time, and
+the healthy lens would pay a software exact seek.
+
+A failed member's end: without it, `check_end` never fires, and
+`pick_pair` holds the last pair while the clock and the audio run on.
+
+Tested:
+
+- `crates/playback/tests/lock` holds the lock's suite: 24 tests on
+  `PerStream` (one `SyntheticBackend` a stream, each with its own frame
+  count, keyframe interval, start, cost and planted tables) and on
+  lavapipe. Each check has a control that must fail.
+  - `open.rs`: each planted fault is refused by its field's name, and
+    the GOP fault file through `FfmpegBackend`. A member that can't
+    open refuses with `"open"`, and a lens a frame short locks and says
+    so once.
+  - `pick.rs`: `pick_pair`'s property with its two controls; all or
+    none; `unpaired_presents` over every stream; `pair_wait`; drops
+    once a pair; the pacing rule (`tests/common/pacing.rs`: after 30
+    frames, pairs at least 80 % of the slowest lens's frames handed out,
+    trailing its newest by at most 2 frames, and play reaching the
+    end), each part failed by a run of its own.
+  - `base.rs`: a seek past the windows lands both lenses; the group's
+    `until` stays within the other lens; differing keyframe landings go
+    exact to the later; a pair ends at its shorter lens; a shrinking
+    budget resyncs the pair.
+  - `play.rs`, read back from the GPU:
+    - The mixed run plays 64 seeds of seeks, steps, plays at three
+      rates and pauses, with lens 1 2.5 to 3 times lens 0's cost. No
+      pair is shown apart, by tag or by content, and its
+      `open_streams` control counts both.
+    - The pacing test's three cases meet the rule, and its control,
+      without the group base, freezes. Its clock moves a frame every
+      3 ms of wall time, and it presents every 4 ms or so. A present
+      whose pair isn't up yet waits for it, 25 ms at most. Without
+      that wait, 2 runs of the suite in about 50 failed: after lens 1
+      caught up several frames, lavapipe took one present too long to
+      put both lenses' frames up.
+    - Six slots are used on a setting of three.
+    - Slots killed to 3, mid-play and mid-seek, unlock the pair with
+      `"slots"`; without the floor it sticks.
+    - A read error on lens 1 mid-play ends the pair at its last frame;
+      without the rule nothing ends.
+  - The suite takes 3.6 to 4.2 s on the cloud box (4 Xeon cores,
+    lavapipe), within the plan's 10 s; 35 runs in a row passed, 15 of
+    them beside 4 busy loops (5.1 to 7.1 s). `play.rs`'s five tests
+    sum to 6.1 to 6.5 s, over their 5.5 s share. Two waits dominate:
+    the floor's and the failure's controls wait 1.5 s each for nothing
+    to happen. Beside the busy loops the floor's mid-seek case once
+    found the seek's frames up before its failures were planted; the
+    failures now go in first, once the open's frames are up.
+- `engine.rs`'s `a_fallback_on_one_lens_keeps_the_pair_locked`
+  (`FaultBackend` with a plan on lens 1 alone) and app's
+  `raw.rs` `the_raw_view_locks_an_mp4_pair` (the Matroska control
+  refused with `"timing"`).
+- `tier2_playback`'s Tier 1 `the_bench_harness_plays_a_locked_pair`
+  reads pair64's corner codes back from both slots, on lavapipe:
+  - on every frame shown unthrottled and in real time;
+  - at 100 seek landings.
+  Its controls, planted, must fail: the run unlocked; lens 0's slot
+  read for both; lens 1 a frame late; lens 1 from another landing.
+- Tier 2h, pending odin:
+  - `samples_lens_pairs_frame_locked`: 100 exact seeks land both lenses
+    on one frame by pts. Real-time play of clip 9's master and of the
+    2×3840² perf pair shows 0 unpaired. On the perf pair, both slots'
+    corner codes are read on every frame and must equal each other and
+    the tags.
+  - `zero_copy_pair_matches_copy`: path B's slots, and path A's where
+    the GPU imports DMA-BUFs, hashed against the same decoder's copy,
+    locked.
+  - P-LOCK in `bench_playback_x5_raw`: each X5 mode played as the app
+    plays it, unlocked then locked, with the locked rows beside the
+    unlocked and a verdict:
+    - Pass at 8K30, 5.7K60 and 4K120: 0 unpaired, at least 99 %
+      presented, and drops at most 1 point over the unlocked run's.
+    - Pass at 8K25 on path B: 0 unpaired and the pacing rule over the
+      real-time pass up to its first loop, with the pairs and
+      `pair_wait` of every second that dropped.
+    - Redirect (8 slots) when only the frames fall short. Kill when a
+      pair shows apart, the lock comes undone or play stalls.
+
+Revisit if: P-LOCK redirects (8 slots for a pair) or kills (a design
+note on the upload schedule before M3.10); odin shows a pair apart by
+corner code that the tags missed; path B's two-lens pool passes the
+plan's 707 MB; a camera's lenses start apart (`LockSpec.offset`) or
+come in a container without tables; or M3.14's LRV proxy needs the
+group's members over one stream.
 
 ## Open
 
