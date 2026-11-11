@@ -1,0 +1,9 @@
+==> recording environment
+==> checking prerequisites
+==> building (release)
+==> listing Tier 2 tests
+==> running Tier 2 tests
+==> running Tier 1 tests
+==> report written to hw-reports/odin-04d15be-m38b.md
+==> Tier 2: 13 passed, 0 failed, 0 skipped, 44 left out by `--only`, 0 did not run (57 tests)
+Error: 2 Tier 1 test(s) failed on this machine; see hw-reports/odin-04d15be-m38b.md

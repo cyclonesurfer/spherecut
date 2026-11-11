@@ -1,0 +1,800 @@
+102-clip 9 (handheld_flips): the truth, 64 and 64 frames a lens decoded in software in 6.4 s
+103-Image:
+104:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+105-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+106-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+107-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+108-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+109-Image:
+110:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+111-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+112-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+113-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+114-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+115-Image:
+116:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+117-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+118-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+119-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+120-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+121-Image:
+122:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+123-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+124-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+125-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+126-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+127-Image:
+128:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+129-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+130-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+131-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+132-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+133-Image:
+134:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+135-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+136-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+137-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+138-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+139-Image:
+140:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+141-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+142-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+143-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+144-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+145-Image:
+146:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+147-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+148-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+149-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+150-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+151-Image:
+152:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+153-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+154-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+155-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+156-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+157-Image:
+158:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+159-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+160-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+161-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+162-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+163-Image:
+164:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+165-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+166-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+167-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+168-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+169-Image:
+170:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+171-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+172-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+173-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+174-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+175-Image:
+176:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+177-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+178-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+179-Image:
+180:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+181-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+182-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+183-Image:
+184-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+185-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+186-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+187-Image:
+188:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+189-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+190-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+191-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+192-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+193-Image:
+194:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+195-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+196-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+197-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+198-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+199-Image:
+200:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+201-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+202-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+203-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+204-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+205-Image:
+206:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+207-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+208-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+209-Image:
+210:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+211-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+212-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+213-Image:
+214-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+215-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+216-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+217-Image:
+218:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+219-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+220-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+221-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+222-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+223-Image:
+224:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+225-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+226-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+227-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+228-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+229-Image:
+230:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+231-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+232-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+233-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+234-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+235-Image:
+236:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+237-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+238-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+239-Image:
+240:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+241-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+242-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+243-Image:
+244-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+245-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+246-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+247-Image:
+248:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+249-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+250-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+251-Image:
+252:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+253-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+254-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+255-Image:
+256-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+257-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+258-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+259-Image:
+260:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+261-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+262-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+263-Image:
+264:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+265-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+266-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+267-Image:
+268-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+269-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+270-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+271-Image:
+272:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+273-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+274-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+275-Image:
+276:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+277-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+278-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+279-Image:
+280-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+281-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+282-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+283-clip 9 (handheld_flips), path B, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 72+72, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+284-Image:
+285:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+286-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+287-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+288-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+289-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+290-Image:
+291:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+292-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+293-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+294-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+295-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+296-Image:
+297:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+298-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+299-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+300-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+301-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+302-Image:
+303:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+304-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+305-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+306-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+307-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+308-Image:
+309:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+310-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+311-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+312-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+313-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+314-Image:
+315:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+316-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+317-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+318-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+319-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+320-Image:
+321:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+322-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+323-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+324-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+325-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+326-Image:
+327:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+328-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+329-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+330-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+331-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+332-Image:
+333:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+334-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+335-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+336-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+337-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+338-Image:
+339:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+340-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+341-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+342-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+343-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+344-Image:
+345:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+346-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+347-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+348-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+349-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+350-Image:
+351:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+352-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+353-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+354-Image:
+355:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+356-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+357-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+358-Image:
+359-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+360-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+361-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+362-Image:
+363:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+364-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+365-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+366-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+367-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+368-Image:
+369:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+370-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+371-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+372-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+373-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+374-Image:
+375:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+376-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+377-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+378-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+379-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+380-Image:
+381:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+382-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+383-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+384-Image:
+385:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+386-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+387-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+388-Image:
+389-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+390-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+391-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+392-Image:
+393:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+394-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+395-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+396-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+397-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+398-Image:
+399:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+400-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+401-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+402-Image:
+403:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+404-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+405-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+406-Image:
+407-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+408-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+409-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+410-Image:
+411:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+412-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+413-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+414-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+415-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+416-Image:
+417:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+418-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+419-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+420-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+421-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+422-Image:
+423:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+424-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+425-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+426-Image:
+427:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+428-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+429-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+430-Image:
+431-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+432-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+433-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+434-Image:
+435:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+436-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+437-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+438-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+439-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+440-Image:
+441:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+442-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+443-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+444-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+445-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+446-Image:
+447:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+448-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+449-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+450-Image:
+451:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+452-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+453-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+454-Image:
+455-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+456-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+457-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+458-Image:
+459:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+460-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+461-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+462-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+463-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+464-Image:
+465:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+466-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+467-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+468-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+469-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+470-Image:
+471:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+472-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+473-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+474-Image:
+475:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+476-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+477-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+478-Image:
+479-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+480-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+481-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+482-Image:
+483:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+484-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+485-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+486-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+487-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+488-Image:
+489:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+490-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+491-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+492-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+493-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+494-Image:
+495:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+496-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+497-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+498-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+499-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+500-Image:
+501:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+502-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+503-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+504-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+505-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+506-Image:
+507:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+508-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+509-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+510-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+511-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+512-Image:
+513:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+514-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+515-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+516-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+517-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+518-Image:
+519:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+520-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+521-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+522-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+523-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+524-Image:
+525:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+526-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+527-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+528-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+529-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+530-Image:
+531:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+532-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+533-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+534-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+535-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+536-Image:
+537:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+538-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+539-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+540-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+541-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+542-Image:
+543:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+544-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+545-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+546-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+547-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+548-Image:
+549:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+550-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+551-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+552-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+553-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+554-Image:
+555:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+556-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+557-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+558-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+559-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+560-Image:
+561:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+562-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+563-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+564-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+565-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+566-Image:
+567:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+568-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+569-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+570-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+571-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+572-Image:
+573:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+574-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+575-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+576-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+577-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+578-Image:
+579:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+580-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+581-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+582-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+583-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+584-Image:
+585:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+586-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+587-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+588-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+589-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+590-Image:
+591:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+592-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+593-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+594-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+595-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+596-Image:
+597:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+598-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+599-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+600-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+601-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+602-Image:
+603:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+604-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+605-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+606-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+607-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+608-Image:
+609:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+610-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+611-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+612-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+613-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+614-Image:
+615:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+616-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+617-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+618-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+619-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+620-Image:
+621:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+622-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+623-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+624-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+625-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+626-Image:
+627:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+628-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+629-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+630-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+631-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+632-Image:
+633:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+634-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+635-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+636-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+637-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+638-Image:
+639:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+640-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+641-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+642-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+643-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+644-clip 9 (handheld_flips), path B, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+645-Image:
+646:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+647-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+648-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+649-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+650-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+651-Image:
+652:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+653-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+654-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+655-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+656-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+657-Image:
+658:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+659-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+660-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+661-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+662-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+663-Image:
+664:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+665-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+666-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+667-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+668-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+669-Image:
+670:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+671-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+672-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+673-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+674-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+675-Image:
+676:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+677-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+678-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+679-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+680-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+681-Image:
+682:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+683-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+684-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+685-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+686-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+687-Image:
+688:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+689-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+690-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+691-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+692-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+693-Image:
+694:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+695-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+696-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+697-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+698-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+699-Image:
+700:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+701-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+702-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+703-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+704-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+705-Image:
+706:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+707-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+708-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+709-Image:
+710:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+711-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+712-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+713-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+714-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+715-Image:
+716:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+717-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+718-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+719-Image:
+720-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+721-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+722-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+723-Image:
+724:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+725-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+726-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+727-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+728-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+729-Image:
+730:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+731-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+732-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+733-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+734-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+735-Image:
+736:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+737-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+738-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+739-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+740-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+741-Image:
+742:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+743-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+744-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+745-Image:
+746:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+747-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+748-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+749-Image:
+750-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+751-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+752-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+753-Image:
+754:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+755-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+756-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x70062410301
+757-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+758-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x70072410301
+759-Image:
+760:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+761-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+762-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+763-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+764-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+765-Image:
+766:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+767-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+768-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+769-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+770-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+771-Image:
+772:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+773-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+774-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+775-Image:
+776:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+777-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+778-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+779-Image:
+780-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+781-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+782-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+783-Image:
+784:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+785-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+786-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+787-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+788-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+789-Image:
+790:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+791-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+792-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+793-Image:
+794:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+795-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+796-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+797-Image:
+798-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+799-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+800-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+801-Image:
+802:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+803-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+804-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+805-Image:
+806:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+807-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+808-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+809-Image:
+810-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+811-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+812-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+813-Image:
+814:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+815-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+816-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+817-Image:
+818:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+819-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+820-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+821-Image:
+822-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+823-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+824-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+825-clip 9 (handheld_flips), path B, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 72+73, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.6 s
+826-Image:
+827:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+828-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+829-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+830-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+831-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+832-Image:
+833:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+834-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+835-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+836-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+837-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+838-Image:
+839:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+840-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+841-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+842-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+843-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+844-Image:
+845:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+846-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+847-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+848-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+849-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+850-Image:
+851:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+852-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+853-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4462400301
+854-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+855-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4462400301
+856-Image:
+857:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+858-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+859-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+860-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+861-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+862-Image:
+863:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+864-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+865-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+866-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+867-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+868-Image:
+869:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+870-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+871-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+872-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+873-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+874-Image:
+875:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+876-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+877-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301
+878-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+879-    Surf: size=7864320, slice_size=7864320, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x50072410301
+880-Image:
+881:  Info: size=22118400, alignment=256, width=3840, height=3840, depth=1, array_size=1, levels=1
+882-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+883-    Surf: size=14745600, slice_size=14745600, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x4466400301
+884-  Plane[1]: vkformat=VK_FORMAT_R8G8_UNORM, offset=14745600
+885-    Surf: size=7372800, slice_size=7372800, alignment=256, swmode=2, tile_swizzle=0, epitch=65535, pitch=1920, blk_w=1, blk_h=1, bpe=2, flags=0x4466400301
+886-Image:
+887:  Info: size=20381696, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=6
+888-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+889-    Surf: size=20381696, slice_size=20381696, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+890-Image:
+891:  Info: size=10682368, alignment=65536, width=1920, height=1920, depth=1, array_size=1, levels=5
+892-  Plane[0]: vkformat=VK_FORMAT_R8G8_UNORM, offset=0
+893-    Surf: size=10682368, slice_size=10682368, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=2048, blk_w=1, blk_h=1, bpe=2, flags=0x22410301
+894-Image:
+895-  Info: size=256, alignment=256, width=1, height=1, depth=1, array_size=1, levels=1
+896-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+897-    Surf: size=256, slice_size=256, alignment=256, swmode=0, tile_swizzle=0, epitch=65535, pitch=256, blk_w=1, blk_h=1, bpe=1, flags=0x22410301
+898-Image:
+899:  Info: size=22609920, alignment=65536, width=3840, height=3840, depth=1, array_size=1, levels=1
+900-  Plane[0]: vkformat=VK_FORMAT_R8_UNORM, offset=0
+901-    Surf: size=14745600, slice_size=14745600, alignment=65536, swmode=27, tile_swizzle=0, epitch=65535, pitch=3840, blk_w=1, blk_h=1, bpe=1, flags=0x50062410301

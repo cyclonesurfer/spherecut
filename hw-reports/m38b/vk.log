@@ -1,0 +1,46 @@
+# vulkaninfo: /usr/bin/vulkaninfo
+998:	apiVersion        = 1.4.354 (4211042)
+1584:	driverName                                           = radv
+1585:	driverInfo                                           = Mesa 26.2.5
+1845:	VK_EXT_image_compression_control              : extension revision 1
+1846:	VK_EXT_image_compression_control_swapchain    : extension revision 1
+2581:VkPhysicalDeviceImageCompressionControlFeaturesEXT:
+2583:	imageCompressionControl = true
+2585:VkPhysicalDeviceImageCompressionControlSwapchainFeaturesEXT:
+2587:	imageCompressionControlSwapchain = true
+3030:	apiVersion        = 1.4.354 (4211042)
+3561:	driverName                                           = llvmpipe
+3562:	driverInfo                                           = Mesa 26.2.5 (LLVM 22.1.8)
+# ls drirc
+ls: cannot access '/etc/drirc': No such file or directory
+/usr/share/drirc.d/:
+00-anv-defaults.conf
+00-asahi-defaults.conf
+00-crocus-defaults.conf
+00-d3d12-defaults.conf
+00-dzn-defaults.conf
+00-hasvk-defaults.conf
+00-hk-defaults.conf
+00-iris-defaults.conf
+00-lavapipe-defaults.conf
+00-mesa-defaults.conf
+00-msm-defaults.conf
+00-nvk-defaults.conf
+00-panfrost-defaults.conf
+00-panvk-defaults.conf
+00-pvr-defaults.conf
+00-r300-defaults.conf
+00-r600-defaults.conf
+00-radeonsi-defaults.conf
+00-radv-defaults.conf
+00-turnip-defaults.conf
+00-v3d-defaults.conf
+00-v3dv-defaults.conf
+00-venus-defaults.conf
+00-virtio_gpu-defaults.conf
+00-vmwgfx-defaults.conf
+00-zink-defaults.conf
+# radv_disable_dcc option names
+      3 /usr/share/drirc.d/00-radv-defaults.conf:radv_disable_dcc
+      1 /usr/share/drirc.d/00-radv-defaults.conf:radv_disable_dcc_mips
+      2 /usr/share/drirc.d/00-radv-defaults.conf:radv_disable_dcc_stores
