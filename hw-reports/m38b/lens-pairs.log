@@ -1,0 +1,14 @@
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.13s
+     Running tests/tier2_playback.rs (target/release/deps/tier2_playback-d55baaae506854be)
+
+running 1 test
+test samples_lens_pairs_frame_locked ... rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+clip 9 (handheld_flips), Vulkan (Auto, zero copy), locked: 100 exact seeks landed both lenses together
+clip 9 (handheld_flips), Vulkan (Auto, zero copy), locked: 599 pairs in 20.0 s of real time, none apart; stream 0 on Vulkan; stream 1 on Vulkan
+perf clip pair-hevc8-3840-2997-noisy-20s, Vulkan (Auto, zero copy), locked: 100 exact seeks landed both lenses together
+perf clip pair-hevc8-3840-2997-noisy-20s, Vulkan (Auto, zero copy), locked: 599 pairs in 20.0 s of real time, none apart; stream 0 on Vulkan; stream 1 on Vulkan
+perf clip pair-hevc8-3840-2997-noisy-20s, Vulkan (Auto, zero copy), locked: 600 pairs' corner codes read back; unpaired by tag 0, by corner code 0, paired on another frame than the tags 0; stream 0 on Vulkan; stream 1 on Vulkan
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 128.02s
+

@@ -1,0 +1,73 @@
+===== plain-1 2026-11-11T05:36:52-08:00 LockedHint=no
+ 05:36:52 up 31 days, 10:34,  1 user,  load average: 1.10, 0.95, 0.91
+top - 05:36:52 up 31 days, 10:34,  1 user,  load average: 1.10, 0.95, 0.91
+Tasks: 626 total, 4 running, 622 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s): 10.2 us,  1.8 sy,  0.0 ni, 87.5 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,    721.4 free,  26914.3 used,  34541.1 buff/cache     
+MiB Swap:   8192.0 total,      0.1 free,   8191.9 used.  37283.6 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 594075 pat       20   0 6788076   2.6g 133232 R  93.5   4.1 254:17.01 Isolate+
+ 174326 pat       20   0   15.0g   1.7g 358556 S  22.3   2.7     36,15 firefox
+ 550462 pat       20   0 6667124   2.5g 154504 R  17.8   3.9     36,11 Isolate+
+   4536 pat       20   0   11.3g 440016 178468 S  13.4   0.7     34,32 gnome-s+
+3443652 pat       20   0 5660352 282764 113596 S   8.9   0.4   0:02.42 2.1.312
+===== plain-2 2026-11-11T05:38:46-08:00 LockedHint=no
+ 05:38:46 up 31 days, 10:36,  1 user,  load average: 3.97, 2.00, 1.29
+top - 05:38:46 up 31 days, 10:36,  1 user,  load average: 3.97, 2.00, 1.29
+Tasks: 657 total, 3 running, 654 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  3.9 us,  1.3 sy,  0.0 ni, 94.5 id,  0.0 wa,  0.3 hi,  0.0 si,  0.0 st 
+MiB Mem :  64197.8 total,   7724.5 free,  27828.4 used,  27581.1 buff/cache     
+MiB Swap:   8192.0 total,      0.2 free,   8191.8 used.  36369.5 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 174326 pat       20   0   15.0g   1.6g 340480 S  22.4   2.6     36,16 firefox
+ 550462 pat       20   0 6669348   2.4g 145816 R  17.9   3.9     36,12 Isolate+
+   4536 pat       20   0   11.3g 437936 176532 S   9.0   0.7     34,33 gnome-s+
+3445364 pat       20   0  236284   6384   4156 R   9.0   0.0   0:00.03 top
+   1510 root      20   0   17144   6980   6600 S   4.5   0.0   1:26.73 systemd+
+===== plain-3 2026-11-11T05:40:22-08:00 LockedHint=no
+ 05:40:22 up 31 days, 10:37,  1 user,  load average: 3.75, 2.45, 1.53
+top - 05:40:22 up 31 days, 10:37,  1 user,  load average: 3.75, 2.45, 1.53
+Tasks: 657 total, 1 running, 656 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  1.6 us,  1.3 sy,  0.0 ni, 96.6 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7708.3 free,  28070.5 used,  27338.5 buff/cache     
+MiB Swap:   8192.0 total,      0.3 free,   8191.7 used.  36127.4 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4536 pat       20   0   11.3g 437936 176532 S  13.7   0.7     34,33 gnome-s+
+ 174326 pat       20   0   15.0g   1.6g 340448 S  13.7   2.6     36,16 firefox
+ 550462 pat       20   0 6670452   2.4g 145816 S   9.1   3.9     36,12 Isolate+
+3446151 pat       20   0  236284   6320   4096 R   9.1   0.0   0:00.03 top
+ 124290 pat       20   0   52.8g  35620  27096 S   4.6   0.1   3:21.20 claude-+
+===== img-1 2026-11-11T05:42:00-08:00 LockedHint=no
+ 05:42:00 up 31 days, 10:39,  1 user,  load average: 4.04, 2.83, 1.75
+top - 05:42:01 up 31 days, 10:39,  1 user,  load average: 4.04, 2.83, 1.75
+Tasks: 656 total, 1 running, 655 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  3.6 us,  1.8 sy,  0.0 ni, 94.0 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7191.3 free,  28692.9 used,  27243.1 buff/cache     
+MiB Swap:   8192.0 total,      0.4 free,   8191.6 used.  35505.0 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 174326 pat       20   0   15.0g   1.6g 340400 S  22.6   2.6     36,17 firefox
+ 550462 pat       20   0 6663204   2.4g 145768 S  22.6   3.9     36,13 Isolate+
+   4536 pat       20   0   11.3g 437936 176532 S   9.0   0.7     34,33 gnome-s+
+3446975 pat       20   0  236284   6324   4096 R   9.0   0.0   0:00.03 top
+ 524792 pat       20   0 4981708   1.5g 130032 S   4.5   2.4 186:25.18 Isolate+
+===== hw-test 2026-11-11T05:43:37-08:00 LockedHint=no
+ 05:43:37 up 31 days, 10:41,  1 user,  load average: 3.35, 2.82, 1.85
+top - 05:43:38 up 31 days, 10:41,  1 user,  load average: 3.35, 2.82, 1.85
+Tasks: 647 total, 4 running, 643 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  9.4 us,  1.8 sy,  0.0 ni, 87.9 id,  0.3 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7478.4 free,  28641.3 used,  27002.7 buff/cache     
+MiB Swap:   8192.0 total,      0.5 free,   8191.5 used.  35556.5 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 594075 pat       20   0 6781980   2.6g 124744 R  99.5   4.1 255:30.95 Isolate+
+ 550462 pat       20   0 6668388   2.4g 143440 R  27.1   3.9     36,14 Isolate+
+ 174326 pat       20   0   15.0g   1.6g 337948 S  22.6   2.6     36,17 firefox
+   4536 pat       20   0   11.3g 437920 176516 R  13.6   0.7     34,33 gnome-s+
+2040555 root      20   0       0      0      0 I   4.5   0.0   7:49.99 kworker+
+===== end 2026-11-11T06:31:58-08:00 LockedHint=no
+===== lens-pairs rerun 2026-11-11T06:33:01-08:00 LockedHint=no
+ 06:33:01 up 31 days, 11:30,  1 user,  load average: 7.41, 11.68, 8.71
