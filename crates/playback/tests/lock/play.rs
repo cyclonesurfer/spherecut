@@ -21,7 +21,7 @@ use spherecut_playback::{
 use spherecut_render::readback::read_texture;
 use spherecut_testkit::control::must_fail;
 
-use crate::common::pacing::{self, Pace, Sample};
+use crate::common::pacing::{self, Pace, Sample, Unpaced};
 use crate::common::per_stream::{Hold, Lens, PerStream};
 use crate::common::{self, pts, snapshot};
 use crate::{GaveUp, WAIT, Wait, timed, wait_for};
@@ -459,51 +459,123 @@ fn a_locked_pair_never_shows_mismatched_frames() {
     assert!(both(&seen) && unpaired > 0, "{apart}");
 }
 
-/// On a 90-frame clip whose clock moves a frame every 3 ms, with lens 1
-/// at 2.5 to 3 times the frame period, both lenses slower than the clock,
-/// and the first case with the budget halved mid-play, the pacing rule
-/// holds after the first 30 frames, with at most `LATE` presents whose
-/// pair wasn't up a present on. Its control, the group base and the
-/// group `until` off, freezes and fails both.
+/// A case of the pacing test: its lenses, its clock, and its cache of
+/// `budget` frames (a window of a quarter of them a lens: half of it,
+/// shared by the two), halved once the clock passes the clip's middle if
+/// `halve`. `slowest` is the most its slowest lens costs a frame, and
+/// `behind` says that lens is slower than the clock, so that it hands
+/// out only what its catch-ups land on.
+struct Case {
+    name: &'static str,
+    backend: PerStream,
+    pace: Pace,
+    budget: u64,
+    halve: bool,
+    slowest: Duration,
+    behind: bool,
+}
+
+impl Case {
+    /// The longest a pair of the case may stand still after the warm-up,
+    /// in the clock's frames: as long as its slowest lens takes to decode
+    /// the leading lens's window, the most a catch-up passes while the
+    /// other lens leads, or the window itself where that is longer; then
+    /// `TRAIL` more, and the most a present held up moves the clock
+    /// (`MOST_A_PRESENT`), for the present that puts the pair up. A pair
+    /// that slides into ever longer freezes outgrows it.
+    fn longest_freeze(&self) -> i64 {
+        let window = i64::try_from(self.budget / 4).unwrap();
+        let decode = self.slowest.as_nanos() * self.budget as u128 / 4;
+        let frames = i64::try_from(decode.div_ceil(self.pace.period.as_nanos())).unwrap();
+        frames.max(window) + pacing::TRAIL + pacing::MOST_A_PRESENT
+    }
+}
+
+/// What a run of the pacing test saw: its samples, what its presents
+/// showed, the pair resyncs (the cache's own count, which takes each at
+/// once) and the unpaired presents counted, the presents after the
+/// warm-up whose pair wasn't up a present on, and the frames lens 1
+/// decoded after the warm-up, catch-ups' included.
+struct Played {
+    samples: Vec<Sample>,
+    seen: Mismatches,
+    resyncs: u64,
+    unpaired: u64,
+    late: u64,
+    decoded: u64,
+}
+
+/// Four cases: on a 90-frame clip whose clock moves a frame every 3 ms,
+/// lens 1 at 2.5 to 3 times the frame period, both lenses slower than
+/// the clock, and lens 1 slow with the budget halved mid-play; and on a
+/// 60-frame clip whose clock moves a frame every 6 ms, lens 1 slower
+/// than lens 0 but within the clock, so that it hands out every frame.
+/// After the first 30 frames of each, the pacing rule holds, the share
+/// judged over the four together ([`pacing::pooled`]) on 20 frames handed
+/// out or more; no pair stands still longer than its slowest lens takes
+/// to catch up a window ([`Case::longest_freeze`]); the presents whose
+/// pair wasn't up a present on are at most one, or a quarter of the
+/// frames handed out, over the three slow cases and in the fourth
+/// ([`settled`]); and no pair resyncs but where the budget was halved,
+/// which may, though in practice it doesn't (base.rs's
+/// `a_shrinking_budget_mid_play_resyncs_the_pair` holds the backstop to
+/// its control). The clock moves on at most two frames a present, so
+/// that a test thread held up isn't counted against the engine. The
+/// controls: the group base and the group `until` off fails the rule by
+/// trailing, and the presents late; one slow case alone is too few
+/// frames to judge; and a pair whose freezes double fails the freeze,
+/// though it keeps to the rule.
 #[test]
 fn a_locked_pair_paces_to_its_slowest_lens() {
     let _alone = alone();
     let _time = timed("a_locked_pair_paces_to_its_slowest_lens");
     const FRAMES: i64 = 90;
-    let pace = Pace {
+    const WITHIN: i64 = 60;
+    let pace = |frames: i64, period: u64| Pace {
         rate: RATE,
-        period: ms(3),
-        frames: FRAMES,
+        period: ms(period),
+        frames,
     };
     // Between presents, beside the millisecond `pacing::play` sleeps.
     const PRESENTS: Duration = Duration::from_millis(3);
-    let lens = |cost_us: u64| {
+    let lens = |frames: i64, cost_us: u64| {
         Lens::default()
-            .frames(FRAMES as u64)
+            .frames(frames as u64)
             .cost(Duration::from_micros(cost_us))
     };
     // Lens 1 at 7.5 to 9 ms a frame, lens 0 at once; both slower than
-    // the clock, at 4.5 and 9 ms.
+    // the clock, at 4.5 and 9 ms; lens 1 at 4.5 ms against a clock at 6.
     let one_slow = || {
-        let lens1 = lens(7500).jitter(3, Duration::from_micros(1500));
-        PerStream::pair(lens(0), lens1)
+        let lens1 = lens(FRAMES, 7500).jitter(3, Duration::from_micros(1500));
+        PerStream::pair(lens(FRAMES, 0), lens1)
     };
-    let both_slow = || PerStream::pair(lens(4500), lens(9000));
-    // A budget of `frames` frames, a window of a quarter of them a lens
-    // (half of it, shared by the two), on six slots.
+    let slow = |name, backend, halve| Case {
+        name,
+        backend,
+        pace: pace(FRAMES, 3),
+        budget: 64,
+        halve,
+        slowest: ms(9),
+        behind: true,
+    };
+    let within = Case {
+        name: "lens 1 slower, within the clock",
+        backend: PerStream::pair(lens(WITHIN, 0), lens(WITHIN, 4500)),
+        pace: pace(WITHIN, 6),
+        budget: 24,
+        halve: false,
+        slowest: Duration::from_micros(4500),
+        behind: false,
+    };
     let budget = |frames: u64| PlayerConfig {
         cache: CacheBudget::Bytes(frames * FRAME),
         gpu_slots: 6,
         decoder: DecoderPreference::Software,
         ..PlayerConfig::default()
     };
-    // A run of `backend` locked by `test`, on a budget of 64 frames
-    // halved once the clock passes frame 45 if `halve`: its samples,
-    // what its presents showed, the resyncs and unpaired presents
-    // counted, and the presents after the warm-up whose pair wasn't up a
-    // present on.
-    let run = |backend: PerStream, test: LockTest, halve: bool| {
-        let (player, clock) = player(backend, 6, 64 * FRAME);
+    // A run of `case`'s lenses, locked by `test`.
+    let run = |case: &Case, test: LockTest| {
+        let (player, clock) = player(case.backend.clone(), 6, case.budget * FRAME);
         let mut seen = Mismatches::default();
         open(&player, Some(spec(test)), &mut seen);
         // Every slot made before the clock runs: a slot is made the first
@@ -517,17 +589,21 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         let epoch = snapshot(&player).epoch;
         // Presents come every 4 ms or so, as from a 250 Hz display: a
         // frame handed out has a present's time to go up in its slot,
-        // with its pair's, and the next lens 1 hands out, at least 7.5 ms
+        // with its pair's, and the next lens 1 hands out, at least 4.5 ms
         // on, a present of its own. A present whose pair isn't up yet
         // waits for it, `SETTLE` at most, and is counted late.
-        let mut halved = !halve;
+        let mut halved = !case.halve;
         let mut late = 0;
-        let mut samples = pacing::play(&player, &clock, pace, [0, 1], WAIT, |p, s| {
+        let mut warm = None;
+        let mut samples = pacing::play(&player, &clock, case.pace, [0, 1], WAIT, |p, s| {
             if let Some(p) = p {
                 seen.check(p);
             }
-            if !halved && frame_of(s.clock) >= 45 {
-                player.set_config(budget(32));
+            if warm.is_none() && frame_of(s.clock) >= pacing::WARM_UP {
+                warm = Some(snapshot(&player).streams[1].decoded);
+            }
+            if !halved && frame_of(s.clock) >= case.pace.frames / 2 {
+                player.set_config(budget(case.budget / 2));
                 halved = true;
             }
             std::thread::sleep(PRESENTS);
@@ -559,57 +635,170 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
                 samples.push(Sample::of(p.as_ref(), &snapshot(&player), [0, 1]));
             }
         }
-        let counted = [Counter::PairResyncs, Counter::UnpairedPresents];
-        let [resyncs, unpaired] = counted.map(|c| player.perf().count(c));
+        let resyncs = player.cache().stats().resyncs;
+        let unpaired = player.perf().count(Counter::UnpairedPresents);
+        let decoded = snapshot(&player).streams[1].decoded - warm.unwrap_or(0);
         common::join(player);
-        (samples, seen, resyncs, unpaired, late)
-    };
-    // At most `LATE` presents late: `SETTLE` covers a rare stall, never
-    // pairs that are slow to go up throughout.
-    let settled = |late: u64| {
-        if late <= LATE {
-            Ok(late)
-        } else {
-            Err(format!(
-                "{late} presents after the warm-up found their pair not up after {PRESENTS:?}"
-            ))
+        Played {
+            samples,
+            seen,
+            resyncs,
+            unpaired,
+            late,
+            decoded,
         }
     };
-    // The check: the pacing rule, the content check, no resync unless
-    // the budget was halved, and few presents late.
-    type Run = (Vec<Sample>, Mismatches, u64, u64, u64);
-    let holds = |(samples, seen, resyncs, unpaired, late): Run, halved: bool| {
-        let paced = pacing::pacing(&samples, RATE).map_err(|e| format!("{e:?}"))?;
-        seen.unmixed(unpaired)?;
-        if resyncs > 0 && !halved {
-            return Err(format!("{resyncs} resyncs"));
+    // A case's own checks: no pair apart, no resync unless the budget
+    // was halved, and no freeze longer than its catch-up.
+    let holds = |case: &Case, played: &Played| {
+        played.seen.unmixed(played.unpaired)?;
+        if played.resyncs > 0 && !case.halve {
+            return Err(format!("{} resyncs", played.resyncs));
         }
-        settled(late)?;
-        Ok::<_, String>((paced, resyncs, late))
+        unfrozen(case, &played.samples)?;
+        Ok::<_, String>(())
     };
-    for (name, backend, halve) in [
-        ("lens 1 slow", one_slow(), false),
-        ("both slow", both_slow(), false),
-        ("lens 1 slow, the budget halved", one_slow(), true),
-    ] {
-        let got = holds(run(backend, LockTest::default(), halve), halve);
-        let (paced, resyncs, late) = got.unwrap_or_else(|e| panic!("{name}: {e}"));
-        eprintln!("{name}: {paced:?}, {resyncs} resyncs, {late} presents late");
+    let cases = [
+        slow("lens 1 slow", one_slow(), false),
+        slow(
+            "both slow",
+            PerStream::pair(lens(FRAMES, 4500), lens(FRAMES, 9000)),
+            false,
+        ),
+        slow("lens 1 slow, the budget halved", one_slow(), true),
+        within,
+    ];
+    let played: Vec<Played> = cases
+        .iter()
+        .map(|case| run(case, LockTest::default()))
+        .collect();
+    for (case, p) in cases.iter().zip(&played) {
+        holds(case, p).unwrap_or_else(|e| panic!("{}: {e}", case.name));
     }
+    let samples: Vec<&[Sample]> = played.iter().map(|p| &p.samples[..]).collect();
+    let paced = pacing::pooled(&samples, RATE).unwrap_or_else(|e| {
+        let each: Vec<String> = cases
+            .iter()
+            .zip(&samples)
+            .map(|(c, s)| format!("{}: {:?}", c.name, pacing::pacing(s, RATE)))
+            .collect();
+        panic!("{e:?}; {}", each.join("; "))
+    });
+    for ((case, p), paced) in cases.iter().zip(&played).zip(&paced) {
+        eprintln!(
+            "{}: {paced:?}, lens 1 decoding {} frames meanwhile; its pair still for {} frames at \
+             most of {}, {} resyncs, {} presents late",
+            case.name,
+            p.decoded,
+            pacing::longest_freeze(&p.samples, RATE),
+            case.longest_freeze(),
+            p.resyncs,
+            p.late
+        );
+    }
+    // The presents late, over the slow cases and in the other.
+    let late = |behind: bool| {
+        let runs: Vec<&Played> = (cases.iter().zip(&played))
+            .filter(|(c, _)| c.behind == behind)
+            .map(|(_, p)| p)
+            .collect();
+        settled(&runs)
+    };
+    late(true).unwrap_or_else(|e| panic!("the slow cases: {e}"));
+    late(false).unwrap_or_else(|e| panic!("{}: {e}", cases[3].name));
 
     // Control: the group base and the group `until` off. Lens 0 runs
-    // from the clock, its frames at lens 1's times gone before lens 1
-    // decodes them: no pair shows past the first, and every present
-    // after the freeze finds its pair not up.
+    // from the clock, its frames at lens 1's times mostly gone before
+    // lens 1 decodes them: the pair trails lens 1's newest, and the
+    // presents after it find their pair not up. Its freezes end at the
+    // odd pair lens 0 still holds, within the bound: the freeze's control
+    // is the slide below.
     let off = LockTest {
         no_group_base: true,
         ..LockTest::default()
     };
-    let frozen = run(one_slow(), off, false);
-    let late = frozen.4;
-    let e = must_fail("no group base or until", holds(frozen, false));
-    assert!(e.contains("Trailed"), "{e}");
-    must_fail("no group base or until, the presents late", settled(late));
+    let control = slow("lens 1 slow, no group base or until", one_slow(), false);
+    let frozen = run(&control, off);
+    let e = must_fail(
+        "no group base or until",
+        pacing::pooled(&[&frozen.samples[..]], RATE),
+    );
+    assert!(matches!(e, Unpaced::Trailed { .. }), "{e:?}");
+    must_fail(
+        "no group base or until, the presents late",
+        settled(&[&frozen]),
+    );
+    // Control: one slow case alone hands out too few frames after the
+    // warm-up to judge the share by.
+    let e = must_fail("one slow case alone", pacing::pooled(&samples[..1], RATE));
+    assert!(matches!(e, Unpaced::Unjudged { .. }), "{e:?}");
+    // Control: a pair whose freezes double, 4 frames of the clock and
+    // then 8, 16, 32 and 64, though each pair it shows is the slowest
+    // lens's newest.
+    let slide = sliding(&[30, 34, 42, 58, 90, 154]);
+    pacing::pacing(&slide, RATE).unwrap_or_else(|e| panic!("the slide's rule: {e:?}"));
+    must_fail("a pair whose freezes double", unfrozen(&cases[0], &slide));
+    // Control, to come with the engine's planted publish delay (unit A's
+    // `LockTest::publish_delay`, written in by unit C once merged): the
+    // fourth case run again with each slot published 4 ms late must fail
+    // `settled`, its pair late at about one present in three.
+}
+
+/// A run of a pair that shows a new pair, the slowest lens's newest,
+/// only at the clock's frames `at`, and stands still between them: a
+/// present a frame of the clock, each lens handing its frame out as the
+/// pair shows it, to the last of `at`, the end.
+fn sliding(at: &[i64]) -> Vec<Sample> {
+    let end = *at.last().unwrap();
+    (0..=end)
+        .map(|k| {
+            let shown = at.iter().rev().find(|&&a| a <= k).map_or(0, |&a| a);
+            let handed = u64::try_from(at.iter().filter(|&&a| a <= k).count()).unwrap();
+            Sample {
+                clock: RATE.frame_to_time(k).unwrap(),
+                shown: Some(RATE.frame_to_time(shown).unwrap()),
+                handed_out: [handed; 2],
+                newest: [Some(RATE.frame_to_time(shown).unwrap()); 2],
+                end: k == end,
+            }
+        })
+        .collect()
+}
+
+/// Whether a run of `case` never stood its pair still after the warm-up
+/// longer than [`Case::longest_freeze`].
+fn unfrozen(case: &Case, samples: &[Sample]) -> Result<i64, String> {
+    let still = pacing::longest_freeze(samples, RATE);
+    if still <= case.longest_freeze() {
+        Ok(still)
+    } else {
+        Err(format!(
+            "the pair stood still for {still} frames of the clock, more than {}",
+            case.longest_freeze()
+        ))
+    }
+}
+
+/// Whether the presents of `runs` that waited for their pair (`SETTLE`)
+/// after the warm-up are at most one between them, or at most a quarter
+/// of the frames their slowest lenses handed out meanwhile. A pair is
+/// late only once its slowest lens's newest moves past the pair in the
+/// slots, about once a frame it hands out, so a pair slow to go up
+/// throughout is late about as often as that, and fails; a rare stall
+/// is late once.
+fn settled(runs: &[&Played]) -> Result<u64, String> {
+    let late = runs.iter().map(|p| p.late).sum::<u64>();
+    let handed_out = (runs.iter())
+        .map(|p| pacing::handed_out(&p.samples, RATE))
+        .sum::<u64>();
+    if late <= 1 || late * 4 <= handed_out {
+        Ok(late)
+    } else {
+        Err(format!(
+            "{late} presents after the warm-up found their pair not up a present on, against \
+             {handed_out} frames handed out"
+        ))
+    }
 }
 
 /// How long a present of the pacing test waits, past its own 4 ms, for
@@ -618,13 +807,9 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
 /// up at once, and on a CPU the other tests share, lavapipe took longer
 /// than one present for them (2 runs of the suite in about 50, the pair
 /// up one present later). A pair the lock never forms still fails the
-/// rule, `SETTLE` later, and a present that waits is counted late.
+/// rule, `SETTLE` later, and a present that waits is counted late
+/// ([`settled`]).
 const SETTLE: Duration = Duration::from_millis(25);
-
-/// The most presents of a pacing run, after the warm-up, that may wait
-/// for their pair (`SETTLE`): more, and pairs are slow to go up
-/// throughout, not held up by a rare stall.
-const LATE: u64 = 3;
 
 /// Whether the slots hold a pair, of open `epoch`, that the pacing rule
 /// takes at the present after `s`: both lenses' frames at one time, at

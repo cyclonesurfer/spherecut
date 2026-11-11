@@ -12,9 +12,13 @@
 //! - play reaches the end.
 //!
 //! [`pacing`] holds a run's [`Sample`]s to it and names the part that
-//! failed, and [`pacing_cut`] one that its own length ends; [`play`] drives a run on a `ManualClock` and gathers them,
-//! [`play_steady`] drives one that keeps to the rule, and [`play_with`]
-//! one whose clock a test moves itself.
+//! failed, [`pacing_cut`] one that its own length ends, and [`pooled`]
+//! several runs whose share is judged together, over at least
+//! [`JUDGED`] frames; [`handed_out`] counts what a run's slowest lens
+//! handed out after the warm-up, and [`longest_freeze`] how long its
+//! pair stood still against the clock. [`play`] drives a run on a
+//! `ManualClock` and gathers them, [`play_steady`] drives one that keeps
+//! to the rule, and [`play_with`] one whose clock a test moves itself.
 
 use std::time::{Duration, Instant};
 
@@ -34,6 +38,17 @@ pub const SHARE: f64 = 0.8;
 /// The most frames the time presented may trail the slowest lens's
 /// newest frame.
 pub const TRAIL: i64 = 2;
+
+/// The fewest frames the slowest lenses of [`pooled`]'s runs must hand
+/// out after the warm-up between them, for [`SHARE`] to judge by: over
+/// fewer, one pair a held-up present missed fails it.
+pub const JUDGED: u64 = 20;
+
+/// The most frames [`play`] moves the clock on at a present: a test
+/// thread held up between two presents moves it on two frames, not past
+/// frames no present was there to show, which would count against the
+/// engine.
+pub const MOST_A_PRESENT: i64 = 2;
 
 /// What one present of a run showed, and where its lenses were.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +127,9 @@ pub enum Unpaced {
     FewPairs { pairs: u64, handed_out: u64 },
     /// Play never reached the end.
     NoEnd,
+    /// [`pooled`]'s runs handed out fewer than [`JUDGED`] frames after
+    /// the warm-up between them: too few to judge the share by.
+    Unjudged { handed_out: u64 },
 }
 
 /// `samples`, a run's presents in order, of a clip at `rate`, held to
@@ -127,15 +145,105 @@ pub fn pacing_cut(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced>
     pacing_to(samples, rate, false)
 }
 
+/// Several runs of one test held to the pacing rule, the share judged
+/// over them together: each run passes the warm-up, never trails and
+/// reaches the end, and between them the slowest lenses hand out at
+/// least [`JUDGED`] frames after the warm-up, of which the pairs
+/// presented are at least [`SHARE`]. Each run's count, or the part the
+/// runs failed: a run's own part, in [`pacing`]'s order, before
+/// `Unjudged`, then `FewPairs` over them all.
+pub fn pooled(runs: &[&[Sample]], rate: FrameRate) -> Result<Vec<Paced>, Unpaced> {
+    let each = runs
+        .iter()
+        .map(|samples| {
+            let paced = counted(samples, rate)?;
+            if samples.iter().any(|s| s.end) {
+                Ok(paced)
+            } else {
+                Err(Unpaced::NoEnd)
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let pairs = each.iter().map(|p| p.pairs).sum::<u64>();
+    let handed_out = each.iter().map(|p| p.handed_out).sum::<u64>();
+    if handed_out < JUDGED {
+        return Err(Unpaced::Unjudged { handed_out });
+    }
+    if (pairs as f64) < SHARE * handed_out as f64 {
+        return Err(Unpaced::FewPairs { pairs, handed_out });
+    }
+    Ok(each)
+}
+
+/// The longest a run's pair stood still after the warm-up, in frames the
+/// clock ran meanwhile: between one present that put a new pair up and
+/// the next, or to the run's last present. A pair that slides into ever
+/// longer freezes outgrows whatever bound the catch-up gives, and one
+/// that freezes outgrows it at once.
+pub fn longest_freeze(samples: &[Sample], rate: FrameRate) -> i64 {
+    let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
+    let Some(start) = warm(samples, rate) else {
+        return 0;
+    };
+    let mut since = frame(samples[start].clock);
+    let mut longest = 0;
+    for at in start..samples.len() {
+        let s = &samples[at];
+        let new = s.shown.is_some() && (at == 0 || samples[at - 1].shown != s.shown);
+        longest = longest.max(frame(s.clock) - since);
+        if new {
+            since = frame(s.clock);
+        }
+    }
+    longest
+}
+
+/// The frames the slowest lens of a run handed out after the warm-up, as
+/// [`pacing`] counts them, whatever else the run did: 0 for a run that
+/// never passed the warm-up.
+pub fn handed_out(samples: &[Sample], rate: FrameRate) -> u64 {
+    warm(samples, rate).map_or(0, |start| handed_out_from(samples, start))
+}
+
+/// The first sample past the warm-up.
+fn warm(samples: &[Sample], rate: FrameRate) -> Option<usize> {
+    let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
+    samples.iter().position(|s| frame(s.clock) >= WARM_UP)
+}
+
+/// The frames the slowest lens handed out from the sample before `start`
+/// to the last.
+fn handed_out_from(samples: &[Sample], start: usize) -> u64 {
+    let base = &samples[start.saturating_sub(1)];
+    let last = samples.last().unwrap_or(base);
+    (0..2)
+        .map(|m| last.handed_out[m].saturating_sub(base.handed_out[m]))
+        .min()
+        .unwrap_or(0)
+}
+
 /// The pacing rule, with or without its last part.
 fn pacing_to(samples: &[Sample], rate: FrameRate, to_end: bool) -> Result<Paced, Unpaced> {
+    let paced = counted(samples, rate)?;
+    if (paced.pairs as f64) < SHARE * paced.handed_out as f64 {
+        return Err(Unpaced::FewPairs {
+            pairs: paced.pairs,
+            handed_out: paced.handed_out,
+        });
+    }
+    if to_end && !samples.iter().any(|s| s.end) {
+        return Err(Unpaced::NoEnd);
+    }
+    Ok(paced)
+}
+
+/// A run past the warm-up that never trailed, and its counts; the share
+/// and the end are its callers'.
+fn counted(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced> {
     let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
-    let start = samples
-        .iter()
-        .position(|s| frame(s.clock) >= WARM_UP)
-        .ok_or(Unpaced::Short {
-            clock: samples.iter().map(|s| s.clock).max(),
-        })?;
+    let start = warm(samples, rate).ok_or(Unpaced::Short {
+        clock: samples.iter().map(|s| s.clock).max(),
+    })?;
     let mut trailed = 0;
     for at in start.max(1)..samples.len() {
         let (before, s) = (&samples[at - 1], &samples[at]);
@@ -159,27 +267,15 @@ fn pacing_to(samples: &[Sample], rate: FrameRate, to_end: bool) -> Result<Paced,
         }
         trailed = trailed.max(frames);
     }
-    let base = &samples[start.saturating_sub(1)];
     let pairs = (start..samples.len())
         .filter(|&at| {
             let s = &samples[at];
             s.shown.is_some() && (at == 0 || samples[at - 1].shown != s.shown)
         })
         .count() as u64;
-    let last = samples.last().unwrap_or(base);
-    let handed_out = (0..2)
-        .map(|m| last.handed_out[m].saturating_sub(base.handed_out[m]))
-        .min()
-        .unwrap_or(0);
-    if (pairs as f64) < SHARE * handed_out as f64 {
-        return Err(Unpaced::FewPairs { pairs, handed_out });
-    }
-    if to_end && !samples.iter().any(|s| s.end) {
-        return Err(Unpaced::NoEnd);
-    }
     Ok(Paced {
         pairs,
-        handed_out,
+        handed_out: handed_out_from(samples, start),
         trailed,
     })
 }
@@ -197,7 +293,9 @@ pub struct Pace {
 /// `pace`, presenting about every millisecond, until play reaches the
 /// end or `wait` passes: each present's [`Sample`] of `members`, with
 /// `each` called after it with what it presented (to read the slots
-/// back, or change the budget mid-play).
+/// back, or change the budget mid-play). The clock keeps to the wall
+/// clock's frame, but moves on at most [`MOST_A_PRESENT`] frames a
+/// present.
 pub fn play(
     player: &Player,
     clock: &ManualClock,
@@ -209,7 +307,12 @@ pub fn play(
     let began = Instant::now();
     play_with(player, members, wait, each, || {
         let k = (began.elapsed().as_nanos() / pace.period.as_nanos().max(1)) as i64;
-        let at = pace.rate.frame_to_time(k.min(pace.frames)).unwrap();
+        let from = pace
+            .rate
+            .time_to_frame(clock.now(), Rounding::Floor)
+            .unwrap();
+        let k = k.min(from + MOST_A_PRESENT).min(pace.frames);
+        let at = pace.rate.frame_to_time(k).unwrap();
         if clock.is_running() && clock.now() < at {
             clock.set(at, Instant::now());
         }
