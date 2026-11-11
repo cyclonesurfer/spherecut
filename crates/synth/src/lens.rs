@@ -49,7 +49,10 @@ impl TruthBinding {
 /// How a block's numbers, in canvas pixels, scale to a square track of
 /// side s. src is the side of a block's square on the canvas (5376 on the
 /// X5), dst is field 27's (5312), and c_local is the block's centre less
-/// its offset on the canvas (block 1's cx less src).
+/// its offset on the canvas (block 1's cx less src). Like
+/// `sphere::rig::CanvasMap`, it leaves out reading D, field 27's window
+/// offset taken literally (`docs/formats/insta360.md` §4.4), so no gate
+/// plants it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TruthCanvas {
     /// Focal f · s/dst, centre c_local · s/src.

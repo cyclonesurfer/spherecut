@@ -94,6 +94,14 @@ impl Binding {
 /// ([`Calibration::src`], 5376 on the X5), dst is field 27's window
 /// ([`Calibration::dst`], 5312), and c_local is the block's centre in its
 /// own square ([`LensCalib::cx`]). An LRV half has s = 832.
+///
+/// Field 27 also stores an offset (0, 0 on the X5), which no map here
+/// reads. Read literally, as a dst window at that offset (focal f · s/dst,
+/// centre (c_local − offset) · s/dst), it would move every centre about
+/// 23 px at 3840² from A, B and C, which agree within 0.25 px. That
+/// reading, D in `docs/formats/insta360.md` §4.4, is unsettled and left
+/// out: the evidence there points away from it, and a convention outside
+/// this space lands as [`Extrinsics::Fitted`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CanvasMap {
     /// Focal f · s/dst, centre c_local · s/src.
