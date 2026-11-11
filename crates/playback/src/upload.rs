@@ -74,6 +74,7 @@ use spherecut_render::{
 
 use crate::budget::{self, CacheBudget};
 use crate::cache::WAIT_SLICE;
+use crate::lock::LockStatus;
 use crate::perf::{self, Counter, MemoryStats, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{BudgetStatus, Landed, Place, Shared, frames_between, time_of};
@@ -115,6 +116,12 @@ struct StreamPass {
     /// It failed the target's request, or can't open: it shows no new
     /// frame for it.
     out: bool,
+    /// How long to wait before each of its frames is published, as a
+    /// locked pair's member under the test switch
+    /// [`LockTest::publish_delay`]: `None` without it.
+    ///
+    /// [`LockTest::publish_delay`]: crate::LockTest::publish_delay
+    delay: Option<Duration>,
 }
 
 /// The upload thread's own state.
@@ -292,15 +299,22 @@ impl UploadThread {
             if status.epoch != epoch {
                 return false;
             }
+            let delay = status
+                .lock
+                .as_ref()
+                .filter(|g| g.status == LockStatus::Locked)
+                .and_then(|g| Some((g.members, g.spec.test.publish_delay?)));
             status
                 .streams
                 .iter()
-                .map(|s| {
+                .enumerate()
+                .map(|(i, s)| {
                     let pass = StreamPass {
                         landed: s.landed,
                         out: target != 0
                             && (s.failed_request == Some(target)
                                 || (!s.opened && s.error.is_some())),
+                        delay: delay.filter(|(m, _)| m.contains(&i)).map(|(_, d)| d),
                     };
                     (pass, placement_of(s.info.as_ref()))
                 })
@@ -401,7 +415,8 @@ impl UploadThread {
                     continue;
                 }
                 let placement = placements.get(i).copied().unwrap_or(Placement::FULL);
-                return self.upload(st, epoch, i, f, &placement) || did;
+                let delay = streams.get(i).and_then(|s| s.delay);
+                return self.upload(st, epoch, i, f, &placement, delay) || did;
             }
         }
         did
@@ -473,8 +488,9 @@ impl UploadThread {
             .or_else(|| cache.following(i, playhead).map(|(f, _)| f))
     }
 
-    /// Upload frame `f` of stream `i` into a free slot: whether it did
-    /// anything (false when no slot is free).
+    /// Upload frame `f` of stream `i` into a free slot, waiting `delay`
+    /// before it is published (a test's switch): whether it did anything
+    /// (false when no slot is free).
     fn upload(
         &self,
         st: &mut State,
@@ -482,6 +498,7 @@ impl UploadThread {
         i: usize,
         f: &Arc<VideoFrame>,
         placement: &Placement,
+        delay: Option<Duration>,
     ) -> bool {
         let shared = &self.shared;
         let slots = &shared.slots;
@@ -513,7 +530,7 @@ impl UploadThread {
                     g
                 }
                 Err(e @ RenderError::OutOfMemory(_)) => {
-                    self.slot_died(epoch, claim, &e);
+                    self.slot_died(claim, &e);
                     return true;
                 }
                 Err(e) => {
@@ -532,6 +549,10 @@ impl UploadThread {
         match uploaded {
             Ok(stats) => {
                 drop(gpu_frame);
+                if let Some(delay) = delay {
+                    may_block("a test's delay before a locked pair's frame is published");
+                    std::thread::sleep(delay);
+                }
                 slots.publish(
                     claim,
                     &SlotFrame {
@@ -553,7 +574,7 @@ impl UploadThread {
             }
             Err(e @ RenderError::OutOfMemory(_)) => {
                 drop(gpu_frame);
-                self.slot_died(epoch, claim, &e);
+                self.slot_died(claim, &e);
             }
             Err(e) => {
                 drop(gpu_frame);
@@ -565,10 +586,13 @@ impl UploadThread {
     }
 
     /// The GPU had no memory for the slot `claim` holds (`e`): it is
-    /// dropped for good, which the player says, and a locked pair of open
-    /// `epoch` left below its floor of live slots unlocks (M3 plan section
-    /// 9), its frame cache's group let go under the same status lock.
-    fn slot_died(&self, epoch: u64, claim: Claim, e: &RenderError) {
+    /// dropped for good, which the player says, and a locked pair left
+    /// below its floor of live slots unlocks (M3 plan section 9), its
+    /// frame cache's group let go under the same status lock. The slots
+    /// serve every open, so the pair checked is the status's, whatever
+    /// open the dying slot's frame was for; the player says so only while
+    /// that pair's open is the latest.
+    fn slot_died(&self, claim: Claim, e: &RenderError) {
         let shared = &self.shared;
         let slot = claim.index;
         shared.slots.kill(claim);
@@ -581,14 +605,14 @@ impl UploadThread {
         });
         let unlocked = {
             let mut st = shared.status();
-            let unlocked = (st.epoch == epoch).then(|| st.below_floor(live)).flatten();
+            let unlocked = st.below_floor(live).map(|e| (st.epoch, e));
             if unlocked.is_some() {
                 shared.cache.set_group(None);
             }
             unlocked
         };
-        if let Some(e) = unlocked
-            && shared.is_current(epoch)
+        if let Some((open, e)) = unlocked
+            && shared.is_current(open)
         {
             shared.event(e);
         }

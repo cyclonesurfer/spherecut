@@ -265,7 +265,7 @@ impl OpenJob {
                     self.epoch,
                     stream,
                     |s| s.error = Some(error.clone()),
-                    |st| st.member_failed(stream),
+                    |st| st.member_failed(stream, false),
                 );
                 shared.event(PlayerEvent::OpenFailed { stream, error });
                 for e in group {
@@ -457,10 +457,24 @@ impl Worker {
     }
 
     /// Nothing to decode until a request comes: the end or a failure was
-    /// reached, or the latest request was stopped (the next is on its
-    /// way).
+    /// reached, unless a request the cache answered since says where to
+    /// go on from (decoding goes on from the end of the run it found,
+    /// which may lie before the end, or past the failure), or the latest
+    /// request was stopped (the next is on its way). Under the test's
+    /// hook ([`Player::old_idle_rule`]), the end or a failure keeps the
+    /// worker idle whatever the cache answered since.
+    ///
+    /// [`Player::old_idle_rule`]: crate::Player::old_idle_rule
     fn is_idle(&self) -> bool {
-        self.at_end || self.failed || self.last.is_none() || self.token.is_stopped()
+        let stuck = self.at_end || self.failed;
+        let resumes = self.resume.is_some() && !self.old_idle();
+        (stuck && !resumes) || self.last.is_none() || self.token.is_stopped()
+    }
+
+    /// Whether the test's hook keeps the rules from before a request the
+    /// cache answered could take a worker on from the end or a failure.
+    fn old_idle(&self) -> bool {
+        self.shared.old_idle.load(Ordering::Acquire)
     }
 
     fn open(&mut self) -> Option<Box<dyn VideoDecode>> {
@@ -503,7 +517,13 @@ impl Worker {
                                 .is_some_and(|g| g.status == LockStatus::Locked)
                         {
                             self.shared.slots.set_pair(true);
-                            events.extend(st.below_floor(self.shared.slots.stats().active));
+                            // Unlocked at once, the pair never ends at its
+                            // shorter lens: that isn't said.
+                            if let Some(refused) = st.below_floor(self.shared.slots.stats().active)
+                            {
+                                events.retain(|e| !matches!(e, PlayerEvent::LensShort { .. }));
+                                events.push(refused);
+                            }
                         }
                         if let Some(members) = st.grouped()
                             && current
@@ -533,7 +553,7 @@ impl Worker {
                         self.epoch,
                         stream,
                         |s| s.error = Some(error.clone()),
-                        |st| st.member_failed(stream),
+                        |st| st.member_failed(stream, false),
                     );
                     self.tell(PlayerEvent::OpenFailed { stream, error });
                     for e in group {
@@ -702,7 +722,9 @@ impl Worker {
     }
 
     /// The decoder at the frame a seek to `at` by `mode` lands on: where
-    /// it is, or sought there.
+    /// it is, or sought there. After a failure the decoder is wherever
+    /// the failed call left it, not at the last frame it handed out, so
+    /// it is sought.
     fn position(
         &mut self,
         dec: &mut dyn VideoDecode,
@@ -711,6 +733,7 @@ impl Worker {
         token: &StopToken,
     ) -> Result<Arc<VideoFrame>, Halt> {
         if mode == SeekMode::Exact
+            && (!self.failed || self.old_idle())
             && let Some(last) = &self.last
             && last.time == at
         {
@@ -897,7 +920,7 @@ impl Worker {
             .ok()
             .zip(frame.checked_add(frame).ok())
             .is_some_and(|(lag, two)| lag > two);
-        let until = match self.group_until(now, behind) {
+        let until = match self.group_until(now, frame, behind) {
             // A locked pair's member catches up only to the group's time,
             // whichever member raised it, so that both skip to one frame.
             Some(until) => until.filter(|&u| newest < u && self.catching_up != Some(u)),
@@ -912,40 +935,56 @@ impl Worker {
         }
     }
 
-    /// A locked pair's catch-up time, given the clock's time `now` and
-    /// whether this member's newest frame is more than two frames behind
-    /// it: the group's `until`, which a member behind raises to `now`, but
-    /// never past the newest frame every other member holds. `None`
-    /// unless the pair is locked with its group base on: the stream then
-    /// catches up on its own.
-    fn group_until(&self, now: Time, behind: bool) -> Option<Option<Time>> {
-        if !self.spec.is_some_and(|s| !s.test.no_group_base) {
-            return None;
-        }
+    /// A locked pair's catch-up time, given the clock's time `now`, a
+    /// frame's length `frame`, and whether this member's newest frame is
+    /// more than two frames behind `now`: the group's `until`, which a
+    /// member behind raises to `now` when every other member's newest is
+    /// behind too, so that a pair trailing the clock together catches up
+    /// to it; else to `now` or the newest frame every other member holds,
+    /// whichever is earlier, so that the member behind catches up to the
+    /// one that leads and no further. `None` unless the pair is locked
+    /// with its group base on: the stream then catches up on its own.
+    /// Under the test switch `old_until`, every rise is capped at the
+    /// newest frame the others hold.
+    fn group_until(&self, now: Time, frame: Time, behind: bool) -> Option<Option<Time>> {
+        let spec = self.spec.filter(|s| !s.test.no_group_base)?;
+        let two = frame.checked_add(frame).ok()?;
         let cache = &self.shared.cache;
         let mut st = self.shared.status();
         if st.epoch != self.epoch {
             return None;
         }
         let members = st.grouped().filter(|m| m.contains(&self.stream))?;
+        let others = || members.iter().filter(|&&m| m != self.stream);
         // Each other member's newest frame in the cache, at or before
         // the newest it handed out (frames a seek back left ahead lie
         // past it).
-        let held = members
-            .iter()
-            .filter(|&&m| m != self.stream)
+        let held = others()
             .map(|&m| {
                 let newest = st.streams.get(m)?.newest?;
                 Some(cache.at_or_before(m, newest)?.time)
             })
             .collect::<Option<Vec<Time>>>()
             .and_then(|h| h.into_iter().min());
+        // Whether every other member's newest frame handed out is more
+        // than two frames behind `now` too.
+        let all_behind = others().all(|&m| {
+            st.streams
+                .get(m)
+                .and_then(|s| s.newest)
+                .and_then(|n| now.checked_sub(n).ok())
+                .is_some_and(|lag| lag > two)
+        });
         let g = st.lock.as_mut()?;
-        if behind
-            && let Some(held) = held
-            && g.until.is_none_or(|u| u < now.min(held))
-        {
-            g.until = Some(now.min(held));
+        if behind && let Some(held) = held {
+            let to = if all_behind && !spec.test.old_until {
+                now
+            } else {
+                now.min(held)
+            };
+            if g.until.is_none_or(|u| u < to) {
+                g.until = Some(to);
+            }
         }
         Some(g.until)
     }
@@ -1083,10 +1122,14 @@ impl Worker {
     }
 
     /// The decoder failed with `e`, after any fallback to software: say
-    /// so, unless it was shut down. A locked pair that hasn't formed yet
-    /// is refused with `"open"`; one that has ends at this member's last
-    /// frame ([`Status::end_member`]).
+    /// so, unless it was shut down. A lock group, pending or locked, of
+    /// a member that failed before it handed out a frame of the open is
+    /// refused with `"open"` ([`Status::member_failed`]), its cache group
+    /// let go under the same lock, so that the other lens plays on alone;
+    /// the pair of one that handed out a frame ends at its last
+    /// ([`Status::end_member`]).
     ///
+    /// [`Status::member_failed`]: crate::shared::Status::member_failed
     /// [`Status::end_member`]: crate::shared::Status::end_member
     fn fail(&mut self, e: MediaError) -> Halt {
         self.failed = true;
@@ -1105,6 +1148,8 @@ impl Worker {
             let length = l.duration.or(self.frame_length)?;
             Some((l.time.checked_add(length).ok()?, l.time))
         });
+        let handed_out = self.last.is_some();
+        let cache = &self.shared.cache;
         let mut ended = None;
         let group = self.shared.stream_and_group(
             self.epoch,
@@ -1119,7 +1164,11 @@ impl Worker {
                 {
                     ended = Some((end, before.0, before.1));
                 }
-                st.member_failed(stream)
+                let refused = st.member_failed(stream, handed_out);
+                if refused.is_some() {
+                    cache.set_group(None);
+                }
+                refused
             },
         );
         if ended.is_some() {

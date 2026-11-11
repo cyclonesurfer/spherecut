@@ -4,9 +4,10 @@
 //!
 //! The lenses lock at open if their timing tables, read through
 //! [`MediaBackend::track_timing`] whatever the decoder, agree on time
-//! base, start (after [`LockSpec::offset`]), constant rate, size, and
-//! `stts` and `stss` over the common prefix; otherwise the lock is
-//! refused by the [`field`] that differs and they play unlocked. Once
+//! base, start (against [`LockSpec::offset`]), and `stts` and `stss`
+//! over the common prefix, and their opened streams' info on a constant
+//! rate and the size; otherwise the lock is refused by the [`field`]
+//! that differs and they play unlocked. Once
 //! locked, the presenter shows the newest time both lenses hold at or
 //! before the clock ([`pick_pair`]), both slots or neither
 //! ([`show_pair`], [`show_pair_over`]); the frame cache runs from the
@@ -23,6 +24,8 @@
 //! [`Player::open_locked`]: crate::Player::open_locked
 //! [`MediaBackend::track_timing`]: spherecut_media::backend::MediaBackend::track_timing
 
+use std::time::Duration;
+
 use spherecut_core::Time;
 
 use crate::slots::{SlotState, SlotView};
@@ -32,10 +35,14 @@ use crate::slots::{SlotState, SlotView};
 /// [`Player::open_locked`]: crate::Player::open_locked
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockSpec {
-    /// Lens 1's start less lens 0's, which the open checks and takes off
-    /// lens 1's times before it compares the two lenses' tables: 0 for
-    /// the X5, whose tracks P-TRK found to start together (M3 plan 4.3,
-    /// R1).
+    /// Lens 1's first presentation time less lens 0's, in the tracks'
+    /// tables, which the open requires the two to differ by (else the
+    /// lock is refused with [`field::START`]): 0 for the X5, whose tracks
+    /// P-TRK found to start together (M3 plan 4.3, R1). Nothing else
+    /// reads it. Each lens's clip time already starts at its own first
+    /// frame, and its `stts` and `stss` are compared from there, so a
+    /// container offset needs nothing more; an offset in the pictures at
+    /// equal times can't be given here.
     pub offset: Time,
     /// The tests' switches, all off but in a control.
     #[doc(hidden)]
@@ -65,8 +72,9 @@ pub struct LockTest {
     /// A seek or a step keeps the old common time as the group base
     /// instead of the clock's time until every member lands.
     pub old_base_in_seeks: bool,
-    /// Keyframe landings that differ stay as they landed, with no exact
-    /// seek of both lenses to the later.
+    /// Landings that differ stay as they landed, with no exact seek of
+    /// both lenses to the later: a keyframe seek's, and an exact seek's
+    /// whose landings both lie at or after its time.
     pub no_later_landing: bool,
     /// No `pair_resync` backstop when every member waits for room and no
     /// common time lies past the group base.
@@ -74,8 +82,22 @@ pub struct LockTest {
     /// No floor of two live slots a member: the group stays locked below
     /// it.
     pub no_floor: bool,
-    /// A member that fails mid-play doesn't end the pair.
+    /// A member that fails, mid-play or in a seek or a step, doesn't end
+    /// the pair.
     pub no_end_on_failure: bool,
+    /// The group `until` stays capped at the newest frame the other
+    /// member holds even when every member trails the clock, so that a
+    /// pair that trails together never catches up (the catch-up
+    /// control).
+    pub old_until: bool,
+    /// A member that fails a seek or a step at or past its end isn't
+    /// taken as landed on its last frame: the clock lands where the live
+    /// member landed.
+    pub no_failed_landing: bool,
+    /// How long the upload thread waits before it publishes each frame of
+    /// a locked pair, to make the pair late on purpose (the pacing
+    /// rule's control); `None`, the default, costs nothing.
+    pub publish_delay: Option<Duration>,
 }
 
 /// Where a locked pair is.
@@ -87,8 +109,9 @@ pub enum LockStatus {
     /// The lenses agreed: they show only as pairs.
     Locked,
     /// They didn't agree on `field` (one of [`field`]'s), or a member
-    /// couldn't open, or the slots fell below the floor: they show
-    /// unlocked, as [`Player::open_streams`] shows streams.
+    /// couldn't open or failed before it handed out a frame, or the slots
+    /// fell below the floor: they show unlocked, as
+    /// [`Player::open_streams`] shows streams.
     ///
     /// [`Player::open_streams`]: crate::Player::open_streams
     Refused { field: &'static str },
@@ -123,15 +146,17 @@ pub mod field {
     pub const STSS: &str = "stss";
     /// A track has no timing tables to compare.
     pub const TIMING: &str = "timing";
-    /// A member's decoder couldn't open before the group formed.
+    /// A member's decoder couldn't open, or the member failed before it
+    /// handed out its first frame of the open, whether the group had
+    /// formed or not.
     pub const OPEN: &str = "open";
     /// A slot's death left fewer live slots than two a member.
     pub const SLOTS: &str = "slots";
 
-    /// Every field, in the order the open checks them, the two that
-    /// aren't about the tables last.
+    /// Every field: the comparisons in the order the open checks them,
+    /// then the two that aren't comparisons.
     pub const ALL: [&str; 9] = [
-        TIME_BASE, START, RATE, SIZE, STTS, STSS, TIMING, OPEN, SLOTS,
+        TIMING, TIME_BASE, START, RATE, SIZE, STTS, STSS, OPEN, SLOTS,
     ];
 }
 

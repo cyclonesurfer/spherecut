@@ -42,8 +42,11 @@ pub enum Stage {
     /// it, positive when the frame is late, negative when early
     /// (presenter).
     AvOffset,
-    /// How far the pair a locked group shows trails the clock's time,
-    /// at each present (presenter, M3 plan section 9).
+    /// How far the clock's time a present is for, without the A/V
+    /// offset, is past the end of the pair a locked group shows: 0 while
+    /// the pair's interval holds it, never negative. Recorded at each
+    /// present while the clock runs and the pair is locked, and at no
+    /// other (presenter, M3 plan section 9).
     PairWait,
 }
 
@@ -90,8 +93,18 @@ pub enum Counter {
     /// Video frames shown.
     FramesShown,
     /// Frames passed over between two shown ones while playing (from run
-    /// links, else from gaps in pts).
+    /// links, else from gaps in pts), beyond those [`Counter::Skipped`]
+    /// counts: a locked pair's once a pair, by its member 0, and an
+    /// unlocked player's once a stream.
     Dropped,
+    /// Of the frames passed over between two shown ones while playing,
+    /// those the presents' cadence passes over because the display
+    /// presents slower than the clip: up to one fewer than the clip's
+    /// frames in the median present interval, rounded up, at each present
+    /// (none at or below the present rate, one for a 120 fps clip at
+    /// 60 Hz). Counted as [`Counter::Dropped`] is, once a pair or once a
+    /// stream.
+    Skipped,
     /// Frames catch-up skipped in the decoder.
     DecodeDropped,
     /// UI frames over 1.5 times the median interval.
@@ -128,11 +141,12 @@ pub enum Counter {
 }
 
 impl Counter {
-    pub const ALL: [Counter; 17] = [
+    pub const ALL: [Counter; 18] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
         Counter::Dropped,
+        Counter::Skipped,
         Counter::DecodeDropped,
         Counter::Hitches,
         Counter::Seeks,
@@ -154,6 +168,7 @@ impl Counter {
             Counter::FramesUploaded => "frames_uploaded",
             Counter::FramesShown => "frames_shown",
             Counter::Dropped => "dropped",
+            Counter::Skipped => "skipped",
             Counter::DecodeDropped => "decode_dropped",
             Counter::Hitches => "hitches",
             Counter::Seeks => "seeks",

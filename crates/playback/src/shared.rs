@@ -166,9 +166,10 @@ pub(crate) struct LockGroup {
     /// opened: the frame cache's keys for them.
     pub(crate) members: [usize; 2],
     pub(crate) status: LockStatus,
-    /// The group's catch-up time: raised to the clock's time when a
-    /// member falls more than 2 frames behind it, never past the newest
-    /// frame every other member holds, and cleared by a seek or a step.
+    /// The group's catch-up time, raised when a member falls more than 2
+    /// frames behind the clock: to the clock's time when every member
+    /// has, else to the clock's time or the newest frame every other
+    /// member holds, whichever is earlier. Cleared by a seek or a step.
     /// No member catches up on its own.
     pub(crate) until: Option<Time>,
     /// Each member's timing tables, as the open read them through the
@@ -313,24 +314,37 @@ impl Status {
     }
 
     /// Player stream `stream` couldn't open, or decode after any
-    /// fallback: a pending group it is a member of is refused with
-    /// `"open"`, and what the player says of it.
-    pub(crate) fn member_failed(&mut self, stream: usize) -> Option<PlayerEvent> {
+    /// fallback, before it handed out a frame of the open (`handed_out`
+    /// false): a group it is a member of, pending or locked, is refused
+    /// with `"open"`, since the pair has no last frame of it to end at
+    /// (M3 plan section 9), and the group's `until` goes with it. Which
+    /// of the member's first decode and its partner's open came first
+    /// doesn't change it. A member that handed out a frame ends the pair
+    /// instead ([`end_member`](Self::end_member)). What the player says
+    /// of it, for the caller to tell once the lock is let go; the caller
+    /// lets the cache's group go too.
+    pub(crate) fn member_failed(&mut self, stream: usize, handed_out: bool) -> Option<PlayerEvent> {
         let g = self.lock.as_mut()?;
-        (g.status == LockStatus::Pending && g.members.contains(&stream))
-            .then(|| g.refuse(field::OPEN))
+        let formed = matches!(g.status, LockStatus::Pending | LockStatus::Locked);
+        (formed && !handed_out && g.members.contains(&stream)).then(|| {
+            g.until = None;
+            g.refuse(field::OPEN)
+        })
     }
 
-    /// Player stream `stream`, a member of the open's locked group, can't
-    /// decode on after any fallback, its last frame ending at `end` and
-    /// starting at `last`: the pair ends there, as at a shorter lens (M3
-    /// plan section 9), its end set for the presenter's check of the end
-    /// unless an earlier end is set already. Without this, nothing ends
-    /// the pair and `pick_pair` holds its last while the clock runs on.
-    /// The end and last frame it replaced, to put back if the member
-    /// decodes past `end` after all (a seek past damage); `None` when
-    /// nothing changed: not a locked member, or the test switch that
-    /// keeps the pair going.
+    /// Player stream `stream`, a member of the open's lock group, locked
+    /// or still pending, can't decode on after any fallback, its last
+    /// frame of the open ending at `end` and starting at `last`: the pair
+    /// ends there, as at a shorter lens (M3 plan section 9), its end set
+    /// for the presenter's check of the end unless an earlier end is set
+    /// already. Without this, nothing ends the pair and `pick_pair` holds
+    /// its last while the clock runs on. Pending, the end is set for the
+    /// pair the group may become, so that which of the failure and the
+    /// partner's open came first doesn't change it. The end and last
+    /// frame it replaced, to put back if the member decodes past `end`
+    /// after all (a seek past damage); `None` when nothing changed: not a
+    /// member of a group that is pending or locked, or the test switch
+    /// that keeps the pair going.
     pub(crate) fn end_member(
         &mut self,
         stream: usize,
@@ -338,7 +352,7 @@ impl Status {
         last: Time,
     ) -> Option<(Option<Time>, Option<Time>)> {
         let g = self.lock.as_ref()?;
-        if g.status != LockStatus::Locked
+        if matches!(g.status, LockStatus::Refused { .. })
             || g.spec.test.no_end_on_failure
             || !g.members.contains(&stream)
         {
@@ -402,6 +416,12 @@ pub(crate) struct Shared {
     ///
     /// [`Player::fail_slot_allocations`]: crate::Player::fail_slot_allocations
     pub(crate) slot_faults: AtomicU64,
+    /// A test's hook ([`Player::old_idle_rule`]): the decode workers keep
+    /// the idle rules from before a request the cache answered could take
+    /// them on from the end or a failure.
+    ///
+    /// [`Player::old_idle_rule`]: crate::Player::old_idle_rule
+    pub(crate) old_idle: AtomicBool,
     /// The request the presenter waits for (0 for none), and whether
     /// playback is wanted: the upload thread's guide to what to upload.
     pub(crate) target: AtomicU64,
@@ -526,7 +546,7 @@ impl Shared {
     /// ([`slot_faults`](Self::slot_faults)), counting it if so.
     pub(crate) fn slot_fault(&self) -> bool {
         self.slot_faults
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
             .is_ok()
     }
 
