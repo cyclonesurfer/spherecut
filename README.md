@@ -4,13 +4,19 @@ A native Linux editor for 360° video, written in Rust, in early
 development. It is being built to open raw files from Insta360, GoPro and
 DJI 360 cameras as well as stitched equirectangular video, to reframe them
 into flat video or edit them as 360, and to export with the metadata
-YouTube and headsets need. It will render with wgpu on Vulkan. It decodes
-with FFmpeg, in software or on the GPU through VA-API.
+YouTube and headsets need. It renders with wgpu on Vulkan and decodes
+with FFmpeg: in software, or on the GPU through Vulkan Video or VA-API.
 
 It runs offline: no accounts, no telemetry, no network access.
 
-**Status: early.** Milestone M0 (foundations) is done; M1, the viewer, is
-in progress. What works today:
+**Status: early.** M3, stitching a camera's raw files, is under way:
+M3.0 to M3.4 and M3.8 are in, and stitching itself comes with M3.5 and
+later. M0 (foundations) is done. M1 (the viewer) is done, its last
+hardware rows waiting on huginn's run. M2 (reframing and export) has
+all its code in (M2.1 to M2.10); the project format (Pat's call), and
+huginn's 4K30 export row and toolkit check, are open. Track A, the tools
+for AI agents: A1 and A2 are in, waiting on runs with a real agent.
+What works today:
 
 - `spherecut [file]` opens the viewer: a stitched equirect played on the
   GPU with its audio, looked around by dragging (the point you grab stays
@@ -19,8 +25,9 @@ in progress. What works today:
   checks your codecs and GPU at startup and shows the fixes it finds.
   F3 shows the performance overlay, File ▸ Settings keeps the cache,
   decoder, filter, slots and A/V offset, and a camera's raw file with a
-  stream a lens shows its lenses flat, side by side.
-- Reframing (M2, under way): opening a video makes a project of it. The
+  stream a lens shows its lenses flat, side by side, both always at the
+  same moment of the clip (M3.8, DECISIONS D67).
+- Reframing and export (M2): opening a video makes a project of it. The
   viewer shows the output's frame, and moving the view on a key edits
   it; Alt+K keys the view, I and O set the trim, and the strip under
   the picture moves keys, markers and the trim (Escape lets a drag go).
@@ -34,21 +41,30 @@ in progress. What works today:
 - `spherecut probe <file>...` shows what an MP4/MOV or Matroska/WebM file
   is: container, streams, codecs, colour, exact frame rates and
   timebases, spherical video and ambisonic metadata, and the camera
-  vendor and layout it most likely came from. It also checks MP4/MOV
-  files for the kinds of damage listed under Build and run. `--json`
-  gives the same as one JSON document, for scripts and AI agents
+  vendor and layout it most likely came from. Of an Insta360 X5's file
+  it also reads the trailer: the camera, which streams hold the lenses,
+  their calibration and the clip's companion file (M3.2). It checks
+  MP4/MOV files for the kinds of damage listed under Build and run, and
+  prints control characters in what it shows of a file, its warnings,
+  damage and FFmpeg's lines included, as `\xNN`. `--json` gives the
+  same as one JSON document, for scripts and AI agents
   ([docs/cli-json.md](docs/cli-json.md)).
 - `spherecut doctor` checks what your FFmpeg, drivers and GPU can actually
   do. It decodes one small frame each of H.264 High, HEVC Main, HEVC Main 10
   and AV1 in software, on VA-API and on FFmpeg's Vulkan device, encodes one
   frame with each VA-API encoder, and lists the Vulkan devices. For each
   problem it prints a fix: the exact `dnf` or `pacman` command where a
-  package fixes it.
+  package fixes it. `--file` also checks a camera's file: whether it can
+  be stitched and whether both its lenses decode.
 - `spherecut frame <file> -o out.png` renders one frame of a stitched
   equirect through a virtual camera (yaw, pitch, roll, field of view,
   rectilinear, fisheye or stereographic, and a morph between two) into a
   PNG, headless, on the GPU's Vulkan driver or Mesa's lavapipe. The frame
   is exactly the one asked for, by time or by number.
+- `spherecut render <project> -o out.mp4` exports a project's sequence
+  as an MP4, encoded on the GPU through VA-API or in software. Every
+  export, the window's too, is read back before it is put in place, by
+  Spherecut and by FFmpeg's own demuxer.
 
 - `spherecut mcp` lets an AI agent on this machine (Claude Code, Codex,
   Gemini CLI, Copilot CLI, Cursor, Zed, goose, opencode) go through your
@@ -93,8 +109,9 @@ See `PLAN.md` for the milestones and `PROGRESS.md` for where things stand.
 
 ### Fedora (43 or newer)
 
-Fedora's own FFmpeg (`ffmpeg-free`) and Mesa VA-API driver leave out H.264
-and HEVC, which nearly every 360 camera records. Use RPM Fusion's builds
+Fedora's own FFmpeg (`ffmpeg-free`) and its Mesa VA-API and Vulkan
+drivers leave out H.264 and HEVC, which nearly every 360 camera records.
+Use RPM Fusion's builds
 (enable the RPM Fusion free repository first; see rpmfusion.org):
 
 ```sh
@@ -103,6 +120,7 @@ sudo dnf install ffmpeg-devel clang-devel pkgconf-pkg-config alsa-lib-devel libv
 sudo dnf install strace                          # for the Tier 1 tests
 # AMD GPUs:
 sudo dnf install mesa-va-drivers-freeworld       # or: dnf swap mesa-va-drivers mesa-va-drivers-freeworld
+sudo dnf swap mesa-vulkan-drivers mesa-vulkan-drivers-freeworld   # Vulkan Video H.264 and HEVC (RPM Fusion free)
 # Intel GPUs (RPM Fusion nonfree):
 sudo dnf install intel-media-driver
 # Rust with rustfmt and clippy:
@@ -214,14 +232,18 @@ When a file can't be opened, its `ffmpeg` lines follow the error on
 stderr (with `--json`, they are in the file's `error.ffmpeg_log`), since
 FFmpeg's log often says why it could not open the file (`moov atom not
 found`). File names don't have to be UTF-8; in the text
-report and in the JSON, bytes that aren't UTF-8 show as U+FFFD. When the
+report and in the JSON, bytes that aren't UTF-8 show as U+FFFD. In the
+text report, a control character in anything taken from the file, its
+`warning`, `DAMAGE` and `ffmpeg` lines among them, prints as `\xNN`
+(ESC as `\x1b`), so that a file can't move the cursor or recolour the
+terminal; the JSON has the text as it is. When the
 reader of probe's output goes away, as in `spherecut probe *.mp4 |
 head`, the output stops quietly, and probe still checks the remaining
 files, so the exit code and the errors on stderr cover every file.
 
-`spherecut doctor [--render-node <PATH>] [--json]` checks the GPU behind
-the render node hardware decoding uses, which is `/dev/dri/renderD128`
-until the GUI knows the GPU it renders on (D30), or the one
+`spherecut doctor [--render-node <PATH>] [--file <FILE>] [--json]`
+checks the GPU behind the render node hardware decoding uses, which is
+`/dev/dri/renderD128` until the GUI knows the GPU it renders on (D30), or the one
 `--render-node` names. (`spherecut frame` decodes on the node of the GPU
 it renders on, D39.) It exits 1 only when a problem is an error: FFmpeg has no H.264, HEVC, ProRes or AAC
 decoder, or nothing decodes AV1. Every decoder and encoder in doctor's
@@ -229,7 +251,10 @@ tables that FFmpeg lacks gets a problem that names it, such as `FFmpeg has
 no software AV1 encoder (libsvtav1)`, with the fix for FFmpeg; an FFmpeg
 built without VA-API gets one problem saying so instead of one for each
 VA-API encoder. A missing Opus or PCM decoder, or a missing AAC, libx264,
-libx265, libsvtav1, VA-API H.264 or VA-API HEVC encoder, is a warning. A
+libx265, libsvtav1, VA-API H.264 or VA-API HEVC encoder, is a warning,
+and so is Vulkan Video unable to decode H.264 or HEVC on a discrete GPU
+even where VA-API can: there VA-API's frames are copied out of video
+memory, which drops frames at 5.7K and up. A
 missing `av1` decoder (FFmpeg's own, which VA-API and Vulkan Video use),
 VA-API AV1 encoder or ProRes encoder is a note. Warnings, such as no GPU
 or a Vulkan device that runs on the CPU, exit 0. Doctor tells a driver
@@ -239,6 +264,12 @@ FFmpeg's software decoder)`); for the second, the fix is a newer driver.
 In `--json`, a failed check's `fault` is `ffmpeg`, `driver` or
 `wrong_output`. Doctor never installs or changes anything; on Fedora it
 makes one read-only `rpm -q` query to word its fixes.
+
+`--file <FILE>` also checks a camera's file: whether it can be stitched
+(its calibration is there), whether both lenses decode as `spherecut
+frame --decoder auto` decodes them (VA-API on the render node, else
+software), and what is missing when not. A file that can't be probed
+fails doctor with probe's code for it.
 
 ### The viewer
 
@@ -310,6 +341,7 @@ spherecut frame clip.mp4 -o out.png --frame 370 --projection fisheye --fov 360 -
 spherecut frame clip.mp4 -o out.png --time 30000/1001 --projection stereographic --fov 300 --pitch -90   # a tiny planet
 spherecut frame clip.mp4 -o out.png --morph-to stereographic --morph 0.5 --fov 150
 spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
+spherecut frame two-views.mkv -o out.png --stream 2 --equirect   # the video stream FFmpeg numbers 2, rendered as an equirect
 spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence at 2.5 s, as render writes it
 ```
 
@@ -329,9 +361,9 @@ spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence 
   stereographic; `--size WxH`, 16 to 16384 a side and within the GPU's
   limit; `--depth 8|16` for the PNG.
 - **The file** must be tagged as an equirect (Spherical Video V1 or V2
-  metadata in an MP4 or MOV file); `--equirect` renders an untagged one
-  as an equirect anyway. Matroska/WebM files need `--equirect` for now:
-  Spherecut doesn't read their spherical metadata yet.
+  metadata in an MP4 or MOV file, its projection in a Matroska or WebM
+  file); `--equirect` renders an untagged one as an equirect anyway. `--stream
+  N` picks a video stream by FFmpeg's index; the first is the default.
   Dual fisheye files from the cameras wait for stitching in M3. Stereo
   files render the left eye, a cropped picture shows black where it
   doesn't cover the sphere, and a pose in the metadata isn't applied
@@ -385,11 +417,85 @@ device or codec it needs is missing (no Vulkan driver, no adapter by
 that name, no decoder for the codec, or the hardware `--decoder` named
 not working, which `spherecut doctor` explains); and 4 when interrupted.
 
+### Rendering a project
+
+```sh
+spherecut render trip.spherecut -o trip.mp4                     # with the export settings the project keeps
+spherecut render trip.spherecut -o trip.mp4 --preset flat-9x16-1080 --codec hevc --quality small
+spherecut render trip.spherecut -o trip.mp4 --range 1:00..90f --draft   # part of it, at half the size, fast
+spherecut render trip.spherecut -o trip360.mp4 --preset 360-5760 --encoder software --overwrite
+spherecut render trip.spherecut -o trip.mp4 --json              # a JSON line a second, the result last
+```
+
+`spherecut render` exports a project's sequence to an MP4 with the
+export settings the project keeps (File ▸ Export… sets them, DECISIONS
+D51); each flag changes one for this run only, and isn't saved:
+
+- `--preset`: `flat-16x9-1080` and the rest of `flat-WxH-SIDE` (16x9,
+  9x16, 1x1 or 4x5 at 1080, 1440 or 2160), or `360-3840`, `360-5760` or
+  `360-7680`. `--draft` renders at half each side, rounded up to a
+  multiple of 8, with the encoder's fastest settings.
+- `--codec` (`h264`, `hevc`, `av1`), `--quality` (`high`, `medium`,
+  `small`), `--audio` (`copy`, `aac`, `none`), `--motion-blur`, and
+  `--eight-bit` for 8-bit from a 10-bit source.
+- `--encoder`: `auto` encodes on the GPU's VA-API encoder and goes on in
+  software, saying why, when it can't open or fails in its first second;
+  `vaapi` fails instead (exit 3), and `software` never tries the GPU.
+- `--range IN..OUT`: the part of the sequence, in sequence time, each
+  end as frame's `--time` takes it and either left out (`2..7.5`,
+  `1:00..90f`, `5..`, `..10`).
+- `--decoder` (`auto`: VA-API on the rendering GPU's node, going on in
+  software; or `software`), `--adapter` (as frame's, or
+  `$SPHERECUT_ADAPTER`) and `--overwrite`.
+
+The file is written beside the output and checked before it is put in
+place in one rename: it opens, its `moov` comes before the media, its
+codec, size, frames, duration and rate are the ones asked for, a 360
+export has its `st3d`, `sv3d` and V1 metadata and a flat one none, the
+audio is right, and FFmpeg's own demuxer reads the header back as the
+same sphere, or none, with no complaint in its log. So Ctrl+C, a failure
+or a full disk leaves nothing at `-o`. A line on stderr says what is
+rendering, then one a second how far it has got, and stdout gets one
+line at the end: `wrote trip.mp4: 600 frames (20 s) at 3840×1920, HEVC
+10-bit in hevc_vaapi, aac audio, 45.1 MB, 14 checks passed`. The exit
+statuses are frame's: 1 when the project, the output, the export or a
+check of the file is the problem, 2 for a command line that doesn't
+parse, 3 when a GPU, an adapter or an encoder it needs is missing or
+fails, and 4 when interrupted.
+
+### Agents
+
+```sh
+spherecut mcp --read-root ~/Videos            # the MCP server an agent starts: it reads only under ~/Videos
+spherecut mcp --read-root ~/Videos --allow-write --write-root ~/Videos/edits   # and makes, edits and renders projects there
+spherecut call probe '{"files": ["clip.mp4"]}'                         # one tool, from a shell
+spherecut call look '{"file": "clip.mp4", "times": ["12.5"], "view": {"yaw": 90}}' --image-dir /tmp
+spherecut agents install-skill                # the recipes agents follow with the tools
+```
+
+`spherecut mcp` serves eleven tools to an AI agent over MCP on stdin
+and stdout: probe, look, analyze, check and doctor read footage;
+project reads a project and, with a write root, makes one; edit and
+undo change it and render and job export it in the background, listed
+only with a write root; and compare measures how alike a video is to
+another or to a project's render. [docs/agents.md](docs/agents.md) has each
+client's setup line, every tool and its limits. `spherecut call` runs
+one tool with the same roots and limits and prints a
+`spherecut.call/1` document; it runs all but render and job, whose
+exports end with their server and so run only under `spherecut mcp`
+(`spherecut render` is the same export). `spherecut agents
+install-skill` installs the skill, the recipes agents follow, for
+Claude Code, Codex, Gemini CLI and Copilot CLI (`--dry-run` says what it
+would do).
+
 ### JSON output
 
 `spherecut probe --json`, `spherecut doctor --json` and `spherecut frame
---json` print exactly one line of JSON on stdout per run, on success and on failure, and keep
-stderr for the log. [docs/cli-json.md](docs/cli-json.md) documents it
+--json` print exactly one line of JSON on stdout per run, on success and
+on failure, and keep stderr for the log. `spherecut render --json`
+prints one envelope a line, the last of them the result or the failure,
+and `spherecut call` always prints one `spherecut.call/1` document.
+[docs/cli-json.md](docs/cli-json.md) documents it
 field by field, with the codes, the exit statuses and an example per
 command; DECISIONS D27 says why it is this way. In short:
 
@@ -417,11 +523,11 @@ command; DECISIONS D27 says why it is this way. In short:
   file's spherical metadata.
 - Exit statuses: 0 when the run did what was asked, 1 when an input or a
   check failed, 2 for a command line that doesn't parse (also a document
-  under `--json`), 3 when `frame` lacks a codec or device it needs, and
-  4 when `frame` was interrupted (code `cancelled`). A panic is an
-  `internal` error, exit 1; an empty stdout means a signal ended the
-  run: Ctrl+C for probe and doctor, a second Ctrl+C for frame, or a
-  crash.
+  under `--json`), 3 when `frame`, `render` or `call` lacks a codec or
+  device it needs, and 4 when one of them was interrupted (code
+  `cancelled`). A panic is an `internal` error, exit 1; an empty stdout
+  means a signal ended the run: Ctrl+C for probe and doctor, a second
+  Ctrl+C for frame, render and call, or a crash.
 
 ### Logging
 
@@ -445,10 +551,50 @@ EnvFilter directives to that default:
 The filter doesn't change probe's reports: their `ffmpeg` lines list
 FFmpeg's warnings and errors about each file whatever it is set to.
 
+### Environment
+
+- `SPHERECUT_LOG`: the log filter (above).
+- `SPHERECUT_ADAPTER`: the GPU to render on, as `--adapter` takes it,
+  for the viewer, `frame` and `render`.
+- `SPHERECUT_FRAME_CACHE_MIB`: the viewer's frame cache, as
+  `--cache-mb`.
+- `SPHERECUT_ZERO_COPY`: `1` keeps VA-API's frames on the GPU too, `0`
+  copies every frame (Rendering a frame, Decoding).
+- `SPHERECUT_EXPORT_DEVICE`: where the window's exports render. By
+  default on a device of their own on the window's GPU (M2.10,
+  DECISIONS D56); `window` puts them on the viewer's own device, as
+  M2.7 ran them.
+
+For development and the tests:
+
+- `SPHERECUT_FFMPEG_COMPAT` and `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`:
+  the FFmpeg builds `cargo xtask check` also builds against, and where
+  (Development).
+- `SPHERECUT_UPDATE_GOLDENS=1` blesses the golden images (DECISIONS
+  D32). `SPHERECUT_BLESS_PROJECT=1` rewrites the checked-in project
+  file `crates/core/tests/data/schema1.spherecut`, whose test fails
+  when the format changes: a new schema needs a migration, not a new
+  copy of that file (DECISIONS D47).
+- `SPHERECUT_TIER2`, `SPHERECUT_SAMPLES`, `SPHERECUT_PERF_MEDIA` and
+  `SPHERECUT_GUI_OUT`: what `cargo xtask hw-test` hands the Tier 2
+  tests (run them, the samples folder, the perf clips' folder, where
+  the GUI runs' documents go). `SPHERECUT_RENDER_NODE` names the render
+  node they test. A Tier 2c test needs only `SPHERECUT_SAMPLES`
+  (Development).
+- `SPHERECUT_BENCH_RUNS`, `SPHERECUT_BENCH_OUT` and
+  `SPHERECUT_PLAYBACK_TIMELINE`: how often a benchmark repeats, where
+  its numbers go, and a folder for the playback benchmarks' timelines
+  (`docs/perf.md`).
+- `SPHERECUT_DEBUG_PANIC` and `SPHERECUT_DEBUG_FRAME_RACE` work in
+  debug builds only, for the contract tests' panics and frame's output
+  race. `SPHERECUT_FOLDER_CHILD`, `SPHERECUT_FOLDER_DIR`,
+  `SPHERECUT_PAIR_DECODE_RUN` and `SPHERECUT_TEST_HOLD_TEMP_IN` are how
+  a test tells a copy of its own binary, run as a child, what to do.
+
 ## Development
 
 ```sh
-cargo xtask check        # rustfmt, clippy -D warnings, Tier 1 tests, doc tests, cargo-deny, cargo-audit
+cargo xtask check        # rustfmt, clippy and rustdoc -D warnings, the MSRV build, Tier 1 tests, doc tests, cargo-deny, cargo-audit
 cargo xtask check --fix  # same, applying rustfmt
 cargo xtask gen-media    # synthetic test clips into test-media/ (--quick skips the 4K clip, --out <dir>)
 cargo xtask hw-test      # Tier 2 run on real hardware; report in hw-reports/
@@ -466,23 +612,30 @@ cargo's target directory, and deletes only directories it made. A
 build passes only if every FFmpeg library it bound came from the
 prefix, checked before the build and after it.
 
-`cargo xtask check` needs `cargo install --locked cargo-deny cargo-audit`
+`cargo xtask check` builds the workspace with the toolchain of
+`rust-version` (1.95) through rustup, and skips that step, saying so,
+when rustup or the toolchain is missing (`rustup toolchain install 1.95
+--profile minimal`); under CI it fails instead. Clippy's network lints,
+rustdoc, the MSRV build and cargo-deny's bans each also run on a scratch
+crate made to fail them, and a check whose control passes fails
+(DECISIONS D8, D32). It needs `cargo install --locked cargo-deny cargo-audit`
 once (or `--no-supply-chain` to skip those two), strace, and ALSA's
 development files: it stops first if `strace -V` fails or pkg-config
 finds no `alsa`, with the command that installs it (`sudo dnf install
 strace alsa-lib-devel`, `sudo pacman -S strace alsa-lib` or `sudo apt
 install strace libasound2-dev`).
 
-Tests come in two tiers. Tier 1 runs anywhere, including machines without
+Tests come in three kinds. Tier 1 runs anywhere, including machines without
 a GPU. It needs the FFmpeg codecs listed above and Mesa's lavapipe Vulkan
 driver (`mesa-vulkan-drivers` on Fedora and Ubuntu, `vulkan-swrast` on
 Arch): `crates/cli/tests/doctor.rs` runs doctor with the Vulkan loader
 limited to lavapipe (`VK_DRIVER_FILES`, `VK_ICD_FILENAMES`), and
 `crates/media/tests/hw_refusal.rs` checks that the decoder turns streams
 down on lavapipe's Vulkan device instead of decoding them in software.
-`crates/cli/tests/confinement.rs` and `crates/cli/tests/doctor.rs` run
-probe, doctor and frame under `strace -f` and fail on any `AF_INET` or
-`AF_INET6` socket, or on probe opening a file a playlist lists; without
+`crates/cli/tests/confinement.rs`, `doctor.rs` and `mcp.rs` run probe,
+doctor, frame, render and the MCP server under `strace -f` and fail on
+any `AF_INET` or `AF_INET6` socket or a `connect` to anything but a
+Unix socket, or on probe opening a file a playlist lists; without
 strace they fail rather than skip. `crates/cli/tests/frame.rs` renders
 on lavapipe, with its own golden images in `crates/cli/tests/goldens/`
 (`SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame
@@ -490,7 +643,22 @@ pipeline_goldens` blesses them, as for render's, DECISIONS D32). The
 tests generate the media they need; `gen-media` is not needed first.
 
 Tier 2 needs a real GPU or camera samples; a plain `cargo test` lists
-those tests as ignored, and `cargo xtask hw-test` runs them. It needs no
+those tests as ignored, with what each needs. Tier 2h tests need the
+hardware, real time or the GUI, and run only under `cargo xtask
+hw-test`, which sets `SPHERECUT_TIER2`; without it they skip
+(`require_hw_run`). Tier 2c tests need only Pat's camera samples and
+the CPU, so they run anywhere the samples are, with
+`SPHERECUT_SAMPLES` naming the folder (`require_samples_cpu`):
+
+```sh
+SPHERECUT_SAMPLES=samples cargo test -p spherecut-media --test tier2_tracks -- --ignored samples_x5_tracks_equal
+```
+
+A Tier 2 test whose prerequisite is missing fails with a `TIER2-SKIP`
+marker rather than passing, and every check has a control that must
+fail (`spherecut_testkit::control::must_fail`, DECISIONS D60).
+
+`cargo xtask hw-test` runs every Tier 2 test, 2h and 2c. It needs no
 sudo. It records the environment (the power settings and every render
 node among it), lists missing prerequisites with the command that
 installs them, builds the workspace in release mode, makes the perf clips
@@ -512,7 +680,8 @@ again only when synth's spec of them changes (DECISIONS D37). Options:
 - `--only <name>`: run only the Tier 2 tests whose names, as `--list`
   prints them, contain `<name>` (repeatable); the report lists the rest as
   left out. `cargo xtask hw-test --only gui_smoke --no-tier1` runs the GUI
-  smoke run again in a few minutes.
+  smoke run again in a few minutes, and `--only gui_decode_behind` the
+  runs with decode held back.
 - `--list`: print the Tier 2 tests, as the report names them, and stop.
 - `--out <file>`: where to write the report.
 
