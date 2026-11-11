@@ -15,7 +15,8 @@
 //!   which `auto` says.
 //! - `export_360_8k_vaapi`: 2 s of the 8K perf clip to 360 at 7680×3840,
 //!   in AV1 where doctor finds av1_vaapi working, else HEVC: V1 and V2
-//!   read back, and A1's `check` passing it for `youtube_360`.
+//!   read back, and A1's `check` passing it for `youtube_360`. Its frames
+//!   a second and bitrate are recorded (`360 8k export <encoder>`).
 //! - `bench_export_4k30_vaapi`: a reframed 4K30 export (flat 3840×2160,
 //!   H.264 at High, the flat default) of 10 s of the 5.7K perf clip, and
 //!   of the first `.lrv` proxy among the samples where there is one:
@@ -392,13 +393,15 @@ fn export_360_8k_vaapi() {
     let r = export_on(&gpu, &p, EncoderChoice::Vaapi, &out);
     assert_eq!((r.encoder, r.size, r.frames), (encoder, (7680, 3840), 60));
     assert_eq!(r.fallback, None);
+    let fps = r.frames as f64 / r.elapsed.as_secs_f64();
+    let mbps = r.bytes as f64 * 8.0 / r.duration.to_secs_f64() / 1e6;
     eprintln!(
-        "360 at 7680x3840 through {encoder}: {:.1} fps, {:.1} Mb/s, decoded on {}, {:?}",
-        r.frames as f64 / r.elapsed.as_secs_f64(),
-        r.bytes as f64 * 8.0 / r.duration.to_secs_f64() / 1e6,
-        r.decode.path,
-        r.stages
+        "360 at 7680x3840 through {encoder}: {fps:.1} fps, {mbps:.1} Mb/s, decoded on {}, {:?}",
+        r.decode.path, r.stages
     );
+    // The report's rows, which the line above never reaches.
+    bench::record(&format!("360 8k export {encoder}"), fps, "fps");
+    bench::record(&format!("360 8k export {encoder}: bitrate"), mbps, "Mb/s");
 
     let tree = mp4::read_file(&out).unwrap();
     assert!(tree.damage().is_empty(), "{:?}", tree.damage());
