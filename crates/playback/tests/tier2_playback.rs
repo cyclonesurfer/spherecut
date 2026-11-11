@@ -40,8 +40,8 @@
 //! - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
 //!   its two lenses as two streams: M3's 8K budget, recorded, failing
-//!   only when a pass stalls (no frame for 5 s), as it does when the
-//!   engine stops. Then hw-test's two-track perf clips, both tracks
+//!   when an unthrottled pass stalls (no frame for 5 s), as it does when
+//!   the engine stops, or P-LOCK's verdict is Kill. Then hw-test's two-track perf clips, both tracks
 //!   opened as a sample's are, unthrottled only: on Auto's hardware as
 //!   the app plays it by default, and again with `SPHERECUT_ZERO_COPY=1`
 //!   where that imports VA-API's frames (path A), with notes on path A
@@ -55,10 +55,19 @@
 //!   beside the app's run: rows of unpaired presents, pairs presented,
 //!   drops, `pair_wait`, pair resyncs, slots, each lens's decodes and
 //!   path B's pool, and a verdict a mode (Pass, Redirect to 8 slots, or
-//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, at least 99 % of the
-//!   frames presented and at most 1 point more dropped than unlocked; at
-//!   8K25 on path B no pair apart and the pacing rule met, with the pairs
-//!   and `pair_wait` of each second that dropped.
+//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, a new pair at 99 %
+//!   or more of the real-time presents that owed one, and at most 1 point
+//!   more dropped a lens than unlocked; at 8K25 on path B no pair apart
+//!   and the pacing rule met, with the pairs and `pair_wait` of each
+//!   second that dropped. A present owes a frame when its clock ran into
+//!   a later one since the present before, short of the end, or when it
+//!   is a loop's first after the seek back, so a rate above the presents'
+//!   and the loops of a short master owe only what can be shown ([`Owed`]).
+//!   The engine counts a locked pair's drops once a pair and an unlocked
+//!   player's for each stream, so the unlocked count is divided by its
+//!   streams. A real-time pass whose frame stands still for 5 s while its
+//!   clock runs has stalled, which with a pair apart or the lock undone
+//!   is Kill; a note sums every mode's verdict up.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
@@ -68,34 +77,43 @@
 //! - `samples_lens_pairs_frame_locked` and `zero_copy_pair_matches_copy`
 //!   (Tier 2h): clip 9 and the 2×3840² perf pair opened locked, landing
 //!   and playing both lenses on one frame, read back from the slots by
-//!   corner code, and path B's and path A's slots byte for byte the copy
-//!   path's.
+//!   corner code, and every slot of path B's, path A's and the copy
+//!   path's passes byte for byte a software decode's, with a line for each
+//!   wrong one that says where and how it is wrong.
 //!
 //! Where the GPU, hardware decode of the format, the perf clips or the
 //! samples aren't there, a benchmark records what it can and skips with
 //! the reason, which never counts as a pass. A run that only records and
-//! fails is a note saying why, but a stall fails the benchmark.
+//! fails is a note saying why, but an unthrottled pass's stall, or
+//! P-LOCK's Kill, fails the benchmark.
 //! `the_bench_harness_plays_on_lavapipe` runs the same harness in Tier 1,
 //! in software on a small clip, with one stream and with two, and
 //! `the_bench_harness_plays_both_tracks_of_a_pair` plays a 2 × 64² pair
 //! as the perf pairs are played, and `the_bench_harness_plays_a_locked_pair`
-//! plays it locked, reading its corner codes back as Tier 2h does, so
-//! that none can rot between hardware runs. Run the rest with `cargo
-//! xtask hw-test`.
+//! plays it locked, reading its corner codes and its slots back as Tier
+//! 2h does, so that none can rot between hardware runs;
+//! `p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens` scores
+//! synthetic passes as P-LOCK does. Run the rest with `cargo xtask
+//! hw-test`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
-use spherecut_core::video::{SampleBytes, VideoPlanes};
-use spherecut_core::{Clock, FrameRate, ManualClock, Rounding, StopToken, SystemClock, Time};
+use spherecut_core::video::{
+    Assumed, ChromaSiting, ColorCodes, ColorFamily, ColorInfo, Matrix, PixelLayout, PlaneDesc,
+    Primaries, Range, SampleBytes, VideoPlanes,
+};
+use spherecut_core::{
+    Clock, FrameRate, ManualClock, Rational, Rounding, StopToken, SystemClock, Time,
+};
 use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodeMode, DecodePath, Fallback, FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame,
@@ -105,17 +123,19 @@ use spherecut_media::decode::VideoDecoder;
 use spherecut_media::detect::Layout;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
+use spherecut_playback::budget::mem_available;
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
     CacheBudget, Counter, DecoderPreference, HwSupport, LockSpec, LockStatus, PerfStats, Player,
     PlayerConfig, PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, SlotFrame,
-    SlotStats, Stage, StreamFormat, ZeroCopy,
+    SlotState, SlotStats, Stage, StreamFormat, ZeroCopy,
 };
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
-    AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuTimers, Image, LinearTarget, Placement,
-    Projector, RenderError, SlotShape, StillOptions, StillRenderer, ViewParams, upload,
+    AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuFrame, GpuTimers, Image, LinearTarget,
+    Placement, Projector, RenderError, SlotShape, StillOptions, StillRenderer, Uploader,
+    ViewParams, upload,
 };
 use spherecut_render::{readback, wgpu};
 use spherecut_sphere::DQuat;
@@ -125,7 +145,7 @@ use spherecut_synth::code::{self as corner, CornerCode, Luma, Samples};
 use spherecut_synth::media::{self as synth_media, Codec, Spec};
 use spherecut_testkit::control::must_fail;
 use spherecut_testkit::samples::{self, Mode};
-use spherecut_testkit::{bench, fnv64, tier2};
+use spherecut_testkit::{bench, tier2};
 
 use common::pacing;
 
@@ -524,9 +544,17 @@ impl Screen {
 struct Second {
     /// Frames decoded, per stream.
     decoded: f64,
-    /// New frames on screen, of the first stream.
+    /// New frames on screen, of the first stream: of a locked pair, new
+    /// pairs.
     shown: u64,
+    /// Presents of the real-time pass that owed a new frame ([`Owed`]).
+    due: u64,
+    /// Frames passed over, as the engine counts them: once a pair for a
+    /// locked pair, summed over the streams otherwise
+    /// ([`Pass::drops_over`]).
     dropped: u64,
+    /// Frames a decoder behind the clock skipped, summed over the
+    /// streams: each worker counts its own.
     decode_dropped: u64,
     late: u64,
     /// The longest `pair_wait` a present of a locked pair recorded in the
@@ -545,8 +573,17 @@ struct Pass {
     loops: u64,
     /// UI ticks missed by taking longer than one.
     missed: u64,
-    /// Why an unthrottled pass stopped before the end, if it did.
+    /// Why an unthrottled pass stopped before the end, or why a real-time
+    /// pass stood still while its clock ran ([`Standing`]), if it did.
     stalled: Option<String>,
+    /// The streams played, and the streams `dropped` sums over: 1 for a
+    /// locked pair, whose frames passed over count once a pair (D67),
+    /// else every stream's. A share a lens divides by it.
+    streams: usize,
+    drops_over: usize,
+    /// `MemAvailable` as the pass began, in bytes, where `/proc/meminfo`
+    /// says.
+    mem_available: Option<u64>,
     /// Every sample each stage recorded, by [`Stage::name`].
     stages: BTreeMap<&'static str, Vec<f32>>,
     /// Where each stream decoded at the end, and whether it fell back.
@@ -744,6 +781,11 @@ impl Meter {
         self.current.late += 1;
     }
 
+    /// Note a present that owed a new frame ([`Owed`]).
+    fn due(&mut self) {
+        self.current.due += 1;
+    }
+
     /// Close every second that has passed by `now`.
     fn tick(&mut self, now: Instant) {
         self.gather();
@@ -774,6 +816,77 @@ impl Meter {
         self.pass.unpaired = unpaired - self.pairs[0];
         self.pass.resyncs = resyncs - self.pairs[1];
         self.pass
+    }
+}
+
+/// Which presents of a real-time pass owe a new frame (P-LOCK, M3 plan
+/// 4.3): a present owes one when the clock ran into a later frame since
+/// the present before, short of the clip's end, and the first present
+/// after the seek back to the start that a loop makes owes the play's
+/// first frame. So a present owes at most one, however many frames its
+/// clock passed (119.88 fps shown at 60 Hz owes 60 a second), and none
+/// while the clock stands: at the end, and through the seek, the landing
+/// and the preroll of a loop, which a short master makes every 3 to 5 s.
+/// The share presented is the new frames put up (new pairs, for a locked
+/// pair), at whatever present, over the presents that owed one
+/// ([`presented_share`]).
+#[derive(Debug, Default)]
+struct Owed {
+    /// The time the present before was for.
+    last: Option<Time>,
+}
+
+impl Owed {
+    /// Whether the present for `time` (the clock one UI frame ahead, as
+    /// [`Presented::time`] is), at `rate`, owes a new frame, with the
+    /// clock `playing` or not and play `at_end` or not as the snapshot
+    /// after it says, of a clip that ends at `end` where that is known.
+    fn at(
+        &mut self,
+        time: Time,
+        rate: FrameRate,
+        playing: bool,
+        at_end: bool,
+        end: Option<Time>,
+    ) -> bool {
+        let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
+        let owed = match self.last {
+            // Back to the start: a loop's seek, which owes the play's
+            // first frame; or the end's present, which set the clock back
+            // to the last frame and owes nothing.
+            Some(before) if time < before => !at_end,
+            Some(before) => playing && end.is_none_or(|e| time < e) && frame(time) > frame(before),
+            None => false,
+        };
+        self.last = Some(time);
+        owed
+    }
+}
+
+/// How long a real-time pass's first stream has shown one frame while
+/// its clock ran short of the end: a pass standing still for [`STALL`]
+/// has stalled, as an unthrottled one with no frame for as long has, and
+/// a locked pair's verdict is then Kill, since more slots wouldn't mend
+/// it (P-LOCK, M3 plan 4.3).
+#[derive(Debug)]
+struct Standing {
+    since: Instant,
+}
+
+impl Standing {
+    fn new(now: Instant) -> Self {
+        Standing { since: now }
+    }
+
+    /// How long the frame has stood at the present at `now`, which put a
+    /// new frame up or not, with the clock `playing` short of the end
+    /// (`at_end` false) or not: zero once it moves, or while the clock
+    /// stands.
+    fn at(&mut self, now: Instant, new: bool, playing: bool, at_end: bool) -> Duration {
+        if new || !playing || at_end {
+            self.since = now;
+        }
+        now.saturating_duration_since(self.since)
     }
 }
 
@@ -930,6 +1043,15 @@ fn stream_error(player: &Player) -> Result<(), String> {
     }
 }
 
+/// Where play ends: the earliest stream's end, once its decoding reached
+/// it, else its length.
+fn clip_end(snap: &PlayerSnapshot) -> Option<Time> {
+    snap.streams
+        .iter()
+        .filter_map(|s| s.end.or_else(|| s.info.as_ref()?.duration))
+        .min()
+}
+
 /// When `f` stops being on screen.
 fn ends(f: &SlotFrame, rate: Option<FrameRate>) -> Option<Time> {
     let d = f.duration.or_else(|| rate.map(FrameRate::frame_duration))?;
@@ -973,7 +1095,8 @@ fn open(player: &Player, path: &Path, streams: &[Option<usize>], run: &Run) -> R
 }
 
 /// What a pass's end adds to what its [`Meter`] counted: the streams'
-/// decodes, the slots and the lock, and the pool `watch` saw.
+/// decodes, the slots and the lock, the pair resyncs, and the pool
+/// `watch` saw. Off the UI thread: it reads the cache.
 fn finish_pass(mut pass: Pass, player: &Player, watch: Option<PoolWatch>) -> Pass {
     let snap = common::snapshot(player);
     pass.paths = snap.streams.iter().map(|s| s.decode.clone()).collect();
@@ -982,6 +1105,16 @@ fn finish_pass(mut pass: Pass, player: &Player, watch: Option<PoolWatch>) -> Pas
     pass.lens_decoded = snap.streams.iter().map(|s| s.decoded).collect();
     pass.slots = snap.slots;
     pass.lock = snap.lock.map(|l| l.status);
+    // From the cache, which counts each at once, where the engine's
+    // counter takes them in every 250 ms; the pass's player is its own,
+    // so these are the pass's since the open.
+    pass.resyncs = player.cache().stats().resyncs;
+    pass.streams = snap.streams.len();
+    pass.drops_over = if pass.lock == Some(LockStatus::Locked) {
+        1
+    } else {
+        pass.streams
+    };
     pass.pool = watch.map_or_else(Vec::new, PoolWatch::finish);
     pass
 }
@@ -1151,8 +1284,10 @@ fn unthrottled_with(
                 std::thread::sleep(Duration::from_micros(250));
             }
         }
-        let pass = finish_pass(meter.finish(Instant::now()), &player, watch);
+        let pass = meter.finish(Instant::now());
+        // The cache's counts take its lock, which the UI thread mustn't.
         drop(ui);
+        let pass = finish_pass(pass, &player, watch);
         if let Some(t) = timeline {
             t.write();
         }
@@ -1165,7 +1300,10 @@ fn unthrottled_with(
 }
 
 /// The real-time pass: `present`, `snapshot` and a draw at 60 Hz
-/// deadlines for `length`, playing from the start again at the end.
+/// deadlines for `length`, playing from the start again at the end. Each
+/// present is scored as [`Owed`] says, and a pass whose frame stands
+/// still for [`STALL`] while its clock runs is marked stalled
+/// ([`Standing`]) and plays on.
 fn realtime(
     rig: &Rig,
     path: &Path,
@@ -1190,9 +1328,14 @@ fn realtime(
         // loop seeks back.
         let mut presents = Vec::new();
         let mut samples = Vec::new();
+        let mem_available = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| mem_available(&m));
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
+        let mut owed = Owed::default();
+        let mut standing = Standing::new(start);
         let mut timeline = Timeline::new(path, run, "realtime", &perf, start);
         let mut deadline = start;
         while start.elapsed() < length {
@@ -1224,6 +1367,7 @@ fn realtime(
                 presents.push([time(0), time(1)]);
                 samples.push(pacing::Sample::of(presented.as_ref(), &snap, [0, 1]));
             }
+            let mut new = false;
             if let Some(p) = &presented {
                 if p.changed {
                     screen.draw(p, &perf).map_err(|e| e.to_string())?;
@@ -1235,6 +1379,7 @@ fn realtime(
                     && f.frame != last
                 {
                     last = f.frame;
+                    new = true;
                     meter.shown();
                 }
                 if snap.playing
@@ -1244,6 +1389,18 @@ fn realtime(
                 {
                     meter.late();
                 }
+                if let Some(rate) = rate
+                    && owed.at(p.time, rate, snap.playing, snap.at_end, clip_end(&snap))
+                {
+                    meter.due();
+                }
+            }
+            let stood = standing.at(now, new, snap.playing, snap.at_end);
+            if stood >= STALL && meter.pass.stalled.is_none() {
+                meter.pass.stalled = Some(format!(
+                    "no new frame for {stood:?} while the clock ran, at {:.3} s",
+                    snap.clock.to_secs_f64()
+                ));
             }
             if let Some((i, e)) = snap
                 .streams
@@ -1259,10 +1416,12 @@ fn realtime(
             }
             meter.tick(now);
         }
-        let mut pass = finish_pass(meter.finish(Instant::now()), &player, watch);
+        let pass = meter.finish(Instant::now());
+        drop(ui);
+        let mut pass = finish_pass(pass, &player, watch);
         pass.presents = presents;
         pass.samples = samples;
-        drop(ui);
+        pass.mem_available = mem_available;
         if let Some(t) = timeline {
             t.write();
         }
@@ -1527,6 +1686,9 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
     if let Some(why) = &u.stalled {
         bench::note(format!("{name}: the unthrottled pass stalled: {why}"));
     }
+    if let Some(why) = &r.stalled {
+        bench::note(format!("{name}: the real-time pass stood still: {why}"));
+    }
     if run.zero_copy != ZeroCopy::Off {
         let (n, k, why) = on_gpu(u, r);
         bench::note(format!(
@@ -1541,15 +1703,20 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
 
 /// A two-stream run's rows of P-LOCK's (M3 plan 4.3), locked or not,
 /// from its `passes`, unthrottled then real time where both ran: the
-/// unpaired presents over them all, each lens's decodes since the open
-/// and path B's pool in the last; of a locked run, its pair resyncs, the pairs it
-/// presented, `pair_wait`, its slots and its lock.
+/// unpaired presents over them all, each lens's decodes since the open,
+/// path B's pool and the slots in the last; of a real-time pass, the share
+/// of the presents that owed a frame that put one up, the frames dropped
+/// a lens and `MemAvailable` as it began; of a locked run, its pair
+/// resyncs, the pairs it presented, `pair_wait` and its lock. Both runs
+/// record their slots, since the lock takes all of `MAX_SLOTS` and the
+/// unlocked player its default.
 fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
     let Some(last) = passes.last() else {
         return;
     };
     let over = |of: fn(&Pass) -> u64| passes.iter().map(|p| of(p)).sum::<u64>() as f64;
-    let pass = if passes.len() > 1 {
+    let real_time = passes.len() > 1;
+    let pass = if real_time {
         "real time"
     } else {
         "unthrottled"
@@ -1576,6 +1743,24 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
             "{name}: lens {k}'s frames shown were in {images} Vulkan images, {pass}"
         ));
     }
+    bench::record(&format!("{name}: slots"), last.slots.active as f64, "slots");
+    // An unthrottled pass owes no frame at a present: its clock waits for
+    // every stream's.
+    if real_time {
+        if let Some(share) = presented_share(last) {
+            bench::record(&format!("{name}: presented after 1 s"), share, "%");
+        }
+        if let Some(share) = dropped_share(last) {
+            bench::record(&format!("{name}: dropped a lens after 1 s"), share, "%");
+        }
+        if let Some(bytes) = last.mem_available {
+            bench::record(
+                &format!("{name}: MemAvailable as the real-time pass began"),
+                bytes as f64 / f64::from(1u32 << 20),
+                "MiB",
+            );
+        }
+    }
     if !run.locked {
         return;
     }
@@ -1589,15 +1774,11 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
         last.shown as f64,
         "pairs",
     );
-    if let Some(share) = presented_share(last) {
-        bench::record(&format!("{name}: presented after 1 s"), share, "%");
-    }
     for p in [50.0, 95.0] {
         if let Some(ms) = last.stage(Stage::PairWait, p) {
             bench::record(&format!("{name}: pair_wait p{p}, {pass}"), ms, "ms");
         }
     }
-    bench::record(&format!("{name}: slots"), last.slots.active as f64, "slots");
     bench::note(format!(
         "{name}: the lock {}; {} slots in use, {} dead, at the end",
         match &last.lock {
@@ -1611,22 +1792,33 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
     ));
 }
 
-/// The frames a real-time pass's full seconds after the first had to
-/// show, at its rate.
+/// The presents of a real-time pass's full seconds after the first that
+/// owed a new frame ([`Owed`]); `None` for none, as of an unthrottled
+/// pass, which counts none.
 fn due_after_first(r: &Pass) -> Option<f64> {
-    let fps = r.rate?.to_f64();
-    let seconds = r.seconds.len().checked_sub(1).filter(|&n| n > 0)?;
-    Some(seconds as f64 * fps)
+    let due = r.after_first(|s| s.due);
+    (due > 0).then_some(due as f64)
 }
 
-/// Of those frames, the share shown, in %.
+/// The new frames put up in those seconds (new pairs, of a locked pair),
+/// at whatever present, over those presents, in %: a frame put up a
+/// present late, at a present that owed none (a frame lasts two presents
+/// at 8K30), still counts: a pair a present late shows in the late
+/// presents' row, not here. A loop's seek owes the play's first frame and its
+/// landing puts it up unowed, so the two even out.
 fn presented_share(r: &Pass) -> Option<f64> {
     Some(100.0 * r.after_first(|s| s.shown) as f64 / due_after_first(r)?)
 }
 
-/// Of those frames, the share dropped, in %.
+/// The frames passed over a lens in those seconds, as a share of those
+/// presents, in %: the engine counts a locked pair's once a pair and an
+/// unlocked player's for every stream, so the count is divided by
+/// [`Pass::drops_over`]. Until `Counter::Skipped` takes them out, the
+/// frames a clip faster than the presents passes over at each one count
+/// too, on both sides of the comparison.
 fn dropped_share(r: &Pass) -> Option<f64> {
-    Some(100.0 * r.after_first(|s| s.dropped) as f64 / due_after_first(r)?)
+    let a_lens = r.after_first(|s| s.dropped) as f64 / r.drops_over.max(1) as f64;
+    Some(100.0 * a_lens / due_after_first(r)?)
 }
 
 /// P-LOCK's verdict (M3 plan 4.3).
@@ -1644,7 +1836,8 @@ enum Verdict {
 }
 
 /// What a locked run's `passes` did that fails P-LOCK outright: a pair
-/// shown apart, the lock refused or undone (the slot floor), a stall.
+/// shown apart, the lock refused or undone (the slot floor), a stall of
+/// either pass ([`Standing`] for the real-time one's).
 fn lock_broken(passes: &[&Pass]) -> Vec<String> {
     let mut broken = Vec::new();
     for (pass, p) in ["unthrottled", "real time"].iter().zip(passes) {
@@ -1662,8 +1855,10 @@ fn lock_broken(passes: &[&Pass]) -> Vec<String> {
 }
 
 /// P-LOCK at 8K30, 5.7K60 and 4K120: the locked run's real-time pass
-/// presents at least 99 % of its frames and drops at most 1 percentage
-/// point more than `unlocked`'s, with no pair apart.
+/// put a new pair up at 99 % or more of the presents that owed one
+/// ([`presented_share`]) and dropped at most 1 percentage point more a
+/// lens than `unlocked`'s real-time pass ([`dropped_share`]), with no
+/// pair apart. The line gives both runs' shares.
 fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
     let broken = lock_broken(&[&locked.0, &locked.1]);
     if !broken.is_empty() {
@@ -1677,12 +1872,13 @@ fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
     ) else {
         return (
             Verdict::Kill,
-            "the real-time passes ran no full second after the first".into(),
+            "the real-time passes owed no frame after the first second".into(),
         );
     };
+    let was = presented_share(unlocked).unwrap_or(f64::NAN);
     let line = format!(
-        "0 unpaired, presented {shown:.2} % of the frames after 1 s, dropped {dropped:.2} % \
-         against {before:.2} % unlocked"
+        "0 unpaired, presented {shown:.2} % of the presents that owed a frame after 1 s \
+         against {was:.2} % unlocked, dropped {dropped:.2} % a lens against {before:.2} %"
     );
     if shown >= 99.0 && dropped - before <= 1.0 {
         (Verdict::Pass, line)
@@ -1694,7 +1890,9 @@ fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
 /// P-LOCK at 8K25 on path B, where the unlocked raw view decode-drops:
 /// no pair apart and the pacing rule met over the real-time pass up to
 /// its first loop, with the pairs presented and `pair_wait` in each
-/// second that dropped.
+/// second that dropped, and the drops and decode drops of each a lens. A
+/// pair that trailed by [`STALL`]'s worth of frames or more, or showed
+/// none, froze, which more slots wouldn't mend: Kill, as a stall is.
 fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
     let broken = lock_broken(&[&locked.0, &locked.1]);
     if !broken.is_empty() {
@@ -1708,8 +1906,12 @@ fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
         .filter(|(_, s)| s.dropped > 0)
         .map(|(i, s)| {
             format!(
-                "second {i}: {} dropped ({} decode-dropped), {} pairs, pair_wait {:.1} ms at most",
-                s.dropped, s.decode_dropped, s.shown, s.pair_wait
+                "second {i}: {:.1} dropped a lens ({:.1} decode-dropped a lens), {} pairs, \
+                 pair_wait {:.1} ms at most",
+                s.dropped as f64 / r.drops_over.max(1) as f64,
+                s.decode_dropped as f64 / r.streams.max(1) as f64,
+                s.shown,
+                s.pair_wait
             )
         })
         .collect();
@@ -1721,10 +1923,15 @@ fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
     let Some(rate) = r.rate else {
         return (Verdict::Kill, "the pass has no frame rate".into());
     };
+    let frozen = (STALL.as_secs_f64() * rate.to_f64()).ceil() as i64;
     match pacing::pacing_cut(&r.samples, rate) {
         Ok(paced) => (
             Verdict::Pass,
             format!("0 unpaired, the pacing rule met ({paced:?}); {drops}"),
+        ),
+        Err(why @ pacing::Unpaced::Trailed { frames, .. }) if frames >= frozen => (
+            Verdict::Kill,
+            format!("0 unpaired, the pair froze: {why:?}; {drops}"),
         ),
         Err(why) => (
             Verdict::Redirect,
@@ -1748,7 +1955,8 @@ fn x5_mode(report: &ProbeReport) -> Option<Mode> {
 /// one: 8K30, 5.7K60 and 4K120 held to the unlocked raw view, 8K25 to the
 /// pacing rule on path B. `auto` is Auto's run, copied, and `copied` its
 /// passes, the unlocked ones where the app copies too. Stalls go into
-/// `stalls`; the verdict's line comes back.
+/// `stalls`; the verdict comes back, `None` where none was decided, with
+/// its line, which gives both runs' slots.
 fn p_lock(
     rig: &Rig,
     mode: &str,
@@ -1757,7 +1965,7 @@ fn p_lock(
     auto: &Run,
     copied: Option<&(Pass, Pass)>,
     stalls: &mut Vec<String>,
-) -> String {
+) -> (Option<Verdict>, String) {
     let streams = lens_streams(report);
     let class = x5_mode(report);
     let shared = rig.as_app_plays(auto);
@@ -1783,37 +1991,56 @@ fn p_lock(
     stalls.extend(stall(mode, &locked_run, &locked));
     let name = format!("P-LOCK, {mode}, {}", locked_run.label);
     let Some(locked) = locked else {
-        return format!("{name}: Kill: the locked run didn't play (see its note)");
+        return (
+            Some(Verdict::Kill),
+            format!("{name}: Kill: the locked run didn't play (see its note)"),
+        );
     };
+    // The baseline's slots beside the lock's: the lock takes all of
+    // MAX_SLOTS and the unlocked player its default.
+    let slots = format!(
+        "{} slots locked, {} unlocked",
+        locked.1.slots.active,
+        unlocked.map_or_else(|| "?".into(), |(_, r)| r.slots.active.to_string())
+    );
     let (verdict, why) = match class {
         Some(Mode::K8_25) if !base.path_b() => {
-            return format!(
-                "{name}: not decided: 8K25's verdict is on path B, and {}",
-                shared.err().unwrap_or_else(|| "the run copies".into())
+            return (
+                None,
+                format!(
+                    "{name}: not decided: 8K25's verdict is on path B, and {}",
+                    shared.err().unwrap_or_else(|| "the run copies".into())
+                ),
             );
         }
         Some(Mode::K8_25) => paced_verdict(&locked),
         Some(Mode::K8_30 | Mode::K5_7_60 | Mode::K4_120) => match unlocked {
             Some((_, r)) => held_verdict(r, &locked),
             None => {
-                return format!("{name}: not decided: the unlocked run didn't play");
+                return (
+                    None,
+                    format!("{name}: not decided: the unlocked run didn't play"),
+                );
             }
         },
         Some(Mode::K5_7_30) | None => {
             let broken = lock_broken(&[&locked.0, &locked.1]);
-            return format!(
-                "{name}: recorded, P-LOCK names no verdict for this mode{}",
-                if broken.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", broken.join("; "))
-                }
+            return (
+                None,
+                format!(
+                    "{name}: recorded, P-LOCK names no verdict for this mode; {slots}{}",
+                    if broken.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", broken.join("; "))
+                    }
+                ),
             );
         }
     };
-    format!(
-        "{name}: {verdict:?}: {why}; {} slots",
-        locked.1.slots.active
+    (
+        Some(verdict),
+        format!("{name}: {verdict:?}: {why}; {slots}"),
     )
 }
 
@@ -2173,10 +2400,33 @@ fn bench_perf_pair(
     })
 }
 
+/// P-LOCK's summary line: every mode's verdict, by mode, "not decided"
+/// where it has none.
+fn p_lock_summary(verdicts: &[(String, Option<Verdict>, String)]) -> String {
+    let each: Vec<String> = verdicts
+        .iter()
+        .map(|(mode, v, _)| match v {
+            Some(v) => format!("{mode} {v:?}"),
+            None => format!("{mode} not decided"),
+        })
+        .collect();
+    format!(
+        "P-LOCK on this machine: {}",
+        if each.is_empty() {
+            "no X5 raw mode among the samples".to_string()
+        } else {
+            each.join(", ")
+        }
+    )
+}
+
 /// Each X5 raw mode among the samples, its two lenses as two streams, on
 /// Auto's hardware and the rest, in real time and unthrottled; then each
 /// of hw-test's two-track perf clips, both tracks opened as a sample's
-/// are, unthrottled ([`bench_perf_pair`]). Recorded; a stall fails it.
+/// are, unthrottled ([`bench_perf_pair`]). Recorded; a stall of an
+/// unthrottled pass fails it, and so does P-LOCK's Kill (a pair apart, the
+/// lock refused or undone, a stall of either pass). A Redirect is a note,
+/// and so is the summary line that names every mode's verdict.
 #[test]
 #[ignore = "tier2: benchmark, needs camera samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn bench_playback_x5_raw() {
@@ -2237,19 +2487,15 @@ fn bench_playback_x5_raw() {
             Ok(run) => {
                 let passes = record(&rig, mode, path, &streams, &run, RECORDED, RECORDED);
                 stalls.extend(stall(mode, &run, &passes));
-                verdicts.push(p_lock(
-                    &rig,
-                    mode,
-                    path,
-                    report,
-                    &run,
-                    passes.as_ref(),
-                    &mut stalls,
-                ));
+                let (verdict, line) =
+                    p_lock(&rig, mode, path, report, &run, passes.as_ref(), &mut stalls);
+                verdicts.push((mode.clone(), verdict, line));
             }
             Err(why) => {
-                verdicts.push(format!(
-                    "P-LOCK, {mode}: not decided: Auto decodes it in software here"
+                verdicts.push((
+                    mode.clone(),
+                    None,
+                    format!("P-LOCK, {mode}: not decided: Auto decodes it in software here"),
                 ));
                 no_hardware.push(format!("{mode}: {why}"));
             }
@@ -2274,10 +2520,19 @@ fn bench_playback_x5_raw() {
             synth_media::PERF_PAIR_2880_2997
         ))
     ));
-    for verdict in &verdicts {
-        bench::note(verdict);
+    for (_, _, line) in &verdicts {
+        bench::note(line);
     }
-    assert!(stalls.is_empty(), "{}", stalls.join("; "));
+    let summary = p_lock_summary(&verdicts);
+    bench::note(&summary);
+    eprintln!("{summary}");
+    let killed: Vec<&str> = verdicts
+        .iter()
+        .filter(|(_, v, _)| *v == Some(Verdict::Kill))
+        .map(|(_, _, line)| line.as_str())
+        .collect();
+    let failed: Vec<&str> = stalls.iter().map(String::as_str).chain(killed).collect();
+    assert!(failed.is_empty(), "{}", failed.join("; "));
     if no_hardware.len() == modes.len() + pairs.len() {
         tier2::skip(format!(
             "Auto decodes in software here: {}",
@@ -2378,9 +2633,18 @@ fn bench_playback_stitched_samples() {
     }
 }
 
-/// Frames the zero-copy check decodes of each clip: more than the
-/// decoder's surfaces beyond [`SURFACE_CAP`], so that the pool runs
-/// round while frames are held.
+/// Frames the zero-copy checks decode of each clip, a lens, while they
+/// hold frames as the frame cache would. On VA-API (path A) that is more
+/// than the [`ZERO_COPY_SURFACES`] its pool keeps beyond the decoder's
+/// own, so that the pool runs round. On Vulkan Video (path B)
+/// `extra_hw_frames` isn't raised: FFmpeg's pool makes images as frames
+/// are held, and what bounds it is the frames held on the device, at most
+/// [`SURFACE_CAP`] a stream in the cache (and as many in the one-stream
+/// check's queue), with the decoder's references and the frames on their
+/// way. Past those, 48 frames have the decoder decode into images of
+/// frames let go, over and over.
+///
+/// [`ZERO_COPY_SURFACES`]: spherecut_media::backend::ZERO_COPY_SURFACES
 const ZERO_COPY_FRAMES: usize = 48;
 
 /// The views the zero-copy check renders each frame through: magnified,
@@ -2570,15 +2834,23 @@ fn refused(e: RenderError) -> NotCompared {
 /// downloaded as it comes) and, [`SURFACE_CAP`] − 1 frames later, as the
 /// GPU takes it, holding the frames in between as the frame cache would:
 /// the two renders must be the same bytes. A surface the decoder took
-/// back while it was held would show a later picture. Returns the frames
-/// compared.
+/// back while it was held would show a later picture. Every other frame
+/// is also taken on the GPU right after its decode, before its download,
+/// and must render as the copy too. On path B that is the upload
+/// thread's order: the copier copies the image out as soon as the decoder
+/// hands it over. It is one thread, so no later decode runs during the
+/// copy, as one may on the player's decode thread. On path A the take
+/// only imports the planes, and the GPU reads them when they render,
+/// after the download, so the order there is the held take's. Returns the
+/// frames compared, and of those, the ones taken right after their
+/// decode.
 fn compare_zero_copy(
     rig: &Rig,
     how: &OnDevice,
     path: &Path,
     stream: Option<usize>,
     count: usize,
-) -> Result<usize, NotCompared> {
+) -> Result<(usize, usize), NotCompared> {
     let backend = FfmpegBackend::on_node(rig.node.clone());
     let (kind, device, output) = match how {
         OnDevice::DmaBuf => (HwKind::VaApi, None, HwOutput::DrmPrime),
@@ -2603,6 +2875,7 @@ fn compare_zero_copy(
     // Each held frame with its copy path's renders.
     let mut held: VecDeque<(usize, Arc<VideoFrame>, Vec<Image>)> = VecDeque::new();
     let mut compared = 0;
+    let mut early = 0;
     let mut moved = false;
     let mut last: Option<Vec<Image>> = None;
     let mut check = |renderer: &mut StillRenderer,
@@ -2642,6 +2915,10 @@ fn compare_zero_copy(
                     .unwrap_or_else(|| "no reason given".into()),
             ));
         }
+        // Production order: taken as soon as it is decoded.
+        let first = (k % 2 == 0)
+            .then(|| take(&rig.gpu, how, &frame))
+            .transpose()?;
         let copied = frame
             .to_system()
             .expect("a frame on its device")
@@ -2654,6 +2931,33 @@ fn compare_zero_copy(
                     .unwrap_or_else(|e| panic!("frame {k}: rendering the copy: {e}"))
             })
             .collect();
+        if let Some(taken) = &first {
+            for (i, (view, size)) in views.iter().enumerate() {
+                let got = render_taken(&rig.gpu, &mut renderer, &frame, taken, view, *size, &opts)
+                    .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
+                if got != want[i] {
+                    let why = mismatch(
+                        &rig.gpu,
+                        &mut renderer,
+                        how,
+                        &frame,
+                        taken,
+                        &got,
+                        &want[i],
+                        view,
+                        *size,
+                        &opts,
+                    );
+                    panic!(
+                        "{}: frame {k}, view {i}: {} right after the decode renders other \
+                         bytes than the copy: {why}",
+                        path.display(),
+                        how.taken()
+                    );
+                }
+            }
+            early += 1;
+        }
         moved |= last.as_ref().is_some_and(|l| *l != want);
         last = Some(want.clone());
         held.push_back((k, frame, want));
@@ -2666,7 +2970,7 @@ fn compare_zero_copy(
     }
     // Otherwise a frame from the wrong surface would match too.
     assert!(moved, "{}: every frame renders the same", path.display());
-    Ok(compared)
+    Ok((compared, early))
 }
 
 /// The zero-copy checks' clips: synthetic HEVC Main and Main 10 (NV12
@@ -2717,8 +3021,9 @@ fn compare_clips(rig: &Rig, how: &OnDevice) {
     let mut left_out = Vec::new();
     for (name, path, stream) in &clips {
         match compare_zero_copy(rig, how, path, *stream, ZERO_COPY_FRAMES) {
-            Ok(n) => eprintln!(
-                "{name}: {n} frames, {} byte-identical to the copy",
+            Ok((n, early)) => eprintln!(
+                "{name}: {n} frames, {} byte-identical to the copy, {early} of them taken \
+                 right after their decode too",
                 how.taken()
             ),
             Err(NotCompared::Decode(why)) => left_out.push(format!("{name}: {decoder}: {why}")),
@@ -3114,6 +3419,9 @@ fn the_bench_harness_plays_both_tracks_of_a_pair() {
         matched.paths_line()
     );
     assert!(!matched.decoded_fps().is_empty());
+    // Unlocked, the engine counts drops for each stream, which P-LOCK's
+    // share a lens divides by (the locked pair's test sees 1).
+    assert_eq!((matched.streams, matched.drops_over), (2, 2));
     must_fail(
         "a pair whose lens 1 is a frame short",
         short.as_ref().is_ok_and(whole),
@@ -3277,6 +3585,57 @@ fn codes_match(tag: i64, codes: [CornerCode; 2]) -> Result<(), String> {
     }
 }
 
+/// Whether `p` shows a locked pair's lenses apart by their tags: one
+/// lens alone, or the two at different times.
+fn tags_apart(p: &Presented) -> bool {
+    let time = |m: usize| {
+        p.frames
+            .iter()
+            .find(|f| f.stream == m)
+            .map(|f| f.frame.time)
+    };
+    time(0) != time(1)
+}
+
+/// What an unthrottled pass of a coded pair read back, as a table: the
+/// presents read, those apart by their tags (not read), those whose two
+/// slots' corner codes name different frames or a lens's slot holds the
+/// other lens's code (apart by code), and those whose codes agree but
+/// name another frame than the tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodeTable {
+    read: usize,
+    apart_by_tag: usize,
+    apart_by_code: usize,
+    not_the_tag: usize,
+}
+
+impl CodeTable {
+    fn of(read: &[(i64, [CornerCode; 2])], apart_by_tag: usize) -> CodeTable {
+        let apart = |[a, b]: [CornerCode; 2]| a.frame != b.frame || (a.lens, b.lens) != (0, 1);
+        CodeTable {
+            read: read.len(),
+            apart_by_tag,
+            apart_by_code: read.iter().filter(|(_, c)| apart(*c)).count(),
+            not_the_tag: read
+                .iter()
+                .filter(|&&(tag, c)| !apart(c) && codes_match(tag, c).is_err())
+                .count(),
+        }
+    }
+}
+
+impl std::fmt::Display for CodeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} pairs' corner codes read back; unpaired by tag {}, by corner code {}, \
+             paired on another frame than the tags {}",
+            self.read, self.apart_by_tag, self.apart_by_code, self.not_the_tag
+        )
+    }
+}
+
 /// The presents of a pass that showed a locked pair's lenses apart by
 /// their tags: one lens alone, or the two at different times.
 fn apart(presents: &[[Option<Time>; 2]]) -> usize {
@@ -3294,13 +3653,26 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// section 9). Every pair is the frame its tags name, every seek lands
 /// both lenses on the frame that holds it, none is shown apart by the
 /// engine's count or the harness's, the lock holds on six slots, and the
-/// real-time pass keeps its samples for the pacing rule; and
-/// [`slot_hashes`] hashes the locked pair's first pairs. The controls:
-/// the pair opened unlocked holds no lock, which `slot_hashes` calls
-/// broken (a failure in `zero_copy_pair_matches_copy`, never a skip),
-/// lens 0's slot read for both fails the codes' check, lens 1 a frame
-/// late in one present fails the harness's count, and lens 1 where
-/// another seek left it fails the landing's.
+/// real-time pass keeps its samples for the pacing rule; and two
+/// [`slot_pass`]es of the locked pair's first pairs read every slot back
+/// as a software decode of the pair makes it, and as each other, slot for
+/// slot, as does a third whose every present read while the slots stood
+/// still ([`Before::Quiet`]). The controls: the pair opened unlocked holds
+/// no lock, which [`lock_held`] says (a failure in
+/// `zero_copy_pair_matches_copy`, never a skip); the second pass's lenses
+/// swapped differ from the first's, and it a frame short names the frame;
+/// each pass's first right slot, judged as its lens's next frame and as
+/// the other lens's, fails as the frame it is; a pass judged against the
+/// truth with its lenses' frames crossed finds every slot wrong, tells
+/// each apart as the other lens's frame at its place (the same read
+/// again, and each lens's first in the cache as in the slot), and fails
+/// the report; counts planted break [`path_rule`] (a kept pass with a
+/// frame downloaded or refused, a copied one with a frame on the GPU) or
+/// skip it (a kept pass with none on the GPU); [`stood_still`] fails with
+/// a slot free before the reads or claimed during them; lens 0's slot
+/// read for both fails the codes' check, lens 1 a frame late in one
+/// present fails the harness's count, and lens 1 where another seek left
+/// it fails the landing's.
 #[test]
 fn the_bench_harness_plays_a_locked_pair() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -3327,8 +3699,32 @@ fn the_bench_harness_plays_a_locked_pair() {
     let limit = Duration::from_secs(60);
     let u = unthrottled_with(&rig, &path, &streams, &run, limit, Some(&mut each)).unwrap();
     let r = realtime(&rig, &path, &streams, &run, Duration::from_millis(2500)).unwrap();
-    let hashed = slot_hashes(&rig, &path, &streams, &run, 4);
-    let unlocked = slot_hashes(&rig, &path, &streams, &Run::software(), 4);
+    let truth = Truth::decode(&path, &streams, 4 + REACH).unwrap();
+    let passes = [(); 2].map(|_| slot_pass(&rig, &path, &streams, &run, 4, Reads::NOW, &truth));
+    let quiet = Reads {
+        before: Before::Quiet,
+        watched: false,
+    };
+    let still = slot_pass(&rig, &path, &streams, &run, 4, quiet, &truth);
+    let unlocked = slot_pass(
+        &rig,
+        &path,
+        &streams,
+        &Run::software(),
+        4,
+        Reads::NOW,
+        &truth,
+    );
+    // The truth with each lens's frames given as the other's.
+    let crossed = Truth {
+        lenses: (0..2)
+            .map(|l| TruthLens {
+                stream: truth.lenses[l].stream,
+                frames: truth.lenses[1 - l].frames.clone(),
+            })
+            .collect(),
+    };
+    let misjudged = slot_pass(&rig, &path, &streams, &run, 4, Reads::NOW, &crossed);
     let landings = seek_landings(&rig, &path, &streams, &run, Some((&mut reader, rate))).unwrap();
     std::fs::remove_dir_all(&dir).ok();
 
@@ -3343,10 +3739,38 @@ fn the_bench_harness_plays_a_locked_pair() {
     for (tag, codes) in &read {
         codes_match(*tag, *codes).unwrap();
     }
+    // Tier 2h's table of the presents read, and its control: lens 0's
+    // slot read for both, and a present apart by tag.
+    let none = CodeTable {
+        read: 30,
+        apart_by_tag: 0,
+        apart_by_code: 0,
+        not_the_tag: 0,
+    };
+    assert_eq!(CodeTable::of(&read, 0), none);
+    let crossed: Vec<_> = read.iter().map(|&(tag, [a, _])| (tag, [a, a])).collect();
+    let mut late = read.clone();
+    late[5].1 = [late[5].1[0], late[6].1[1]];
+    let mut stale = read.clone();
+    stale[5].1 = stale[4].1;
+    assert_eq!(
+        [
+            CodeTable::of(&crossed, 1),
+            CodeTable::of(&late, 0),
+            CodeTable::of(&stale, 0)
+        ]
+        .map(|t| (t.apart_by_tag, t.apart_by_code, t.not_the_tag)),
+        [(1, 30, 0), (0, 1, 0), (0, 0, 1)]
+    );
+    must_fail("a table with a pair apart", CodeTable::of(&late, 0) == none);
     assert_eq!((r.lock, r.unpaired), (Some(LockStatus::Locked), 0));
     assert_eq!(apart(&r.presents), 0);
     assert!(r.shown > 0 && !r.samples.is_empty());
     assert_eq!(r.samples.len(), r.presents.len());
+    // Its presents scored as P-LOCK scores them: some owed a pair, and
+    // its drops count once a pair.
+    assert!(r.seconds.iter().any(|s| s.due > 0), "{:?}", r.seconds);
+    assert_eq!((r.streams, r.drops_over), (2, 1));
     assert_eq!(u.lens_decoded.len(), 2);
     assert!(
         u.lens_decoded.iter().all(|&d| d >= 29),
@@ -3358,16 +3782,127 @@ fn the_bench_harness_plays_a_locked_pair() {
         landed_together(l).unwrap();
         assert!(l.codes.is_some(), "{l:?}");
     }
-    let hashed = hashed.unwrap();
-    let hashed_pts = |s: usize| hashed.keys().filter(move |k| k.0 == s).map(|k| k.1);
-    assert_eq!(hashed_pts(0).count(), 4, "{hashed:?}");
-    assert!(hashed_pts(0).eq(hashed_pts(1)), "{hashed:?}");
+    for p in &passes {
+        assert_eq!((p.broken.as_deref(), p.wrong().count()), (None, 0), "{p:?}");
+        lock_held(p).unwrap();
+        let pts = |lens: usize| p.keys.keys().filter(move |k| k.0 == lens).map(|k| k.1);
+        assert_eq!(pts(0).count(), 4, "{:?}", p.keys.keys());
+        assert!(pts(0).eq(pts(1)), "{:?}", p.keys.keys());
+        assert_eq!(p.counts.downloaded(), p.counts.uploaded, "{:?}", p.counts);
+    }
+    // Two runs of the same path, slot for slot, and a third read while
+    // the slots stood still.
+    let (first, second) = (passes[0].hashes(), passes[1].hashes());
+    assert_eq!(same_slots(&first, &second), Ok(8));
+    assert_eq!((still.broken.as_deref(), still.wrong().count()), (None, 0));
+    assert_eq!((still.quiet, still.unquiet), (4, 0), "{still:?}");
+    assert_eq!(same_slots(&first, &still.hashes()), Ok(8));
+    // The path rules, on counts planted: a kept pass all on the GPU and a
+    // copied one all through system memory keep to them.
+    let kept = Run {
+        zero_copy: ZeroCopy::Vulkan,
+        ..Run::only(HwKind::Vulkan)
+    };
+    let copied = Run::only(HwKind::Vulkan);
+    let counts = |copied, refused| PassCounts {
+        uploaded: 8,
+        copied,
+        refused,
+        ..PassCounts::default()
+    };
+    path_rule(&kept, &counts(8, 0), None).unwrap();
+    path_rule(&copied, &counts(0, 0), None).unwrap();
 
     // Controls.
-    let unlocked = must_fail("the pair opened unlocked holds a lock", unlocked);
+    let swapped = second
+        .iter()
+        .map(|(&(lens, pts), &h)| ((lens ^ 1, pts), h))
+        .collect();
+    must_fail(
+        "the second run's lenses swapped",
+        same_slots(&first, &swapped),
+    );
+    let mut short = second.clone();
+    short.pop_last();
+    let short = must_fail("the second run a frame short", same_slots(&first, &short));
     assert!(
-        matches!(&unlocked, NoHashes::Broken(why) if why.contains("the lock ended None")),
-        "{unlocked:?}"
+        short.contains("8 and 7 frames; only the first: lens 1 pts"),
+        "{short}"
+    );
+    for (name, run, c) in [
+        ("a kept pass with a frame downloaded", &kept, counts(7, 0)),
+        ("a kept pass with a frame refused", &kept, counts(8, 1)),
+        ("a copied pass with a frame copied", &copied, counts(1, 0)),
+    ] {
+        let off = must_fail(name, path_rule(run, &c, None));
+        assert!(matches!(off, Off::Broken(_)), "{name}: {off:?}");
+    }
+    let off = must_fail(
+        "a kept pass with no frame on the GPU",
+        path_rule(&kept, &counts(0, 8), None),
+    );
+    assert!(matches!(off, Off::NotKept(_)), "{off:?}");
+    let words: Vec<(usize, u64)> = (0..6).map(|i| (i, 16 * i as u64 + 2)).collect();
+    assert!(stood_still(6, &words, &words));
+    must_fail(
+        "a slot free before the reads",
+        stood_still(6, &words[1..], &words[1..]),
+    );
+    let mut claimed = words.clone();
+    claimed[3].1 += 8;
+    must_fail(
+        "a slot claimed while they read",
+        stood_still(6, &words, &claimed),
+    );
+    assert_eq!(unlocked.broken, None);
+    let unlocked = must_fail(
+        "the pair opened unlocked holds a lock",
+        lock_held(&unlocked),
+    );
+    assert!(unlocked.contains("the lock ended None"), "{unlocked}");
+    for p in passes.iter().chain([&still]) {
+        check_controls(p.controls.as_ref().unwrap());
+    }
+    // Judged against the crossed truth, every slot is wrong, told apart
+    // as the other lens's frame at its place and the same when read
+    // again, each lens's first in the cache as in the slot and the rest
+    // not looked up; and the report fails it as a copy side's fault.
+    assert_eq!(misjudged.broken, None);
+    assert_eq!(misjudged.wrong().count(), 8, "{misjudged:?}");
+    assert!(misjudged.controls.is_none(), "{misjudged:?}");
+    for (&(lens, pts), s) in misjudged.wrong() {
+        let w = s.first_wrong.as_ref().unwrap();
+        assert_eq!(
+            w.wrong.like().map(|l| (l.lens, l.off)),
+            Some((1 - lens, 0)),
+            "{}",
+            w.wrong
+        );
+        assert!(matches!(w.again, Again::Same), "{}", w.again);
+        let first = misjudged.keys.keys().find(|k| k.0 == lens) == Some(&(lens, pts));
+        if first {
+            assert!(matches!(w.cached, Cached::AsSlot), "{}", w.cached);
+        } else {
+            assert!(matches!(w.cached, Cached::NotLooked), "{}", w.cached);
+        }
+    }
+    let report = pair_report(&[Played {
+        file: "pair64-matched".into(),
+        path: "software",
+        variant: "crossed truth",
+        passes: vec![("copy 1", false, misjudged)],
+    }]);
+    let failed = must_fail(
+        "a pass judged against the crossed truth",
+        if report.is_empty() {
+            Ok(())
+        } else {
+            Err(report)
+        },
+    );
+    assert!(
+        failed[0].starts_with("copy wrong: 1 copied passes"),
+        "{failed:?}"
     );
     let (tag, codes) = read[5];
     must_fail(
@@ -3394,12 +3929,13 @@ fn the_bench_harness_plays_a_locked_pair() {
     );
 }
 
-/// A file a locked check plays: its name, its path and the rate its
-/// corner codes count at, where it has them.
-type LockedFile = (String, PathBuf, Option<FrameRate>);
+/// A file a locked check plays: its name, its path, and the rate its
+/// corner codes count at and its frames a lens, where it has them.
+type LockedFile = (String, PathBuf, Option<(FrameRate, i64)>);
 
 /// The two-lens files the locked Tier 2h checks play, with the rate
-/// their corner codes count at where they have them: clip 9's master
+/// their corner codes count at and their frames where they have them:
+/// clip 9's master
 /// (`handheld_flips`, handheld, where a pair shown apart would show,
 /// unlike clip 8's still tripod take) and the 2×3840² perf pair. Each
 /// file not here is a reason.
@@ -3420,7 +3956,7 @@ fn locked_files() -> (Vec<LockedFile>, Vec<String>) {
         Ok(path) => files.push((
             format!("perf clip {}", spec.name),
             path,
-            Some(spec.lenses[0].rate),
+            Some((spec.lenses[0].rate, i64::from(spec.lenses[0].frames))),
         )),
         Err(why) => missing.push(why),
     }
@@ -3582,10 +4118,12 @@ fn seek_landings(
 /// perf pair, by corner code; both play in real time with no pair shown
 /// apart, by the engine's count and the harness's; and the perf pair's
 /// corner codes, read back from both presented slots on every frame of an
-/// unthrottled pass, equal each other and the tags: the content check on
-/// path B and its pool. Each check's control plants a mismatch it must
-/// catch: lens 1 landed a frame off, the codes of lens 0's slot read for
-/// both, lens 1 a frame late in one present.
+/// unthrottled pass, every frame of the clip once and in order, equal
+/// each other and the tags: the content check on path B and its pool. A
+/// table gives the presents unpaired by tag and by corner code. Each
+/// check's control plants a mismatch it must catch: lens 1 landed a frame
+/// off, the codes of lens 0's slot read for both (which the table counts
+/// too), lens 1 a frame late in one present, a pass a frame short.
 #[test]
 #[ignore = "tier2: needs the X5 samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn samples_lens_pairs_frame_locked() {
@@ -3610,7 +4148,7 @@ fn samples_lens_pairs_frame_locked() {
         };
         let side = shape(&report).map_or(0, |((w, _), _, _)| w);
         let mut reader = coded.map(|_| CodeReader::new(&on.gpu, side));
-        let codes = reader.as_mut().zip(*coded);
+        let codes = reader.as_mut().zip(coded.map(|(rate, _)| rate));
         let landings = seek_landings(on, path, &streams, &run, codes)
             .unwrap_or_else(|e| panic!("{name}, {}: seeks: {e}", run.label));
         for l in &landings {
@@ -3662,32 +4200,62 @@ fn samples_lens_pairs_frame_locked() {
             r.paths_line()
         );
 
-        // Every frame's corner codes, unthrottled.
-        let (Some(reader), Some(rate)) = (reader.as_mut(), *coded) else {
+        // Every frame's corner codes, unthrottled: a present whose tags
+        // show the lenses apart is counted, not read, so that the table
+        // below gives both counts.
+        let (Some(reader), Some((rate, frames))) = (reader.as_mut(), *coded) else {
             continue;
         };
-        let mut read = Vec::new();
+        let (mut read, mut apart_by_tag) = (Vec::new(), 0);
         let mut each = |p: &Presented| {
-            read.push(pair_codes(reader, &on.gpu, p, rate)?);
+            if tags_apart(p) {
+                apart_by_tag += 1;
+            } else {
+                read.push(pair_codes(reader, &on.gpu, p, rate)?);
+            }
             Ok(ControlFlow::Continue(()))
         };
         let u = unthrottled_with(on, path, &streams, &run, GATED_UNTHROTTLED, Some(&mut each))
             .unwrap_or_else(|e| panic!("{name}, {}: unthrottled: {e}", run.label));
+        let table = CodeTable::of(&read, apart_by_tag);
+        eprintln!("{name}, {}: {table}; {}", run.label, u.paths_line());
         assert_eq!(u.stalled, None, "{name}, {}", run.label);
         assert_eq!((u.lock, u.unpaired), (Some(LockStatus::Locked), 0));
+        assert_eq!(
+            (table.apart_by_tag, table.apart_by_code, table.not_the_tag),
+            (0, 0, 0),
+            "{name}, {}: {table}",
+            run.label
+        );
         for (tag, codes) in &read {
             codes_match(*tag, *codes).unwrap_or_else(|e| panic!("{name}, {}: {e}", run.label));
         }
+        // Every frame of the clip, each once, in order: a pass cut off at
+        // its limit, or ended early, reads fewer.
+        let tags: Vec<i64> = read.iter().map(|(tag, _)| *tag).collect();
+        assert!(
+            tags.iter().copied().eq(0..frames),
+            "{name}, {}: {} frames read of {frames}, from {:?} to {:?}",
+            run.label,
+            tags.len(),
+            tags.first(),
+            tags.last()
+        );
         let (tag, codes) = read[read.len() / 2];
         must_fail(
             "lens 0's slot read for both",
             codes_match(tag, [codes[0], codes[0]]),
         );
-        eprintln!(
-            "{name}, {}: {} pairs' corner codes read back, each its tags' frame; {}",
-            run.label,
-            read.len(),
-            u.paths_line()
+        must_fail(
+            "a pass a frame short",
+            tags[..tags.len() - 1].iter().copied().eq(0..frames),
+        );
+        let crossed: Vec<(i64, [CornerCode; 2])> =
+            read.iter().map(|&(tag, [a, _])| (tag, [a, a])).collect();
+        let off = CodeTable::of(&crossed, 1);
+        must_fail(
+            "lens 0's slot read for both, and a present apart by tag, in the table",
+            (off.apart_by_tag, off.apart_by_code) == (0, 0),
         );
     }
     if !missing.is_empty() || !no_hardware.is_empty() {
@@ -3702,117 +4270,1597 @@ fn samples_lens_pairs_frame_locked() {
     }
 }
 
-/// Why [`slot_hashes`] has no hashes.
-#[derive(Debug)]
-enum NoHashes {
-    /// A zero-copy run took no frame on the GPU, or had one refused:
-    /// what this GPU can't do, which skips.
-    NotKept(String),
-    /// The run failed, stalled, or the lock didn't hold: a failure.
-    Broken(String),
+/// How far either way of a wrong slot's frame [`Truth::like`] looks for a
+/// frame, of either lens, whose bands the slot holds: a stale frame, or
+/// one crossed from the other lens.
+const REACH: usize = 16;
+
+/// The picture rows of a band, the unit a wrong slot's place is given in:
+/// an HEVC CTU row of luma, and the chroma rows beside it.
+const BAND: u32 = 64;
+
+/// The wrong frames of a pass the report lists one by one; the rest it
+/// counts.
+const LISTED: usize = 40;
+
+/// One plane of a [`Yuv`]: its size in samples, and the samples, packed
+/// row after row.
+#[derive(Clone, PartialEq, Eq)]
+struct Plane {
+    width: u32,
+    height: u32,
+    samples: Vec<u8>,
 }
 
-/// Each slot's planes of the first `count` pairs a locked pair shows,
-/// opened as `run` on `rig` and played unthrottled, read back from the
-/// GPU and hashed (level 0, which the mips are made from): by stream and
-/// pts. Broken when the run fails or stalls or the lock doesn't hold;
-/// not kept when a zero-copy run took no frame on the GPU or had one
-/// refused.
-fn slot_hashes(
+impl Plane {
+    /// Band `b`'s rows, `rows` a band, as far as the plane goes.
+    fn band(&self, b: u32, rows: u32) -> &[u8] {
+        let at = |r: u32| r.min(self.height) as usize * self.width as usize;
+        &self.samples[at(b.saturating_mul(rows))..at(b.saturating_add(1).saturating_mul(rows))]
+    }
+}
+
+/// A picture's 8-bit Y, U and V planes: the truth's, a slot's read back,
+/// or a frame's in the cache, with interleaved chroma (NV12's) split, so
+/// that any two compare plane for plane.
+#[derive(Clone, PartialEq, Eq)]
+struct Yuv([Plane; 3]);
+
+impl std::fmt::Debug for Yuv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Yuv({})", self.shape())
+    }
+}
+
+impl Yuv {
+    /// `planes`, Y, U and V, or why they aren't three.
+    fn of(planes: Vec<Plane>) -> Result<Yuv, String> {
+        let n = planes.len();
+        <[Plane; 3]>::try_from(planes)
+            .map(Yuv)
+            .map_err(|_| format!("{n} planes, not Y, U and V"))
+    }
+
+    /// Each plane's size: "3840x3840, 1920x1920, 1920x1920".
+    fn shape(&self) -> String {
+        self.0
+            .iter()
+            .map(|p| format!("{}x{}", p.width, p.height))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn same_shape(&self, other: &Yuv) -> bool {
+        self.0
+            .iter()
+            .zip(&other.0)
+            .all(|(a, b)| (a.width, a.height) == (b.width, b.height))
+    }
+
+    /// The picture's bands, [`BAND`] rows of luma each.
+    fn bands(&self) -> u32 {
+        self.0[0].height.div_ceil(BAND)
+    }
+
+    /// Plane `i`'s rows in a band: 64 of luma, 32 of 4:2:0 chroma.
+    fn band_rows(&self, i: usize) -> u32 {
+        let rows =
+            u64::from(BAND) * u64::from(self.0[i].height) / u64::from(self.0[0].height.max(1));
+        u32::try_from(rows).unwrap_or(BAND).max(1)
+    }
+
+    /// Whether band `b` is the same in every plane of `self` and `other`,
+    /// pictures of one shape.
+    fn same_band(&self, other: &Yuv, b: u32) -> bool {
+        (0..3).all(|i| {
+            let rows = self.band_rows(i);
+            self.0[i].band(b, rows) == other.0[i].band(b, rows)
+        })
+    }
+
+    /// A hash of every plane, eight bytes at a time: far quicker than
+    /// testkit's `fnv64`, a byte at a time, at 8K.
+    fn hash(&self) -> u64 {
+        self.0
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325, |h, p| words_hash(h, &p.samples))
+    }
+}
+
+/// `h` with `bytes` mixed in eight at a time, as FxHash mixes its words,
+/// and their length.
+fn words_hash(h: u64, bytes: &[u8]) -> u64 {
+    let mix = |h: u64, w: u64| (h.rotate_left(5) ^ w).wrapping_mul(0x517c_c1b7_2722_0a95);
+    let words = bytes.chunks_exact(8);
+    let tail = words
+        .remainder()
+        .iter()
+        .fold(0u64, |w, &b| w << 8 | u64::from(b));
+    let h = words.fold(h, |h, w| mix(h, u64::from_le_bytes(w.try_into().unwrap())));
+    mix(mix(h, tail), bytes.len() as u64)
+}
+
+/// A plane of `width` × `height` positions, `components` samples
+/// interleaved at each, as a plane a component.
+fn split(
+    width: u32,
+    height: u32,
+    components: usize,
+    samples: Vec<u8>,
+) -> Result<Vec<Plane>, String> {
+    match components {
+        1 => Ok(vec![Plane {
+            width,
+            height,
+            samples,
+        }]),
+        2 => {
+            let (u, v): (Vec<u8>, Vec<u8>) = samples.chunks_exact(2).map(|c| (c[0], c[1])).unzip();
+            Ok(vec![
+                Plane {
+                    width,
+                    height,
+                    samples: u,
+                },
+                Plane {
+                    width,
+                    height,
+                    samples: v,
+                },
+            ])
+        }
+        n => Err(format!("a plane of {n} samples interleaved")),
+    }
+}
+
+/// `frame`'s planes, planar or semi-planar 8-bit YUV, as a [`Yuv`].
+fn yuv_of(frame: &dyn VideoPlanes) -> Result<Yuv, String> {
+    let layout = frame.layout();
+    if layout.family != ColorFamily::Yuv || layout.bit_depth != 8 {
+        return Err(format!("{} isn't 8-bit YUV", layout.name));
+    }
+    let mut planes = Vec::new();
+    for (i, desc) in layout.planes.iter().enumerate() {
+        let p = frame
+            .plane(i)
+            .ok_or_else(|| format!("{} has no plane {i} in memory", layout.name))?;
+        let row = desc.row_bytes(p.width);
+        let mut samples = Vec::with_capacity(row * p.height as usize);
+        for y in 0..p.height {
+            let bytes = p
+                .row(y, row)
+                .ok_or_else(|| format!("{}'s plane {i} has no row {y}", layout.name))?;
+            samples.extend_from_slice(bytes);
+        }
+        planes.extend(split(
+            p.width,
+            p.height,
+            usize::from(desc.components),
+            samples,
+        )?);
+    }
+    Yuv::of(planes)
+}
+
+/// Slot `f`'s planes, read back from `gpu` by [`read_planes`].
+fn read_slot(gpu: &Gpu, f: &ShownFrame) -> Result<Yuv, String> {
+    read_planes(gpu, &f.gpu).map_err(|e| format!("stream {}'s slot: {e}", f.stream))
+}
+
+/// `slot`'s planes, level 0 (which the mips are made from), read back
+/// from `gpu`, NV12's chroma split. Waits for the GPU.
+fn read_planes(gpu: &Gpu, slot: &GpuFrame) -> Result<Yuv, String> {
+    let mut planes = Vec::new();
+    for (i, t) in (0..).map_while(|i| slot.plane_texture(i).map(|t| (i, t))) {
+        let components = match t.format() {
+            wgpu::TextureFormat::R8Unorm => 1,
+            wgpu::TextureFormat::Rg8Unorm => 2,
+            other => return Err(format!("plane {i} is {other:?}, not 8-bit")),
+        };
+        let texels = readback::read_texture(gpu, t, 0).map_err(|e| e.to_string())?;
+        planes.extend(split(texels.width, texels.height, components, texels.data)?);
+    }
+    Yuv::of(planes)
+}
+
+/// The first `frames` frames of `stream` of `path`, decoded in software,
+/// with their pts.
+fn software_frames(
+    path: &Path,
+    stream: Option<usize>,
+    frames: usize,
+) -> Result<Vec<(i64, Yuv)>, String> {
+    let req = VideoRequest {
+        stream,
+        ..VideoRequest::default()
+    };
+    let mut decoder = FfmpegBackend::new()
+        .open_video(path, &req)
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(frames);
+    while out.len() < frames {
+        match decoder
+            .next_frame(&StopToken::never())
+            .map_err(|e| e.to_string())?
+        {
+            NextFrame::Frame(f) => out.push((f.pts, yuv_of(f.as_ref())?)),
+            NextFrame::End => break,
+            NextFrame::Stopped => return Err("the decode stopped".into()),
+        }
+    }
+    Ok(out)
+}
+
+/// What a slot pass judges its slots against: each lens's first frames
+/// decoded in software, HEVC's decode being exact by the standard, so
+/// that every pass, on any decoder, kept on the GPU or copied, must show
+/// the same bytes. It holds [`REACH`] frames more than a pass shows, so
+/// that a wrong slot can be named as a frame of either lens near its own.
+struct Truth {
+    lenses: Vec<TruthLens>,
+}
+
+/// A lens of the [`Truth`]: its stream, and its frames in order, with
+/// their pts.
+struct TruthLens {
+    stream: Option<usize>,
+    frames: Vec<(i64, Yuv)>,
+}
+
+impl Truth {
+    /// The first `frames` frames of each of `streams` of `path`, decoded
+    /// in software, a lens a thread.
+    fn decode(path: &Path, streams: &[Option<usize>], frames: usize) -> Result<Truth, String> {
+        let lenses = std::thread::scope(|s| {
+            let decodes: Vec<_> = streams
+                .iter()
+                .map(|&stream| s.spawn(move || software_frames(path, stream, frames)))
+                .collect();
+            decodes
+                .into_iter()
+                .zip(streams)
+                .map(|(d, &stream)| {
+                    let frames = d
+                        .join()
+                        .map_err(|_| format!("decoding stream {stream:?} panicked"))??;
+                    Ok(TruthLens { stream, frames })
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })?;
+        Ok(Truth { lenses })
+    }
+
+    /// The lens `stream` is: its place among the truth's streams.
+    fn lens_of(&self, stream: Option<usize>) -> Option<usize> {
+        self.lenses.iter().position(|l| l.stream == stream)
+    }
+
+    /// Where lens `lens`'s frame at `pts` is among its frames.
+    fn index(&self, lens: usize, pts: i64) -> Option<usize> {
+        self.lenses
+            .get(lens)?
+            .frames
+            .binary_search_by_key(&pts, |(p, _)| *p)
+            .ok()
+    }
+
+    fn frame(&self, lens: usize, index: usize) -> Option<&(i64, Yuv)> {
+        self.lenses.get(lens)?.frames.get(index)
+    }
+
+    /// Whether `picture` is lens `lens`'s frame `index`, byte for byte.
+    fn holds(&self, picture: &Yuv, lens: usize, index: Option<usize>) -> bool {
+        index
+            .and_then(|i| self.frame(lens, i))
+            .is_some_and(|(_, want)| want == picture)
+    }
+
+    /// Whether `slot` holds lens `lens`'s frame `index`, byte for byte;
+    /// how it doesn't when not.
+    fn judge(&self, slot: &Yuv, lens: usize, index: usize) -> Result<(), Wrong> {
+        let Some((_, want)) = self.frame(lens, index) else {
+            return Err(Wrong::NotInTruth);
+        };
+        if !slot.same_shape(want) {
+            return Err(Wrong::Shape(format!(
+                "{} against the truth's {}",
+                slot.shape(),
+                want.shape()
+            )));
+        }
+        if slot == want {
+            return Ok(());
+        }
+        let planes =
+            std::array::from_fn(|i| PlaneDiff::of(&slot.0[i], &want.0[i], slot.band_rows(i)));
+        let bands: Vec<u32> = (0..slot.bands())
+            .filter(|&b| !slot.same_band(want, b))
+            .collect();
+        let like = self.like(slot, lens, index, &bands);
+        Err(Wrong::Samples(Box::new(Diff {
+            planes,
+            bands: bands.len(),
+            like,
+        })))
+    }
+
+    /// Of the frames of either lens within [`REACH`] of lens `lens`'s
+    /// frame `index` (that frame left out), the one that holds the most of
+    /// `slot`'s bands `bands`, the nearest first and its own lens before
+    /// the other: a stale frame, or one crossed from the other lens.
+    /// `None` when none holds one.
+    fn like(&self, slot: &Yuv, lens: usize, index: usize, bands: &[u32]) -> Option<Like> {
+        let lenses: Vec<usize> = std::iter::once(lens)
+            .chain((0..self.lenses.len()).filter(|&l| l != lens))
+            .collect();
+        let mut best: Option<Like> = None;
+        for d in 0..=REACH as isize {
+            let offs = if d == 0 { vec![0] } else { vec![-d, d] };
+            for &l in &lenses {
+                for &off in &offs {
+                    if l == lens && off == 0 {
+                        continue;
+                    }
+                    let Some((pts, other)) =
+                        index.checked_add_signed(off).and_then(|j| self.frame(l, j))
+                    else {
+                        continue;
+                    };
+                    if !other.same_shape(slot) {
+                        continue;
+                    }
+                    let held = bands.iter().filter(|&&b| slot.same_band(other, b)).count();
+                    if held > best.map_or(0, |b| b.bands) {
+                        best = Some(Like {
+                            lens: l,
+                            off,
+                            pts: *pts,
+                            bands: held,
+                        });
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// How a picture isn't the truth's frame.
+#[derive(Debug, Clone)]
+enum Wrong {
+    /// The truth has no frame of its lens at its pts.
+    NotInTruth,
+    /// It isn't shaped as the truth's frame is.
+    Shape(String),
+    /// Its samples differ.
+    Samples(Box<Diff>),
+}
+
+impl Wrong {
+    /// The frame near it that holds the most of its bands that differ.
+    fn like(&self) -> Option<Like> {
+        match self {
+            Wrong::Samples(d) => d.like,
+            _ => None,
+        }
+    }
+}
+
+/// Where a picture's samples differ from the truth's frame's.
+#[derive(Debug, Clone)]
+struct Diff {
+    /// Y's, U's and V's.
+    planes: [PlaneDiff; 3],
+    /// The picture's bands that differ in any plane.
+    bands: usize,
+    /// The frame near it of either lens that holds the most of those
+    /// bands.
+    like: Option<Like>,
+}
+
+/// Where one plane differs.
+#[derive(Debug, Clone, Default)]
+struct PlaneDiff {
+    samples: usize,
+    /// The largest difference of a sample.
+    most: u8,
+    /// x0, y0, x1, y1 of the samples that differ, inclusive, in the
+    /// plane's own samples.
+    bounds: Option<[u32; 4]>,
+    /// The picture's bands it differs in.
+    bands: Vec<u32>,
+}
+
+impl PlaneDiff {
+    /// Where `got` differs from `want`, planes of one shape, `rows` rows a
+    /// band.
+    fn of(got: &Plane, want: &Plane, rows: u32) -> PlaneDiff {
+        let mut d = PlaneDiff::default();
+        let width = (got.width as usize).max(1);
+        for (y, (g, w)) in (0u32..).zip(got.samples.chunks(width).zip(want.samples.chunks(width))) {
+            if g == w {
+                continue;
+            }
+            for (x, (a, b)) in (0u32..).zip(g.iter().zip(w)) {
+                if a == b {
+                    continue;
+                }
+                d.samples += 1;
+                d.most = d.most.max(a.abs_diff(*b));
+                d.bounds = Some(match d.bounds {
+                    None => [x, y, x, y],
+                    Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
+                });
+            }
+            let band = y / rows;
+            if d.bands.last() != Some(&band) {
+                d.bands.push(band);
+            }
+        }
+        d
+    }
+}
+
+/// A frame of the truth whose bands a wrong picture holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Like {
+    lens: usize,
+    /// Frames from the one the picture should be, and its pts.
+    off: isize,
+    pts: i64,
+    /// Of the picture's bands that differ, those it holds.
+    bands: usize,
+}
+
+impl std::fmt::Display for Wrong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let d = match self {
+            Wrong::NotInTruth => return write!(f, "not among the truth's frames"),
+            Wrong::Shape(s) => return write!(f, "shaped {s}"),
+            Wrong::Samples(d) => d,
+        };
+        for (name, p) in ["Y", "U", "V"].iter().zip(&d.planes) {
+            match p.bounds {
+                None => write!(f, "{name} right; ")?,
+                Some([x0, y0, x1, y1]) => write!(
+                    f,
+                    "{name} {} samples by up to {} in x {x0}-{x1} y {y0}-{y1}, bands {}; ",
+                    p.samples,
+                    p.most,
+                    ranges(&p.bands)
+                )?,
+            }
+        }
+        match d.like {
+            Some(l) => write!(
+                f,
+                "{} of its {} bands that differ are lens {}'s frame {:+} (pts {})",
+                l.bands, d.bands, l.lens, l.off, l.pts
+            ),
+            None => write!(
+                f,
+                "none of its {} bands that differ is either lens's within {REACH} frames",
+                d.bands
+            ),
+        }
+    }
+}
+
+/// `[3, 4, 5, 9]` as "3-5, 9".
+fn ranges(v: &[u32]) -> String {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let mut j = i;
+        while j + 1 < v.len() && v[j + 1] == v[j] + 1 {
+            j += 1;
+        }
+        out.push(if i == j {
+            v[i].to_string()
+        } else {
+            format!("{}-{}", v[i], v[j])
+        });
+        i = j + 1;
+    }
+    out.join(", ")
+}
+
+/// A second read of a wrong slot, still held: the same bytes as the first,
+/// the truth's, or others.
+#[derive(Debug)]
+enum Again {
+    Same,
+    Right,
+    Other,
+    Failed(String),
+}
+
+impl std::fmt::Display for Again {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Again::Same => write!(f, "the same"),
+            Again::Right => write!(f, "right"),
+            Again::Other => write!(f, "other bytes"),
+            Again::Failed(e) => write!(f, "failed ({e})"),
+        }
+    }
+}
+
+/// A wrong slot's frame as the cache holds it then, downloaded from its
+/// decoder's device where it is on one: the truth's, the slot's bytes or
+/// others; or gone from the cache. Only each lens's first wrong frame of
+/// a pass is looked up: the download is FFmpeg's, under its frame lock,
+/// on the test's thread while the decoders run, which moves the timing
+/// under test for the frames after it.
+#[derive(Debug)]
+enum Cached {
+    Right,
+    AsSlot,
+    Other,
+    Gone,
+    Failed(String),
+    NotLooked,
+}
+
+impl std::fmt::Display for Cached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Cached::Right => write!(f, "right"),
+            Cached::AsSlot => write!(f, "as the slot"),
+            Cached::Other => write!(f, "other bytes"),
+            Cached::Gone => write!(f, "gone"),
+            Cached::Failed(e) => write!(f, "unread ({e})"),
+            Cached::NotLooked => write!(f, "not looked up"),
+        }
+    }
+}
+
+/// A showing of a frame whose slot wasn't the truth's.
+#[derive(Debug)]
+struct Showing {
+    /// The slot, and the frame's run and place in it as the slot has them.
+    slot: usize,
+    run: u64,
+    seq: u64,
+    wrong: Wrong,
+    again: Again,
+    cached: Cached,
+}
+
+/// What a slot pass saw of one frame of one lens.
+#[derive(Debug, Default)]
+struct Seen {
+    /// Its place among the truth's frames of its lens.
+    index: Option<usize>,
+    /// The times it was shown, and uploaded (the slot versions seen
+    /// holding it).
+    shown: u32,
+    uploaded: u32,
+    /// Its slot's [`Yuv::hash`] at its first showing.
+    hash: u64,
+    /// The showings that weren't the truth's, and the first of them,
+    /// told apart, for the first [`LISTED`] frames of a pass that are
+    /// wrong (telling one apart reads it again, downloads its frame in the
+    /// cache and looks through the truth's frames near it).
+    wrong: u32,
+    first_wrong: Option<Showing>,
+}
+
+/// The engine's counts at the end of a slot pass, since its open.
+#[derive(Debug, Default, Clone)]
+struct PassCounts {
+    resyncs: u64,
+    unpaired: u64,
+    /// Each lens's frames decoded.
+    decoded: Vec<u64>,
+    /// Frames uploaded into slots, and of those: copied out of FFmpeg's
+    /// Vulkan images (path B), imported as DMA-BUFs (path A), and left on
+    /// the device but refused by the GPU.
+    uploaded: u64,
+    copied: u64,
+    imported: u64,
+    refused: u64,
+}
+
+impl PassCounts {
+    /// The frames uploaded through system memory: decoded there, or
+    /// downloaded by the decoder or the upload thread.
+    fn downloaded(&self) -> u64 {
+        self.uploaded.saturating_sub(self.copied + self.imported)
+    }
+}
+
+/// A pass's controls, planted at its first slot the truth judges right:
+/// the slot judged as its lens's next frame, and as the other lens's
+/// frame at its place.
+#[derive(Debug)]
+struct Controls {
+    lens: usize,
+    late: Result<(), Wrong>,
+    crossed: Option<Result<(), Wrong>>,
+}
+
+/// What a slot pass found.
+#[derive(Debug, Default)]
+struct SlotPass {
+    /// By lens and pts.
+    keys: BTreeMap<(usize, i64), Seen>,
+    counts: PassCounts,
+    lock: Option<LockStatus>,
+    elapsed: Duration,
+    /// Why the pass is broken, a failure; or why it kept no frame on the
+    /// GPU here, a skip.
+    broken: Option<String>,
+    not_kept: Option<String>,
+    controls: Option<Controls>,
+    /// With [`Before::Quiet`], the presents whose reads the slots stood
+    /// still over, and those they didn't (the wait for them ran out, or
+    /// a slot changed while they read).
+    quiet: u32,
+    unquiet: u32,
+    /// With [`Reads::watched`], each stream's distinct images the
+    /// [`PoolWatch`] saw, and their bytes.
+    pool: Vec<(usize, u64)>,
+    /// The lenses whose first wrong frame was looked up in the cache.
+    looked: HashSet<usize>,
+}
+
+impl SlotPass {
+    /// Each frame's slot hash, at its first showing.
+    fn hashes(&self) -> BTreeMap<(usize, i64), u64> {
+        self.keys.iter().map(|(&k, s)| (k, s.hash)).collect()
+    }
+
+    /// The frames shown other than the truth's, at least once.
+    fn wrong(&self) -> impl Iterator<Item = (&(usize, i64), &Seen)> {
+        self.keys.iter().filter(|(_, s)| s.wrong > 0)
+    }
+
+    /// The wrong frames told apart so far: the first [`LISTED`], whose
+    /// lines the report gives.
+    fn told(&self) -> usize {
+        self.keys
+            .values()
+            .filter(|s| s.first_wrong.is_some())
+            .count()
+    }
+}
+
+/// Whether a locked pass's lock held: locked at its end, no pair shown
+/// apart.
+fn lock_held(p: &SlotPass) -> Result<(), String> {
+    if p.lock == Some(LockStatus::Locked) && p.counts.unpaired == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "the lock ended {:?} with {} unpaired presents",
+            p.lock, p.counts.unpaired
+        ))
+    }
+}
+
+/// How long a [`Before::Quiet`] read waits for the slots to stand still
+/// before it reads anyway, and counts the present as not quiet.
+const QUIET: Duration = Duration::from_secs(2);
+
+/// What a slot pass does before each present's reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Before {
+    /// Reads at once.
+    #[default]
+    Nothing,
+    /// Waits for the GPU to finish the work submitted so far. That moves
+    /// the reads' timing, and nothing more: the upload thread may still be
+    /// between staging the copier's wait on wgpu's queue and its own
+    /// submit, which a read's submit then takes.
+    Idle,
+    /// Waits, at most [`QUIET`], until every live slot is Ready or Shown:
+    /// none is free for the upload thread to claim and none is being
+    /// written, so that it is copying nothing out and has staged no wait
+    /// that a read's submit could take. A present counts as quiet when no
+    /// slot changed by the end of its reads ([`stood_still`]).
+    Quiet,
+}
+
+/// How a slot pass reads its slots.
+#[derive(Debug, Clone, Copy, Default)]
+struct Reads {
+    before: Before,
+    /// A [`PoolWatch`] fed every present, as [`unthrottled_with`]'s path B
+    /// passes feed one, and as this check's passes had when odin's
+    /// mismatches came: it takes FFmpeg's frame lock from a thread of its
+    /// own and holds frames while it looks.
+    watched: bool,
+}
+
+impl Reads {
+    /// Reads at once, with no watch.
+    const NOW: Reads = Reads {
+        before: Before::Nothing,
+        watched: false,
+    };
+}
+
+/// Why a pass's frames didn't come the way its run says.
+#[derive(Debug)]
+enum Off {
+    /// A kept run's frame came through system memory or was refused by
+    /// the GPU, or a copied run's came on the GPU: the pass didn't play
+    /// the path it names, a failure.
+    Broken(String),
+    /// A kept run took no frame on the GPU at all: the decoder or the GPU
+    /// turned zero copy down here, a skip.
+    NotKept(String),
+}
+
+/// Whether the frames `run` uploaded, `c`, came the way it says: every
+/// one of a kept run's on the GPU (copied out or imported), none of a
+/// copied run's. `refusal` is the player's reason the GPU turned the
+/// decoder's frames down, where it has one.
+fn path_rule(run: &Run, c: &PassCounts, refusal: Option<&String>) -> Result<(), Off> {
+    let on_gpu = c.copied + c.imported;
+    if run.zero_copy == ZeroCopy::Off {
+        return match on_gpu {
+            0 => Ok(()),
+            n => Err(Off::Broken(format!(
+                "a copied run took {n} frames on the GPU"
+            ))),
+        };
+    }
+    if on_gpu == 0 {
+        Err(Off::NotKept(format!(
+            "no frame taken on the GPU, {} refused{}",
+            c.refused,
+            because(refusal)
+        )))
+    } else if c.downloaded() > 0 || c.refused > 0 {
+        Err(Off::Broken(format!(
+            "{} of its {} frames uploaded came through system memory, {} refused by the GPU{}",
+            c.downloaded(),
+            c.uploaded,
+            c.refused,
+            because(refusal)
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// The words of `player`'s Ready and Shown slots, by slot: a claim, a
+/// discard, a publish or a show changes a slot's.
+fn slot_words(player: &Player) -> Vec<(usize, u64)> {
+    player
+        .slots()
+        .views()
+        .iter()
+        .map(|v| (v.index, v.word))
+        .collect()
+}
+
+/// Waits, at most [`QUIET`], until the upload thread has nothing left to
+/// do while `p` is on screen: every live slot of `player`'s Ready or
+/// Shown, and each Ready one ahead of the frame its stream shows (one
+/// behind it, a frame the presenter gave back, the upload thread frees
+/// and writes again). The live slots, and the words then.
+fn settle(player: &Player, p: &Presented) -> (usize, Vec<(usize, u64)>) {
+    let until = Instant::now() + QUIET;
+    loop {
+        let active = player.slots().stats().active;
+        let views = player.slots().views();
+        let ahead = views.iter().all(|v| {
+            v.state != SlotState::Ready
+                || p.frames
+                    .iter()
+                    .any(|f| f.stream == v.frame.stream && f.frame.time < v.frame.time)
+        });
+        if (views.len() == active && ahead) || Instant::now() >= until {
+            return (active, views.iter().map(|v| (v.index, v.word)).collect());
+        }
+        std::thread::sleep(Duration::from_micros(250));
+    }
+}
+
+/// Whether the slots stood still over a present's reads: every one of
+/// the `active` live slots Ready or Shown before them (`before`), so that
+/// none was free for the upload thread to claim or being written, and
+/// none changed by their end (`after`), a claim moving a slot's version
+/// on. The upload thread then copied nothing out while they read, and
+/// had staged no wait of the copier's that their submits could take.
+fn stood_still(active: usize, before: &[(usize, u64)], after: &[(usize, u64)]) -> bool {
+    before.len() == active && before == after
+}
+
+/// `count` presents of `streams` of `path`, opened as `run` on `rig` and
+/// played unthrottled, each slot shown read back from the GPU (level 0,
+/// which the mips are made from) as `reads` says and judged against
+/// `truth`, byte for byte. A wrong slot is read again while held, and a
+/// lens's first wrong frame is looked up in the cache. There is no
+/// [`PoolWatch`] unless `reads` asks for one: it takes FFmpeg's frame
+/// lock from another thread and holds frames, which moves the timing
+/// under test. Broken when the run fails, stalls or ends short, a locked
+/// run's lock doesn't hold, or its frames break [`path_rule`]; not kept
+/// when a kept run took no frame on the GPU at all.
+fn slot_pass(
     rig: &Rig,
     path: &Path,
     streams: &[Option<usize>],
     run: &Run,
     count: usize,
-) -> Result<BTreeMap<(usize, i64), Vec<u64>>, NoHashes> {
-    let mut hashes = BTreeMap::new();
-    let mut pairs = 0;
-    let mut each = |p: &Presented| {
-        for f in &p.frames {
-            let planes = (0..)
-                .map_while(|i| f.gpu.plane_texture(i))
-                .map(|t| {
-                    readback::read_texture(&rig.gpu, t, 0)
-                        .map(|texels| fnv64(&texels.data))
-                        .map_err(|e| e.to_string())
-                })
-                .collect::<Result<Vec<u64>, String>>()?;
-            hashes.insert((f.stream, f.frame.pts), planes);
-        }
-        pairs += 1;
-        Ok(if pairs >= count {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
-        })
+    reads: Reads,
+    truth: &Truth,
+) -> SlotPass {
+    let begun = Instant::now();
+    let mut pass = SlotPass::default();
+    let Some(lenses) = streams
+        .iter()
+        .map(|&s| truth.lens_of(s))
+        .collect::<Option<Vec<usize>>>()
+    else {
+        pass.broken = Some(format!("the truth has no lens of {streams:?}"));
+        return pass;
     };
-    let u = unthrottled_with(rig, path, streams, run, GATED_UNTHROTTLED, Some(&mut each))
-        .map_err(NoHashes::Broken)?;
-    if let Some(why) = &u.stalled {
-        return Err(NoHashes::Broken(format!("the pass stalled: {why}")));
+    let clock = Arc::new(ManualClock::new(FrameRate::FPS_30.frame_duration()));
+    let player = match rig.player(clock.clone(), run) {
+        Ok(p) => p,
+        Err(e) => {
+            pass.broken = Some(e);
+            return pass;
+        }
+    };
+    // Each upload seen, by slot and version: the frame it holds.
+    let mut uploads: HashMap<(usize, u64), (usize, i64)> = HashMap::new();
+    let mut watch = None;
+    let played = (|| -> Result<(), String> {
+        open(&player, path, streams, run)?;
+        if reads.watched {
+            watch = PoolWatch::of(&player, run, streams.len());
+        }
+        let (mut next, mut rate) = (None, None);
+        for n in 0..count {
+            if let Some(t) = next {
+                clock.set(t, Instant::now());
+            }
+            let (asked, wait) = (Instant::now(), if n == 0 { FIRST_FRAME } else { STALL });
+            let p = loop {
+                for v in player.slots().views() {
+                    if let Some(&lens) = lenses.get(v.frame.stream) {
+                        uploads.insert((v.index, v.word >> 3), (lens, v.frame.pts));
+                    }
+                }
+                if let Some(p) = player.present(Instant::now())
+                    && p.frames.len() == streams.len()
+                    && next.is_none_or(|t| p.frames.iter().all(|f| ends(&f.frame, rate) > Some(t)))
+                {
+                    break p;
+                }
+                stream_error(&player)?;
+                if player.snapshot().at_end {
+                    return Err(format!("the file ended {n} presents in"));
+                }
+                if asked.elapsed() > wait {
+                    return Err(format!("it stalled {n} presents in: none after {wait:?}"));
+                }
+                std::thread::sleep(Duration::from_micros(250));
+            };
+            if let Some(w) = &watch {
+                w.shown(&p);
+            }
+            look(rig, &player, truth, &lenses, reads.before, &p, &mut pass)?;
+            if n == 0 {
+                rate = stream_rate(&player);
+                player.play();
+            }
+            let shown = p.frames[0].frame;
+            next = Some(
+                ends(&shown, rate)
+                    .ok_or_else(|| format!("frame at {:?} has no duration", shown.time))?,
+            );
+        }
+        Ok(())
+    })();
+    pass.pool = watch.map_or_else(Vec::new, PoolWatch::finish);
+    let snap = common::snapshot(&player);
+    let perf = player.perf();
+    pass.counts = PassCounts {
+        resyncs: perf.count(Counter::PairResyncs),
+        unpaired: perf.count(Counter::UnpairedPresents),
+        decoded: snap.streams.iter().map(|s| s.decoded).collect(),
+        uploaded: perf.count(Counter::FramesUploaded),
+        copied: perf.count(Counter::VulkanCopies),
+        imported: perf.count(Counter::FramesImported),
+        refused: perf.count(Counter::ImportsRefused),
+    };
+    pass.lock = snap.lock.map(|l| l.status);
+    for key in uploads.into_values() {
+        if let Some(seen) = pass.keys.get_mut(&key) {
+            seen.uploaded += 1;
+        }
     }
-    if u.lock != Some(LockStatus::Locked) || u.unpaired > 0 {
-        return Err(NoHashes::Broken(format!(
-            "the lock ended {:?} with {} unpaired presents",
-            u.lock, u.unpaired
-        )));
+    let joined = join(player);
+    pass.elapsed = begun.elapsed();
+    let mut broken = played.err();
+    if broken.is_none() && run.locked {
+        broken = lock_held(&pass).err();
     }
-    if run.zero_copy != ZeroCopy::Off && (u.imported == 0 || u.refused > 0) {
-        return Err(NoHashes::NotKept(format!(
-            "{} frames taken on the GPU, {} refused{}",
-            u.imported,
-            u.refused,
-            because(u.refusal.as_ref())
-        )));
+    match path_rule(run, &pass.counts, snap.import_refused.as_ref()) {
+        Ok(()) => {}
+        Err(Off::NotKept(why)) => pass.not_kept = Some(why),
+        Err(Off::Broken(why)) => {
+            broken.get_or_insert(why);
+        }
     }
-    Ok(hashes)
+    if let Err(e) = joined {
+        broken = Some(broken.map_or(e.clone(), |b| format!("{b}; {e}")));
+    }
+    pass.broken = broken;
+    pass
 }
 
-/// Whether the zero-copy run's slots, `got`, hold the copy's, `want`,
-/// byte for byte: the same frames of each lens, every plane the same.
-/// The frames compared.
+/// Read back each slot `p` shows, as lens `lenses[stream]`, after what
+/// `before` waits for, and judge it against `truth`, into `pass`: a wrong
+/// one read again, and a lens's first wrong one looked up in `player`'s
+/// cache. The pass's first slot the truth judges right plants its
+/// controls.
+fn look(
+    on: &Rig,
+    player: &Player,
+    truth: &Truth,
+    lenses: &[usize],
+    before: Before,
+    p: &Presented,
+    pass: &mut SlotPass,
+) -> Result<(), String> {
+    let settled = match before {
+        Before::Nothing => None,
+        Before::Idle => {
+            on.gpu.wait_for_submitted().map_err(|e| e.to_string())?;
+            None
+        }
+        Before::Quiet => Some(settle(player, p)),
+    };
+    for f in &p.frames {
+        let lens = *lenses
+            .get(f.stream)
+            .ok_or_else(|| format!("a present showed stream {}", f.stream))?;
+        let pts = f.frame.pts;
+        let slot = read_slot(&on.gpu, f)?;
+        let index = truth.index(lens, pts);
+        let right = truth.holds(&slot, lens, index);
+        if pass.controls.is_none()
+            && right
+            && let Some(i) = index
+        {
+            let other = (lens + 1) % truth.lenses.len();
+            pass.controls = Some(Controls {
+                lens,
+                late: truth.judge(&slot, lens, i + 1),
+                crossed: (other != lens).then(|| truth.judge(&slot, other, i)),
+            });
+        }
+        let told = pass.told();
+        let seen = pass.keys.entry((lens, pts)).or_default();
+        seen.index = index;
+        seen.shown += 1;
+        if seen.shown == 1 {
+            seen.hash = slot.hash();
+        }
+        if right {
+            continue;
+        }
+        seen.wrong += 1;
+        if seen.first_wrong.is_some() || told >= LISTED {
+            continue;
+        }
+        let Err(wrong) = index.map_or(Err(Wrong::NotInTruth), |i| truth.judge(&slot, lens, i))
+        else {
+            continue;
+        };
+        let again = match read_slot(&on.gpu, f) {
+            Ok(s) if s == slot => Again::Same,
+            Ok(s) if truth.holds(&s, lens, index) => Again::Right,
+            Ok(_) => Again::Other,
+            Err(e) => Again::Failed(e),
+        };
+        let cached = if pass.looked.insert(lens) {
+            cached(player, f, &slot, truth, lens, index)
+        } else {
+            Cached::NotLooked
+        };
+        if let Some(seen) = pass.keys.get_mut(&(lens, pts)) {
+            seen.first_wrong = Some(Showing {
+                slot: f.slot,
+                run: f.frame.run,
+                seq: f.frame.seq,
+                wrong,
+                again,
+                cached,
+            });
+        }
+    }
+    if let Some((active, words)) = settled {
+        if stood_still(active, &words, &slot_words(player)) {
+            pass.quiet += 1;
+        } else {
+            pass.unquiet += 1;
+        }
+    }
+    Ok(())
+}
+
+/// What `player`'s cache holds now of the frame `f` shows, against the
+/// truth's frame `index` of lens `lens` and against `slot`.
+fn cached(
+    player: &Player,
+    f: &ShownFrame,
+    slot: &Yuv,
+    truth: &Truth,
+    lens: usize,
+    index: Option<usize>,
+) -> Cached {
+    let Some(frame) = player.cache().get(f.stream, f.frame.time) else {
+        return Cached::Gone;
+    };
+    let yuv = match frame.to_system() {
+        Some(Ok(down)) => yuv_of(&down),
+        Some(Err(e)) => Err(e.to_string()),
+        None => yuv_of(frame.as_ref()),
+    };
+    match yuv {
+        Ok(y) if truth.holds(&y, lens, index) => Cached::Right,
+        Ok(y) if y == *slot => Cached::AsSlot,
+        Ok(_) => Cached::Other,
+        Err(e) => Cached::Failed(e),
+    }
+}
+
+/// The controls a pass planted (M3 plan 4.1, rule 1): its first right
+/// slot judged as its lens's next frame and as the other lens's frame
+/// must fail, and [`Truth::like`] must name the frame it is: a frame
+/// early of its own lens, and the other lens's at its place.
+fn check_controls(c: &Controls) {
+    let late = must_fail("a slot judged as its lens's next frame", c.late.clone());
+    assert_eq!(
+        late.like().map(|l| (l.lens, l.off)),
+        Some((c.lens, -1)),
+        "a slot judged as its lens's next frame: {late}"
+    );
+    if let Some(crossed) = &c.crossed {
+        let crossed = must_fail("a slot judged as the other lens's frame", crossed.clone());
+        assert_eq!(
+            crossed.like().map(|l| (l.lens, l.off)),
+            Some((c.lens, 0)),
+            "a slot judged as the other lens's frame: {crossed}"
+        );
+    }
+}
+
+/// An 8-bit 4:2:0 layout of `components` a plane: `[1, 2]` NV12's,
+/// `[1, 1, 1]` I420's.
+fn layout_420(name: &str, components: &[u8]) -> PixelLayout {
+    PixelLayout {
+        name: name.into(),
+        planes: (0..)
+            .zip(components)
+            .map(|(i, &components)| PlaneDesc {
+                components,
+                bytes: SampleBytes::One,
+                log2_sub: if i == 0 { (0, 0) } else { (1, 1) },
+            })
+            .collect(),
+        family: ColorFamily::Yuv,
+        bit_depth: 8,
+        msb_aligned: false,
+    }
+}
+
+/// [`read_planes`] and [`yuv_of`] on the slots path A, path B and the
+/// copy path fill on a hardware decoder, NV12's (R8 and Rg8), which the
+/// Tier 1 players' software decode never fills: a 70×130 picture (three
+/// bands, odd chroma rows) given as NV12 and as I420, rows padded, is the
+/// same [`Yuv`] in memory, and uploaded to a slot of each reads back as
+/// it, which the truth judges its frame. The control: the NV12 frame with
+/// U and V swapped reads back with Y right and U and V wrong.
+#[test]
+fn nv12_and_i420_slots_read_back_as_one_picture() {
+    let gpu = common::gpu();
+    let size: (u32, u32) = (70, 130);
+    let chroma = (size.0.div_ceil(2), size.1.div_ceil(2));
+    let plane = |p: u32, (width, height): (u32, u32)| Plane {
+        width,
+        height,
+        samples: (0..height)
+            .flat_map(|y| {
+                (0..width).map(move |x| {
+                    ((p * 7919 + y * 104_729 + x * 31).wrapping_mul(2_654_435_761) >> 24) as u8
+                })
+            })
+            .collect(),
+    };
+    let want = Yuv([plane(0, size), plane(1, chroma), plane(2, chroma)]);
+    let [y, u, v] = &want.0;
+    let uv = |a: &Plane, b: &Plane| -> Vec<u8> {
+        a.samples
+            .iter()
+            .zip(&b.samples)
+            .flat_map(|(&a, &b)| [a, b])
+            .collect()
+    };
+    let color = ColorInfo {
+        codes: ColorCodes::UNSPECIFIED,
+        range: Range::Limited,
+        matrix: Matrix::Bt709,
+        transfer: spherecut_core::video::Transfer::Sdr,
+        primaries: Primaries::Bt709,
+        siting: ChromaSiting::Left,
+        assumed: Assumed::default(),
+    };
+    // Each plane given as rows of `row` bytes, then 5 bytes of padding.
+    let frame = |name: &str, components: &[u8], planes: [(u32, &[u8]); 3]| {
+        let (planes, strides): (Vec<Vec<u8>>, Vec<usize>) = planes[..components.len()]
+            .iter()
+            .map(|&(row, packed)| {
+                let row = row as usize;
+                let padded = packed
+                    .chunks(row)
+                    .flat_map(|r| r.iter().copied().chain([0xa5; 5]))
+                    .collect();
+                (padded, row + 5)
+            })
+            .unzip();
+        let layout = Arc::new(layout_420(name, components));
+        VideoFrame::owned(layout, size, planes, strides, color, (0, Time::ZERO)).unwrap()
+    };
+    let (vu, uv) = (uv(v, u), uv(u, v));
+    let nv12 = frame(
+        "nv12",
+        &[1, 2],
+        [(size.0, &y.samples), (2 * chroma.0, &uv), (0, &[])],
+    );
+    let i420 = frame(
+        "yuv420p",
+        &[1, 1, 1],
+        [
+            (size.0, &y.samples),
+            (chroma.0, &u.samples),
+            (chroma.0, &v.samples),
+        ],
+    );
+    let nv21 = frame(
+        "nv12",
+        &[1, 2],
+        [(size.0, &y.samples), (2 * chroma.0, &vu), (0, &[])],
+    );
+    let mut uploader = Uploader::new(gpu);
+    let mut read_back = |f: &VideoFrame| {
+        let slot = GpuFrame::new(gpu, &SlotShape::of(f.layout(), size).unwrap()).unwrap();
+        uploader.upload(gpu, f, &slot).unwrap();
+        let formats: Vec<_> = (0..)
+            .map_while(|i| slot.plane_texture(i).map(|t| t.format()))
+            .collect();
+        (formats, read_planes(gpu, &slot))
+    };
+    let truth = Truth {
+        lenses: vec![TruthLens {
+            stream: Some(0),
+            frames: vec![(0, want.clone())],
+        }],
+    };
+
+    let (r8, rg8) = (wgpu::TextureFormat::R8Unorm, wgpu::TextureFormat::Rg8Unorm);
+    for (f, formats) in [(&nv12, vec![r8, rg8]), (&i420, vec![r8; 3])] {
+        assert_eq!(yuv_of(f), Ok(want.clone()), "{}", f.layout().name);
+        let (got, slot) = read_back(f);
+        assert_eq!(got, formats, "{}", f.layout().name);
+        let slot = slot.unwrap();
+        truth.judge(&slot, 0, 0).unwrap();
+        assert_eq!(slot, want);
+    }
+
+    // Control.
+    let (_, swapped) = read_back(&nv21);
+    let wrong = must_fail(
+        "an NV12 slot with U and V swapped",
+        truth.judge(&swapped.unwrap(), 0, 0),
+    );
+    let Wrong::Samples(d) = &wrong else {
+        panic!("{wrong}")
+    };
+    assert_eq!(
+        d.planes.each_ref().map(|p| p.samples > 0),
+        [false, true, true],
+        "{wrong}"
+    );
+}
+
+/// Whether two passes' slots, `got` and `want` by lens and pts, hold the
+/// same frames byte for byte; the frames that differ, or how many frames
+/// each showed and the first few that only one did. The frames compared.
 fn same_slots(
-    got: &BTreeMap<(usize, i64), Vec<u64>>,
-    want: &BTreeMap<(usize, i64), Vec<u64>>,
+    got: &BTreeMap<(usize, i64), u64>,
+    want: &BTreeMap<(usize, i64), u64>,
 ) -> Result<usize, String> {
     if got.keys().ne(want.keys()) {
+        let only = |a: &BTreeMap<(usize, i64), u64>, b: &BTreeMap<(usize, i64), u64>| {
+            let keys: Vec<String> = a
+                .keys()
+                .filter(|k| !b.contains_key(k))
+                .map(|(lens, pts)| format!("lens {lens} pts {pts}"))
+                .collect();
+            match keys.len() {
+                0 => "none".to_string(),
+                n if n <= 4 => keys.join(", "),
+                n => format!("{} and {} more", keys[..4].join(", "), n - 4),
+            }
+        };
         return Err(format!(
-            "the runs showed other frames: {:?} against {:?}",
-            got.keys().collect::<Vec<_>>(),
-            want.keys().collect::<Vec<_>>()
+            "the passes showed {} and {} frames; only the first: {}; only the second: {}",
+            got.len(),
+            want.len(),
+            only(got, want),
+            only(want, got)
         ));
     }
-    match got.iter().find(|(k, v)| want.get(k) != Some(v)) {
-        Some(((stream, pts), _)) => Err(format!(
-            "stream {stream}'s frame at pts {pts} differs from the copy's"
-        )),
-        None => Ok(got.len()),
+    let differ: Vec<String> = got
+        .iter()
+        .filter(|(k, v)| want.get(k) != Some(v))
+        .map(|((lens, pts), _)| format!("lens {lens} pts {pts}"))
+        .collect();
+    if differ.is_empty() {
+        return Ok(got.len());
+    }
+    let shown = differ.len().min(8);
+    Err(format!(
+        "{} of {} frames differ: {}{}",
+        differ.len(),
+        got.len(),
+        differ[..shown].join(", "),
+        if differ.len() > shown { ", …" } else { "" }
+    ))
+}
+
+/// `line` on stderr and as a bench note, so that it lands in hw-test's
+/// report.
+fn say(line: &str) {
+    eprintln!("{line}");
+    bench::note(line);
+}
+
+/// A way the zero-copy pair check plays a file.
+struct Variant {
+    name: &'static str,
+    /// The lenses it opens, by their place among the file's.
+    lenses: &'static [usize],
+    locked: bool,
+    reads: Reads,
+}
+
+/// The ways: locked, as the app plays a pair, first; then, on clip 9's
+/// path B, where odin's mismatches came, unlocked, each lens alone
+/// through the player, and locked three more ways: each read after the
+/// GPU idles, each read while the slots stand still, and with a
+/// [`PoolWatch`] fed every present, as when the mismatches came.
+const VARIANTS: [Variant; 7] = [
+    Variant {
+        name: "locked",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads::NOW,
+    },
+    Variant {
+        name: "unlocked",
+        lenses: &[0, 1],
+        locked: false,
+        reads: Reads::NOW,
+    },
+    Variant {
+        name: "lens 0 alone",
+        lenses: &[0],
+        locked: false,
+        reads: Reads::NOW,
+    },
+    Variant {
+        name: "lens 1 alone",
+        lenses: &[1],
+        locked: false,
+        reads: Reads::NOW,
+    },
+    Variant {
+        name: "locked, read idle",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads {
+            before: Before::Idle,
+            watched: false,
+        },
+    },
+    Variant {
+        name: "locked, read quiet",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads {
+            before: Before::Quiet,
+            watched: false,
+        },
+    },
+    Variant {
+        name: "locked, pool watched",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads {
+            before: Before::Nothing,
+            watched: true,
+        },
+    },
+];
+
+/// A variant of the zero-copy pair check played on one file and path,
+/// and its passes in the order run, each named, and kept or copied.
+struct Played {
+    file: String,
+    path: &'static str,
+    variant: &'static str,
+    passes: Vec<(&'static str, bool, SlotPass)>,
+}
+
+impl Played {
+    /// What a wrong frame is over the variant's passes: kept wrong (only
+    /// the kept passes showed it wrong), copy wrong, or both wrong.
+    fn class(&self, key: &(usize, i64)) -> &'static str {
+        let wrong = |kept: bool| {
+            self.passes
+                .iter()
+                .any(|(_, k, p)| *k == kept && p.keys.get(key).is_some_and(|s| s.wrong > 0))
+        };
+        match (wrong(true), wrong(false)) {
+            (true, true) => "both wrong",
+            (true, false) => "kept wrong",
+            (false, true) => "copy wrong",
+            (false, false) => "wrong",
+        }
+    }
+
+    /// A pass's row: its frames, the wrong ones, its verdict and the
+    /// engine's counts.
+    fn row(&self, name: &str, p: &SlotPass) -> String {
+        let mut classes: BTreeMap<&str, usize> = BTreeMap::new();
+        for (k, _) in p.wrong() {
+            *classes.entry(self.class(k)).or_default() += 1;
+        }
+        let verdict = if let Some(why) = &p.broken {
+            format!("broken: {why}")
+        } else if !classes.is_empty() {
+            classes
+                .iter()
+                .map(|(c, n)| format!("{c} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else if let Some(why) = &p.not_kept {
+            format!("not kept: {why}")
+        } else {
+            "right".into()
+        };
+        let twice: Vec<String> = p
+            .keys
+            .iter()
+            .filter(|(_, s)| s.shown > 1)
+            .map(|((lens, pts), s)| format!("lens {lens} pts {pts} x{}", s.shown))
+            .collect();
+        let c = &p.counts;
+        let mut also = String::new();
+        if p.quiet + p.unquiet > 0 {
+            also += &format!(", quiet {} of {}", p.quiet, p.quiet + p.unquiet);
+        }
+        if !p.pool.is_empty() {
+            also += &format!(
+                ", pool {} images",
+                p.pool
+                    .iter()
+                    .map(|(images, _)| images.to_string())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            );
+        }
+        format!(
+            "{}, {}, {}, {name}: {} frames, {} wrong: {verdict}; resyncs {}, unpaired {}, \
+             decoded {}, uploaded {} ({} copied, {} imported, {} downloaded, {} refused), \
+             shown twice: {}{also}; {:.1} s",
+            self.file,
+            self.path,
+            self.variant,
+            p.keys.len(),
+            p.wrong().count(),
+            c.resyncs,
+            c.unpaired,
+            c.decoded
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join("+"),
+            c.uploaded,
+            c.copied,
+            c.imported,
+            c.downloaded(),
+            c.refused,
+            if twice.is_empty() {
+                "none".into()
+            } else {
+                twice.join(", ")
+            },
+            p.elapsed.as_secs_f64()
+        )
+    }
+
+    /// Each side's passes against each other, slot for slot: "copy 1
+    /// against copy 2: the same 96 frames; kept 1 against kept 2: …".
+    fn steadiness(&self) -> String {
+        let side = |kept: bool| -> Vec<&(&str, bool, SlotPass)> {
+            self.passes.iter().filter(|(_, k, _)| *k == kept).collect()
+        };
+        [false, true]
+            .into_iter()
+            .filter_map(|kept| match side(kept).as_slice() {
+                [(a, _, p), (b, _, q)] => Some(format!(
+                    "{a} against {b}: {}",
+                    match same_slots(&p.hashes(), &q.hashes()) {
+                        Ok(n) => format!("the same {n} frames"),
+                        Err(e) => e,
+                    }
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// One line for wrong frame `key` of pass `name`, `p`.
+    fn key_line(&self, name: &str, (lens, pts): (usize, i64), s: &Seen) -> String {
+        let at = s.index.map_or_else(|| "?".into(), |i| i.to_string());
+        let head = format!(
+            "{}, {}, {}, {name}: lens {lens} pts {pts} (frame {at}): {}; shown {}, uploaded {}, \
+             wrong {}",
+            self.file,
+            self.path,
+            self.variant,
+            self.class(&(lens, pts)),
+            s.shown,
+            s.uploaded,
+            s.wrong
+        );
+        match &s.first_wrong {
+            Some(w) => format!(
+                "{head}; slot {} run {} seq {}; read again: {}; in the cache: {}; {}",
+                w.slot, w.run, w.seq, w.again, w.cached, w.wrong
+            ),
+            None => head,
+        }
     }
 }
 
-/// A locked pair kept on the GPU (path B where the device can be shared,
-/// and path A where the GPU imports VA-API's frames) shows the same
-/// pairs, each slot's planes read back byte for byte, as the copy path on
-/// the same decoder: the first [`ZERO_COPY_FRAMES`] pairs of clip 9 and
-/// of the 2×3840² perf pair, more than the decoder's surfaces beyond
-/// [`SURFACE_CAP`], so that the pool runs round while frames are held (M3
-/// plan section 9). The control plants a mismatch: the copy's lenses
-/// swapped must differ. Skips, with the reasons, when no path keeps the
-/// frames on the GPU here or a file isn't; never a pass with one left
-/// out. A run that fails, stalls or shows the lenses apart fails it, on
-/// either path.
+/// The zero-copy pair check's report, as [`say`]s: a row a pass, a line a
+/// variant on its passes' steadiness, then each wrong frame, at most
+/// [`LISTED`] a pass. What failed, in words: nothing when every pass
+/// showed the truth's frames and none broke.
+fn pair_report(played: &[Played]) -> Vec<String> {
+    say(
+        "zero-copy pair check: file, path, variant, pass: frames, wrong, verdict; the engine's counts",
+    );
+    for g in played {
+        for (name, _, p) in &g.passes {
+            say(&g.row(name, p));
+        }
+        let steady = g.steadiness();
+        if !steady.is_empty() {
+            say(&format!("{}, {}, {}: {steady}", g.file, g.path, g.variant));
+        }
+    }
+    for g in played {
+        for (name, _, p) in &g.passes {
+            let (told, more): (Vec<_>, Vec<_>) =
+                p.wrong().partition(|(_, s)| s.first_wrong.is_some());
+            for (&key, s) in told {
+                say(&g.key_line(name, key, s));
+            }
+            if !more.is_empty() {
+                say(&format!(
+                    "{}, {}, {}, {name}: {} wrong frames more, not told apart: {}",
+                    g.file,
+                    g.path,
+                    g.variant,
+                    more.len(),
+                    more.iter()
+                        .map(|&(&(lens, pts), s)| format!(
+                            "lens {lens} pts {pts} ({}, wrong {})",
+                            g.class(&(lens, pts)),
+                            s.wrong
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    let passes = || {
+        played
+            .iter()
+            .flat_map(|g| g.passes.iter().map(move |p| (g, p)))
+    };
+    let wrong_in = |kept: bool| {
+        passes()
+            .filter(|(_, (_, k, p))| *k == kept && p.wrong().next().is_some())
+            .count()
+    };
+    let mut failed = Vec::new();
+    match wrong_in(true) {
+        0 => {}
+        n => failed.push(format!(
+            "{n} kept passes showed frames other than the truth's"
+        )),
+    }
+    match wrong_in(false) {
+        0 => {}
+        n => failed.push(format!(
+            "copy wrong: {n} copied passes showed frames other than the truth's, an upstream \
+             decode fault, not path B's"
+        )),
+    }
+    let broken: Vec<String> = passes()
+        .filter_map(|(g, (name, _, p))| {
+            let why = p.broken.as_ref()?;
+            Some(format!(
+                "{}, {}, {}, {name}: {why}",
+                g.file, g.path, g.variant
+            ))
+        })
+        .collect();
+    if !broken.is_empty() {
+        failed.push(format!(
+            "{} passes broke: {}",
+            broken.len(),
+            broken.join("; ")
+        ));
+    }
+    failed
+}
+
+/// Every slot a locked pair shows, kept on the GPU (path B where the
+/// device can be shared, and path A where the GPU imports VA-API's
+/// frames) or copied on the same decoder, is the frame a software decode
+/// of the file makes, byte for byte: the first [`ZERO_COPY_FRAMES`] pairs
+/// of clip 9 and of the 2×3840² perf pair, more than path B's cache
+/// holds on the device a lens (M3 plan section 9). Each variant runs a
+/// copied pass, a kept one, and each again, so that each side's
+/// steadiness shows; clip 9's path B also plays unlocked, each lens
+/// alone, and locked three more ways ([`VARIANTS`]): each read after the
+/// GPU idles, each read while the slots stand still, and with a
+/// [`PoolWatch`]. A wrong slot is told apart: its kept or copied side,
+/// its planes' differences and bands, whether those bands are a frame of
+/// either lens near it, its slot, run and seq, a second read, its frame
+/// in the cache (each lens's first wrong one a pass), and how often it
+/// was shown and uploaded. Every pass and file runs before the test
+/// fails, and the report (one row a pass, one line a wrong frame) goes to
+/// stderr and the bench notes. Each pass plants controls: its first right
+/// slot judged as its lens's next frame, and as the other lens's, must
+/// fail as the frame it is. A pass that breaks [`path_rule`] (a kept one
+/// with a frame through system memory or refused by the GPU, a copied one
+/// with a frame on the GPU), or fails, stalls, ends short or shows the
+/// lenses apart locked, fails it; a kept one that keeps no frame on the
+/// GPU at all skips, as a file or path not here does, never a pass with
+/// one left out.
 #[test]
 #[ignore = "tier2: needs a GPU that keeps decoded frames on it, and the X5 samples or hw-test's perf pairs"]
 fn zero_copy_pair_matches_copy() {
     tier2::require_hw_run();
+    let begun = Instant::now();
     let (files, mut missing) = locked_files();
     if files.is_empty() {
         tier2::skip(missing.join("; "));
     }
     let rig = Rig::hardware();
-    eprintln!("{}", rig.about());
+    say(&rig.about());
     let shared = rig.shared();
-    for (name, path, _) in &files {
+    let mut played: Vec<Played> = Vec::new();
+    let mut failed = Vec::new();
+    for (name, path, coded) in &files {
         let report = probe_file(path);
         let streams = lens_streams(&report);
         let format = format_of(&report, streams[0]);
@@ -3834,41 +5882,349 @@ fn zero_copy_pair_matches_copy() {
         } else {
             paths.push(("path A", &rig, HwKind::VaApi, ZeroCopy::All));
         }
-        for (label, on, kind, zero_copy) in paths {
-            let kept = Run {
-                label: format!("{kind}, {label}"),
-                zero_copy,
-                ..Run::only(kind)
-            }
-            .locked();
-            let copy = Run::only(kind).locked();
-            let got = slot_hashes(on, path, &streams, &kept, ZERO_COPY_FRAMES);
-            let want = slot_hashes(&rig, path, &streams, &copy, ZERO_COPY_FRAMES)
-                .unwrap_or_else(|e| panic!("{name}, {}: {e:?}", copy.label));
-            let got = match got {
-                Ok(g) => g,
-                Err(NoHashes::NotKept(why)) => {
-                    missing.push(format!("{name}, {}: {why}", kept.label));
-                    continue;
-                }
-                Err(NoHashes::Broken(why)) => panic!("{name}, {}: {why}", kept.label),
-            };
-            let n = same_slots(&got, &want)
-                .unwrap_or_else(|e| panic!("{name}, {} against the copy: {e}", kept.label));
-            let swapped = want
-                .iter()
-                .map(|(&(stream, pts), v)| ((stream ^ 1, pts), v.clone()))
-                .collect();
-            must_fail("the copy's lenses swapped", same_slots(&got, &swapped));
-            eprintln!(
-                "{name}, {}: {n} frames, every slot's planes the copy's byte for byte",
-                kept.label
-            );
+        if paths.is_empty() {
+            continue;
         }
+        let decoding = Instant::now();
+        let truth = match Truth::decode(path, &streams, ZERO_COPY_FRAMES + REACH) {
+            Ok(t) => t,
+            Err(e) => {
+                failed.push(format!("{name}: decoding the truth in software: {e}"));
+                continue;
+            }
+        };
+        say(&format!(
+            "{name}: the truth, {} frames a lens decoded in software in {:.1} s",
+            truth
+                .lenses
+                .iter()
+                .map(|l| l.frames.len().to_string())
+                .collect::<Vec<_>>()
+                .join(" and "),
+            decoding.elapsed().as_secs_f64()
+        ));
+        for (label, on, kind, zero_copy) in paths {
+            // Clip 9 is the sample, the file without corner codes.
+            let variants = if coded.is_none() && kind == HwKind::Vulkan {
+                &VARIANTS[..]
+            } else {
+                &VARIANTS[..1]
+            };
+            for v in variants {
+                let streams: Vec<Option<usize>> = v.lenses.iter().map(|&l| streams[l]).collect();
+                let as_variant = |r: Run| if v.locked { r.locked() } else { r };
+                let kept = as_variant(Run {
+                    label: format!("{kind}, {label}"),
+                    zero_copy,
+                    ..Run::only(kind)
+                });
+                let copy = as_variant(Run::only(kind));
+                let mut g = Played {
+                    file: name.clone(),
+                    path: label,
+                    variant: v.name,
+                    passes: Vec::new(),
+                };
+                for (pass, is_kept) in [
+                    ("copy 1", false),
+                    ("kept 1", true),
+                    ("copy 2", false),
+                    ("kept 2", true),
+                ] {
+                    let (on, run) = if is_kept { (on, &kept) } else { (&rig, &copy) };
+                    let p = slot_pass(on, path, &streams, run, ZERO_COPY_FRAMES, v.reads, &truth);
+                    if let Some(why) = p.not_kept.as_ref().filter(|_| is_kept) {
+                        let why = format!("{name}, {}: {why}", kept.label);
+                        if !missing.contains(&why) {
+                            missing.push(why);
+                        }
+                    }
+                    g.passes.push((pass, is_kept, p));
+                    // As it goes, should a later pass never end.
+                    if let Some((pass, _, p)) = g.passes.last() {
+                        eprintln!("{}", g.row(pass, p));
+                    }
+                }
+                played.push(g);
+            }
+        }
+    }
+    failed.extend(pair_report(&played));
+    say(&format!(
+        "the zero-copy pair check took {:.0} s",
+        begun.elapsed().as_secs_f64()
+    ));
+    for (_, _, p) in played.iter().flat_map(|g| &g.passes) {
+        if let Some(c) = &p.controls {
+            check_controls(c);
+        }
+    }
+    if !failed.is_empty() {
+        panic!(
+            "{}; the rows and the frames above say where",
+            failed.join("; ")
+        );
     }
     if !missing.is_empty() {
         tier2::skip(missing.join("; "));
     }
+}
+
+/// A synthetic real-time pass of 20 s for P-LOCK's scoring: a clip of
+/// `frames` frames of `mode`'s rate played as the engine plays it at
+/// [`TICK`]'s presents, each scored as [`realtime`] scores it ([`Owed`]).
+/// A present is for the clock one tick ahead. The one whose time reaches
+/// the clip's end puts nothing new up and has the clock set back to the
+/// last frame; then the loop's seek to the start stands for `stand`
+/// presents (the seek, the landing, which puts frame 0 up at the last of
+/// them, and the preroll) and plays on. A present `held` (by its index and
+/// the frame its clock is in) keeps the frame it owes back, as a pair
+/// waiting on a lens would; a `jumped` one finds the clock a frame
+/// further on, as after a tick the UI thread missed, and passes a frame
+/// over. The engine counts frames passed over once for a locked pair and
+/// for each of `streams` otherwise.
+fn simulated(
+    mode: Mode,
+    frames: i64,
+    stand: u64,
+    (streams, locked): (usize, bool),
+    held: impl Fn(u64, i64) -> bool,
+    jumped: impl Fn(u64) -> bool,
+) -> Pass {
+    let (n, d) = mode.rate();
+    let rate = FrameRate::new(Rational::new(n.into(), d.into()).unwrap()).unwrap();
+    let tick = i64::try_from(TICK.as_nanos()).unwrap();
+    let ns = |n: i64| Time::seconds(Rational::new(n, 1_000_000_000).unwrap());
+    let at = |f: i64| rate.frame_to_time(f).unwrap();
+    let end = at(frames);
+    let counted = if locked { 1 } else { streams as u64 };
+    let mut owed = Owed::default();
+    let mut pass = Pass {
+        seconds: vec![Second::default(); 20],
+        rate: Some(rate),
+        streams,
+        drops_over: if locked { 1 } else { streams },
+        lock: locked.then_some(LockStatus::Locked),
+        elapsed: Duration::from_secs(20),
+        ..Pass::default()
+    };
+    // The frame on screen; the wall time the clock was at 0, playing,
+    // and the frames it jumped since; the presents a loop has left to
+    // stand.
+    let (mut shown, mut began, mut ahead, mut standing) = (0, 0, 0, None::<u64>);
+    for k in 0..1200u64 {
+        let w = k as i64 * tick;
+        let (time, playing, at_end, new, passed) = match standing {
+            Some(left) => {
+                standing = left.checked_sub(1).filter(|&n| n > 0);
+                let landed = standing.is_none();
+                if landed {
+                    (shown, began, ahead) = (0, w, 0);
+                }
+                (Time::ZERO, false, false, landed, 0)
+            }
+            None => {
+                ahead += i64::from(jumped(k));
+                let time = ns(w - began + tick).checked_add(at(ahead)).unwrap();
+                if time >= end {
+                    standing = Some(stand);
+                    pass.loops += 1;
+                    (at(frames - 1), false, true, false, 0)
+                } else {
+                    let f = rate.time_to_frame(time, Rounding::Floor).unwrap();
+                    if f > shown && !held(k, f) {
+                        let passed = f - shown - 1;
+                        shown = f;
+                        (time, true, false, true, passed as u64)
+                    } else {
+                        (time, true, false, false, 0)
+                    }
+                }
+            }
+        };
+        let second = &mut pass.seconds[usize::try_from(w / 1_000_000_000).unwrap()];
+        second.due += u64::from(owed.at(time, rate, playing, at_end, Some(end)));
+        second.shown += u64::from(new);
+        second.dropped += passed * counted;
+        pass.shown += u64::from(new);
+    }
+    pass
+}
+
+/// The share of a pass's frames presented as P-LOCK counted it before
+/// presents owed frames: wall seconds after the first times the rate,
+/// which a loop's restarts and a rate above the presents' fail.
+fn wall_second_share(r: &Pass) -> f64 {
+    let due = (r.seconds.len() - 1) as f64 * r.rate.map_or(f64::NAN, FrameRate::to_f64);
+    100.0 * r.after_first(|s| s.shown) as f64 / due
+}
+
+/// P-LOCK's scoring (M3 plan 4.3) on synthetic passes: frames owed
+/// count per present, so 4K120 at 60 Hz presents and a 5.7K60 master
+/// that loops every 3.17 s present all they owe and pass; drops compare
+/// a lens to a lens, the unlocked count divided by its streams; a stall
+/// is Kill. Each has a control that must fail: a real shortfall of pairs
+/// (a pair held back, which the present after passes over, and one that
+/// stands still at each loop's end, which passes nothing over and fails
+/// the share alone), a real excess of drops, a pass that stands still
+/// while its clock runs.
+#[test]
+fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
+    let unthrottled = || Pass {
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let never = |_: u64| false;
+    let kept = |_: u64, _: i64| false;
+    let pair = (2, true);
+    let apart = (2, false);
+    // 4K120 at 60 Hz: 4.89 s of 586 frames, every present owing one and
+    // passing one over, which counts as dropped on both sides until
+    // `Counter::Skipped` takes it out.
+    let k4 = |held: &dyn Fn(u64, i64) -> bool, (streams, locked): (usize, bool)| {
+        simulated(Mode::K4_120, 586, 4, (streams, locked), held, never)
+    };
+    let unlocked = k4(&kept, apart);
+    let locked = (unthrottled(), k4(&kept, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "4K120: {line}");
+    let r = &locked.1;
+    assert!(r.loops >= 3, "4K120 looped {} times", r.loops);
+    assert!(presented_share(r).unwrap() >= 99.9, "{line}");
+    assert!(wall_second_share(r) < 51.0, "{}", wall_second_share(r));
+    let (dropped, before) = (dropped_share(r).unwrap(), dropped_share(&unlocked).unwrap());
+    assert!((dropped - before).abs() < 0.5, "{line}");
+    // The control: a pair held back at one present in 20, short of the
+    // presents owed (and dropping its frame at the present after).
+    let short = (unthrottled(), k4(&|k, _| k % 20 == 7, pair));
+    let (verdict, line) = held_verdict(&unlocked, &short);
+    must_fail(
+        "4K120 holding a pair back at 1 present in 20",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    assert!(presented_share(&short.1).unwrap() < 99.0, "{line}");
+
+    // 5.7K60: 3.17 s of 190 frames, five or six loops in 20 s, each
+    // standing four presents that owe nothing but the seek's.
+    let k57 = |held: &dyn Fn(u64, i64) -> bool,
+               jumped: &dyn Fn(u64) -> bool,
+               (streams, locked): (usize, bool)| {
+        simulated(Mode::K5_7_60, 190, 4, (streams, locked), held, jumped)
+    };
+    let unlocked = k57(&kept, &never, apart);
+    let locked = (unthrottled(), k57(&kept, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "5.7K60: {line}");
+    let r = &locked.1;
+    assert!(r.loops >= 5, "5.7K60 looped {} times", r.loops);
+    assert!(wall_second_share(r) < 99.0, "{}", wall_second_share(r));
+    eprintln!(
+        "5.7K60 locked: {line}; wall seconds would say {:.2} %",
+        wall_second_share(r)
+    );
+    let short = (unthrottled(), k57(&|k, _| k % 40 == 7, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &short);
+    must_fail(
+        "5.7K60 holding a pair back at 1 present in 40",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    assert!(presented_share(&short.1).unwrap() < 99.0, "{line}");
+    // The control for the share alone: a pair that stands still for the
+    // last 4 frames of each loop, which the loop's seek leaves unshown
+    // and passes nothing over, short of the presents owed by 2 % and
+    // dropping no more than the unlocked run.
+    let stood = (unthrottled(), k57(&|_, f| f >= 186, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &stood);
+    must_fail(
+        "5.7K60 standing still for each loop's last 4 frames",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    let (dropped, before) = (
+        dropped_share(&stood.1).unwrap(),
+        dropped_share(&unlocked).unwrap(),
+    );
+    assert!(dropped - before <= 0.0, "{line}");
+    assert!(presented_share(&stood.1).unwrap() < 99.0, "{line}");
+
+    // Drops a lens: the unlocked baseline passes a frame over on each
+    // stream at 1 present in 100, which its counter sums to 2 %, and
+    // the locked pair at 1 in 70 (1.4 %) passes at 0.4 points more a lens.
+    let unlocked = k57(&kept, &|k| k % 100 == 50, apart);
+    let a_lens = dropped_share(&unlocked).unwrap();
+    // About 1 %: a jump that falls on a loop's restart passes nothing over.
+    assert!((0.8..=1.1).contains(&a_lens), "{a_lens:.2} % a lens");
+    let locked = (unthrottled(), k57(&kept, &|k| k % 70 == 50, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "drops a lens: {line}");
+    // The control: 1 in 40 (2.5 %) is 1.5 points more a lens, which the
+    // summed baseline's 2 % would have let pass.
+    let more = (unthrottled(), k57(&kept, &|k| k % 40 == 20, pair));
+    let (verdict, line) = held_verdict(&unlocked, &more);
+    must_fail(
+        "a pair dropping 1.5 points more a lens",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    let summed = dropped_share(&unlocked).unwrap() * unlocked.drops_over as f64;
+    assert!(dropped_share(&more.1).unwrap() - summed <= 1.0, "{line}");
+
+    // A real-time pass that stood still while its clock ran is Kill.
+    let stood = Pass {
+        stalled: Some("no new frame for 5s while the clock ran, at 2.000 s".into()),
+        ..k57(&kept, &never, pair)
+    };
+    let (verdict, line) = held_verdict(&unlocked, &(unthrottled(), stood));
+    assert_eq!(verdict, Verdict::Kill, "{line}");
+    assert!(line.contains("real time: stalled"), "{line}");
+}
+
+/// A real-time pass stands still once its frame has stayed up for
+/// [`STALL`] while its clock ran short of the end; a clock paused, or at
+/// the end, never stands it still.
+#[test]
+fn a_real_time_pass_stands_still_only_while_its_clock_runs() {
+    let t0 = Instant::now();
+    let later = |s: u64| t0 + Duration::from_millis(s);
+    let mut standing = Standing::new(t0);
+    assert_eq!(standing.at(later(1000), true, true, false), Duration::ZERO);
+    assert_eq!(
+        standing.at(later(4000), false, true, false),
+        Duration::from_secs(3)
+    );
+    assert!(standing.at(later(6000), false, true, false) >= STALL);
+    // The controls: the same wait with the clock paused, or at the end.
+    for (playing, at_end, why) in [(false, false, "paused"), (true, true, "at the end")] {
+        let mut standing = Standing::new(t0);
+        standing.at(later(1000), true, true, false);
+        let stood = standing.at(later(6000), false, playing, at_end);
+        must_fail(&format!("a pass {why} standing still"), stood >= STALL);
+    }
+    // paced_verdict's line gives drops and decode drops a lens.
+    let r = Pass {
+        seconds: vec![Second {
+            dropped: 3,
+            decode_dropped: 4,
+            shown: 20,
+            ..Second::default()
+        }],
+        rate: Some(FrameRate::FPS_25),
+        streams: 2,
+        drops_over: 1,
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let unthrottled = Pass {
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let (_, line) = paced_verdict(&(unthrottled, r));
+    assert!(
+        line.contains("3.0 dropped a lens (2.0 decode-dropped a lens)"),
+        "{line}"
+    );
 }
 
 /// K2's engine half holds VA-API's copied pass to 36 fps a lens in every

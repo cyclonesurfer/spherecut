@@ -5,7 +5,8 @@
 //! the trailing lens was catching up to.
 //!
 //! The controls that wait for what never comes (a deadlock) wait until
-//! the player is stuck ([`Wait::Stuck`]) instead of for all of `WAIT`.
+//! the player is stuck ([`Wait::StuckFor`] [`STALL`]) instead of for all
+//! of `WAIT`.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,16 @@ fn frame_of(t: Time) -> i64 {
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
+
+/// How long a control sees nothing move before it calls the player
+/// stuck, in place of `STUCK`: each control's freeze is for good, the
+/// old base the playhead or no resync to move it, and the clock is paused
+/// or set once, so a shorter wait loses nothing, as with `play.rs`'s
+/// controls. The resync check waits on the cache's own count, which
+/// moves at once, not on the perf counter the upload thread folds in
+/// every 250 ms: a window this short would call a resync not yet folded
+/// in stuck.
+const STALL: Duration = Duration::from_millis(500);
 
 /// A paused `ManualClock`.
 fn clock() -> Arc<ManualClock> {
@@ -279,24 +290,25 @@ fn a_seek_forward_while_lens_0_leads_lands_both() {
         old_base_in_seeks: true,
         ..LockTest::default()
     };
-    let (newest, landed) = seek(old, Wait::Stuck);
+    let (newest, landed) = seek(old, Wait::StuckFor(STALL));
     assert_eq!(newest, [Some(31), Some(10)]);
     assert_eq!(must_fail("the old base in seeks", landed), GaveUp::Stuck);
 }
 
 /// The group's `until` is raised to the clock's time by a member more
-/// than 2 frames behind it, but never past the newest frame every other
-/// member holds, so the trailing lens's next frame always pairs.
+/// than 2 frames behind it, but, while the other lens is within 2 frames
+/// of the clock, never past the newest frame that lens holds, so the
+/// trailing lens's next frame always pairs.
 #[test]
 fn the_group_until_stays_within_the_other_lens() {
     let _time = timed("the_group_until_stays_within_the_other_lens");
     // Paused at the pair on frame 0, lens 0 hands out frames 1 to 31,
     // all it may, and the window (1 s, 30 frames) holds 1 to 30, while
     // lens 1 holds its frame 1 for a permit. Played with the clock at
-    // frame 40, then 50, and lens 1's frame 1 let go, lens 1 is far
-    // behind the clock and catches up. The frame lens 1 caught up to, the
-    // group's `until` then, the frames lens 0 held, and the one it holds
-    // for a permit.
+    // frame 33, 2 frames past lens 0's newest, and lens 1's frame 1 let
+    // go, lens 1 is far behind the clock and catches up. The frame lens 1
+    // caught up to, the group's `until` then, the frames lens 0 held, and
+    // the one it holds for a permit.
     let catch_up = |test: LockTest| {
         let backend = Permits::new(
             PerStream::pair(Lens::default().frames(90), Lens::default().frames(90)),
@@ -311,18 +323,16 @@ fn the_group_until_stays_within_the_other_lens() {
         });
         assert!(filled.is_some(), "lens 0 never filled its window");
         player.play();
-        for k in [40, 50] {
-            clock.set(at(k), Instant::now());
-            // Until lens 0 goes no further: it holds a frame for a
-            // permit, or waits for room behind a group base at 0.
-            let still = until(WAIT, || {
-                let _ = player.present(Instant::now());
-                let c = player.cache().stats();
-                let stuck = c.waiting == 1 && c.base == Some(Time::ZERO);
-                (c.playhead == at(k) && (backend.holding(0).is_some() || stuck)).then_some(())
-            });
-            assert!(still.is_some(), "lens 0 never settled at frame {k}");
-        }
+        clock.set(at(33), Instant::now());
+        // Until lens 0 goes no further: it holds a frame for a permit, or
+        // waits for room behind a group base at 0.
+        let still = until(WAIT, || {
+            let _ = player.present(Instant::now());
+            let c = player.cache().stats();
+            let stuck = c.waiting == 1 && c.base == Some(Time::ZERO);
+            (c.playhead == at(33) && (backend.holding(0).is_some() || stuck)).then_some(())
+        });
+        assert!(still.is_some(), "lens 0 never settled at frame 33");
         backend.permit(1, 1);
         let caught =
             until(WAIT, || backend.holding(1).filter(|&f| f > 1)).expect("lens 1 never caught up");
@@ -343,9 +353,9 @@ fn the_group_until_stays_within_the_other_lens() {
     assert!(held.contains(&caught), "lens 0 holds {held:?}");
     assert_eq!(next, Some(32));
 
-    // Control: no group base and no group `until`. Lens 0 caught up to
-    // the clock at 40 and holds that frame for a permit, and lens 1
-    // catches up to the clock at 50, a frame lens 0 hasn't got to.
+    // Control: no group base and no group `until`. Lens 0, 2 frames
+    // behind, holds frame 32 for a permit, and lens 1 catches up to the
+    // clock at 33, a frame lens 0 hasn't got to.
     let no_base = LockTest {
         no_group_base: true,
         ..LockTest::default()
@@ -354,7 +364,7 @@ fn the_group_until_stays_within_the_other_lens() {
     must_fail("no group base or until", held.contains(&caught));
     assert_eq!(
         (caught, until, held.last(), next),
-        (50, None, Some(&31), Some(40))
+        (33, None, Some(&31), Some(32))
     );
 }
 
@@ -526,26 +536,37 @@ fn a_shrinking_budget_mid_play_resyncs_the_pair() {
         backend.permit(1, u64::MAX);
         let base = wait_for(&player, wait, || {
             let _ = player.present(Instant::now());
-            let s = player.snapshot();
-            let base = s.lock?.base.filter(|&b| b > at(1))?;
-            (s.perf.counter(Counter::PairResyncs) >= 1).then_some(frame_of(base))
+            let base = player.snapshot().lock?.base.filter(|&b| b > at(1))?;
+            (player.cache().stats().resyncs >= 1).then_some(frame_of(base))
+        });
+        // The resync as the perf counters show it, once the upload thread
+        // folds the cache's counts in.
+        let counted = base.is_ok().then(|| {
+            until(WAIT, || {
+                let n = player.perf().count(Counter::PairResyncs);
+                (n >= 1).then_some(n)
+            })
         });
         common::join(player);
-        (caught, base)
+        (caught, base, counted.flatten())
     };
-    let (caught, base) = resync(LockTest::default(), Wait::Full);
+    let (caught, base, counted) = resync(LockTest::default(), Wait::Full);
     assert!(
         caught > 2,
         "lens 1 skipped nothing: it holds frame {caught}"
     );
     let base = base.unwrap();
     assert!(base >= 10, "the base moved only to {base}");
+    assert!(
+        counted.is_some(),
+        "the perf counters never showed the resync"
+    );
 
     // Control: no backstop, and both lenses wait for room for good.
     let off = LockTest {
         no_resync: true,
         ..LockTest::default()
     };
-    let (_, base) = resync(off, Wait::Stuck);
+    let (_, base, _) = resync(off, Wait::StuckFor(STALL));
     assert_eq!(must_fail("no backstop", base), GaveUp::Stuck);
 }
