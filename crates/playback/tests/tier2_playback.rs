@@ -2378,9 +2378,18 @@ fn bench_playback_stitched_samples() {
     }
 }
 
-/// Frames the zero-copy check decodes of each clip: more than the
-/// decoder's surfaces beyond [`SURFACE_CAP`], so that the pool runs
-/// round while frames are held.
+/// Frames the zero-copy checks decode of each clip, a lens, while they
+/// hold frames as the frame cache would. On VA-API (path A) that is more
+/// than the [`ZERO_COPY_SURFACES`] its pool keeps beyond the decoder's
+/// own, so that the pool runs round. On Vulkan Video (path B)
+/// `extra_hw_frames` isn't raised: FFmpeg's pool makes images as frames
+/// are held, and what bounds it is the frames held on the device, at most
+/// [`SURFACE_CAP`] a stream in the cache (and as many in the one-stream
+/// check's queue), with the decoder's references and the frames on their
+/// way. Past those, 48 frames have the decoder decode into images of
+/// frames let go, over and over.
+///
+/// [`ZERO_COPY_SURFACES`]: spherecut_media::backend::ZERO_COPY_SURFACES
 const ZERO_COPY_FRAMES: usize = 48;
 
 /// The views the zero-copy check renders each frame through: magnified,
@@ -2570,15 +2579,18 @@ fn refused(e: RenderError) -> NotCompared {
 /// downloaded as it comes) and, [`SURFACE_CAP`] − 1 frames later, as the
 /// GPU takes it, holding the frames in between as the frame cache would:
 /// the two renders must be the same bytes. A surface the decoder took
-/// back while it was held would show a later picture. Returns the frames
-/// compared.
+/// back while it was held would show a later picture. Every other frame
+/// is also taken on the GPU right after its decode, before its download,
+/// as the upload thread takes it while later decodes may still read it
+/// as a reference, and must render as the copy too. Returns the frames
+/// compared, and of those, the ones taken right after their decode.
 fn compare_zero_copy(
     rig: &Rig,
     how: &OnDevice,
     path: &Path,
     stream: Option<usize>,
     count: usize,
-) -> Result<usize, NotCompared> {
+) -> Result<(usize, usize), NotCompared> {
     let backend = FfmpegBackend::on_node(rig.node.clone());
     let (kind, device, output) = match how {
         OnDevice::DmaBuf => (HwKind::VaApi, None, HwOutput::DrmPrime),
@@ -2603,6 +2615,7 @@ fn compare_zero_copy(
     // Each held frame with its copy path's renders.
     let mut held: VecDeque<(usize, Arc<VideoFrame>, Vec<Image>)> = VecDeque::new();
     let mut compared = 0;
+    let mut early = 0;
     let mut moved = false;
     let mut last: Option<Vec<Image>> = None;
     let mut check = |renderer: &mut StillRenderer,
@@ -2642,6 +2655,10 @@ fn compare_zero_copy(
                     .unwrap_or_else(|| "no reason given".into()),
             ));
         }
+        // Production order: taken as soon as it is decoded.
+        let first = (k % 2 == 0)
+            .then(|| take(&rig.gpu, how, &frame))
+            .transpose()?;
         let copied = frame
             .to_system()
             .expect("a frame on its device")
@@ -2654,6 +2671,33 @@ fn compare_zero_copy(
                     .unwrap_or_else(|e| panic!("frame {k}: rendering the copy: {e}"))
             })
             .collect();
+        if let Some(taken) = &first {
+            for (i, (view, size)) in views.iter().enumerate() {
+                let got = render_taken(&rig.gpu, &mut renderer, &frame, taken, view, *size, &opts)
+                    .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
+                if got != want[i] {
+                    let why = mismatch(
+                        &rig.gpu,
+                        &mut renderer,
+                        how,
+                        &frame,
+                        taken,
+                        &got,
+                        &want[i],
+                        view,
+                        *size,
+                        &opts,
+                    );
+                    panic!(
+                        "{}: frame {k}, view {i}: {} right after the decode renders other \
+                         bytes than the copy: {why}",
+                        path.display(),
+                        how.taken()
+                    );
+                }
+            }
+            early += 1;
+        }
         moved |= last.as_ref().is_some_and(|l| *l != want);
         last = Some(want.clone());
         held.push_back((k, frame, want));
@@ -2666,7 +2710,7 @@ fn compare_zero_copy(
     }
     // Otherwise a frame from the wrong surface would match too.
     assert!(moved, "{}: every frame renders the same", path.display());
-    Ok(compared)
+    Ok((compared, early))
 }
 
 /// The zero-copy checks' clips: synthetic HEVC Main and Main 10 (NV12
@@ -2717,8 +2761,9 @@ fn compare_clips(rig: &Rig, how: &OnDevice) {
     let mut left_out = Vec::new();
     for (name, path, stream) in &clips {
         match compare_zero_copy(rig, how, path, *stream, ZERO_COPY_FRAMES) {
-            Ok(n) => eprintln!(
-                "{name}: {n} frames, {} byte-identical to the copy",
+            Ok((n, early)) => eprintln!(
+                "{name}: {n} frames, {} byte-identical to the copy, {early} of them taken \
+                 right after their decode too",
                 how.taken()
             ),
             Err(NotCompared::Decode(why)) => left_out.push(format!("{name}: {decoder}: {why}")),
