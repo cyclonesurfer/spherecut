@@ -304,7 +304,7 @@ fn count(n: impl Into<u64>) -> String {
 
 /// Bytes in KiB or MiB, as the table gives them.
 fn kib(n: usize) -> String {
-    if n >= 1 << 20 && n % (1 << 20) == 0 {
+    if n >= 1 << 20 && n.is_multiple_of(1 << 20) {
         format!("{} MiB", n >> 20)
     } else {
         assert_eq!(n % 1024, 0, "{n} bytes");
@@ -317,7 +317,7 @@ fn time(d: Duration) -> String {
     let ms = d.as_millis();
     if ms < 1000 {
         format!("{ms} ms")
-    } else if ms % 1000 == 0 {
+    } else if ms.is_multiple_of(1000) {
         format!("{} s", ms / 1000)
     } else {
         format!("{} s", ms as f64 / 1000.0)
