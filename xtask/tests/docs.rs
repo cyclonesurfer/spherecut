@@ -1,6 +1,9 @@
-//! The docs held to the code (F091): `docs/perf.md` has a paragraph for
-//! every benchmark, each of its targets names Tier 2 tests that exist,
-//! and its links to `hw-reports/` resolve. Each check also runs on an
+//! The docs held to the code. `docs/perf.md` has a paragraph for every
+//! benchmark, each of its targets names Tier 2 tests that exist, and its
+//! links to `hw-reports/` resolve (F091). Every `SPHERECUT_*` variable the
+//! code reads is documented (F077), DECISIONS.md's index lists its entries
+//! as their headings do (F076), and ARCHITECTURE.md's crate map and table
+//! name every crate in the workspace (F074). Each check also runs on an
 //! input made to fail it (D32).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -248,4 +251,344 @@ fn every_hw_report_link_resolves() {
         broken_links(&planted, &root()),
     );
     assert_eq!(broken, ["odin-nonesuch.md"]);
+}
+
+/// The names a `SPHERECUT_` string literal opens in `src`: each
+/// `"SPHERECUT_` followed by capitals, digits and underscores, as every
+/// `env::var` call and constant naming a variable has it. A literal that
+/// is the bare prefix names nothing.
+fn variables_read(src: &str) -> BTreeSet<String> {
+    const PREFIX: &str = "SPHERECUT_";
+    let mut found = BTreeSet::new();
+    for (i, _) in src.match_indices(PREFIX) {
+        if !src[..i].ends_with('"') {
+            continue;
+        }
+        let rest = &src[i + PREFIX.len()..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'))
+            .unwrap_or(rest.len());
+        if end > 0 {
+            found.insert(format!("{PREFIX}{}", &rest[..end]));
+        }
+    }
+    found
+}
+
+/// Every `SPHERECUT_` name `docs` gives, whole: `SPHERECUT_FFMPEG_COMPAT`
+/// doesn't count as written where only `SPHERECUT_FFMPEG_COMPAT_TARGET_DIR`
+/// is.
+fn variables_named(docs: &str) -> BTreeSet<String> {
+    docs.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| w.starts_with("SPHERECUT_") && w.len() > "SPHERECUT_".len())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The variables in `read` that `docs` never names.
+fn undocumented(read: &BTreeSet<String>, docs: &str) -> Result<(), Vec<String>> {
+    let named = variables_named(docs);
+    let missing: Vec<String> = read.difference(&named).cloned().collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+/// README.md, ARCHITECTURE.md and every Markdown file under `docs/`, one
+/// after the other.
+fn user_docs() -> String {
+    fn markdown(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                markdown(&p, out);
+            } else if p.extension().is_some_and(|x| x == "md") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = vec![root().join("README.md"), root().join("ARCHITECTURE.md")];
+    markdown(&root().join("docs"), &mut files);
+    files
+        .iter()
+        .map(|f| std::fs::read_to_string(f).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn every_environment_variable_is_documented() {
+    let mut files = Vec::new();
+    rust_files(&root().join("crates"), &mut files);
+    rust_files(&root().join("xtask"), &mut files);
+    let read: BTreeSet<String> = files
+        .iter()
+        .flat_map(|f| variables_read(&std::fs::read_to_string(f).unwrap()))
+        .collect();
+    assert!(read.len() >= 5, "only {} found: {read:?}", read.len());
+    assert!(read.contains("SPHERECUT_EXPORT_DEVICE"), "{read:?}");
+    let docs = user_docs();
+    assert_eq!(undocumented(&read, &docs), Ok(()));
+    // A longer name doesn't stand for a shorter one, nor a prefix for a
+    // name.
+    assert_eq!(
+        variables_named("SPHERECUT_FFMPEG_COMPAT_TARGET_DIR, SPHERECUT_*"),
+        BTreeSet::from(["SPHERECUT_FFMPEG_COMPAT_TARGET_DIR".to_owned()])
+    );
+    // The controls: the docs with every line naming SPHERECUT_EXPORT_DEVICE
+    // cut, and a source reading a variable no doc names. The planted name
+    // is split here so that this file doesn't read it.
+    let cut: String = docs
+        .lines()
+        .filter(|l| !l.contains("SPHERECUT_EXPORT_DEVICE"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let missing = must_fail(
+        "the docs without SPHERECUT_EXPORT_DEVICE",
+        undocumented(&read, &cut),
+    );
+    assert_eq!(missing, ["SPHERECUT_EXPORT_DEVICE"]);
+    let planted = variables_read(concat!(
+        "let v = std::env::var(\"",
+        "SPHERECUT",
+        "_NOT_A_VAR\");"
+    ));
+    assert_eq!(planted.len(), 1, "{planted:?}");
+    let missing = must_fail(
+        "a source reading a variable no doc names",
+        undocumented(&planted, &docs),
+    );
+    assert_eq!(missing, [concat!("SPHERECUT", "_NOT_A_VAR")]);
+}
+
+/// DECISIONS.md's index (the `- D<n>. <title>` lines under `Index:`) and
+/// its `## D<n>. <title>` headings, each as `D<n>. <title>`.
+fn index_and_headings(decisions: &str) -> (Vec<&str>, Vec<&str>) {
+    let index = decisions
+        .lines()
+        .skip_while(|l| *l != "Index:")
+        .take_while(|l| !l.starts_with("## "))
+        .filter_map(|l| l.strip_prefix("- "))
+        .filter(|l| l.starts_with('D'))
+        .collect();
+    let headings = decisions
+        .lines()
+        .filter_map(|l| l.strip_prefix("## "))
+        .filter(|l| l.starts_with('D') && l[1..].starts_with(|c: char| c.is_ascii_digit()))
+        .collect();
+    (index, headings)
+}
+
+/// Where DECISIONS.md's index and its headings part, and whether D60,
+/// M3's verification contract, has its heading.
+fn index_disagrees(decisions: &str) -> Result<(), Vec<String>> {
+    let (index, headings) = index_and_headings(decisions);
+    let mut why = Vec::new();
+    for h in headings.iter().filter(|h| !index.contains(h)) {
+        why.push(format!("not in the index: {h}"));
+    }
+    for i in index.iter().filter(|i| !headings.contains(i)) {
+        why.push(format!("no heading: {i}"));
+    }
+    if why.is_empty() && index != headings {
+        why.push(format!(
+            "the index's order isn't the headings': {index:?} against {headings:?}"
+        ));
+    }
+    if !headings.iter().any(|h| h.starts_with("D60. ")) {
+        why.push("no D60 heading".to_owned());
+    }
+    if why.is_empty() { Ok(()) } else { Err(why) }
+}
+
+#[test]
+fn the_decisions_index_lists_every_entry() {
+    let decisions = std::fs::read_to_string(root().join("DECISIONS.md")).unwrap();
+    let (index, headings) = index_and_headings(&decisions);
+    assert!(headings.len() >= 60, "{} headings", headings.len());
+    assert_eq!(index.len(), headings.len());
+    assert_eq!(index_disagrees(&decisions), Ok(()));
+    // The controls: the index without D77's line, and DECISIONS without
+    // D60's heading.
+    let without_d77: String = decisions
+        .lines()
+        .filter(|l| !l.starts_with("- D77. "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let why = must_fail("the index without D77", index_disagrees(&without_d77));
+    assert_eq!(why.len(), 1, "{why:?}");
+    assert!(why[0].starts_with("not in the index: D77. "), "{why:?}");
+    let without_d60: String = decisions
+        .lines()
+        .filter(|l| !l.starts_with("## D60. "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let why = must_fail(
+        "DECISIONS without D60's heading",
+        index_disagrees(&without_d60),
+    );
+    assert_eq!(
+        why,
+        [
+            "no heading: D60. M3's verification contract",
+            "no D60 heading"
+        ]
+    );
+}
+
+/// The workspace's members, from the root `Cargo.toml`'s `members`, each
+/// as its folder's name and its package's.
+fn members() -> Vec<(String, String)> {
+    let manifest = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let line = manifest
+        .lines()
+        .find(|l| l.starts_with("members = "))
+        .unwrap();
+    let mut dirs = Vec::new();
+    for pattern in line.split('"').skip(1).step_by(2) {
+        match pattern.strip_suffix("/*") {
+            Some(parent) => {
+                for e in std::fs::read_dir(root().join(parent)).unwrap().flatten() {
+                    if e.path().join("Cargo.toml").is_file() {
+                        dirs.push(e.path());
+                    }
+                }
+            }
+            None => dirs.push(root().join(pattern)),
+        }
+    }
+    let mut found: Vec<(String, String)> = dirs
+        .iter()
+        .map(|d| {
+            let toml = std::fs::read_to_string(d.join("Cargo.toml")).unwrap();
+            let name = toml
+                .lines()
+                .find_map(|l| l.strip_prefix("name = \""))
+                .and_then(|l| l.strip_suffix('"'))
+                .unwrap()
+                .to_owned();
+            (d.file_name().unwrap().to_string_lossy().into_owned(), name)
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// The crates `diagram` gives a row of their own: a line's first word,
+/// after its level if it has one.
+fn diagram_rows(diagram: &str) -> BTreeSet<&str> {
+    diagram
+        .lines()
+        .filter_map(|l| {
+            let mut words = l.split_whitespace();
+            let first = words.next()?;
+            if first.chars().all(|c| c.is_ascii_digit()) {
+                words.next()
+            } else {
+                Some(first)
+            }
+        })
+        .collect()
+}
+
+/// ARCHITECTURE.md's first code block, the crate map.
+fn first_code_block(architecture: &str) -> &str {
+    let after = architecture.split_once("\n```\n").unwrap().1;
+    after.split_once("\n```").unwrap().0
+}
+
+/// The packages the rows of ARCHITECTURE.md's crate table name: each
+/// row's first cell, in backticks, under `## Crates`.
+fn table_rows(architecture: &str) -> BTreeSet<&str> {
+    architecture
+        .lines()
+        .skip_while(|l| *l != "## Crates")
+        .skip(1)
+        .take_while(|l| !l.starts_with("## "))
+        .filter_map(|l| l.strip_prefix("| `"))
+        .filter_map(|l| l.split_once("` |"))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names in `wanted` that `have` leaves out.
+fn left_out<'a>(
+    wanted: impl IntoIterator<Item = &'a str>,
+    have: &BTreeSet<&str>,
+) -> Result<(), Vec<String>> {
+    let missing: Vec<String> = wanted
+        .into_iter()
+        .filter(|w| !have.contains(w))
+        .map(str::to_owned)
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing)
+    }
+}
+
+/// ARCHITECTURE.md's crate map at 073715b, before agent and the test
+/// support had rows.
+const DIAGRAM_073715B: &str = r"
+          app (eframe viewer; M1 slice 7)   cli (`spherecut` binary)   tests
+                          \                |                    /
+                           +---- export (M2.4 and M2.5) -------+
+                                      |
+   playback (Player, decode workers, frame cache, GPU slots, presenter, the file's audio; M1 slices 5 and 6)
+                     |                                    |
+   render (wgpu on Vulkan, WGSL; M1 slice 3)   audio (cpal output, chunk ring, audio clock; M1 slice 6)
+                                      |
+                    motion (IMU, stabilization)  (planned)
+                                      |
+     media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
+                                      |
+        camera (cameras' raw files from their bytes: the Insta360 trailer; M3.2)
+                                      |
+   sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes, the project model)
+";
+
+#[test]
+fn architecture_names_every_crate() {
+    let members = members();
+    assert!(members.len() >= 14, "{members:?}");
+    let architecture = std::fs::read_to_string(root().join("ARCHITECTURE.md")).unwrap();
+    let diagram = first_code_block(&architecture);
+    let rows = diagram_rows(diagram);
+    let folders = || members.iter().map(|(folder, _)| folder.as_str());
+    let packages = || members.iter().map(|(_, package)| package.as_str());
+    assert_eq!(left_out(folders(), &rows), Ok(()));
+    let table = table_rows(&architecture);
+    assert_eq!(left_out(packages(), &table), Ok(()));
+    // The controls: 073715b's map, which had no row for agent; today's map
+    // with core's row cut, though other rows still name core among their
+    // dependencies; and the table without agent's row.
+    let missing = must_fail(
+        "073715b's crate map",
+        left_out(folders(), &diagram_rows(DIAGRAM_073715B)),
+    );
+    assert!(missing.iter().any(|m| m == "agent"), "{missing:?}");
+    let cut: String = diagram
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("1    core"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(cut.contains(" core "));
+    let missing = must_fail(
+        "the map without core's row",
+        left_out(folders(), &diagram_rows(&cut)),
+    );
+    assert_eq!(missing, ["core"]);
+    let cut: String = architecture
+        .lines()
+        .filter(|l| !l.starts_with("| `spherecut-agent` |"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let missing = must_fail(
+        "the table without agent's row",
+        left_out(packages(), &table_rows(&cut)),
+    );
+    assert_eq!(missing, ["spherecut-agent"]);
 }
