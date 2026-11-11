@@ -71,12 +71,12 @@
 //! `gui_decode_behind` checks that the UI keeps to the display while
 //! decode falls behind (perf.md's target, D40), which `gui_smoke` can't:
 //! it fails any run that drops frames, and odin's default path keeps
-//! up. Its three runs play for 20 s each with the smoke run's hidden
-//! flags: run 0 holds decode to a frame in 50 ms (20 fps of a 30 fps
-//! seam clip, `--smoke-decode-floor-ms 50`) on the default path; run 1
-//! plays the noisy 5.7K 10-bit clip on VA-API with its frames copied
-//! (`--smoke-decoder vaapi`, `SPHERECUT_ZERO_COPY=0`), where VA-API
-//! decodes HEVC Main 10; run 2, the control, is run 0 with the UI
+//! up. Its three runs take the smoke run's hidden flags: run 0 holds
+//! decode to a frame in 50 ms (20 fps, `--smoke-decode-floor-ms 50`) on
+//! the default path, playing a 10 s, 30 fps seam clip to its end; run 1
+//! plays the noisy 5.7K 10-bit clip for 20 s on VA-API with its frames
+//! copied (`--smoke-decoder vaapi`, `SPHERECUT_ZERO_COPY=0`), where
+//! VA-API decodes HEVC Main 10; run 2, the control, is run 0 with the UI
 //! waiting for each decoded frame (`--smoke-control-ui-waits`). After
 //! the first second each run must have run as asked with decode behind
 //! (at most 85% of the frames expected shown), and runs 0 and 1 must
