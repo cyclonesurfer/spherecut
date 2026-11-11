@@ -23,7 +23,7 @@ use crate::decoder::{HwPromise, HwSupport};
 use crate::lock::{LockSpec, LockStatus, field};
 use crate::perf::{MemoryStats, PerfStats};
 use crate::player::{PlayerError, PlayerEvent};
-use crate::slots::SlotRing;
+use crate::slots::{SLOT_FLOOR, SlotRing};
 
 /// The GUI's repaint request: called when a frame is ready to show or
 /// the snapshot changed.
@@ -160,10 +160,6 @@ pub(crate) struct Status {
 /// A locked pair's group (M3 plan section 9): what it was asked for, its
 /// members, where it is, and the one time its members catch up to.
 #[derive(Debug, Clone)]
-#[allow(
-    dead_code,
-    reason = "the M3.8 units form the group and read its parts; remove once they do"
-)]
 pub(crate) struct LockGroup {
     pub(crate) spec: LockSpec,
     /// The player streams locked together, by their place in what was
@@ -245,6 +241,9 @@ impl LockGroup {
                 "the lenses don't lock: a lens has no timing tables, or they couldn't be read, \
                  so they show unlocked"
             ),
+            field::SLOTS => tracing::warn!(
+                "the GPU has too few slots for a locked pair, two a lens: the lenses show unlocked"
+            ),
             field::TIME_BASE
             | field::START
             | field::RATE
@@ -321,6 +320,61 @@ impl Status {
         (g.status == LockStatus::Pending && g.members.contains(&stream))
             .then(|| g.refuse(field::OPEN))
     }
+
+    /// Player stream `stream`, a member of the open's locked group, can't
+    /// decode on after any fallback, its last frame ending at `end` and
+    /// starting at `last`: the pair ends there, as at a shorter lens (M3
+    /// plan section 9), its end set for the presenter's check of the end
+    /// unless an earlier end is set already. Without this, nothing ends
+    /// the pair and `pick_pair` holds its last while the clock runs on.
+    /// The end and last frame it replaced, to put back if the member
+    /// decodes past `end` after all (a seek past damage); `None` when
+    /// nothing changed: not a locked member, or the test switch that
+    /// keeps the pair going.
+    pub(crate) fn end_member(
+        &mut self,
+        stream: usize,
+        end: Time,
+        last: Time,
+    ) -> Option<(Option<Time>, Option<Time>)> {
+        let g = self.lock.as_ref()?;
+        if g.status != LockStatus::Locked
+            || g.spec.test.no_end_on_failure
+            || !g.members.contains(&stream)
+        {
+            return None;
+        }
+        let s = self.streams.get_mut(stream)?;
+        if s.end.is_some_and(|e| e <= end) {
+            return None;
+        }
+        tracing::warn!(
+            stream,
+            "a lens can't decode on: the pair ends at its last frame"
+        );
+        let before = (s.end, s.last);
+        s.end = Some(end);
+        s.last = Some(last);
+        Some(before)
+    }
+
+    /// A slot died, leaving `live`: a locked group with fewer than
+    /// [`SLOT_FLOOR`] live slots a member unlocks, refused with
+    /// `"slots"`, and its streams show unlocked as each one's frame
+    /// comes (M3 plan section 9), unless the test switch keeps it locked.
+    /// What the player says of it, for the caller to tell once the lock
+    /// is let go; the caller lets the cache's group go too.
+    pub(crate) fn below_floor(&mut self, live: usize) -> Option<PlayerEvent> {
+        let g = self.lock.as_mut()?;
+        if g.status != LockStatus::Locked
+            || g.spec.test.no_floor
+            || live >= SLOT_FLOOR * g.members.len()
+        {
+            return None;
+        }
+        g.until = None;
+        Some(g.refuse(field::SLOTS))
+    }
 }
 
 /// Shared by every thread of a player.
@@ -341,6 +395,11 @@ pub(crate) struct Shared {
     /// the open before left, so that the upload thread never takes an
     /// old file's frame for the new one's.
     pub(crate) live: AtomicU64,
+    /// The slot allocations still to fail as the GPU having no memory
+    /// for them: a test's hook ([`Player::fail_slot_allocations`]).
+    ///
+    /// [`Player::fail_slot_allocations`]: crate::Player::fail_slot_allocations
+    pub(crate) slot_faults: AtomicU64,
     /// The request the presenter waits for (0 for none), and whether
     /// playback is wanted: the upload thread's guide to what to upload.
     pub(crate) target: AtomicU64,
@@ -459,6 +518,14 @@ impl Shared {
 
     pub(crate) fn is_shut_down(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Whether the slot allocation now is one a test planted to fail
+    /// ([`slot_faults`](Self::slot_faults)), counting it if so.
+    pub(crate) fn slot_fault(&self) -> bool {
+        self.slot_faults
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     /// Whether open `epoch` is the latest, and the player runs.

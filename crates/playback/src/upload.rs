@@ -44,6 +44,10 @@
 //! its shape goes in, inside the out-of-memory error scope
 //! [`GpuFrame::new`] pushes. A slot the GPU has no memory for is dropped
 //! for good (Dead), and playback goes on with one fewer, with an event.
+//! A locked pair left with fewer than two live slots a lens unlocks (M3
+//! plan section 9): it shows only as pairs, so with three its pair on
+//! screen and one lens's next frame would hold every slot, and the other
+//! lens's next frame would never get one.
 //!
 //! **The budget**: set when the thread starts, and rechecked every 5 s
 //! against the memory available, with the cache's own bytes counted as
@@ -73,7 +77,7 @@ use crate::cache::WAIT_SLICE;
 use crate::perf::{self, Counter, MemoryStats, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{BudgetStatus, Landed, Place, Shared, frames_between, time_of};
-use crate::slots::{SlotFrame, SlotState};
+use crate::slots::{Claim, SlotFrame, SlotState};
 
 /// How often the budget is rechecked against the memory available.
 pub const BUDGET_RECHECK: Duration = Duration::from_secs(5);
@@ -491,23 +495,25 @@ impl UploadThread {
         let Some(claim) = slots.claim() else {
             return false;
         };
+        // A test's planted failure makes the slot's frame again, and fails.
+        let fault = shared.slot_fault();
+        let made = || {
+            if fault {
+                Err(RenderError::OutOfMemory("a GPU slot (a planted failure)"))
+            } else {
+                GpuFrame::new(&self.gpu, &shape)
+            }
+        };
         let gpu_frame = match slots.frame_of(&claim) {
-            Some(g) if g.shape().fits(&shape) => g,
-            _ => match GpuFrame::new(&self.gpu, &shape) {
+            Some(g) if !fault && g.shape().fits(&shape) => g,
+            _ => match made() {
                 Ok(g) => {
                     let g = Arc::new(g);
                     slots.replace(&claim, g.clone());
                     g
                 }
                 Err(e @ RenderError::OutOfMemory(_)) => {
-                    let slot = claim.index;
-                    slots.kill(claim);
-                    tracing::warn!("GPU slot {slot} dropped: {e}");
-                    shared.event(PlayerEvent::SlotDropped {
-                        slot,
-                        error: PlayerError::from(&e),
-                        live: slots.stats().active,
-                    });
+                    self.slot_died(epoch, claim, &e);
                     return true;
                 }
                 Err(e) => {
@@ -547,14 +553,7 @@ impl UploadThread {
             }
             Err(e @ RenderError::OutOfMemory(_)) => {
                 drop(gpu_frame);
-                let slot = claim.index;
-                slots.kill(claim);
-                tracing::warn!("GPU slot {slot} dropped: {e}");
-                shared.event(PlayerEvent::SlotDropped {
-                    slot,
-                    error: PlayerError::from(&e),
-                    live: slots.stats().active,
-                });
+                self.slot_died(epoch, claim, &e);
             }
             Err(e) => {
                 drop(gpu_frame);
@@ -563,6 +562,36 @@ impl UploadThread {
             }
         }
         true
+    }
+
+    /// The GPU had no memory for the slot `claim` holds (`e`): it is
+    /// dropped for good, which the player says, and a locked pair of open
+    /// `epoch` left below its floor of live slots unlocks (M3 plan section
+    /// 9), its frame cache's group let go under the same status lock.
+    fn slot_died(&self, epoch: u64, claim: Claim, e: &RenderError) {
+        let shared = &self.shared;
+        let slot = claim.index;
+        shared.slots.kill(claim);
+        let live = shared.slots.stats().active;
+        tracing::warn!("GPU slot {slot} dropped, {live} live: {e}");
+        shared.event(PlayerEvent::SlotDropped {
+            slot,
+            error: PlayerError::from(e),
+            live,
+        });
+        let unlocked = {
+            let mut st = shared.status();
+            let unlocked = (st.epoch == epoch).then(|| st.below_floor(live)).flatten();
+            if unlocked.is_some() {
+                shared.cache.set_group(None);
+            }
+            unlocked
+        };
+        if let Some(e) = unlocked
+            && shared.is_current(epoch)
+        {
+            shared.event(e);
+        }
     }
 
     /// Uploads `f`, left on its decoder's device, into `slot`: imported

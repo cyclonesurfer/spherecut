@@ -48,7 +48,11 @@
 //! frame is before it catches up to it, so that both skip to the same
 //! frame. A seek or a step clears it. Decoding ahead, a member waiting
 //! for room may be told by the cache's backstop to seek exactly to the
-//! trailing member's newest frame instead ([`Insert::Resync`]).
+//! trailing member's newest frame instead ([`Insert::Resync`]). A member
+//! that can't decode on once the group has locked ends the pair at its
+//! last frame, as a shorter lens does: the stream's end is set there for
+//! the presenter, until a frame decoded past it (a seek past the damage)
+//! puts back what was there. Locked, the pair takes every GPU slot.
 //!
 //! **Fallback.** A decoder that goes on in software says so with an
 //! event, which the worker puts in the stream's status and the player's
@@ -75,7 +79,7 @@ use spherecut_render::vkshare::SharedVideo;
 use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
 use crate::decoder::{self, DecoderChoice, DecoderPreference, HwSupport, StreamFormat};
-use crate::lock::LockSpec;
+use crate::lock::{LockSpec, LockStatus};
 use crate::perf::{Counter, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{
@@ -192,11 +196,12 @@ impl OpenJob {
                 })
                 .collect();
             // A locked pair's group, pending until both members open; none
-            // for an unlocked open. The cache's group goes under the same
-            // lock, so that a worker of the open before, settling its
-            // group as this runs, never leaves it set.
+            // for an unlocked open. The cache's group and the slots' pair
+            // go under the same lock, so that a worker of the open before,
+            // settling its group as this runs, never leaves them set.
             st.lock = group;
             shared.cache.set_group(None);
+            shared.slots.set_pair(false);
             std::mem::replace(&mut st.audio, audio)
         };
         // The last open's audio, if this holds it last, outside the lock.
@@ -248,6 +253,8 @@ impl OpenJob {
                 at_end: false,
                 failed: false,
                 reported: false,
+                failed_end: None,
+                frame_length: None,
                 catching_up: None,
                 seen: DecodeStats::default(),
                 spec: self.lock,
@@ -413,6 +420,15 @@ struct Worker {
     /// Whether the stream's status holds a failure, which a frame decoded
     /// after it (a seek past it) clears.
     reported: bool,
+    /// The end a failure set for a locked pair's member, and the end and
+    /// last frame it replaced, which a frame decoded at or past it puts
+    /// back ([`Status::end_member`]).
+    ///
+    /// [`Status::end_member`]: crate::shared::Status::end_member
+    failed_end: Option<(Time, Option<Time>, Option<Time>)>,
+    /// A frame's length at the stream's rate, once open, for a frame that
+    /// gives none.
+    frame_length: Option<Time>,
     /// The clock time the decoder is catching up to.
     catching_up: Option<Time>,
     /// The decoder's numbers when last read.
@@ -459,6 +475,7 @@ impl Worker {
             Ok(mut dec) => {
                 let info = dec.info().clone();
                 let path = dec.decode_path().clone();
+                self.frame_length = info.frame_rate().map(|r| r.frame_duration());
                 // With the other member's open, a locked pair's lenses are
                 // compared under the same lock.
                 let group = self.shared.stream_and_group(
@@ -471,10 +488,20 @@ impl Worker {
                     },
                     |st| {
                         let events = st.settle_lock();
-                        // Locked, the cache runs the members from the
-                        // group base from now on.
+                        let current = self.shared.is_current(self.epoch);
+                        // Locked, the pair takes every slot, and the cache
+                        // runs the members from the group base from now
+                        // on.
+                        if current
+                            && st
+                                .lock
+                                .as_ref()
+                                .is_some_and(|g| g.status == LockStatus::Locked)
+                        {
+                            self.shared.slots.set_pair(true);
+                        }
                         if let Some(members) = st.grouped()
-                            && self.shared.is_current(self.epoch)
+                            && current
                         {
                             self.shared.cache.set_group(Some(members));
                         }
@@ -975,6 +1002,11 @@ impl Worker {
         }
         self.seen = stats;
         let cleared = std::mem::take(&mut self.reported);
+        // Decoding went on past the end a failure set: it wasn't the end.
+        let unended = self.failed_end.filter(|&(end, ..)| time >= end);
+        if unended.is_some() {
+            self.failed_end = None;
+        }
         self.shared.stream(self.epoch, self.stream, |s| {
             s.handed_out += 1;
             s.newest = Some(time);
@@ -982,6 +1014,12 @@ impl Worker {
             if cleared {
                 s.error = None;
                 s.failed_request = None;
+            }
+            if let Some((end, before_end, before_last)) = unended
+                && s.end == Some(end)
+            {
+                s.end = before_end;
+                s.last = before_last;
             }
         });
     }
@@ -1041,7 +1079,10 @@ impl Worker {
 
     /// The decoder failed with `e`, after any fallback to software: say
     /// so, unless it was shut down. A locked pair that hasn't formed yet
-    /// is refused with `"open"`.
+    /// is refused with `"open"`; one that has ends at this member's last
+    /// frame ([`Status::end_member`]).
+    ///
+    /// [`Status::end_member`]: crate::shared::Status::end_member
     fn fail(&mut self, e: MediaError) -> Halt {
         self.failed = true;
         if self.shared.is_shut_down() {
@@ -1052,6 +1093,14 @@ impl Worker {
         let error = PlayerError::from(&e);
         let working = self.working;
         let stream = self.stream;
+        // Where this member's last frame starts and ends, if it handed one
+        // out: a frame without a duration lasts a frame of the stream's
+        // rate.
+        let last = self.last.as_ref().and_then(|l| {
+            let length = l.duration.or(self.frame_length)?;
+            Some((l.time.checked_add(length).ok()?, l.time))
+        });
+        let mut ended = None;
         let group = self.shared.stream_and_group(
             self.epoch,
             stream,
@@ -1059,8 +1108,18 @@ impl Worker {
                 s.error = Some(error.clone());
                 s.failed_request = working;
             },
-            |st| st.member_failed(stream),
+            |st| {
+                if let Some((end, at)) = last
+                    && let Some(before) = st.end_member(stream, end, at)
+                {
+                    ended = Some((end, before.0, before.1));
+                }
+                st.member_failed(stream)
+            },
         );
+        if ended.is_some() {
+            self.failed_end = ended;
+        }
         // A locked pair's base no longer waits for this member's landing.
         if let Some(id) = working {
             self.shared.cache.landed(stream, Some(id));

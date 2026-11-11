@@ -206,7 +206,8 @@ pub struct PlayerConfig {
     pub cache: CacheBudget,
     /// How far ahead of the playhead to decode.
     pub ahead: Duration,
-    /// GPU slots, 3 to 6.
+    /// GPU slots, 3 to 6. A locked pair uses 6 whatever this says
+    /// ([`Player::open_locked`]).
     pub gpu_slots: u8,
     /// For the files opened after it is set.
     pub decoder: DecoderPreference,
@@ -661,6 +662,7 @@ impl Player {
             opens: StopSource::new(),
             epoch: AtomicU64::new(0),
             live: AtomicU64::new(0),
+            slot_faults: AtomicU64::new(0),
             target: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -770,8 +772,14 @@ impl Player {
     /// and nothing of the pair shows until the lenses agree and the group
     /// forms, or the lock is refused ([`PlayerEvent::LockRefused`]) and
     /// they show unlocked, as [`open_streams`](Self::open_streams) shows
-    /// them. Locked, they show only as pairs of one clip time, and end at
-    /// the shorter lens ([`PlayerEvent::LensShort`]).
+    /// them. Locked, they show only as pairs of one clip time, on all six
+    /// GPU slots whatever [`PlayerConfig::gpu_slots`] says (until the
+    /// next open or a close), and end at the shorter lens
+    /// ([`PlayerEvent::LensShort`]), or at the last frame of a lens that
+    /// can't decode on. A hardware failure moves only its own lens to
+    /// software. Should the GPU's memory leave fewer than two live slots
+    /// a lens, the pair unlocks (`LockRefused` with `"slots"`) and shows
+    /// as unlocked streams do, each lens's frame as it comes.
     pub fn open_locked(&self, path: PathBuf, streams: [usize; 2], lock: LockSpec) {
         self.open_with(path, streams.map(Some).to_vec(), Some(lock));
     }
@@ -852,8 +860,9 @@ impl Player {
         }
         self.end_open(&mut ui, now);
         // No group without a pair; with the cache's lock taken, the next
-        // open's clears it.
+        // open's clears it. The slots go back to the setting.
         self.shared.cache.try_set_group(None);
+        self.shared.slots.set_pair(false);
         ui.path = None;
         ui.target = None;
         self.shared.playing.store(false, Ordering::Release);
@@ -1182,8 +1191,7 @@ impl Player {
                             if let Some(again) = Self::relanding(ui, target) {
                                 ui.target = None;
                                 self.start_seek(ui, again, SeekMode::Exact, now);
-                            } else if let Some(up) =
-                                self.land_locked(ui, members, &mut picked, now)
+                            } else if let Some(up) = self.land_locked(ui, members, &mut picked, now)
                             {
                                 changed |= up;
                                 changed |= self.show_target(ui, target, picked, now);
@@ -1912,6 +1920,18 @@ impl Player {
             .try_borrow()
             .map(|ui| ui.config.clone())
             .unwrap_or_default()
+    }
+
+    /// A test's hook: the next `n` slot allocations fail as the GPU having
+    /// no memory for them (`RenderError::OutOfMemory`), each slot then
+    /// dropped for good, as [`PlayerEvent::SlotDropped`] says. While a
+    /// failure is planted, a slot the upload thread claims has its GPU
+    /// frame made again rather than reused, so that slots die mid-play
+    /// too. Never waits.
+    #[doc(hidden)]
+    pub fn fail_slot_allocations(&self, n: u64) {
+        self.shared.slot_faults.store(n, Ordering::Release);
+        self.shared.cache.notify();
     }
 
     /// The GPU slots, for the viewer's paint callbacks and the tests.
