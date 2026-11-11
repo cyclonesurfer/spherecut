@@ -20,6 +20,7 @@
 //! `ManualClock` and gathers them, [`play_steady`] drives one that keeps
 //! to the rule, and [`play_with`] one whose clock a test moves itself.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, FrameRate, ManualClock, Rounding, Time};
@@ -293,8 +294,11 @@ pub struct Pace {
 /// `pace`, presenting about every millisecond, until play reaches the
 /// end or `wait` passes: each present's [`Sample`] of `members`, with
 /// `each` called after it with what it presented (to read the slots
-/// back, or change the budget mid-play). The clock keeps to the wall
-/// clock's frame, but moves on at most [`MOST_A_PRESENT`] frames a
+/// back, or change the budget mid-play). `each` returns how long of its
+/// own time the clock leaves out: time it held the presents up that
+/// isn't the engine's, which would have the clock run on past frames
+/// no present was there to show. The clock keeps to the wall clock's
+/// frame, less that, but moves on at most [`MOST_A_PRESENT`] frames a
 /// present.
 pub fn play(
     player: &Player,
@@ -302,11 +306,14 @@ pub fn play(
     pace: Pace,
     members: [usize; 2],
     wait: Duration,
-    each: impl FnMut(Option<&Presented>, &Sample),
+    mut each: impl FnMut(Option<&Presented>, &Sample) -> Duration,
 ) -> Vec<Sample> {
     let began = Instant::now();
+    let left_out = Cell::new(Duration::ZERO);
+    let each = |p: Option<&Presented>, s: &Sample| left_out.set(left_out.get() + each(p, s));
     play_with(player, members, wait, each, || {
-        let k = (began.elapsed().as_nanos() / pace.period.as_nanos().max(1)) as i64;
+        let played = began.elapsed().saturating_sub(left_out.get());
+        let k = (played.as_nanos() / pace.period.as_nanos().max(1)) as i64;
         let from = pace
             .rate
             .time_to_frame(clock.now(), Rounding::Floor)

@@ -8,7 +8,10 @@
 //! its first 8 luma bytes, so the check sees what the GPU holds whatever
 //! the slots' tags say.
 
+use std::collections::HashMap;
+use std::ffi::OsString;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -519,12 +522,15 @@ struct Played {
 /// ([`settled`]); and no pair resyncs but where the budget was halved,
 /// which may, though in practice it doesn't (base.rs's
 /// `a_shrinking_budget_mid_play_resyncs_the_pair` holds the backstop to
-/// its control). The clock moves on at most two frames a present, so
-/// that a test thread held up isn't counted against the engine. The
+/// its control). The clock moves on at most two frames a present, and a
+/// present gives its pair as long again as the engine's threads waited
+/// for a CPU, so that neither a test thread held up nor a CPU busy
+/// beyond the tests is counted against the engine. The
 /// controls: the group base and the group `until` off fails the rule by
-/// trailing, and the presents late; one slow case alone is too few
-/// frames to judge; and a pair whose freezes double fails the freeze,
-/// though it keeps to the rule.
+/// trailing, and the presents late; a run that hands out a frame fewer
+/// than [`pacing::JUDGED`] after the warm-up is too few to judge; and a
+/// pair whose freezes double fails the freeze, though it keeps to the
+/// rule.
 #[test]
 fn a_locked_pair_paces_to_its_slowest_lens() {
     let _alone = alone();
@@ -590,12 +596,16 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         // Presents come every 4 ms or so, as from a 250 Hz display: a
         // frame handed out has a present's time to go up in its slot,
         // with its pair's, and the next lens 1 hands out, at least 4.5 ms
-        // on, a present of its own. A present whose pair isn't up yet
-        // waits for it, `SETTLE` at most, and is counted late.
+        // on, a present of its own. A CPU busy beyond the tests adds the
+        // time the other threads waited for one since the present
+        // (`starved`), which the clock leaves out. A present whose pair
+        // isn't up then is counted late, and waits for it `SETTLE` more
+        // at most.
         let mut halved = !case.halve;
         let mut late = 0;
         let mut warm = None;
         let mut samples = pacing::play(&player, &clock, case.pace, [0, 1], WAIT, |p, s| {
+            let queued = Queued::read();
             if let Some(p) = p {
                 seen.check(p);
             }
@@ -607,13 +617,14 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
                 halved = true;
             }
             std::thread::sleep(PRESENTS);
-            if !pair_up(&player, epoch, s) {
+            let began = Instant::now();
+            if !goes_up(&player, epoch, s, || began.elapsed() < starved(&queued)) {
                 late += u64::from(frame_of(s.clock) >= pacing::WARM_UP);
-                let began = Instant::now();
-                while !pair_up(&player, epoch, s) && began.elapsed() < SETTLE {
-                    std::thread::sleep(ms(1));
-                }
+                goes_up(&player, epoch, s, || {
+                    began.elapsed() < SETTLE + starved(&queued)
+                });
             }
+            starved(&queued).min(began.elapsed())
         });
         // Play stops at the end, and the presents go on there, as a
         // window's do: until the pair shows the slowest lens's newest
@@ -728,10 +739,23 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         "no group base or until, the presents late",
         settled(&[&frozen]),
     );
-    // Control: one slow case alone hands out too few frames after the
-    // warm-up to judge the share by.
-    let e = must_fail("one slow case alone", pacing::pooled(&samples[..1], RATE));
-    assert!(matches!(e, Unpaced::Unjudged { .. }), "{e:?}");
+    // Control: a run that shows a pair at every frame after the warm-up
+    // hands out one frame too few to judge the share by; a frame longer,
+    // it hands out enough.
+    let pairs = |last: i64| sliding(&(pacing::WARM_UP..=last).collect::<Vec<_>>());
+    let judged = pacing::WARM_UP + i64::try_from(pacing::JUDGED).unwrap() - 1;
+    let e = must_fail(
+        "a run a frame too short to judge",
+        pacing::pooled(&[&pairs(judged - 1)[..]], RATE),
+    );
+    assert_eq!(
+        e,
+        Unpaced::Unjudged {
+            handed_out: pacing::JUDGED - 1
+        }
+    );
+    pacing::pooled(&[&pairs(judged)[..]], RATE)
+        .unwrap_or_else(|e| panic!("a run long enough to judge: {e:?}"));
     // Control: a pair whose freezes double, 4 frames of the clock and
     // then 8, 16, 32 and 64, though each pair it shows is the slowest
     // lens's newest.
@@ -779,8 +803,9 @@ fn unfrozen(case: &Case, samples: &[Sample]) -> Result<i64, String> {
     }
 }
 
-/// Whether the presents of `runs` that waited for their pair (`SETTLE`)
-/// after the warm-up are at most one between them, or at most a quarter
+/// Whether the presents of `runs` counted late after the warm-up (their
+/// pair not up a present on, give or take [`starved`]) are at most one
+/// between them, or at most a quarter
 /// of the frames their slowest lenses handed out meanwhile. A pair is
 /// late only once its slowest lens's newest moves past the pair in the
 /// slots, about once a frame it hands out, so a pair slow to go up
@@ -807,9 +832,75 @@ fn settled(runs: &[&Played]) -> Result<u64, String> {
 /// up at once, and on a CPU the other tests share, lavapipe took longer
 /// than one present for them (2 runs of the suite in about 50, the pair
 /// up one present later). A pair the lock never forms still fails the
-/// rule, `SETTLE` later, and a present that waits is counted late
-/// ([`settled`]).
+/// rule, `SETTLE` later (and [`starved`]), and a present that waits is
+/// counted late ([`settled`]).
 const SETTLE: Duration = Duration::from_millis(25);
+
+/// How long the threads of this process but the test's own waited for a
+/// CPU between them since a present (`queued`), `3 * SETTLE` at most:
+/// the time the present gives its pair to go up beyond its own 4 ms
+/// before it counts it late, and beyond `SETTLE` before it gives up. On
+/// a CPU busy beyond the tests, a thread the engine wakes waits for
+/// another's time slice to end: beside four busy loops on four CPUs, its
+/// threads waited 12 to 16 ms for one in a present, and without this a
+/// pair went up 35 ms into its wait, too late (1 run of the pacing test
+/// in about 30), and a slow case's pair was late twice against 7 frames
+/// handed out (1 in 60). On a CPU that isn't busy it is a millisecond or
+/// so, what the other tests' threads wait.
+fn starved(queued: &Queued) -> Duration {
+    queued.since().min(3 * SETTLE)
+}
+
+/// How long each thread of this process but the caller has waited for a
+/// CPU while it could run, as the kernel counts it: the second field of
+/// `/proc/self/task/<tid>/schedstat`, in nanoseconds. Empty where the
+/// kernel doesn't count it.
+struct Queued(HashMap<OsString, u64>);
+
+impl Queued {
+    fn read() -> Queued {
+        let me = std::fs::read_link("/proc/thread-self").ok();
+        let me = me.as_deref().and_then(Path::file_name);
+        let tasks = std::fs::read_dir("/proc/self/task")
+            .into_iter()
+            .flatten()
+            .flatten();
+        Queued(
+            tasks
+                .filter(|task| Some(task.file_name().as_os_str()) != me)
+                .filter_map(|task| {
+                    let stat = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
+                    let waited = stat.split_whitespace().nth(1)?.parse().ok()?;
+                    Some((task.file_name(), waited))
+                })
+                .collect(),
+        )
+    }
+
+    /// How long the threads have waited for a CPU since `self` was read,
+    /// between them: a thread begun since counts all its own.
+    fn since(&self) -> Duration {
+        let now = Queued::read();
+        let waited = (now.0.iter())
+            .map(|(task, &ns)| ns.saturating_sub(self.0.get(task).copied().unwrap_or(0)))
+            .sum::<u64>();
+        Duration::from_nanos(waited)
+    }
+}
+
+/// Whether the pair [`pair_up`] looks for after `s` goes up while `wait`
+/// holds, looking every millisecond: at once, at least.
+fn goes_up(player: &Player, epoch: u64, s: &Sample, wait: impl Fn() -> bool) -> bool {
+    loop {
+        if pair_up(player, epoch, s) {
+            return true;
+        }
+        if !wait() {
+            return false;
+        }
+        std::thread::sleep(ms(1));
+    }
+}
 
 /// Whether the slots hold a pair, of open `epoch`, that the pacing rule
 /// takes at the present after `s`: both lenses' frames at one time, at
