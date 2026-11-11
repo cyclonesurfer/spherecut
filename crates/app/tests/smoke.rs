@@ -17,7 +17,9 @@ use spherecut_app::{Settings, SpherecutApp};
 use spherecut_core::project::Aspect;
 use spherecut_export::Preset;
 use spherecut_media::backend::FfmpegBackend;
+use spherecut_media::encode::{MuxedAs, mux_video_streams_as};
 use spherecut_synth::media::{self, Codec, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// The grid at 30 fps for 3 s: the run plays half of it.
 fn clip() -> &'static Path {
@@ -128,9 +130,10 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
     let frames = &r["frames"];
     assert!(frames["shown"].as_u64().unwrap() >= 5, "{frames}");
     assert!(frames["expected"].as_f64().unwrap() > 40.0, "{frames}");
-    // One stream is never shown apart from another.
-    assert_eq!(frames["unpaired"], 0, "{frames}");
-    assert_eq!(frames["pair_resyncs"], 0, "{frames}");
+    // What the presents' cadence passed over, apart from the drops (as
+    // many as lavapipe's pace makes); one stream has no lock.
+    assert!(frames["skipped"].as_u64().is_some(), "{frames}");
+    assert!(r["lock"].is_null(), "{}", r["lock"]);
     // Late passes are late for a refresh rate, which kittest hasn't.
     assert_eq!(r["late"], serde_json::json!([]));
     assert_eq!(r["streams"][0]["decoder"], "software");
@@ -173,11 +176,8 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
         (&settled["ui"]["frames"], &ui["frames"]),
         (&settled["ui"]["passes"], &ui["passes"]),
         (&settled["frames"]["shown"], &r["frames"]["shown"]),
-        (&settled["frames"]["unpaired"], &r["frames"]["unpaired"]),
-        (
-            &settled["frames"]["pair_resyncs"],
-            &r["frames"]["pair_resyncs"],
-        ),
+        (&settled["frames"]["dropped"], &r["frames"]["dropped"]),
+        (&settled["frames"]["skipped"], &r["frames"]["skipped"]),
     ] {
         assert!(
             part.as_u64().unwrap() <= whole.as_u64().unwrap(),
@@ -320,11 +320,15 @@ fn a_clip_that_cant_open_ends_the_run_with_its_code() {
 }
 
 /// A camera's raw file: the run starts once the probe has opened both
-/// lenses, and measures them side by side.
+/// lenses, and measures them side by side. An MP4 pair locks (M3 plan
+/// section 9): the document says so, no present shows the lenses at
+/// different frames, nothing resyncs, and `pair_wait` is recorded at the
+/// presents. Its control, the same lenses in Matroska, which has no
+/// tables to compare: refused by name, and no `pair_wait`, which only a
+/// locked pair records.
 #[test]
 fn the_smoke_run_plays_a_cameras_lenses_together() {
     let gpu = common::gpu();
-    let rs = common::render_state(&gpu);
     let dir = common::tmp().join("smoke-lenses");
     std::fs::create_dir_all(&dir).unwrap();
     let lens = |name: &str, pattern| {
@@ -344,40 +348,67 @@ fn the_smoke_run_plays_a_cameras_lenses_together() {
     };
     let a = lens("lens-a", spherecut_synth::Pattern::Grid);
     let b = lens("lens-b", spherecut_synth::Pattern::Seam);
-    let clip =
-        spherecut_media::encode::mux_video_streams(&[&a, &b], &dir.join("lenses.mkv")).unwrap();
-    let args = SmokeArgs {
-        clip,
-        seconds: 10.0,
-        out: dir.join("smoke.json"),
-        screenshot: None,
-        export: None,
+    // The run's document, played for `seconds` of the pair muxed as
+    // `muxed`.
+    let run = |muxed: MuxedAs, name: &str, seconds: f64| {
+        let clip =
+            mux_video_streams_as(&[a.as_path(), b.as_path()], &dir.join(name), muxed).unwrap();
+        let args = SmokeArgs {
+            clip,
+            seconds,
+            out: dir.join(format!("{name}.json")),
+            screenshot: None,
+            export: None,
+        };
+        let rs = common::render_state(&gpu);
+        let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
+        run_to_end(&mut h);
+        let doc = read_json(&args.out);
+        assert_eq!(doc["ok"], true, "{doc}");
+        let r = &doc["result"];
+        assert_eq!(r["raw_view"], true);
+        assert_eq!(
+            r["streams"].as_array().unwrap().len(),
+            2,
+            "{}",
+            r["streams"]
+        );
+        r.clone()
     };
-    let mut h = common::harness(smoke_app(&gpu, &rs, args.clone()), &rs, [800.0, 600.0], 1.0);
-    run_to_end(&mut h);
-    let doc = read_json(&args.out);
-    assert_eq!(doc["ok"], true, "{doc}");
-    let r = &doc["result"];
-    assert_eq!(r["raw_view"], true);
+    let r = run(MuxedAs::Mp4, "lenses.mp4", 10.0);
     assert_eq!(
-        r["streams"].as_array().unwrap().len(),
-        2,
-        "{}",
-        r["streams"]
+        r["lock"],
+        serde_json::json!({"status": "locked", "field": null})
     );
     assert_eq!(r["ended"], true);
-    // To the end of 1.5 s: each lens's 45 frames shown, or dropped where
-    // lavapipe was late under load.
+    // To the end of 1.5 s: each of the 45 pairs shown, or passed over
+    // where lavapipe was late under load. A locked pair's frames shown
+    // count once a lens, what it passed over once a pair.
     let frames = &r["frames"];
-    let shown = frames["shown"].as_u64().unwrap();
-    assert!(shown >= 20, "{frames}");
+    let count = |k: &str| frames[k].as_u64().unwrap();
+    let pairs = count("shown") / 2;
+    assert!(pairs >= 10, "{frames}");
     assert!(
-        shown + frames["dropped"].as_u64().unwrap() >= 80,
+        pairs + count("dropped") + count("skipped") >= 40,
         "{frames}"
     );
-    // Opened unlocked: the lenses may show apart, and nothing resyncs.
-    assert!(frames["unpaired"].as_u64().is_some(), "{frames}");
+    assert_eq!(frames["unpaired"], 0, "{frames}");
     assert_eq!(frames["pair_resyncs"], 0, "{frames}");
+    let waits = &r["stages"]["pair_wait"];
+    assert!(waits["samples"].as_u64().unwrap() > 0, "{waits}");
+
+    // Control: the Matroska pair opens unlocked.
+    let r = run(MuxedAs::Matroska, "lenses.mkv", 0.5);
+    must_fail("the Matroska pair locked", r["lock"]["status"] == "locked");
+    assert_eq!(
+        r["lock"],
+        serde_json::json!({"status": "refused", "field": "timing"})
+    );
+    must_fail(
+        "an unlocked pair recorded pair_wait",
+        r["stages"]["pair_wait"]["samples"].as_u64().unwrap() > 0,
+    );
+    eprintln!("unlocked: {} unpaired", r["frames"]["unpaired"]);
 }
 
 /// The watchdog's exit, as a test sees it: the status, on a channel.

@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use spherecut_core::fs::TempFile;
 use spherecut_media::backend::DecodePath;
-use spherecut_playback::{Counter, PlayState, Stage};
+use spherecut_playback::{Counter, LockStatus, PlayState, Stage};
 
 use spherecut_core::project::{AnyKey, Ease, Edit, Key, KeyId, Orient};
 use spherecut_core::time::{Rational, Time};
@@ -790,6 +790,7 @@ impl Run {
             frames: Frames {
                 shown: since(Counter::FramesShown),
                 dropped: since(Counter::Dropped),
+                skipped: since(Counter::Skipped),
                 decode_dropped: since(Counter::DecodeDropped),
                 unpaired: since(Counter::UnpairedPresents),
                 pair_resyncs: since(Counter::PairResyncs),
@@ -919,6 +920,9 @@ pub struct Report {
     pub refresh_hz: Option<f64>,
     pub raw_view: bool,
     pub streams: Vec<StreamReport>,
+    /// A camera pair's frame lock at the run's end (M3 plan section 9);
+    /// `None` for streams not opened locked.
+    pub lock: Option<LockReport>,
     pub ui: UiReport,
     pub frames: Frames,
     /// The same after the first second ([`SETTLE`]), which the gates
@@ -1016,6 +1020,28 @@ impl Adapter {
     }
 }
 
+/// Where a locked pair's lock stands.
+#[derive(Debug, Serialize)]
+pub struct LockReport {
+    /// `pending`, `locked` or `refused`.
+    pub status: &'static str,
+    /// Why a lock was refused, by `LockStatus::Refused`'s field: what the
+    /// lenses disagreed on, `timing` for a track without MP4 tables,
+    /// `open`, or `slots` below the floor.
+    pub field: Option<&'static str>,
+}
+
+impl LockReport {
+    fn of(status: LockStatus) -> LockReport {
+        let (status, field) = match status {
+            LockStatus::Pending => ("pending", None),
+            LockStatus::Locked => ("locked", None),
+            LockStatus::Refused { field } => ("refused", Some(field)),
+        };
+        LockReport { status, field }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct StreamReport {
     /// "hevc 5760×2880 nv12 limited/709", as the overlay has it.
@@ -1084,10 +1110,21 @@ pub struct SettledUi {
     pub max: Option<f32>,
 }
 
+/// The playback counters over a stretch of the run (`PerfStats`'s, M3
+/// plan section 9 for the pair's).
 #[derive(Debug, Serialize)]
 pub struct Frames {
+    /// Each stream's frames shown: a locked pair's twice a pair.
     pub shown: u64,
+    /// Frames passed over beyond the presents' cadence while playing:
+    /// a locked pair's once a pair, other streams' once a stream. A
+    /// locked pair's share is of pairs, `dropped` over `shown` / 2 +
+    /// `dropped`, as the overlay's and `gui_smoke`'s are.
     pub dropped: u64,
+    /// Frames passed over up to the presents' cadence, which a display
+    /// slower than the clip passes over by design (one a present for
+    /// 120 fps at 60 Hz), counted as `dropped` is and apart from it.
+    pub skipped: u64,
     pub decode_dropped: u64,
     /// Presents at which the streams showed frames of different clip
     /// times, and times a locked pair sought both lenses to catch up
@@ -1313,9 +1350,11 @@ impl SmokeDriver {
             viewer,
             refresh_hz,
             raw_view: s.raw_view(),
+            lock: snap.lock.map(|l| LockReport::of(l.status)),
             frames: Frames {
                 shown: counted(Counter::FramesShown),
                 dropped: counted(Counter::Dropped),
+                skipped: counted(Counter::Skipped),
                 decode_dropped: counted(Counter::DecodeDropped),
                 unpaired: counted(Counter::UnpairedPresents),
                 pair_resyncs: counted(Counter::PairResyncs),
