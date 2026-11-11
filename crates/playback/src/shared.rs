@@ -237,7 +237,26 @@ impl LockGroup {
     /// Refused by `field`: the members play unlocked. What the player
     /// says of it.
     fn refuse(&mut self, field: &'static str) -> PlayerEvent {
-        tracing::warn!("the lenses don't lock: their {field} differs, so they show unlocked");
+        match field {
+            field::OPEN => tracing::warn!(
+                "the lenses don't lock: a lens couldn't open or decode, so the other shows unlocked"
+            ),
+            field::TIMING => tracing::warn!(
+                "the lenses don't lock: a lens has no timing tables, or they couldn't be read, \
+                 so they show unlocked"
+            ),
+            field::TIME_BASE
+            | field::START
+            | field::RATE
+            | field::SIZE
+            | field::STTS
+            | field::STSS => {
+                tracing::warn!(
+                    "the lenses don't lock: their {field} differs, so they show unlocked"
+                )
+            }
+            _ => tracing::warn!("the lenses don't lock ({field}), so they show unlocked"),
+        }
         self.status = LockStatus::Refused { field };
         PlayerEvent::LockRefused { field }
     }

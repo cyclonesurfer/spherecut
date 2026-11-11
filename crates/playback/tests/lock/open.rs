@@ -3,10 +3,11 @@
 //! whatever the decoder; otherwise it is refused by the field that
 //! differs and plays unlocked.
 //!
-//! The pairs here are a `PerStream`'s lens 0 and one of its other
-//! lenses, opened one after another on one player, each open clearing
-//! what the one before left, which keeps the tests inside their share of
-//! the suite's budget.
+//! Most pairs here are two of a `PerStream`'s lenses, opened one after
+//! another on one player, each open clearing what the one before left,
+//! which keeps the tests inside their share of the suite's budget. The
+//! GOP fault pair is a file from M3.1's writer, read through
+//! `FfmpegBackend`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,10 +55,9 @@ fn player(backend: impl MediaBackend + 'static, decoder: DecoderPreference) -> P
     )
 }
 
-/// What the player said of the lock in its events since the last call.
-fn said(player: &Player) -> Vec<Said> {
-    player
-        .events()
+/// What `events` said of the lock.
+fn of_lock(events: Vec<PlayerEvent>) -> Vec<Said> {
+    events
         .into_iter()
         .filter_map(|e| match e {
             PlayerEvent::LockRefused { field } => Some(Said::Refused(field)),
@@ -65,6 +65,11 @@ fn said(player: &Player) -> Vec<Said> {
             _ => None,
         })
         .collect()
+}
+
+/// What the player said of the lock in its events since the last call.
+fn said(player: &Player) -> Vec<Said> {
+    of_lock(player.events())
 }
 
 /// The lock's status once it has formed or been refused, failing after
@@ -116,6 +121,47 @@ fn opened(
     }
     let later = until(WAIT, || Some(said(player)).filter(|s| !s.is_empty()));
     (status, later.unwrap_or_default())
+}
+
+/// How an open of `streams` of `path` locked stood once its player
+/// stream 0's first frame had failed to decode or gone up in a slot,
+/// while `gate` held stream 1's open, and what the player said of its
+/// lock once `gate` let stream 1 open and `n` streams show. A refusal
+/// said of nothing yet is waited for, as in [`opened`].
+fn decoded_first(
+    player: &Player,
+    path: &Path,
+    streams: [usize; 2],
+    gate: &Gate,
+    n: usize,
+) -> (LockStatus, Vec<Said>) {
+    said(player);
+    player.open_locked(path.to_path_buf(), streams, LockSpec::default());
+    let epoch = snapshot(player).epoch;
+    let mut heard = Vec::new();
+    until(WAIT, || {
+        let events = player.events();
+        let failed = events
+            .iter()
+            .any(|e| matches!(e, PlayerEvent::DecodeFailed { stream: 0, .. }));
+        heard.extend(of_lock(events));
+        let up = player
+            .slots()
+            .views()
+            .iter()
+            .any(|v| v.frame.epoch == epoch && v.frame.stream == 0 && v.frame.pts == 0);
+        (failed || up).then_some(())
+    })
+    .expect("stream 0's first frame neither failed nor went up");
+    let held = snapshot(player).lock.expect("a locked open's group").status;
+    gate.release();
+    let status = settled(player);
+    shown(player, n);
+    heard.extend(said(player));
+    if heard.is_empty() && status != LockStatus::Locked {
+        heard = until(WAIT, || Some(said(player)).filter(|s| !s.is_empty())).unwrap_or_default();
+    }
+    (held, heard)
 }
 
 /// The check: the field a pair was refused by, said once. A pair that
@@ -266,15 +312,19 @@ fn each_planted_fault_is_refused_by_name() {
     common::join(player);
 }
 
-/// A member whose open fails before the group forms refuses the lock
-/// with field `"open"`, and the other lens plays unlocked.
+/// A member whose open fails before the group forms, or whose first
+/// frame fails to decode while the other's open is held, refuses the
+/// lock with field `"open"`, and the other lens plays unlocked.
 #[test]
 fn a_member_that_cant_open_refuses_the_lock() {
     let _time = timed("a_member_that_cant_open_refuses_the_lock");
+    let held = Gate::new();
     let backend = PerStream::new(vec![
         Lens::default(),
         Lens::default().open_fails(),
         Lens::default(),
+        Lens::default().read_error_at(0),
+        Lens::default().held_by(&held),
     ]);
     let player = player(backend, DecoderPreference::Software);
     let path = Path::new(LENSES);
@@ -288,6 +338,22 @@ fn a_member_that_cant_open_refuses_the_lock() {
         refused(opened(&player, path, [0, 2], LockSpec::default(), 2)),
     );
     assert_eq!((status, said), (LockStatus::Locked, Vec::new()));
+
+    // Lens 3 opens but fails to decode (`Worker::fail`, not the open's
+    // failure) while lens 4's open is held: the group is refused before
+    // lens 4 opens, and lens 4 then shows alone.
+    let got = refused(decoded_first(&player, path, [3, 4], &held, 1));
+    assert_eq!(got, Ok(field::OPEN));
+    assert_eq!(shown(&player, 1), [0]);
+    // Control: lens 0 in lens 3's place decodes, the group waits for lens
+    // 4, and the pair locks once it opens.
+    held.close();
+    let (status, said) = must_fail(
+        "decoding",
+        refused(decoded_first(&player, path, [0, 4], &held, 2)),
+    );
+    assert_eq!((status, said), (LockStatus::Pending, Vec::new()));
+    assert_eq!(settled(&player), LockStatus::Locked);
     common::join(player);
 }
 
