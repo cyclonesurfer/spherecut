@@ -1,0 +1,117 @@
+warning: use of deprecated method `std::sync::atomic::Atomic::<u64>::fetch_update`: renamed to `try_update` for consistency
+   --> crates/playback/src/shared.rs:529:14
+    |
+529 |             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+529 -             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+529 +             .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+    |
+
+warning: `spherecut-playback` (lib) generated 1 warning (run `cargo fix --lib -p spherecut-playback` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.11s
+     Running tests/tier2_playback.rs (target/release/deps/tier2_playback-d55baaae506854be)
+
+running 1 test
+test zero_copy_pair_matches_copy ... rendered on AMD Radeon RX 7600 (RADV NAVI33) (radv Mesa 26.2.5), decoded on /dev/dri/renderD128, the GPU at PCI 0000:0c:00.0
+clip 9 (handheld_flips): the truth, 64 and 64 frames a lens decoded in software in 6.4 s
+clip 9 (handheld_flips), path B, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 72+73, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+clip 9 (handheld_flips), path B, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.4 s
+clip 9 (handheld_flips), path B, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, unlocked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 75+76, uploaded 98 (0 copied, 0 imported, 98 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, unlocked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 98 (98 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, unlocked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+77, uploaded 98 (0 copied, 0 imported, 98 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, unlocked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 98 (98 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, lens 0 alone, copy 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 0 alone, kept 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 0 alone, copy 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 0 alone, kept 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 1 alone, copy 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 1 alone, kept 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 1 alone, copy 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 1 alone, kept 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, locked, read idle, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, locked, read idle, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, locked, read idle, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, read idle, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, locked, read quiet, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 75+75, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 3.2 s
+clip 9 (handheld_flips), path B, locked, read quiet, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 1.9 s
+clip 9 (handheld_flips), path B, locked, read quiet, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+78, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 3.4 s
+clip 9 (handheld_flips), path B, locked, read quiet, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 1.9 s
+clip 9 (handheld_flips), path B, locked, pool watched, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, pool watched, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, pool 18+18 images; 1.7 s
+clip 9 (handheld_flips), path B, locked, pool watched, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, pool watched, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, pool 18+18 images; 1.7 s
+clip 9 (handheld_flips), path A, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 50+49, uploaded 97 (0 copied, 0 imported, 97 downloaded, 0 refused), shown twice: none; 2.8 s
+clip 9 (handheld_flips), path A, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.1 s
+clip 9 (handheld_flips), path A, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 49+50, uploaded 97 (0 copied, 0 imported, 97 downloaded, 0 refused), shown twice: none; 2.8 s
+clip 9 (handheld_flips), path A, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 2.9 s
+perf clip pair-hevc8-3840-2997-noisy-20s: the truth, 64 and 64 frames a lens decoded in software in 2.6 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 74+74, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.6 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 78+79, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.9 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.2 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79+78, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.9 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.0 s
+zero-copy pair check: file, path, variant, pass: frames, wrong, verdict; the engine's counts
+clip 9 (handheld_flips), path B, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 72+73, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+clip 9 (handheld_flips), path B, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.4 s
+clip 9 (handheld_flips), path B, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, locked: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+clip 9 (handheld_flips), path B, unlocked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 75+76, uploaded 98 (0 copied, 0 imported, 98 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, unlocked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 98 (98 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, unlocked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+77, uploaded 98 (0 copied, 0 imported, 98 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, unlocked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 98 (98 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, unlocked: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+clip 9 (handheld_flips), path B, lens 0 alone, copy 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 0 alone, kept 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 0 alone, copy 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 0 alone, kept 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 0 alone: copy 1 against copy 2: the same 48 frames; kept 1 against kept 2: the same 48 frames
+clip 9 (handheld_flips), path B, lens 1 alone, copy 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 1 alone, kept 1: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 1 alone, copy 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79, uploaded 51 (0 copied, 0 imported, 51 downloaded, 0 refused), shown twice: none; 1.2 s
+clip 9 (handheld_flips), path B, lens 1 alone, kept 2: 48 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65, uploaded 51 (51 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 0.9 s
+clip 9 (handheld_flips), path B, lens 1 alone: copy 1 against copy 2: the same 48 frames; kept 1 against kept 2: the same 48 frames
+clip 9 (handheld_flips), path B, locked, read idle, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.7 s
+clip 9 (handheld_flips), path B, locked, read idle, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, locked, read idle, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, read idle, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.7 s
+clip 9 (handheld_flips), path B, locked, read idle: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+clip 9 (handheld_flips), path B, locked, read quiet, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 75+75, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 3.2 s
+clip 9 (handheld_flips), path B, locked, read quiet, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 1.9 s
+clip 9 (handheld_flips), path B, locked, read quiet, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+78, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 3.4 s
+clip 9 (handheld_flips), path B, locked, read quiet, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, quiet 48 of 48; 1.9 s
+clip 9 (handheld_flips), path B, locked, read quiet: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+clip 9 (handheld_flips), path B, locked, pool watched, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 76+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, pool watched, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, pool 18+18 images; 1.7 s
+clip 9 (handheld_flips), path B, locked, pool watched, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+76, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+clip 9 (handheld_flips), path B, locked, pool watched, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none, pool 18+18 images; 1.7 s
+clip 9 (handheld_flips), path B, locked, pool watched: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+clip 9 (handheld_flips), path A, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 50+49, uploaded 97 (0 copied, 0 imported, 97 downloaded, 0 refused), shown twice: none; 2.8 s
+clip 9 (handheld_flips), path A, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.1 s
+clip 9 (handheld_flips), path A, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 49+50, uploaded 97 (0 copied, 0 imported, 97 downloaded, 0 refused), shown twice: none; 2.8 s
+clip 9 (handheld_flips), path A, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 2.9 s
+clip 9 (handheld_flips), path A, locked: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 74+74, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.6 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 77+77, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.5 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (100 copied, 0 imported, 0 downloaded, 0 refused), shown twice: none; 1.8 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path B, locked: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, copy 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 78+79, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.9 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, kept 1: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.2 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, copy 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 79+78, uploaded 100 (0 copied, 0 imported, 100 downloaded, 0 refused), shown twice: none; 2.9 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked, kept 2: 96 frames, 0 wrong: right; resyncs 0, unpaired 0, decoded 65+65, uploaded 100 (0 copied, 100 imported, 0 downloaded, 0 refused), shown twice: none; 3.0 s
+perf clip pair-hevc8-3840-2997-noisy-20s, path A, locked: copy 1 against copy 2: the same 96 frames; kept 1 against kept 2: the same 96 frames
+the zero-copy pair check took 95 s
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 95.18s
+

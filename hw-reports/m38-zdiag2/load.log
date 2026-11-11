@@ -1,0 +1,42 @@
+===== nodcc-1 2026-11-11T01:31:51-08:00
+ 01:31:51 up 31 days,  6:29,  1 user,  load average: 0.51, 1.18, 1.31
+top - 01:31:51 up 31 days,  6:29,  1 user,  load average: 0.51, 1.18, 1.31
+Tasks: 610 total, 3 running, 607 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  9.5 us,  2.6 sy,  0.0 ni, 86.9 id,  0.5 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   8065.5 free,  28657.2 used,  25835.4 buff/cache     
+MiB Swap:   8192.0 total,   2460.5 free,   5731.5 used.  35540.7 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+3368385 pat       20   0 5664452 320676 122452 S  98.9   0.5   0:13.75 2.1.312
+   4536 pat       20   0   11.3g 478492 187536 S  13.5   0.7     34,10 gnome-s+
+ 174326 pat       20   0   14.9g   1.9g 383004 S  13.5   3.1     35,39 firefox
+ 550462 pat       20   0 6638892   2.5g 154248 R  13.5   3.9     35,44 Isolate+
+ 124453 pat       20   0 1461.2g 599008  70092 S   9.0   0.9  54:19.86 claude-+
+===== plain-1 2026-11-11T01:33:37-08:00
+ 01:33:37 up 31 days,  6:31,  1 user,  load average: 3.43, 2.06, 1.62
+top - 01:33:37 up 31 days,  6:31,  1 user,  load average: 3.43, 2.06, 1.62
+Tasks: 667 total, 2 running, 664 sleep, 1 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  7.9 us,  2.6 sy,  0.0 ni, 89.0 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   7558.2 free,  29366.7 used,  25556.9 buff/cache     
+MiB Swap:   8192.0 total,   2409.2 free,   5782.8 used.  34831.1 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 550462 pat       20   0 6642092   2.5g 154248 R  84.9   4.0     35,44 Isolate+
+   4536 pat       20   0   11.3g 474792 187368 S   8.9   0.7     34,11 gnome-s+
+ 174326 pat       20   0   14.9g   1.9g 374768 S   8.9   3.1     35,39 firefox
+ 524792 pat       20   0 4982748   1.7g 138600 S   4.5   2.7 183:58.41 Isolate+
+ 594075 pat       20   0 6920604   3.2g 134348 S   4.5   5.2 224:04.66 Isolate+
+===== nodcc-2 2026-11-11T01:35:13-08:00
+ 01:35:13 up 31 days,  6:32,  1 user,  load average: 2.68, 2.18, 1.71
+top - 01:35:13 up 31 days,  6:32,  1 user,  load average: 2.68, 2.18, 1.71
+Tasks: 667 total, 1 running, 666 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  2.9 us,  3.4 sy,  0.0 ni, 93.2 id,  0.0 wa,  0.3 hi,  0.3 si,  0.0 st 
+MiB Mem :  64197.8 total,   8017.1 free,  29430.1 used,  25074.1 buff/cache     
+MiB Swap:   8192.0 total,   2325.7 free,   5866.3 used.  34767.7 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 124196 pat       20   0 1448.4g 159236  55688 S  13.6   0.2  79:24.10 claude-+
+ 174326 pat       20   0   14.9g   1.9g 374548 S  13.6   3.1     35,39 firefox
+   4536 pat       20   0   11.3g 473492 186740 S   9.1   0.7     34,11 gnome-s+
+1808613 pat       20   0   19.3g 506648 132008 S   9.1   0.8  21:29.46 Isolate+
+3379127 pat       20   0  236284   6384   4156 R   9.1   0.0   0:00.03 top
