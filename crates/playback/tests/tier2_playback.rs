@@ -83,7 +83,9 @@
 //!   and playing both lenses on one frame, read back from the slots by
 //!   corner code, and every slot of path B's, path A's and the copy
 //!   path's passes byte for byte a software decode's, with a line for each
-//!   wrong one that says where and how it is wrong.
+//!   wrong one that says where and how it is wrong, and whether it is on
+//!   the fault odin's GFX11 RADV showed with DCC on (the check's docs say
+//!   what each outcome means).
 //!
 //! Where the GPU, hardware decode of the format, the perf clips or the
 //! samples aren't there, a benchmark records what it can and skips with
@@ -1162,7 +1164,10 @@ impl PoolWatch {
                 };
                 let locked =
                     picture.with_locked(&mut |states| seen.extend(states.iter().map(|s| s.image)));
-                assert!(locked, "a cached frame of stream {stream} couldn't be locked");
+                assert!(
+                    locked,
+                    "a cached frame of stream {stream} couldn't be locked"
+                );
                 // A picture's planes, each its size in texels by its
                 // texel's bytes, over the images that hold them.
                 let layout = frame.layout();
@@ -3697,8 +3702,10 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// the other lens's, fails as the frame it is; a pass judged against the
 /// truth with its lenses' frames crossed finds every slot wrong, tells
 /// each apart as the other lens's frame at its place (the same read
-/// again, and each lens's first in the cache as in the slot), and fails
-/// the report; counts planted break [`path_rule`] (a kept pass with a
+/// again, each lens's first in the cache as in the slot and the slot's
+/// own frame, its Y samples its own lens's beside the crossed truth's,
+/// off the GFX11 R8 signature), and fails the report, which counts them
+/// by path and side; counts planted break [`path_rule`] (a kept pass with a
 /// frame downloaded or refused, a copied one with a frame on the GPU) or
 /// skip it (a kept pass with none on the GPU); [`stood_still`] fails with
 /// a slot free before the reads or claimed during them; lens 0's slot
@@ -3897,11 +3904,17 @@ fn the_bench_harness_plays_a_locked_pair() {
     }
     // Judged against the crossed truth, every slot is wrong, told apart
     // as the other lens's frame at its place and the same when read
-    // again, each lens's first in the cache as in the slot and the rest
-    // not looked up; and the report fails it as a copy side's fault.
+    // again, each lens's first in the cache as in the slot (the frame the
+    // slot was filled from) and the rest not looked up, its Y samples
+    // its own lens's frame's beside the crossed truth's, and off the
+    // GFX11 R8 signature; and the report fails it, by path and side.
     assert_eq!(misjudged.broken, None);
     assert_eq!(misjudged.wrong().count(), 8, "{misjudged:?}");
     assert!(misjudged.controls.is_none(), "{misjudged:?}");
+    let y_at = |lens: usize, index: usize, s: &YSample| {
+        let y = &truth.frame(lens, index).unwrap().1.0[0];
+        y.samples[(s.y * y.width + s.x) as usize]
+    };
     for (&(lens, pts), s) in misjudged.wrong() {
         let w = s.first_wrong.as_ref().unwrap();
         assert_eq!(
@@ -3913,10 +3926,35 @@ fn the_bench_harness_plays_a_locked_pair() {
         assert!(matches!(w.again, Again::Same), "{}", w.again);
         let first = misjudged.keys.keys().find(|k| k.0 == lens) == Some(&(lens, pts));
         if first {
-            assert!(matches!(w.cached, Cached::AsSlot), "{}", w.cached);
+            assert!(
+                matches!(w.cached, Cached::AsSlot(Source::TheSlots)),
+                "{}",
+                w.cached
+            );
         } else {
             assert!(matches!(w.cached, Cached::NotLooked), "{}", w.cached);
         }
+        let index = s.index.unwrap();
+        assert!(
+            !w.samples.is_empty() && w.samples.len() <= SAMPLES,
+            "{}",
+            w.samples()
+        );
+        for y in &w.samples {
+            assert_eq!(
+                (y.slot, y.truth),
+                (y_at(lens, index, y), y_at(1 - lens, index, y)),
+                "{}",
+                w.samples()
+            );
+        }
+        if let Some(b) = w.before {
+            assert!(b.pts < pts, "{b:?}");
+        }
+        must_fail(
+            "the crossed truth's frame on the GFX11 R8 signature",
+            gfx11_r8(w, s.shown, &misjudged.counts),
+        );
     }
     let report = pair_report(&[Played {
         file: "pair64-matched".into(),
@@ -3933,7 +3971,11 @@ fn the_bench_harness_plays_a_locked_pair() {
         },
     );
     assert!(
-        failed[0].starts_with("copy wrong: 1 copied passes"),
+        failed[0].starts_with(
+            "8 frames shown wrong (software copy 8 in 1 pass); of the 8 told apart, 0 on the \
+             GFX11 R8 signature and 8 off it; the cache, looked up for 2 frames: as the slot with \
+             the slot's own frame 2; where it held the slot's own frame as the slot"
+        ),
         "{failed:?}"
     );
     let (tag, codes) = read[5];
@@ -4820,31 +4862,142 @@ impl std::fmt::Display for Again {
 
 /// A wrong slot's frame as the cache holds it then, downloaded from its
 /// decoder's device where it is on one: the truth's, the slot's bytes or
-/// others; or gone from the cache. Only each lens's first wrong frame of
-/// a pass is looked up: the download is FFmpeg's, under its frame lock,
-/// on the test's thread while the decoders run, which moves the timing
-/// under test for the frames after it.
+/// others, and whether it is the frame the slot was filled from; or gone
+/// from the cache. Only each lens's first wrong frame of a pass is looked
+/// up: the download is FFmpeg's, under its frame lock, on the test's
+/// thread while the decoders run, which moves the timing under test for
+/// the frames after it.
 #[derive(Debug)]
 enum Cached {
-    Right,
-    AsSlot,
-    Other,
+    Right(Source),
+    AsSlot(Source),
+    Other(Source),
     Gone,
     Failed(String),
     NotLooked,
 }
 
-impl std::fmt::Display for Cached {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Cached {
+    /// What it found, in a few words, for the report's sum.
+    fn kind(&self) -> &'static str {
         match self {
-            Cached::Right => write!(f, "right"),
-            Cached::AsSlot => write!(f, "as the slot"),
-            Cached::Other => write!(f, "other bytes"),
-            Cached::Gone => write!(f, "gone"),
-            Cached::Failed(e) => write!(f, "unread ({e})"),
-            Cached::NotLooked => write!(f, "not looked up"),
+            Cached::Right(Source::TheSlots) => "right with the slot's own frame",
+            Cached::Right(Source::Another { .. }) => "right with another decode",
+            Cached::AsSlot(Source::TheSlots) => "as the slot with the slot's own frame",
+            Cached::AsSlot(Source::Another { .. }) => "as the slot with another decode",
+            Cached::Other(_) => "other bytes",
+            Cached::Gone => "gone",
+            Cached::Failed(_) => "unread",
+            Cached::NotLooked => "not looked up",
         }
     }
+}
+
+impl std::fmt::Display for Cached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (what, source) = match self {
+            Cached::Right(s) => ("right", s),
+            Cached::AsSlot(s) => ("as the slot", s),
+            Cached::Other(s) => ("other bytes", s),
+            Cached::Gone => return write!(f, "gone"),
+            Cached::Failed(e) => return write!(f, "unread ({e})"),
+            Cached::NotLooked => return write!(f, "not looked up"),
+        };
+        write!(f, "{what}, {source}")
+    }
+}
+
+/// Whether the frame the cache holds at a slot's time is the one the
+/// slot was filled from: the same run and seq, which the slot keeps from
+/// the decoder's frame (it keeps no `Arc` of the frame to compare), or
+/// another decode of that time, whose bytes say nothing of the slot's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    TheSlots,
+    Another { run: u64, seq: u64 },
+}
+
+impl Source {
+    /// The cache's frame of run `run` and place `seq` in it, against the
+    /// frame `slot` holds.
+    fn of(slot: &SlotFrame, run: u64, seq: u64) -> Source {
+        if (slot.run, slot.seq) == (run, seq) {
+            Source::TheSlots
+        } else {
+            Source::Another { run, seq }
+        }
+    }
+}
+
+impl std::fmt::Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::TheSlots => write!(f, "the frame the slot was filled from"),
+            Source::Another { run, seq } => write!(
+                f,
+                "but another decode of its time (run {run} seq {seq}), not the slot's frame"
+            ),
+        }
+    }
+}
+
+/// A frame a slot showed: its lens, pts and place among the truth's
+/// frames of that lens, and its run and seq.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    lens: usize,
+    pts: i64,
+    index: Option<usize>,
+    run: u64,
+    seq: u64,
+}
+
+/// The most Y samples a wrong slot's line gives: a whole 8×4 cell's.
+const SAMPLES: usize = 32;
+
+/// A Y sample where a wrong slot differs from the truth's frame: its
+/// place, the slot's sample, the truth's, and the sample there of the
+/// frame the slot showed before, where it showed one the truth has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct YSample {
+    x: u32,
+    y: u32,
+    slot: u8,
+    truth: u8,
+    before: Option<u8>,
+}
+
+/// The first [`SAMPLES`] of `slot`'s Y samples that differ from `want`'s,
+/// in raster order, each beside `before`'s there: `slot` and `want` of
+/// one shape, and `before` left out where it isn't theirs.
+fn y_samples(slot: &Yuv, want: &Yuv, before: Option<&Yuv>) -> Vec<YSample> {
+    let before = before.filter(|b| b.same_shape(slot)).map(|b| &b.0[0]);
+    let (got, want) = (&slot.0[0], &want.0[0]);
+    let width = (got.width as usize).max(1);
+    let mut out = Vec::new();
+    let rows = got.samples.chunks(width).zip(want.samples.chunks(width));
+    for (y, (g, w)) in (0u32..).zip(rows) {
+        if g == w {
+            continue;
+        }
+        for (x, (&a, &b)) in (0u32..).zip(g.iter().zip(w)) {
+            if a == b {
+                continue;
+            }
+            if out.len() == SAMPLES {
+                return out;
+            }
+            let at = y as usize * width + x as usize;
+            out.push(YSample {
+                x,
+                y,
+                slot: a,
+                truth: b,
+                before: before.and_then(|p| p.samples.get(at).copied()),
+            });
+        }
+    }
+    out
 }
 
 /// A showing of a frame whose slot wasn't the truth's.
@@ -4857,6 +5010,131 @@ struct Showing {
     wrong: Wrong,
     again: Again,
     cached: Cached,
+    /// The frame the slot showed before this one in the pass, where it
+    /// showed one: the frame it held before, unless one written to it
+    /// in between was never shown.
+    before: Option<Held>,
+    /// Its first Y samples that differ, beside the truth's and the frame
+    /// before's ([`y_samples`]).
+    samples: Vec<YSample>,
+}
+
+impl Showing {
+    /// Its Y samples that differ, "x,y slot/truth/before" each, and how
+    /// many of them are the frame before's.
+    fn samples(&self) -> String {
+        if self.samples.is_empty() {
+            return "no Y sample differs".into();
+        }
+        let before = match self.before {
+            Some(b) => format!(
+                "the slot showed lens {} pts {} (frame {}) before",
+                b.lens,
+                b.pts,
+                b.index.map_or_else(|| "?".into(), |i| i.to_string())
+            ),
+            None => "the slot showed nothing before in the pass".into(),
+        };
+        let each: Vec<String> = self
+            .samples
+            .iter()
+            .map(|s| {
+                let was = s.before.map_or_else(|| "-".into(), |b| b.to_string());
+                format!("{},{} {}/{}/{was}", s.x, s.y, s.slot, s.truth)
+            })
+            .collect();
+        let stale = self
+            .samples
+            .iter()
+            .filter(|s| s.before == Some(s.slot))
+            .count();
+        format!(
+            "Y slot/truth/before at x,y, the first {} that differ ({before}): {}; {stale} of \
+             them the frame before's",
+            self.samples.len(),
+            each.join(" ")
+        )
+    }
+}
+
+/// Where a wrong showing falls against odin's GFX11 R8 signature, the
+/// fault PR #32 told apart on the RX 7600 under RADV with DCC on (the
+/// check's docs give the evidence): Y only, U and V right; the samples
+/// that differ inside one aligned 8×4 cell, in its right half (x%8 4..7:
+/// an aligned 4×2, or the 4×4) or across both halves (the 8×4); the same
+/// when read again; the cache right or not looked up; the pass with no
+/// resync and no unpaired present; and the frame shown once. `shown` is
+/// how often the frame was shown and `c` its pass's counts. On it, where
+/// in the cell; off it, every way it is off. It labels a line and never
+/// excuses one: every wrong frame fails the check either way.
+fn gfx11_r8(w: &Showing, shown: u32, c: &PassCounts) -> Result<String, String> {
+    let mut off = Vec::new();
+    let mut shape = None;
+    match &w.wrong {
+        Wrong::Samples(d) => {
+            match d.planes[0].bounds.map(r8_cell) {
+                Some(Ok(s)) => shape = Some(s),
+                Some(Err(why)) => off.push(why),
+                None => off.push("Y right".into()),
+            }
+            for (name, p) in ["U", "V"].iter().zip(&d.planes[1..]) {
+                if p.bounds.is_some() {
+                    off.push(format!("{name} differs"));
+                }
+            }
+        }
+        other => off.push(other.to_string()),
+    }
+    if !matches!(w.again, Again::Same) {
+        off.push(format!("read again: {}", w.again));
+    }
+    if !matches!(w.cached, Cached::Right(_) | Cached::NotLooked) {
+        off.push(format!("in the cache: {}", w.cached));
+    }
+    if c.resyncs > 0 {
+        off.push(format!("pair resyncs in its pass: {}", c.resyncs));
+    }
+    if c.unpaired > 0 {
+        off.push(format!("unpaired presents in its pass: {}", c.unpaired));
+    }
+    if shown > 1 {
+        off.push(format!("shown {shown} times"));
+    }
+    match shape {
+        Some(s) if off.is_empty() => Ok(s),
+        _ => Err(off.join(", ")),
+    }
+}
+
+/// Where Y's samples that differ, `[x0, y0, x1, y1]` inclusive, lie in
+/// an aligned 8×4 cell, as [`gfx11_r8`] has it: an aligned 4×2 or the 4×4
+/// of its right half, or across both halves; or why they don't.
+fn r8_cell([x0, y0, x1, y1]: [u32; 4]) -> Result<String, String> {
+    let (cx, cy) = (x0 / 8 * 8, y0 / 4 * 4);
+    if (x1 / 8 * 8, y1 / 4 * 4) != (cx, cy) {
+        return Err(format!(
+            "Y differs in x {x0}-{x1} y {y0}-{y1}, beyond one aligned 8x4 cell"
+        ));
+    }
+    let cell = format!("the 8x4 cell at x {cx} y {cy}");
+    let (c0, c1, r0, r1) = (x0 % 8, x1 % 8, y0 % 4, y1 % 4);
+    if c1 < 4 {
+        Err(format!(
+            "Y differs only in x%8 {c0}..{c1}, the left half of {cell}"
+        ))
+    } else if c0 < 4 {
+        Ok(format!(
+            "the 8x4 (x%8 {c0}..{c1}, y%4 {r0}..{r1}) of {cell}"
+        ))
+    } else if r0 / 2 == r1 / 2 {
+        Ok(format!(
+            "a 4x2 at x%8 4..7, y%4 {}..{} of {cell}",
+            r0 / 2 * 2,
+            r0 / 2 * 2 + 1
+        ))
+    } else {
+        Ok(format!("the 4x4 at x%8 4..7 of {cell}"))
+    }
 }
 
 /// What a slot pass saw of one frame of one lens.
@@ -4935,6 +5213,9 @@ struct SlotPass {
     pool: Vec<(usize, u64)>,
     /// The lenses whose first wrong frame was looked up in the cache.
     looked: HashSet<usize>,
+    /// By slot, the frame it showed last and the one it showed before
+    /// that.
+    held: HashMap<usize, (Held, Option<Held>)>,
 }
 
 impl SlotPass {
@@ -5230,9 +5511,10 @@ fn slot_pass(
 
 /// Read back each slot `p` shows, as lens `lenses[stream]`, after what
 /// `before` waits for, and judge it against `truth`, into `pass`: a wrong
-/// one read again, and a lens's first wrong one looked up in `player`'s
-/// cache. The pass's first slot the truth judges right plants its
-/// controls.
+/// one read again, its Y samples that differ listed beside the truth's
+/// and those of the frame its slot showed before, and a lens's first
+/// wrong one looked up in `player`'s cache. The pass's first slot the
+/// truth judges right plants its controls.
 fn look(
     on: &Rig,
     player: &Player,
@@ -5269,6 +5551,19 @@ fn look(
                 crossed: (other != lens).then(|| truth.judge(&slot, other, i)),
             });
         }
+        let now = Held {
+            lens,
+            pts,
+            index,
+            run: f.frame.run,
+            seq: f.frame.seq,
+        };
+        let before = match pass.held.get(&f.slot) {
+            Some(&(last, earlier)) if last == now => earlier,
+            Some(&(last, _)) => Some(last),
+            None => None,
+        };
+        pass.held.insert(f.slot, (now, before));
         let told = pass.told();
         let seen = pass.keys.entry((lens, pts)).or_default();
         seen.index = index;
@@ -5298,6 +5593,13 @@ fn look(
         } else {
             Cached::NotLooked
         };
+        let picture = |h: Option<Held>| {
+            h.and_then(|h| truth.frame(h.lens, h.index?))
+                .map(|(_, y)| y)
+        };
+        let samples = picture(Some(now))
+            .filter(|want| want.same_shape(&slot))
+            .map_or_else(Vec::new, |want| y_samples(&slot, want, picture(before)));
         if let Some(seen) = pass.keys.get_mut(&(lens, pts)) {
             seen.first_wrong = Some(Showing {
                 slot: f.slot,
@@ -5306,6 +5608,8 @@ fn look(
                 wrong,
                 again,
                 cached,
+                before,
+                samples,
             });
         }
     }
@@ -5320,7 +5624,8 @@ fn look(
 }
 
 /// What `player`'s cache holds now of the frame `f` shows, against the
-/// truth's frame `index` of lens `lens` and against `slot`.
+/// truth's frame `index` of lens `lens` and against `slot`, and whether
+/// it is the frame the slot was filled from ([`Source`]).
 fn cached(
     player: &Player,
     f: &ShownFrame,
@@ -5332,15 +5637,16 @@ fn cached(
     let Some(frame) = player.cache().get(f.stream, f.frame.time) else {
         return Cached::Gone;
     };
+    let source = Source::of(&f.frame, frame.run, frame.seq);
     let yuv = match frame.to_system() {
         Some(Ok(down)) => yuv_of(&down),
         Some(Err(e)) => Err(e.to_string()),
         None => yuv_of(frame.as_ref()),
     };
     match yuv {
-        Ok(y) if truth.holds(&y, lens, index) => Cached::Right,
-        Ok(y) if y == *slot => Cached::AsSlot,
-        Ok(_) => Cached::Other,
+        Ok(y) if truth.holds(&y, lens, index) => Cached::Right(source),
+        Ok(y) if y == *slot => Cached::AsSlot(source),
+        Ok(_) => Cached::Other(source),
         Err(e) => Cached::Failed(e),
     }
 }
@@ -5744,8 +6050,10 @@ impl Played {
             .join("; ")
     }
 
-    /// One line for wrong frame `key` of pass `name`, `p`.
-    fn key_line(&self, name: &str, (lens, pts): (usize, i64), s: &Seen) -> String {
+    /// One line for wrong frame `key` of pass `name`, whose counts are
+    /// `c`: where told apart, how it is wrong, its Y samples that differ,
+    /// and whether it is on odin's GFX11 R8 signature ([`gfx11_r8`]).
+    fn key_line(&self, name: &str, (lens, pts): (usize, i64), s: &Seen, c: &PassCounts) -> String {
         let at = s.index.map_or_else(|| "?".into(), |i| i.to_string());
         let head = format!(
             "{}, {}, {}, {name}: lens {lens} pts {pts} (frame {at}): {}; shown {}, uploaded {}, \
@@ -5760,8 +6068,18 @@ impl Played {
         );
         match &s.first_wrong {
             Some(w) => format!(
-                "{head}; slot {} run {} seq {}; read again: {}; in the cache: {}; {}",
-                w.slot, w.run, w.seq, w.again, w.cached, w.wrong
+                "{head}; slot {} run {} seq {}; read again: {}; in the cache: {}; {}; {}; {}",
+                w.slot,
+                w.run,
+                w.seq,
+                w.again,
+                w.cached,
+                w.wrong,
+                w.samples(),
+                match gfx11_r8(w, s.shown, c) {
+                    Ok(shape) => format!("on the GFX11 R8 signature: {shape}"),
+                    Err(why) => format!("off the GFX11 R8 signature: {why}"),
+                }
             ),
             None => head,
         }
@@ -5770,8 +6088,12 @@ impl Played {
 
 /// The zero-copy pair check's report, as [`say`]s: a row a pass, a line a
 /// variant on its passes' steadiness, then each wrong frame, at most
-/// [`LISTED`] a pass. What failed, in words: nothing when every pass
-/// showed the truth's frames and none broke.
+/// [`LISTED`] a pass, labelled on odin's GFX11 R8 signature or off it
+/// ([`gfx11_r8`]), and a line that sums the labels up and calls out each
+/// frame off it. What failed, in words: nothing when every pass showed the
+/// truth's frames and none broke; else the wrong frames by path and side
+/// and what the cache found of them ([`Wrongs`]), and the passes that
+/// broke. A frame on the signature fails as any other does.
 fn pair_report(played: &[Played]) -> Vec<String> {
     say(
         "zero-copy pair check: file, path, variant, pass: frames, wrong, verdict; the engine's counts",
@@ -5790,7 +6112,7 @@ fn pair_report(played: &[Played]) -> Vec<String> {
             let (told, more): (Vec<_>, Vec<_>) =
                 p.wrong().partition(|(_, s)| s.first_wrong.is_some());
             for (&key, s) in told {
-                say(&g.key_line(name, key, s));
+                say(&g.key_line(name, key, s, &p.counts));
             }
             if !more.is_empty() {
                 say(&format!(
@@ -5811,31 +6133,17 @@ fn pair_report(played: &[Played]) -> Vec<String> {
             }
         }
     }
-    let passes = || {
-        played
-            .iter()
-            .flat_map(|g| g.passes.iter().map(move |p| (g, p)))
-    };
-    let wrong_in = |kept: bool| {
-        passes()
-            .filter(|(_, (_, k, p))| *k == kept && p.wrong().next().is_some())
-            .count()
-    };
+    let wrongs = Wrongs::of(played);
+    if wrongs.frames > 0 {
+        say(&wrongs.signature());
+    }
     let mut failed = Vec::new();
-    match wrong_in(true) {
-        0 => {}
-        n => failed.push(format!(
-            "{n} kept passes showed frames other than the truth's"
-        )),
+    if wrongs.frames > 0 {
+        failed.push(wrongs.to_string());
     }
-    match wrong_in(false) {
-        0 => {}
-        n => failed.push(format!(
-            "copy wrong: {n} copied passes showed frames other than the truth's, an upstream \
-             decode fault, not path B's"
-        )),
-    }
-    let broken: Vec<String> = passes()
+    let broken: Vec<String> = played
+        .iter()
+        .flat_map(|g| g.passes.iter().map(move |p| (g, p)))
         .filter_map(|(g, (name, _, p))| {
             let why = p.broken.as_ref()?;
             Some(format!(
@@ -5854,6 +6162,486 @@ fn pair_report(played: &[Played]) -> Vec<String> {
     failed
 }
 
+/// `n` and `one` or `many` after it: "1 pass", "3 passes".
+fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// The wrong frames of the zero-copy pair check's passes, summed up.
+#[derive(Debug, Default)]
+struct Wrongs {
+    frames: usize,
+    /// By path and side (kept or copy), in the order played: the wrong
+    /// frames, and the passes that showed them.
+    by_path: Vec<(String, usize, usize)>,
+    /// Those told apart, those of them on the GFX11 R8 signature, and
+    /// each one off it, where and why.
+    told: usize,
+    on: usize,
+    off: Vec<String>,
+    /// What each lookup in the cache found ([`Cached::kind`]), by kind.
+    cache: BTreeMap<&'static str, usize>,
+}
+
+impl Wrongs {
+    fn of(played: &[Played]) -> Wrongs {
+        let mut w = Wrongs::default();
+        for g in played {
+            for (name, kept, p) in &g.passes {
+                let n = p.wrong().count();
+                if n == 0 {
+                    continue;
+                }
+                w.frames += n;
+                let side = format!("{} {}", g.path, if *kept { "kept" } else { "copy" });
+                match w.by_path.iter_mut().find(|(s, _, _)| *s == side) {
+                    Some((_, frames, passes)) => {
+                        *frames += n;
+                        *passes += 1;
+                    }
+                    None => w.by_path.push((side, n, 1)),
+                }
+                for (&(lens, pts), s) in p.wrong() {
+                    let Some(shown) = &s.first_wrong else {
+                        continue;
+                    };
+                    w.told += 1;
+                    if !matches!(shown.cached, Cached::NotLooked) {
+                        *w.cache.entry(shown.cached.kind()).or_default() += 1;
+                    }
+                    match gfx11_r8(shown, s.shown, &p.counts) {
+                        Ok(_) => w.on += 1,
+                        Err(why) => w.off.push(format!(
+                            "{}, {}, {}, {name}: lens {lens} pts {pts} ({why})",
+                            g.file, g.path, g.variant
+                        )),
+                    }
+                }
+            }
+        }
+        w
+    }
+
+    /// The report's line on the GFX11 R8 signature: how many of the
+    /// frames told apart are on it, and each one off it, called out.
+    fn signature(&self) -> String {
+        let mut line = format!(
+            "GFX11 R8 signature: {} of the {} wrong frames told apart on it, {} off it; {} not \
+             told apart",
+            self.on,
+            self.told,
+            self.off.len(),
+            self.frames - self.told
+        );
+        if !self.off.is_empty() {
+            line += &format!("; off it: {}", self.off.join("; "));
+        }
+        line
+    }
+}
+
+impl std::fmt::Display for Wrongs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let by_path: Vec<String> = self
+            .by_path
+            .iter()
+            .map(|(side, frames, passes)| {
+                format!("{side} {frames} in {}", count_of(*passes, "pass", "passes"))
+            })
+            .collect();
+        write!(
+            f,
+            "{} shown wrong ({}); of the {} told apart, {} on the GFX11 R8 signature and {} off \
+             it",
+            count_of(self.frames, "frame", "frames"),
+            by_path.join(", "),
+            self.told,
+            self.on,
+            self.off.len()
+        )?;
+        if self.cache.is_empty() {
+            return write!(f, "; none looked up in the cache");
+        }
+        let found: Vec<String> = self
+            .cache
+            .iter()
+            .map(|(kind, n)| format!("{kind} {n}"))
+            .collect();
+        write!(
+            f,
+            "; the cache, looked up for {}: {}",
+            count_of(self.cache.values().sum(), "frame", "frames"),
+            found.join(", ")
+        )?;
+        let has = |kind: &str| self.cache.contains_key(kind);
+        if has(Cached::Right(Source::TheSlots).kind()) {
+            write!(
+                f,
+                "; where the cache held the slot's own frame right, the decode was right and the \
+                 slot's write or read went wrong"
+            )?;
+        }
+        if has(Cached::AsSlot(Source::TheSlots).kind()) {
+            write!(
+                f,
+                "; where it held the slot's own frame as the slot, the frame was wrong before the \
+                 slot: the decode, or its download"
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The zero-copy pair check's report on mismatches planted in pictures of
+/// noise, judged as the check judges a slot. On odin's GFX11 R8 signature:
+/// a 4×2 of the frame the slot held before at x%8 4..7, y%4 2..3 of an
+/// aligned 8×4 cell (its eight samples listed beside the truth's and the
+/// frame before's, all eight the frame before's), one at y%4 0..1, the
+/// cell's right 4×4 and its whole 8×4, with the cache right (the slot's
+/// own frame, or another decode) or not looked up. The report fails on
+/// them all the same, a frame on the signature alone too, and counts them
+/// by path and side, the frames told apart on the signature and off it,
+/// and what the cache found. The controls, each off the signature and
+/// saying why: the cell's left half alone, a 4×2 across two cells, U
+/// wrong too, a second read with other bytes, the cache with other bytes,
+/// as the slot or gone, a pass that resynced or showed a pair apart, a
+/// frame shown twice, a frame the truth hasn't, and the whole frame
+/// before shown; fresh bytes where the frame before's were planted aren't
+/// counted as its, the samples stop at [`SAMPLES`], and the cache's frame
+/// of another run or seq isn't the slot's.
+#[test]
+fn the_pair_report_labels_odins_gfx11_r8_signature() {
+    let (width, height) = (32u32, 16u32);
+    let noise = |seed: u32, (w, h): (u32, u32)| Plane {
+        width: w,
+        height: h,
+        samples: (0..w * h)
+            .map(|i| ((i ^ seed.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect(),
+    };
+    let picture = |seed: u32| {
+        let chroma = (width / 2, height / 2);
+        Yuv([
+            noise(3 * seed, (width, height)),
+            noise(3 * seed + 1, chroma),
+            noise(3 * seed + 2, chroma),
+        ])
+    };
+    // Frame 2 is the slot's; frame 0, every sample of it frame 2's with
+    // bits flipped, is the one its slot showed before.
+    let want = picture(7);
+    let stale = Yuv(want.0.clone().map(|p| Plane {
+        samples: p.samples.iter().map(|s| s ^ 0x5a).collect(),
+        ..p
+    }));
+    let truth = Truth {
+        lenses: vec![TruthLens {
+            stream: Some(0),
+            frames: vec![
+                (0, stale.clone()),
+                (1, picture(8)),
+                (2, want.clone()),
+                (3, picture(9)),
+            ],
+        }],
+    };
+    let before = Held {
+        lens: 0,
+        pts: 0,
+        index: Some(0),
+        run: 0,
+        seq: 0,
+    };
+    // `want` with Y in `xs` × `ys` taken from `from`.
+    let plant = |from: &Yuv, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        let mut slot = want.clone();
+        for y in ys {
+            for x in xs.clone() {
+                let at = (y * width + x) as usize;
+                slot.0[0].samples[at] = from.0[0].samples[at];
+            }
+        }
+        slot
+    };
+    let showing = |slot: &Yuv, again: Again, cached: Cached| Showing {
+        slot: 1,
+        run: 0,
+        seq: 2,
+        wrong: truth.judge(slot, 0, 2).unwrap_err(),
+        again,
+        cached,
+        before: Some(before),
+        samples: y_samples(slot, &want, truth.frame(0, 0).map(|(_, y)| y)),
+    };
+    let own = || Cached::Right(Source::TheSlots);
+    let calm = PassCounts::default();
+    let on = |slot: &Yuv| showing(slot, Again::Same, own());
+
+    let block = on(&plant(&stale, 12..16, 6..8));
+    assert_eq!(
+        gfx11_r8(&block, 1, &calm),
+        Ok("a 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4".into())
+    );
+    let places: Vec<(u32, u32)> = block.samples.iter().map(|s| (s.x, s.y)).collect();
+    let want_places: Vec<(u32, u32)> = (6..8).flat_map(|y| (12..16).map(move |x| (x, y))).collect();
+    assert_eq!(places, want_places);
+    for s in &block.samples {
+        let at = (s.y * width + s.x) as usize;
+        assert_eq!(
+            (s.slot, s.truth, s.before),
+            (
+                stale.0[0].samples[at],
+                want.0[0].samples[at],
+                Some(stale.0[0].samples[at])
+            )
+        );
+    }
+    let words = block.samples();
+    assert!(
+        words.contains("the first 8 that differ (the slot showed lens 0 pts 0 (frame 0) before)")
+            && words.ends_with("8 of them the frame before's"),
+        "{words}"
+    );
+    for (slot, cached, shape) in [
+        (
+            plant(&stale, 20..24, 8..10),
+            Cached::NotLooked,
+            "a 4x2 at x%8 4..7, y%4 0..1 of the 8x4 cell at x 16 y 8",
+        ),
+        (
+            plant(&stale, 4..8, 0..4),
+            Cached::Right(Source::Another { run: 1, seq: 0 }),
+            "the 4x4 at x%8 4..7 of the 8x4 cell at x 0 y 0",
+        ),
+        (
+            plant(&stale, 24..32, 12..16),
+            own(),
+            "the 8x4 (x%8 0..7, y%4 0..3) of the 8x4 cell at x 24 y 12",
+        ),
+    ] {
+        let s = showing(&slot, Again::Same, cached);
+        assert_eq!(gfx11_r8(&s, 1, &calm), Ok(shape.into()), "{}", s.wrong);
+    }
+
+    // Off the signature, each saying why.
+    let mut chroma = plant(&stale, 12..16, 6..8);
+    chroma.0[1].samples[0] ^= 1;
+    let resynced = PassCounts {
+        resyncs: 1,
+        ..PassCounts::default()
+    };
+    let apart = PassCounts {
+        unpaired: 2,
+        ..PassCounts::default()
+    };
+    let not_in_truth = Showing {
+        wrong: Wrong::NotInTruth,
+        ..on(&plant(&stale, 12..16, 6..8))
+    };
+    for (name, s, shown, counts, why) in [
+        (
+            "the cell's left half alone",
+            on(&plant(&stale, 8..12, 6..8)),
+            1,
+            &calm,
+            "Y differs only in x%8 0..3, the left half of the 8x4 cell at x 8 y 4",
+        ),
+        (
+            "a 4x2 across two cells",
+            on(&plant(&stale, 14..18, 6..8)),
+            1,
+            &calm,
+            "beyond one aligned 8x4 cell",
+        ),
+        ("U wrong too", on(&chroma), 1, &calm, "U differs"),
+        (
+            "a second read with other bytes",
+            showing(&plant(&stale, 12..16, 6..8), Again::Other, own()),
+            1,
+            &calm,
+            "read again: other bytes",
+        ),
+        (
+            "the cache with other bytes",
+            showing(
+                &plant(&stale, 12..16, 6..8),
+                Again::Same,
+                Cached::Other(Source::TheSlots),
+            ),
+            1,
+            &calm,
+            "in the cache: other bytes",
+        ),
+        (
+            "the cache as the slot",
+            showing(
+                &plant(&stale, 12..16, 6..8),
+                Again::Same,
+                Cached::AsSlot(Source::TheSlots),
+            ),
+            1,
+            &calm,
+            "in the cache: as the slot",
+        ),
+        (
+            "the cache gone",
+            showing(&plant(&stale, 12..16, 6..8), Again::Same, Cached::Gone),
+            1,
+            &calm,
+            "in the cache: gone",
+        ),
+        (
+            "a pass that resynced",
+            on(&plant(&stale, 12..16, 6..8)),
+            1,
+            &resynced,
+            "pair resyncs in its pass: 1",
+        ),
+        (
+            "a pass with a pair apart",
+            on(&plant(&stale, 12..16, 6..8)),
+            1,
+            &apart,
+            "unpaired presents in its pass: 2",
+        ),
+        (
+            "a frame shown twice",
+            on(&plant(&stale, 12..16, 6..8)),
+            2,
+            &calm,
+            "shown 2 times",
+        ),
+        (
+            "a frame the truth hasn't",
+            not_in_truth,
+            1,
+            &calm,
+            "not among the truth's frames",
+        ),
+        (
+            "the whole frame before",
+            on(&stale),
+            1,
+            &calm,
+            "beyond one aligned 8x4 cell, U differs, V differs",
+        ),
+    ] {
+        let off = must_fail(name, gfx11_r8(&s, shown, counts));
+        assert!(off.contains(why), "{name}: {off}");
+    }
+    let whole = on(&stale);
+    let places: Vec<(u32, u32)> = whole.samples.iter().map(|s| (s.x, s.y)).collect();
+    assert_eq!(places, (0..width).map(|x| (x, 0)).collect::<Vec<_>>());
+    let fresh = on(&plant(&picture(10), 12..16, 6..8));
+    assert!(!fresh.samples.is_empty(), "{}", fresh.wrong);
+    must_fail(
+        "fresh bytes counted as the frame before's",
+        fresh.samples.iter().all(|s| s.before == Some(s.slot)),
+    );
+    let slot = SlotFrame {
+        stream: 0,
+        epoch: 1,
+        time: Time::ZERO,
+        pts: 0,
+        run: 4,
+        seq: 7,
+        duration: None,
+    };
+    assert_eq!(Source::of(&slot, 4, 7), Source::TheSlots);
+    for (name, run, seq) in [
+        ("the cache's frame of another run", 5, 7),
+        ("the cache's frame at another seq", 4, 8),
+    ] {
+        must_fail(name, Source::of(&slot, run, seq) == Source::TheSlots);
+    }
+
+    // The report: wrong frames fail it on the signature or off it, a
+    // frame on it alone too.
+    let seen = |first_wrong: Option<Showing>| Seen {
+        index: Some(2),
+        shown: 1,
+        uploaded: 1,
+        hash: 0,
+        wrong: 1,
+        first_wrong,
+    };
+    let pass = |keys: Vec<((usize, i64), Seen)>| SlotPass {
+        keys: keys.into_iter().collect(),
+        ..SlotPass::default()
+    };
+    let played = |passes| Played {
+        file: "planted".into(),
+        path: "path B",
+        variant: "locked",
+        passes,
+    };
+    let as_slot = showing(&chroma, Again::Same, Cached::AsSlot(Source::TheSlots));
+    let report = pair_report(&[played(vec![
+        (
+            "kept 1",
+            true,
+            pass(vec![
+                ((0, 2), seen(Some(on(&plant(&stale, 12..16, 6..8))))),
+                ((0, 3), seen(Some(as_slot))),
+            ]),
+        ),
+        ("copy 1", false, pass(vec![((0, 2), seen(None))])),
+    ])]);
+    let failed = must_fail(
+        "wrong frames on the signature and off it",
+        if report.is_empty() {
+            Ok(())
+        } else {
+            Err(report)
+        },
+    );
+    assert_eq!(
+        failed,
+        [
+            "3 frames shown wrong (path B kept 2 in 1 pass, path B copy 1 in 1 pass); of the 2 \
+             told apart, 1 on the GFX11 R8 signature and 1 off it; the cache, looked up for 2 \
+             frames: as the slot with the slot's own frame 1, right with the slot's own frame 1; \
+             where the cache held the slot's own frame right, the decode was right and the slot's \
+             write or read went wrong; where it held the slot's own frame as the slot, the frame \
+             was wrong before the slot: the decode, or its download"
+        ]
+    );
+    let alone = pair_report(&[played(vec![(
+        "kept 1",
+        true,
+        pass(vec![((0, 2), seen(Some(on(&plant(&stale, 12..16, 6..8)))))]),
+    )])]);
+    let alone = must_fail(
+        "a frame on the signature alone",
+        if alone.is_empty() { Ok(()) } else { Err(alone) },
+    );
+    assert!(
+        alone[0].starts_with(
+            "1 frame shown wrong (path B kept 1 in 1 pass); of the 1 told apart, 1 on the GFX11 \
+             R8 signature and 0 off it"
+        ),
+        "{alone:?}"
+    );
+    let g = played(Vec::new());
+    let line = g.key_line(
+        "kept 1",
+        (0, 2),
+        &seen(Some(on(&plant(&stale, 12..16, 6..8)))),
+        &calm,
+    );
+    assert!(
+        line.ends_with(
+            "on the GFX11 R8 signature: a 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4"
+        ),
+        "{line}"
+    );
+    let line = g.key_line("kept 1", (0, 3), &seen(Some(on(&chroma))), &calm);
+    assert!(
+        line.ends_with("off the GFX11 R8 signature: U differs"),
+        "{line}"
+    );
+}
+
 /// Every slot a locked pair shows, kept on the GPU (path B where the
 /// device can be shared, and path A where the GPU imports VA-API's
 /// frames) or copied on the same decoder, is the frame a software decode
@@ -5867,17 +6655,58 @@ fn pair_report(played: &[Played]) -> Vec<String> {
 /// [`PoolWatch`]. A wrong slot is told apart: its kept or copied side,
 /// its planes' differences and bands, whether those bands are a frame of
 /// either lens near it, its slot, run and seq, a second read, its frame
-/// in the cache (each lens's first wrong one a pass), and how often it
-/// was shown and uploaded. Every pass and file runs before the test
-/// fails, and the report (one row a pass, one line a wrong frame) goes to
-/// stderr and the bench notes. Each pass plants controls: its first right
-/// slot judged as its lens's next frame, and as the other lens's, must
-/// fail as the frame it is. A pass that breaks [`path_rule`] (a kept one
-/// with a frame through system memory or refused by the GPU, a copied one
-/// with a frame on the GPU), or fails, stalls, ends short or shows the
-/// lenses apart locked, fails it; a kept one that keeps no frame on the
-/// GPU at all skips, as a file or path not here does, never a pass with
-/// one left out.
+/// in the cache (each lens's first wrong one a pass) and whether that is
+/// the frame the slot was filled from, its first [`SAMPLES`] Y samples
+/// that differ beside the truth's and those of the frame the slot showed
+/// before, how often it was shown and uploaded, and whether it is on
+/// odin's GFX11 R8 signature ([`gfx11_r8`]). Every pass and file runs
+/// before the test fails, and the report (one row a pass, one line a
+/// wrong frame, one line on the signature) goes to stderr and the bench
+/// notes; the failure gives the wrong frames by path and side and what
+/// the cache found ([`Wrongs`]). Each pass plants controls: its first
+/// right slot judged as its lens's next frame, and as the other lens's,
+/// must fail as the frame it is. A pass that breaks [`path_rule`] (a kept
+/// one with a frame through system memory or refused by the GPU, a copied
+/// one with a frame on the GPU), or fails, stalls, ends short or shows
+/// the lenses apart locked, fails it; a kept one that keeps no frame on
+/// the GPU at all skips, as a file or path not here does, never a pass
+/// with one left out. Every wrong frame fails it, on the signature or
+/// off it: there is no tolerance, retry, skip or list of frames let off.
+///
+/// What its outcomes mean:
+///
+/// - Every pass right: each path's slots are the decode's, byte for byte.
+/// - A pass broken: its row says why (its path, its lock, or its run);
+///   its frames say nothing until it plays as its run says.
+/// - Kept and copied passes wrong alike, every line on the GFX11 R8
+///   signature, the cache right with the slot's own frame: the slot-DCC
+///   outcome, the fault odin's RX 7600 (Navi 33, GFX11; Mesa 26.2.5's
+///   RADV, FFmpeg 8.1.3, kernel 7.2.9) showed in M3.8. PR #32 (this
+///   check's diagnostic, at 8ebe9f7) failed all three runs on clip 9 and
+///   none on the perf pair: 141 frames wrong, path B kept 118, path A
+///   kept 16, path B copy 6 and path A copy 1, a kept frame 3.3 % of the
+///   time and a copied one 0.17 %; every one Y only (the R8Unorm plane,
+///   never the Rg8Unorm chroma), an aligned 4×2 (sometimes the 4×4 or
+///   the whole 8×4) at x%8 4..7 and y%4 2..3 of an aligned 8×4 cell, the
+///   same read again, the cache right wherever looked up (on the copied
+///   passes too, whose cached frame is the very bytes uploaded), never on
+///   a slot's first write, and no place twice. PR #33 ran it with
+///   `RADV_DEBUG=nodcc`: it passed twice, every frame right on every path,
+///   and a plain run between the two failed (45 wrong). The fault is in
+///   the slot's write on the GPU, or in every read of it, and needs
+///   RADV's DCC (delta colour compression); it isn't in the decoder,
+///   FFmpeg, the cache, the Copier or the import. Whether it is the write
+///   or the read, and the driver or the hardware, isn't known; DECISIONS
+///   has the fault and what keeps the slots out of DCC. Where a line's
+///   samples are the frame before's (its before column the slot's), the
+///   slot kept part of the frame it held before.
+/// - Wrong lines off the signature, called out: another fault, the line
+///   saying how it is off. Kept passes wrong and copied ones right off
+///   the signature point at path A or B's own steps (the import and its
+///   acquire, the Copier and its barrier); the cache as the slot with the
+///   slot's own frame says the frame was wrong before its slot (the
+///   decode, or its download); the cache right with another decode says
+///   nothing of the slot's own frame.
 #[test]
 #[ignore = "tier2: needs a GPU that keeps decoded frames on it, and the X5 samples or hw-test's perf pairs"]
 fn zero_copy_pair_matches_copy() {
