@@ -459,7 +459,7 @@ same sphere, or none, with no complaint in its log. So Ctrl+C, a failure
 or a full disk leaves nothing at `-o`. A line on stderr says what is
 rendering, then one a second how far it has got, and stdout gets one
 line at the end: `wrote trip.mp4: 600 frames (20 s) at 3840×1920, HEVC
-10-bit in hevc_vaapi, aac audio, 45.1 MB, 14 checks passed`. The exit
+10-bit in hevc_vaapi, aac audio, 45.1 MB, 13 checks passed`. The exit
 statuses are frame's: 1 when the project, the output, the export or a
 check of the file is the problem, 2 for a command line that doesn't
 parse, 3 when a GPU, an adapter or an encoder it needs is missing or

@@ -107,15 +107,16 @@ rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
 `cargo +1.95 test --workspace` passes (368 tests, then 377). Rechecked at
 0233870, after slice 3b's goldens: both pass, with 389 tests.
 
-*Updated 2026-11-11 (review-fix slice):* the heading said "MSRV 1.88
-now and 1.95 with the GUI"; it was 1.88 until the GUI's crates came
-and has been 1.95 since M1 slice 3a (c7f02cf, 2026-10-24), above. From
-this slice `cargo xtask check` builds every crate and target with
-`rust-version`'s toolchain through rustup (`cargo check --workspace
---all-targets --all-features`, in a target directory of its own), with
-a control: a scratch crate whose `rust-version` is one minor past it
-must be refused. Without rustup or the toolchain the step is skipped
-and says so, except under CI, where it fails.
+*Updated 2026-11-11 (review-fix slice):* the heading said "MSRV 1.88 now
+and 1.95 with the GUI"; it was 1.88 until M1 slice 3a brought in wgpu
+(c7f02cf, 2026-10-24) and moved it to 1.95, which egui 0.37, the crate
+that pins that wgpu (D7), needs (the note above); it has been 1.95
+since. From this slice `cargo xtask check` builds every crate and target
+with `rust-version`'s toolchain through rustup (`cargo check --workspace
+--all-targets --all-features`, in a target directory of its own), with a
+control: a scratch crate whose `rust-version` is one minor past it must
+be refused. Without rustup or the toolchain the step is skipped and says
+so, except under CI, where it fails.
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
@@ -602,9 +603,10 @@ and a control that passes fails the check (D32). The licence allow
 list now holds only what the Linux graph uses (GPL-3.0-or-later, MIT,
 Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
 BSD-3-Clause, ISC, Zlib, Unicode-3.0), and `unused-allowed-license` is
-`warn`, so an entry nothing uses shows and goes; GPL-3.0, LGPL-3.0,
-MIT-0, Unicode-DFS-2016, CC0-1.0 and MPL-2.0 left the list, unused. A
-licence a new dependency brings is added with its reason here.
+`warn`, so an entry nothing uses shows and goes; GPL-3.0,
+LGPL-2.1-or-later, LGPL-3.0-or-later, MIT-0, Unicode-DFS-2016, BSL-1.0,
+CC0-1.0 and MPL-2.0 left the list, unused. A licence a new dependency
+brings is added with its reason here.
 
 ## D9. Test tiers and synthetic media
 

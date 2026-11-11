@@ -810,7 +810,7 @@ going on in software, or `software`), `--adapter` and `--overwrite`.
 Without `--json`, a line on stderr says what is rendering, then one a
 second how far it has got, and a run that wrote its file prints one
 line on stdout (`wrote out.mp4: 600 frames (20 s) at 3840×1920, HEVC
-10-bit in hevc_vaapi, aac audio, 45.1 MB, 14 checks passed`).
+10-bit in hevc_vaapi, aac audio, 45.1 MB, 13 checks passed`).
 
 The run, in order: the command line; the output (refused before any work
 if something is there, as frame's is); the project, loaded, and its
