@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use spherecut_core::{FrameRate, ManualClock};
+use spherecut_core::{Clock, FrameRate, ManualClock};
 use spherecut_media::backend::{FfmpegBackend, HwKind, MediaBackend};
 use spherecut_playback::lock::field;
 use spherecut_playback::{
@@ -354,6 +354,74 @@ fn a_member_that_cant_open_refuses_the_lock() {
     );
     assert_eq!((status, said), (LockStatus::Pending, Vec::new()));
     assert_eq!(settled(&player), LockStatus::Locked);
+    common::join(player);
+}
+
+/// A member whose first frame fails to decode once the pair has locked
+/// refuses the lock with `"open"` too (V1): it handed out no frame for
+/// the pair to end at, so the group lets go of its lenses and the other
+/// plays on alone. Forced, lens 1's open is held until lens 0 has
+/// opened, so that lens 1's open locks the pair before its first frame
+/// fails; unforced, either lens may open first. Its control, a lens that
+/// decodes in lens 1's place, stays locked and the pair plays.
+#[test]
+fn a_member_that_fails_its_first_frame_once_locked_refuses_the_lock() {
+    let _time = timed("a_member_that_fails_its_first_frame_once_locked_refuses_the_lock");
+    let (gate, gate_too) = (Gate::new(), Gate::new());
+    let backend = PerStream::new(vec![
+        Lens::default(),
+        Lens::default().read_error_at(0).held_by(&gate),
+        Lens::default().read_error_at(0),
+        Lens::default().held_by(&gate_too),
+    ]);
+    let clock = crate::held::clock();
+    let player = common::player(backend, clock.clone(), crate::held::config());
+    // How lens 0 opened with lens `k` locked stood, lens `k`'s open held
+    // by `gate` (if any) until lens 0 has opened: what was said of the
+    // lock, and what shows once played to frame 10.
+    let run = |k: usize, gate: Option<&Gate>| -> ((LockStatus, Vec<Said>), Vec<i64>) {
+        player.pause();
+        said(&player);
+        player.open_locked(LENSES.into(), [0, k], LockSpec::default());
+        if let Some(gate) = gate {
+            let first = until(WAIT, || {
+                snapshot(&player).streams.first()?.opened.then_some(())
+            });
+            assert!(first.is_some(), "lens 0 never opened");
+            gate.release();
+        }
+        let up = until(WAIT, || {
+            let p = player.present(Instant::now())?;
+            (pts(&p).first() == Some(&0)).then_some(())
+        });
+        assert!(up.is_some(), "lens 0's first frame never showed");
+        player.play();
+        clock.set(crate::held::at(10), Instant::now());
+        let played = until(WAIT, || {
+            let p = player.present(Instant::now())?;
+            let shown = pts(&p);
+            (shown.first() == Some(&10)).then_some(shown)
+        })
+        .expect("lens 0 never played to frame 10");
+        let status = snapshot(&player).lock.map(|l| l.status);
+        let mut heard = said(&player);
+        if heard.is_empty() && status != Some(LockStatus::Locked) {
+            heard =
+                until(WAIT, || Some(said(&player)).filter(|s| !s.is_empty())).unwrap_or_default();
+        }
+        ((status.expect("a locked open's group"), heard), played)
+    };
+    let (forced, shown) = run(1, Some(&gate));
+    assert_eq!(refused(forced), Ok(field::OPEN));
+    assert_eq!(shown, [10]);
+    let (unforced, shown) = run(2, None);
+    assert_eq!(refused(unforced), Ok(field::OPEN));
+    assert_eq!(shown, [10]);
+    // Control: lens 3 decodes, and the pair stays locked and plays.
+    let (locked, shown) = run(3, Some(&gate_too));
+    let (status, heard) = must_fail("lens 3 decodes", refused(locked));
+    assert_eq!((status, heard), (LockStatus::Locked, Vec::new()));
+    assert_eq!(shown, [10, 10]);
     common::join(player);
 }
 
