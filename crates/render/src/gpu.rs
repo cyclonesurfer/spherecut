@@ -2,7 +2,7 @@
 //!
 //! Every device Spherecut renders on is made here, from one instance
 //! descriptor (Vulkan only), one adapter rule and one device descriptor,
-//! in [`open_device`], so that `spherecut frame`, the tests and the GUI
+//! in `open_device`, so that `spherecut frame`, the tests and the GUI
 //! agree on features and limits. The GUI (slice 7) opens its device here
 //! too and hands it to eframe through egui-wgpu's `WgpuSetup::Existing`;
 //! `WgpuSetup::CreateNew` would have egui-wgpu make its own. Slice 5b
@@ -10,7 +10,7 @@
 //! `Adapter::open_with_callback`, to add the video-decode extensions and
 //! queues FFmpeg's Vulkan Video needs and the DMA-BUF import extensions,
 //! then wraps it with `wgpu::Adapter::create_device_from_hal`; that
-//! replaces [`open_device`] and nothing else (DECISIONS D31). As built,
+//! replaces `open_device` and nothing else (DECISIONS D31). As built,
 //! only path B's device is made so ([`Gpu::headless_shared`],
 //! [`crate::vkshare`]): path A needs no more than a feature.
 

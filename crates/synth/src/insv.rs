@@ -344,7 +344,7 @@ impl Records {
     /// use, the newest `cals` holds (4 for V6, else 3 for V3, else none).
     ///
     /// Record 4: an item a frame, a frame apart, with the items
-    /// [`X5_EXPOSURE_MARGINS`] gives at `rate` before the first frame's,
+    /// `X5_EXPOSURE_MARGINS` gives at `rate` before the first frame's,
     /// whose stamp is field 24's, and past the last frame's, as the X5
     /// writes it: so field 24's frame is item 5 at 29.97 fps, not item 0,
     /// and the record has 122 items for clip 1's 114 frames. Record 3: a

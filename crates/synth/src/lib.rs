@@ -181,8 +181,10 @@ pub const SEAM_CHECKER_CONTRAST: f64 = 0.15;
 /// puts lens 1 at +0.5 EV and +5 % red, which takes a display value above
 /// 0.840 past white (in linear light 1/(√2 · 1.05) = 0.673), so the scene
 /// stays below that, and lens 1 can be matched back to lens 0 everywhere
-/// on it. Its darkest value, a dark cell at +X, is 0.05, above the 0.01
-/// that section 16's estimator leaves out.
+/// on it. Its darkest value, a dark cell at +X, is 0.05, which is 0.0039
+/// in linear light: within 20° of +X the dark cells lie under the 0.01
+/// that 8.2's and section 16's estimators leave out of their log ratios,
+/// which read the bright cells there (0.35, in linear light 0.10).
 pub const SEAM_LINES_PEAK: f64 = 0.8;
 
 /// `SeamLines`' luminance ramp at azimuth `along` degrees: 0.2 at +X up

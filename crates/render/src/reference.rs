@@ -9,11 +9,15 @@
 //! own precision: its `atan2`, its filtering weights and its LOD
 //! fraction.
 //! The Tier 1 tests hold `render_still` to it at calibrated tolerances.
+//!
+//! [`render_rig`] is the stitch of a lens pair the same way (M3 plan
+//! 10.3), written before the shader's, which is held to it in turn.
 
 use std::f64::consts::{PI, TAU};
 
 use glam::{DVec2, DVec3};
 use spherecut_core::video::{Transfer, VideoPlanes};
+use spherecut_sphere::rig::Rig;
 use spherecut_sphere::{equirect, pixel};
 
 use crate::color::{self, Placement};
@@ -44,6 +48,36 @@ pub struct Options {
     /// Level 0 only, as `DebugMode::Level0`.
     pub level0: bool,
     pub placement: Placement,
+}
+
+/// What [`render_rig`] writes instead of the stitched picture, for checks:
+/// M3 plan 10.3's debug modes 4 to 7. They stay apart from
+/// [`crate::DebugMode`], every one of whose values the pipeline tests
+/// build for the equirect pass, until the shader's stitch (M3.7) joins
+/// the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RigDebug {
+    #[default]
+    Off,
+    /// Mode 4: calibration block 0's lens alone, wherever its mask covers,
+    /// with no feather; black elsewhere.
+    Lens0,
+    /// Mode 5: block 1's lens alone.
+    Lens1,
+    /// Mode 6: the weights the lenses blend by, block 0's in red and
+    /// block 1's in blue.
+    Weights,
+    /// Mode 7: the seam difference, |lin0 − lin1| × 8 in linear light
+    /// where both lenses cover; black elsewhere.
+    SeamDiff,
+}
+
+/// How [`render_rig`] renders.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RigOptions {
+    pub debug: RigDebug,
+    /// Level 0 only, as `DebugMode::Level0`.
+    pub level0: bool,
 }
 
 /// The world direction through point `(x, y)` of a `size` view, in
@@ -148,6 +182,146 @@ pub fn render_blurred(
     })
 }
 
+/// A lens pair stitched through `view`, `size` pixels large, as the encode
+/// pass computes it: M3 plan 10.3's stitch in f64 (10.4). `lenses` are the
+/// two tracks' pictures, by track, so calibration block b of `rig` samples
+/// `lenses[rig.lenses[b].track]`; `gains` are the frame's gains on linear
+/// RGB, by block.
+///
+/// For each output pixel and each lens: the parallax-corrected ray
+/// ([`Rig::ray`]) through the lens's model to its slot; a footprint from
+/// the pixel's four ±½ px rays, projected through the same lens
+/// ([`lens_footprint`]), and the LOD it gives; the mask at that LOD
+/// ([`Rig::covers`]: θ_max less the margin, and the frame term); trilinear
+/// taps, or level 0 alone under `opts.level0`, which leaves the mask at
+/// the footprint's LOD; the slot's own matrix and EOTF; then the lens's
+/// gain in linear light. The lenses blend by [`Rig::weights`] at their own
+/// LODs, (w0 rgb0 + w1 rgb1)/(w0 + w1), and a lens whose weight is 0 isn't
+/// sampled. The weights sum to 1 wherever a lens covers the pixel, a
+/// covering lens taking whole what no feather weighs, so the stitch is
+/// black only where no lens covers. Then the view's dim, f16 and the
+/// OETF, as [`render`] ends. `opts.debug` writes one of [`RigDebug`]'s
+/// pictures instead: a lens alone ends as the stitch does, with its gain;
+/// the weights and the seam difference are written as [`lod_map`] writes,
+/// as the nearest f16 with no dim and no OETF, the weights as
+/// [`Rig::weights`] gives them (normalised) and the difference as
+/// |g0 lin0 − g1 lin1| × 8 for each channel, the gains applied.
+///
+/// A lens's model is in the pixels of its track's picture, so a texel
+/// becomes a uv over the picture's own size, and a tap past the picture's
+/// edge clamps to it; the mask's frame term, which keeps every footprint
+/// off that edge, reads the rig's own side for the lens
+/// (`RigLens::side`), which [`Rig::build`] takes from the track. Where a
+/// lens's model has no image for one of a pixel's five rays the lens has
+/// no footprint there, and doesn't cover the pixel. A fisheye view past
+/// θ = π is black, as [`render`]'s is. The rows are dealt to threads
+/// ([`row_threads`]), and the picture is the same on any number of them.
+///
+/// What the shader's stitch (M3.7) must match that 10.3 doesn't say: the
+/// mask's θ test is made in angle. 10.3 writes it as cos θ ≥ cos(θ_max −
+/// margin · 2^λ / texels per radian), and [`Rig::covers`] compares θ with
+/// that bound. The two agree while the bound is 0 or more. Once the
+/// margin's angle passes θ_max the bound is negative, the cosine is even,
+/// and the cosine form covers directions that the angle refuses. On Pat's
+/// V3 lens 0 at 768² (174.73 texels a radian at a θ_max of 100°) the
+/// bound is below 0 from LOD 7.253, while the frame term still passes the
+/// lens's axis up to LOD 7.577 and the slot's middle, half a degree off
+/// it, up to 7.584. Of the 401 directions from 0° to 40° off the axis
+/// along a meridian, the cosine form covers 14 at LOD 7.272 (a bound of
+/// −1.36°) and 108 at 7.4 (−10.77°), whichever the meridian, and 10 to 26
+/// at 7.565 (−24.19°), by the meridian, where the angle covers none; at
+/// LOD 7.202 both cover 35 and at 7.635 neither any. So the WGSL compares
+/// θ in angle, or guards the cosine form (the bound 0 or more, and cos θ
+/// ≥ cos of it), and M3.7's mask test needs a case at such an LOD, an
+/// output a few pixels across.
+///
+/// This builds both pictures' mip chains and renders once: a caller with
+/// more than one picture to make of one pair of frames makes a
+/// [`LensPair`] and calls [`render_rig_of`].
+///
+/// Refuses a gain that isn't finite or is below 0, a rig whose block
+/// reads a track other than 0 or 1 or whose blocks both read one track,
+/// and planes [`render`] would refuse, in that order: a call refused for
+/// its gains or its rig builds no chain.
+pub fn render_rig(
+    lenses: [&dyn VideoPlanes; 2],
+    rig: &Rig,
+    gains: [[f64; 3]; 2],
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &RigOptions,
+) -> Result<ImageF64, RenderError> {
+    // What `render_rig_of` refuses, before the chains are paid for.
+    check_gains(&gains)?;
+    check_tracks(rig)?;
+    render_rig_of(&LensPair::new(lenses)?, rig, gains, view, size, opts)
+}
+
+/// [`render_rig`] of a pair made ready once: the same picture, bit for
+/// bit, without the pair's mip chains built again. Everything of the rig
+/// (the binding, θ_max, the feather, q), the gains, the view and the
+/// options are this call's, so one pair serves any number of rigs and
+/// views of its two frames.
+///
+/// Refuses what [`render_rig`] refuses of the rig and the gains.
+pub fn render_rig_of(
+    pair: &LensPair,
+    rig: &Rig,
+    gains: [[f64; 3]; 2],
+    view: &ViewParams,
+    size: (u32, u32),
+    opts: &RigOptions,
+) -> Result<ImageF64, RenderError> {
+    check_gains(&gains)?;
+    check_tracks(rig)?;
+    let pixels = per_pixel_rows(size, |px| pair.shade(rig, &gains, view, size, px, opts));
+    Ok(ImageF64 {
+        width: size.0,
+        height: size.1,
+        data: pixels.into_iter().flatten().collect(),
+    })
+}
+
+/// Refuses a gain that isn't a finite number of 0 or more.
+fn check_gains(gains: &[[f64; 3]; 2]) -> Result<(), RenderError> {
+    match gains
+        .iter()
+        .flatten()
+        .find(|g| !(g.is_finite() && **g >= 0.0))
+    {
+        Some(gain) => Err(RenderError::Invalid(format!(
+            "a lens's gain is {gain}: a gain is finite and 0 or more"
+        ))),
+        None => Ok(()),
+    }
+}
+
+/// Pixel `(i, j)`'s footprint in calibration block `b`'s slot, in texels:
+/// how the lens's texel ([`Rig::texel`]) changes across one pixel to the
+/// right and one pixel down, from central differences along the
+/// directions half a pixel either side, the four rays [`uv_footprint`]
+/// casts, projected through the lens (M3 plan 10.3). The lens samples at
+/// the LOD log2 of the longer of the two, and its mask takes its margin
+/// from that LOD. `None` where the lens's model has no image for the
+/// pixel's centre or for one of the four rays: the lens has no footprint
+/// there, and doesn't cover the pixel.
+///
+/// # Panics
+///
+/// If `b` is neither 0 nor 1.
+pub fn lens_footprint(
+    rig: &Rig,
+    b: usize,
+    view: &ViewParams,
+    size: (u32, u32),
+    i: u32,
+    j: u32,
+) -> Option<(DVec2, DVec2)> {
+    check_block(b);
+    let rays = Rays::at(|x, y| view.dir(size, x, y), pixel::centre(i, j));
+    Footprint::of(rig, b, &rays).map(|f| (f.across[0], f.across[1]))
+}
+
 /// What the flat pass draws (`fs_flat`, the GUI's raw view, and
 /// `StillOptions::flat`): `frame`'s picture scaled to `size`, clamped at
 /// its edges, as the encode pass computes it.
@@ -166,6 +340,13 @@ pub fn render_flat(
 
 /// What `DebugMode::LodHeatmap` writes, read back with `Depth::Linear`:
 /// luma's and chroma's LOD as sampled, then luma's before clamping.
+///
+/// This is one equirect frame's map, the frame placed on the sphere by
+/// `placement`. A rig has none yet: [`RigDebug`] has no LOD mode, and
+/// [`lens_footprint`] gives luma's footprint alone, with chroma's LOD
+/// and the levels that both clamp to left inside the sampler. The M3
+/// plan's `dfish_lod_heatmap` (10.5) holds the shader's debug mode 3
+/// against such a map for each lens, which is M3.7's to build.
 pub fn lod_map(
     frame: &dyn VideoPlanes,
     view: &ViewParams,
@@ -195,6 +376,269 @@ fn per_pixel(size: (u32, u32), f: impl Fn((u32, u32)) -> [f64; 3]) -> ImageF64 {
         width: size.0,
         height: size.1,
         data,
+    }
+}
+
+/// `f` of each pixel of a `size` grid, row after row from the top. The
+/// rows are dealt to threads in turn, and each value is `f`'s of its own
+/// pixel alone, so the result doesn't depend on how many threads there
+/// are.
+pub(crate) fn per_pixel_rows<T: Copy + Default + Send>(
+    size: (u32, u32),
+    f: impl Fn((u32, u32)) -> T + Sync,
+) -> Vec<T> {
+    rows_on(row_threads(), size, f)
+}
+
+/// How many threads [`render_rig`], the masks and the strips of
+/// [`crate::seam`] deal their rows to: the machine's parallelism, and 16
+/// at most. Each call starts its own, so a caller that runs them from
+/// threads of its own multiplies the two counts.
+pub fn row_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(16)
+}
+
+/// [`per_pixel_rows`] on `threads` threads.
+fn rows_on<T: Copy + Default + Send>(
+    threads: usize,
+    size: (u32, u32),
+    f: impl Fn((u32, u32)) -> T + Sync,
+) -> Vec<T> {
+    let mut values = vec![T::default(); size.0 as usize * size.1 as usize];
+    let mut dealt: Vec<Vec<(u32, &mut [T])>> = (0..threads.max(1)).map(|_| Vec::new()).collect();
+    for (j, row) in values.chunks_mut(size.0.max(1) as usize).enumerate() {
+        let k = j % dealt.len();
+        dealt[k].push((j as u32, row));
+    }
+    let f = &f;
+    std::thread::scope(|s| {
+        for rows in dealt {
+            s.spawn(move || {
+                for (j, row) in rows {
+                    for (i, value) in row.iter_mut().enumerate() {
+                        *value = f((i as u32, j));
+                    }
+                }
+            });
+        }
+    });
+    values
+}
+
+/// The directions through a point of an output grid and half a pixel
+/// either side of it: the centre's, then those to its right, to its left,
+/// below and above, which the footprint's central differences take.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Rays {
+    pub(crate) d: DVec3,
+    sides: [DVec3; 4],
+}
+
+impl Rays {
+    /// The rays at point `c` of a grid whose point `(x, y)`, in pixels
+    /// from the top-left corner, looks along `dir(x, y)`.
+    pub(crate) fn at(dir: impl Fn(f64, f64) -> DVec3, c: DVec2) -> Rays {
+        Rays {
+            d: dir(c.x, c.y),
+            sides: [
+                dir(c.x + 0.5, c.y),
+                dir(c.x - 0.5, c.y),
+                dir(c.x, c.y + 0.5),
+                dir(c.x, c.y - 0.5),
+            ],
+        }
+    }
+}
+
+/// Where one lens of a rig samples for one output pixel, in its slot's
+/// texels: the texel at the pixel's centre, and how it changes across the
+/// pixel, to the right and down ([`lens_footprint`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Footprint {
+    texel: DVec2,
+    across: [DVec2; 2],
+}
+
+impl Footprint {
+    /// Block `b`'s footprint for `rays`, or `None` where its model has no
+    /// image for one of them.
+    pub(crate) fn of(rig: &Rig, b: usize, rays: &Rays) -> Option<Footprint> {
+        let at = |k: usize| rig.texel(b, rays.sides[k]);
+        Some(Footprint {
+            texel: rig.texel(b, rays.d)?,
+            across: [at(0)? - at(1)?, at(2)? - at(3)?],
+        })
+    }
+
+    /// The LOD the lens samples luma at, before it is clamped to the
+    /// chain, and its mask takes its margin from: log2 of the footprint's
+    /// longer side.
+    pub(crate) fn lod(&self) -> f64 {
+        lod(self.across, DVec2::ONE)
+    }
+}
+
+/// Whether block `b`'s mask covers the pixel `rays` go through
+/// ([`Rig::covers`] at the footprint's LOD): where [`render_rig`] draws
+/// the lens alone. A lens with no footprint covers nothing.
+pub(crate) fn lens_covers(rig: &Rig, b: usize, rays: &Rays) -> bool {
+    Footprint::of(rig, b, rays).is_some_and(|f| rig.covers(b, rays.d, f.lod()))
+}
+
+/// Whether a view shows anything at point `c` of its `size` target: a
+/// fisheye past θ = π would show the sphere twice (`inside` in
+/// `shaders/project.wgsl`).
+pub(crate) fn in_view(view: &ViewParams, size: (u32, u32), c: DVec2) -> bool {
+    view.theta(size, c.x, c.y) <= PI + 1e-4
+}
+
+/// Refuses a block index that no rig has: `b` is 0 or 1.
+pub(crate) fn check_block(b: usize) {
+    assert!(b < 2, "block {b}: a rig's blocks are 0 and 1");
+}
+
+/// Refuses a rig that a pair of pictures can't be sampled under: a block
+/// that reads a track other than 0 or 1, or both blocks reading one
+/// track. [`Rig::build`] gives each block its own track of the two, so
+/// only a rig put together by hand can fail; nothing renders two blocks
+/// from one picture (an LRV's two halves are two pictures, 15), and a rig
+/// that did would be a block's track written wrong.
+pub(crate) fn check_tracks(rig: &Rig) -> Result<(), RenderError> {
+    let tracks = [rig.lenses[0].track, rig.lenses[1].track];
+    for (b, track) in tracks.into_iter().enumerate() {
+        if track > 1 {
+            return Err(RenderError::Invalid(format!(
+                "block {b} of the rig reads track {track}: a pair has tracks 0 and 1"
+            )));
+        }
+    }
+    if tracks[0] == tracks[1] {
+        return Err(RenderError::Invalid(format!(
+            "both blocks of the rig read track {}: each block reads its own track",
+            tracks[0]
+        )));
+    }
+    Ok(())
+}
+
+/// A lens pair's two pictures made ready to sample: each track's planes
+/// as the shader sees them, clamped at their edges, with their mip chains
+/// in f64. The chains are most of what a small picture or a strip costs
+/// (11 to 17 ms a pair of 768² and about half a second a pair of 3840²,
+/// whose chains take about 470 MB), and they are the planes' alone:
+/// nothing of a rig is here, neither its binding nor a gain nor θ_max. So
+/// a caller that samples one pair of frames more than once, under one rig
+/// or under many as a fit does (8.4), makes the pair once and hands it to
+/// [`render_rig_of`] and [`crate::seam::strips_of`] with each rig.
+pub struct LensPair {
+    /// By track.
+    sources: [Source; 2],
+    /// Whether each track's values are linear already, by track.
+    linear: [bool; 2],
+}
+
+impl std::fmt::Debug for LensPair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LensPair")
+            .field("sizes", &[self.sources[0].size0, self.sources[1].size0])
+            .field("linear", &self.linear)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LensPair {
+    /// The pair for the two tracks' pictures, by track. Refuses planes
+    /// [`render`] would refuse.
+    pub fn new(lenses: [&dyn VideoPlanes; 2]) -> Result<LensPair, RenderError> {
+        let source = |frame: &dyn VideoPlanes| {
+            let mut source = Source::new(frame, &Placement::FULL)?;
+            // Fisheye uv has no wrap.
+            source.wraps = false;
+            Ok::<Source, RenderError>(source)
+        };
+        Ok(LensPair {
+            sources: [source(lenses[0])?, source(lenses[1])?],
+            linear: lenses.map(|frame| frame.color().transfer == Transfer::Linear),
+        })
+    }
+
+    /// Block `b` of `rig`'s linear light at unit gain where `f` samples
+    /// its track's picture: trilinear taps (level 0 alone when `level0`),
+    /// the matrix and the EOTF, with no rounding. `rig` is one that
+    /// [`check_tracks`] passed.
+    pub(crate) fn light(&self, rig: &Rig, b: usize, f: &Footprint, level0: bool) -> [f64; 3] {
+        let track = rig.lenses[b].track;
+        let source = &self.sources[track];
+        source.light(&source.lens_sampled(f), level0, self.linear[track])
+    }
+
+    /// What [`render_rig_of`] writes at pixel `(i, j)` under `rig`, one
+    /// that [`check_tracks`] passed.
+    fn shade(
+        &self,
+        rig: &Rig,
+        gains: &[[f64; 3]; 2],
+        view: &ViewParams,
+        size: (u32, u32),
+        (i, j): (u32, u32),
+        opts: &RigOptions,
+    ) -> [f64; 3] {
+        let c = pixel::centre(i, j);
+        if !in_view(view, size, c) {
+            return [0.0; 3];
+        }
+        let rays = Rays::at(|x, y| view.dir(size, x, y), c);
+        let feet = [0, 1].map(|b| Footprint::of(rig, b, &rays));
+        // A lens with no footprint has no LOD: an infinite one, whose
+        // margin no mask covers.
+        let lods = feet.map(|f| f.map_or(f64::INFINITY, |f| f.lod()));
+        let covers = |b: usize| feet[b].is_some() && rig.covers(b, rays.d, lods[b]);
+        // The lens's light with its gain, in linear light.
+        let lit = |b: usize| {
+            let light = feet[b].map_or([0.0; 3], |f| self.light(rig, b, &f, opts.level0));
+            [0, 1, 2].map(|k| light[k] * gains[b][k])
+        };
+        // The linear target is f16; the encode pass undoes the EOTF.
+        let dim = view.dim_at(c.x, c.y);
+        let picture = |rgb: [f64; 3]| rgb.map(|v| srgb_oetf(round_f16(v * dim).clamp(0.0, 1.0)));
+        let alone = |b: usize| {
+            if covers(b) { picture(lit(b)) } else { [0.0; 3] }
+        };
+        match opts.debug {
+            RigDebug::Off => {
+                let w = rig.weights(rays.d, lods);
+                let sum = w[0] + w[1];
+                if sum > 0.0 {
+                    let mut blend = [0.0; 3];
+                    for (b, weight) in w.into_iter().enumerate() {
+                        if weight > 0.0 {
+                            for (acc, v) in blend.iter_mut().zip(lit(b)) {
+                                *acc += weight * v;
+                            }
+                        }
+                    }
+                    picture(blend.map(|v| v / sum))
+                } else {
+                    [0.0; 3]
+                }
+            }
+            RigDebug::Lens0 => alone(0),
+            RigDebug::Lens1 => alone(1),
+            RigDebug::Weights => {
+                let w = rig.weights(rays.d, lods);
+                [w[0], 0.0, w[1]].map(round_f16)
+            }
+            RigDebug::SeamDiff => {
+                if covers(0) && covers(1) {
+                    let (a, b) = (lit(0), lit(1));
+                    [0, 1, 2].map(|k| round_f16((a[k] - b[k]).abs() * 8.0))
+                } else {
+                    [0.0; 3]
+                }
+            }
+        }
     }
 }
 
@@ -316,10 +760,27 @@ impl Source {
         }
     }
 
-    /// The colour at `s`, as the encode pass computes it: trilinear
-    /// taps (level 0 alone when `level0`), the matrix, the EOTF unless
-    /// the values are `linear`, f16, then the OETF.
-    fn shade(&self, s: &Sampled, level0: bool, linear: bool) -> [f64; 3] {
+    /// Where a lens's footprint `f`, in this picture's texels, samples:
+    /// the texel as a uv over the picture's own size, and chroma by the
+    /// chroma transform, as [`Source::flat_footprint`]'s.
+    fn lens_sampled(&self, f: &Footprint) -> Sampled {
+        let uv = f.texel / self.size0;
+        let g = f.across.map(|v| v / self.size0);
+        let gc = g.map(|v| v * self.chroma_scale);
+        Sampled {
+            uv,
+            cuv: uv * self.chroma_scale + self.chroma_offset,
+            lod: [f.lod(), lod(gc, self.size1)],
+            levels: self.levels,
+            inside: true,
+            dim: 1.0,
+        }
+    }
+
+    /// The linear light at `s`, before the target rounds it: trilinear
+    /// taps (level 0 alone when `level0`), the matrix, and the EOTF
+    /// unless the values are `linear`.
+    fn light(&self, s: &Sampled, level0: bool, linear: bool) -> [f64; 3] {
         let lods = if level0 {
             [0.0, 0.0]
         } else {
@@ -353,12 +814,18 @@ impl Source {
                 .sum::<f64>()
                 .clamp(0.0, 1.0)
         });
+        rgb.map(|v| if linear { v } else { srgb_eotf(v) })
+    }
+
+    /// The colour at `s`, as the encode pass computes it: the linear
+    /// light ([`Source::light`]), the dim, f16, then the OETF.
+    fn shade(&self, s: &Sampled, level0: bool, linear: bool) -> [f64; 3] {
         if !s.inside {
             return [0.0; 3];
         }
-        rgb.map(|v| {
+        self.light(s, level0, linear).map(|v| {
             // The linear target is f16; the encode pass undoes the EOTF.
-            let lin = round_f16((if linear { v } else { srgb_eotf(v) }) * s.dim);
+            let lin = round_f16(v * s.dim);
             srgb_oetf(lin.clamp(0.0, 1.0))
         })
     }
@@ -612,6 +1079,25 @@ mod tests {
                 .map(|(x, y)| f(x, y))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn rows_come_out_alike_on_any_number_of_threads() {
+        // Each pixel's own coordinates, so a row dealt to the wrong place
+        // shows.
+        let f = |(i, j): (u32, u32)| [f64::from(i), f64::from(j), f64::from(i * 100 + j)];
+        let one = rows_on(1, (7, 13), f);
+        assert_eq!(one.len(), 7 * 13);
+        for (n, value) in one.iter().enumerate() {
+            let (i, j) = ((n % 7) as u32, (n / 7) as u32);
+            assert_eq!(*value, f((i, j)), "pixel ({i}, {j})");
+        }
+        for threads in [0, 2, 3, 4, 13, 16, 64] {
+            assert_eq!(rows_on(threads, (7, 13), f), one, "{threads} threads");
+        }
+        // No pixels: nothing to deal.
+        assert!(rows_on(4, (0, 5), f).is_empty());
+        assert!(rows_on(4, (5, 0), f).is_empty());
     }
 
     #[test]

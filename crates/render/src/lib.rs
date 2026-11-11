@@ -32,6 +32,7 @@ pub mod plane;
 pub mod project;
 pub mod readback;
 pub mod reference;
+pub mod seam;
 pub mod still;
 pub mod timers;
 pub mod upload;

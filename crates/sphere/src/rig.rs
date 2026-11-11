@@ -42,6 +42,7 @@
 //! (`spherecut_synth::lens`), which composes the same rig from the plan's
 //! text with its own code to check this one (4.1 rule 2).
 
+use std::cmp::Ordering;
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::fmt;
 
@@ -908,21 +909,49 @@ impl Rig {
     /// the parallax-corrected ray, 0 past θ_max − margin(λ_b) or where the
     /// sample's footprint leaves its slot (10.3's frame term), then
     /// normalised. h shrinks, never below 0.5°, where the margin or the
-    /// frame leaves less overlap than h. Both are 0 where neither lens
-    /// covers `d`.
+    /// frame leaves less overlap than h.
+    ///
+    /// Where both of those are 0 and a lens covers `d` ([`Rig::covers`]),
+    /// the covering lens with the smaller θ takes `d` whole, at a weight
+    /// of 1, and where both cover it at one θ each takes ½. A lens covers
+    /// at a feathered weight of 0 past 90° + h, and the other lens can
+    /// weigh nothing there too: where the lenses' parallax or a tilt puts
+    /// the seam's plane further past 90° on both than the feather is wide
+    /// (the X5's baseline puts it 0.46° past at q = 0.5 m⁻¹ and 3.1° at
+    /// 3.34), or where one lens's θ_max is so near 90° that its mask ends
+    /// short of the other's band. So the weights sum to 1 wherever a lens
+    /// covers `d`, and both are 0 only where neither does: no direction a
+    /// lens covers is left black. Where one lens alone covers such a
+    /// direction, the rule goes on from the normalised weights, which are
+    /// 1 and 0 at its feather's end already. Where both cover, the picture
+    /// switches from one lens to the other where their θ meet, as a
+    /// feather of 0 switches at 90°; where their h differ and the θ meet
+    /// inside the wider band, the switch falls on that band's end. 10.3's
+    /// WGSL must copy the rule.
     pub fn weights(&self, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
-        let w = [0, 1].map(|b| {
-            if !self.covers(b, d, lod[b]) {
-                return 0.0;
-            }
-            let h = self.feather_at(b, lod[b]);
-            1.0 - smoothstep(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(self.ray(b, d)))
+        // Each covering lens's θ and its feathered weight.
+        let lenses = [0, 1].map(|b| {
+            self.covers(b, d, lod[b]).then(|| {
+                let theta = off_axis(self.ray(b, d));
+                let h = self.feather_at(b, lod[b]);
+                (theta, 1.0 - smoothstep(FRAC_PI_2 - h, FRAC_PI_2 + h, theta))
+            })
         });
+        let w = lenses.map(|lens| lens.map_or(0.0, |(_, w)| w));
         let sum = w[0] + w[1];
         if sum > 0.0 {
-            w.map(|w| w / sum)
-        } else {
-            [0.0; 2]
+            return w.map(|w| w / sum);
+        }
+        // No feather weighs d: the covering lens nearer its axis takes it.
+        match lenses {
+            [Some((theta_0, _)), Some((theta_1, _))] => match theta_0.partial_cmp(&theta_1) {
+                Some(Ordering::Less) => [1.0, 0.0],
+                Some(Ordering::Greater) => [0.0, 1.0],
+                _ => [0.5; 2],
+            },
+            [Some(_), None] => [1.0, 0.0],
+            [None, Some(_)] => [0.0, 1.0],
+            [None, None] => [0.0; 2],
         }
     }
 
@@ -1122,8 +1151,8 @@ fn off_axis(d: DVec3) -> f64 {
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
     if hi <= lo {
         return match x.partial_cmp(&lo) {
-            Some(std::cmp::Ordering::Less) => 0.0,
-            Some(std::cmp::Ordering::Equal) => 0.5,
+            Some(Ordering::Less) => 0.0,
+            Some(Ordering::Equal) => 0.5,
             _ => 1.0,
         };
     }

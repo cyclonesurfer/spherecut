@@ -1,8 +1,14 @@
 //! Shared by the render tests: one lavapipe device per test binary, and
 //! frames in every plane layout the renderer samples, made from synth's
-//! patterns with padded rows.
+//! patterns with padded rows. For the stitching tests (M3.4), [`rig`]
+//! holds sphere's rig of synth's camera, [`predict`] the seam shifts a
+//! model predicts and [`budget`] 3.4's error budget as the tests hold it.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
+
+pub mod budget;
+pub mod predict;
+pub mod rig;
 
 use std::sync::OnceLock;
 

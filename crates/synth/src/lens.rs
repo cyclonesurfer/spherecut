@@ -11,8 +11,8 @@
 //! and centre, and [`render_lens`] renders what each lens sees through
 //! synth's own forward and inverse ([`TruthModel`]), which
 //! [`lens_planes`] codes as the X5 does. [`x5_like`] and [`kb_like`] are
-//! 4.2's two rigs, and a [`RenderCache`] keeps a test binary's renders
-//! to a budget.
+//! 4.2's two rigs, [`x5_like_v6`] the first with V6 terms, and a
+//! [`RenderCache`] keeps a test binary's renders to a budget.
 //!
 //! The frames are 6.2's. A lens frame is Mei's and OpenCV's: +x right in
 //! the image, +y down, +z along the optical axis. The rig frame is
@@ -1330,10 +1330,10 @@ fn lens_on_threads(
                                     i as f64 + (f64::from(a) + 0.5) / f64::from(n),
                                     j as f64 + (f64::from(b) + 0.5) / f64::from(n),
                                 );
-                                let Some(d) = truth.model.invert(at, truth.theta_max) else {
+                                let Some((d, seen)) = sight(rig, truth, to_scene, centre, at)
+                                else {
                                     continue;
                                 };
-                                let seen = sees(rig, centre, to_scene * d);
                                 let c =
                                     expose(crate::color(pattern, seen, frame), truth, off_axis(d));
                                 for (acc, c) in acc.iter_mut().zip(c) {
@@ -1361,6 +1361,56 @@ pub fn exposed_at(rig: &RigTruth, lens: usize, frame: u32, row: u32) -> f64 {
     let side = f64::from(rig.lenses[lens].side);
     (f64::from(frame) + rig.late_frames[lens]) / rig.motion.fps
         + rig.readout_s * (f64::from(row) + 0.5) / side
+}
+
+/// Where the scene is seen from the point `px` of track `track`'s picture
+/// of `frame`, in the model's pixels from the top-left corner: the unit
+/// direction, in the scene's frame, that [`render_lens`] reads the
+/// pattern in for a sample there. It is synth's inverse, `to_rig` under
+/// the rig's motion at the time the point's row is exposed
+/// ([`exposed_at`]), and the ray from `centre_m` to the scene's sphere or
+/// the ground. `None` past `theta_max` and where the inverse has no
+/// direction, where the picture is black. 8.3's predictions take each
+/// seam sample through it, with no images.
+///
+/// A point outside the picture, which has `side` rows of `side` pixels,
+/// has no row to be exposed with and shows nothing, so it is `None` too.
+pub fn seen(rig: &RigTruth, track: usize, frame: u32, px: DVec2) -> Option<DVec3> {
+    let truth = &rig.lenses[track];
+    let side = f64::from(truth.side);
+    let inside = |v: f64| v >= 0.0 && v < side;
+    if !(inside(px.x) && inside(px.y)) {
+        return None;
+    }
+    // Row j covers j to j + 1, as `render_lens` deals its samples.
+    let turned = rig.motion.at(exposed_at(rig, track, frame, px.y as u32));
+    let (_, point) = sight(
+        rig,
+        truth,
+        turned * truth.to_rig,
+        turned * truth.centre_m,
+        px,
+    )?;
+    Some(point.normalize())
+}
+
+/// One sample of a lens's picture, at `at` in its model's pixels: the
+/// lens-frame direction synth's inverse gives it, no further than
+/// `theta_max` off the axis, and the point the ray along it from `centre`
+/// meets ([`sees`]), which the pattern is read in the direction of.
+/// `to_scene` and `centre` are the lens's `to_rig` and `centre_m` under
+/// the rig's motion at the sample's time. [`render_lens`] and [`seen`]
+/// both sample through this, so that what `seen` says a point shows is
+/// what the picture shows there.
+fn sight(
+    rig: &RigTruth,
+    truth: &LensTruth,
+    to_scene: DQuat,
+    centre: DVec3,
+    at: DVec2,
+) -> Option<(DVec3, DVec3)> {
+    let d = truth.model.invert(at, truth.theta_max)?;
+    Some((d, sees(rig, centre, to_scene * d)))
 }
 
 /// The point a ray from `centre` along `d`, both in the scene's frame,
@@ -1788,6 +1838,52 @@ pub fn x5_like() -> CalibTruth {
     }
 }
 
+/// The conventions 4.2's round trip plants in the X5-like rig, rung 1's:
+/// the binding direct, map C, the placeholder Euler convention, block 1's
+/// turn about Y, no upright turn, tz as stored and V6 read radial only
+/// (which [`x5_like`]'s V3 terms don't read). Rung 1 [`compose`]s the rig
+/// under them at front track 0 and `[X5_LIKE_SIDE; 2]`.
+pub fn x5_like_planted() -> Planted {
+    Planted {
+        binding: TruthBinding::Direct,
+        canvas: TruthCanvas::C,
+        euler: TruthEuler::PLACEHOLDER,
+        turn: TruthTurn::Y,
+        upright: QuarterTurn::Zero,
+        tz: TruthTz::AsStored,
+        v6: TruthV6::RADIAL_ONLY,
+    }
+}
+
+/// [`x5_like`] as a V6 calibration, for the round trip's controls that
+/// need V6 terms (4.2's wrong V6 reading, 10.5's `dfish_seam_registration`
+/// and 8.5's hard neighbours): `x5_like`'s blocks, with their centres,
+/// angles and t_1, under Pat's V6 focal lengths (insta360.md, "Pat's X5
+/// samples") and [`PATS_V6_D`] for both blocks' terms.
+///
+/// [`compose`]d at [`X5_LIKE_SIDE`] under C, its frame cuts the image
+/// circle at [`IMAGE_CIRCLE_DEG`] on all four sides, as `x5_like`'s
+/// does, under 19 of [`TruthV6`]'s 21 readings, where r(106°) is 386 to
+/// 404 px by lens, direction and reading. Under the other two, the pair
+/// read as (d6, d5), with or without its extension, and the prism at d9
+/// by axis, track 0's circle ends 1.19 px and 0.25 px short of the
+/// middle of its bottom edge: the circle reaches that edge only at 106.5°
+/// and 106.1°, so a truth read through either shows a sliver of black
+/// there.
+pub fn x5_like_v6() -> CalibTruth {
+    let v3 = x5_like();
+    let focals = [(4277.52, 4277.27), (4284.40, 4284.76)];
+    CalibTruth {
+        blocks: std::array::from_fn(|b| BlockTruth {
+            fx: focals[b].0,
+            fy: focals[b].1,
+            ..v3.blocks[b]
+        }),
+        dist: StoredDist::V6 { d: PATS_V6_D },
+        ..v3
+    }
+}
+
 /// The distortion of [`kb_like`]'s lenses, k1 to k5.
 pub const KB_LIKE_K: [f64; 5] = [0.012, -0.0021, 0.0003, 0.0, 0.0];
 
@@ -1919,7 +2015,7 @@ mod tests {
     use std::hash::Hash;
 
     use spherecut_testkit::bench;
-    use spherecut_testkit::control::{at_most, must_fail};
+    use spherecut_testkit::control::{at_least, at_most, must_fail};
 
     use super::*;
     use crate::AXIS_MARKERS;
@@ -3625,6 +3721,120 @@ mod tests {
         );
     }
 
+    /// `seen` is where `render_lens` reads the pattern: synth's inverse,
+    /// the rig as it is turned when the point's row is exposed, and the
+    /// ray from the lens's centre to the scene or the ground.
+    #[test]
+    fn seen_is_where_render_lens_reads_the_pattern() {
+        // A rig that turns about +Y at 30°/s, lens 1 half a frame late, a
+        // rolling shutter, a scene 1.5 m out and a ground 1.2 m down: each
+        // moves HighFrequency's 1° cells at 64², about 3° a pixel.
+        let mut rig = square_rig(64);
+        rig.motion = Motion {
+            fps: 32.0,
+            turns: vec![Turn {
+                start_s: 0.0,
+                end_s: 2.0,
+                axis: DVec3::Y,
+                deg_per_s: 30.0,
+            }],
+        };
+        rig.late_frames = [0.0, 0.5];
+        rig.readout_s = 1.0 / 32.0;
+        rig.scene_radius_m = Some(1.5);
+        rig.ground_m = Some(1.2);
+        // How many pixels of `picture`, rendered at ss = 1, are not the
+        // pattern where `shows` says their centres see, or black where it
+        // says they see nothing.
+        let unlike = |picture: &RgbImage, shows: &dyn Fn(DVec2) -> Option<DVec3>| {
+            let mut wrong = 0;
+            for j in 0..picture.height {
+                for i in 0..picture.width {
+                    let want = shows(pixel_centre(i, j))
+                        .map_or([0.0; 3], |d| crate::color(Pattern::HighFrequency, d, 10));
+                    if picture.get(i, j) != want {
+                        wrong += 1;
+                    }
+                }
+            }
+            wrong
+        };
+        let mut global = rig.clone();
+        global.readout_s = 0.0;
+        let mut far = rig.clone();
+        far.scene_radius_m = None;
+        far.ground_m = None;
+        for lens in 0..2 {
+            let picture = render_lens(Pattern::HighFrequency, &rig, lens, 10, 1);
+            assert_eq!(
+                unlike(&picture, &|px| seen(&rig, lens, 10, px)),
+                0,
+                "lens {lens}"
+            );
+            // Controls: the other track, every row at the frame's own
+            // time, and the scene infinitely far.
+            let controls = [
+                ("the other track's sight", &rig, 1 - lens),
+                ("every row at the frame's time", &global, lens),
+                ("the scene infinitely far", &far, lens),
+            ];
+            for (name, rig, track) in controls {
+                let wrong = unlike(&picture, &|px| seen(rig, track, 10, px));
+                let wrong = must_fail(name, at_most(wrong, 0));
+                assert!(wrong > 64 * 64 / 16, "lens {lens}, {name}: {wrong}");
+            }
+        }
+
+        // By hand. Row 40 of lens 1 at frame 10 is exposed (10 + ½)/32 s
+        // and (40 + ½)/64 of the readout after it, 0.34790 s, by when the
+        // rig has turned 30°/s · 0.34790 s = 10.437° about +Y. With the
+        // scene infinitely far, the point sees the direction `to_rig`
+        // gives synth's inverse, turned by that much.
+        let lens = &far.lenses[1];
+        let at = DVec2::new(20.25, 40.75);
+        let t = 10.5 / 32.0 + 40.5 / 64.0 / 32.0;
+        assert_eq!(exposed_at(&far, 1, 10, 40), t);
+        let turned = DQuat::from_axis_angle(DVec3::Y, (30.0 * t).to_radians());
+        let by_hand = turned * (lens.to_rig * lens.model.inverse(at).unwrap());
+        let got = seen(&far, 1, 10, at).unwrap();
+        // Each of these four differences is rounding alone, which reaches
+        // 7e-16 at other points of this rig: 4e-15 leaves it room.
+        assert!((got - by_hand).length() <= 4e-15, "{got} against {by_hand}");
+        assert!((got.length() - 1.0).abs() <= 4e-15);
+        // Control: the row above is exposed sooner.
+        let above = seen(&far, 1, 10, at - DVec2::Y).unwrap();
+        let sooner = DQuat::from_axis_angle(DVec3::Y, (30.0 / 64.0 / 32.0f64).to_radians());
+        let same_time = lens.to_rig * lens.model.inverse(at - DVec2::Y).unwrap();
+        assert!((above - sooner.inverse() * turned * same_time).length() <= 4e-15);
+        must_fail(
+            "the row above at this row's time",
+            at_most((above - turned * same_time).length(), 1e-6),
+        );
+        // A near scene is seen in the direction of the point the ray from
+        // the lens's centre meets, 1.5 m from the rig's origin.
+        let mut near_scene = far.clone();
+        near_scene.scene_radius_m = Some(1.5);
+        let centre = turned * lens.centre_m;
+        let point = sees(&near_scene, centre, by_hand);
+        assert!((point.length() - 1.5).abs() <= 1e-12);
+        let got = seen(&near_scene, 1, 10, at).unwrap();
+        assert!((got - point.normalize()).length() <= 4e-15);
+        assert!((got - by_hand).length() > 1e-3);
+
+        // Nothing past the image circle, nor outside the picture.
+        assert_eq!(seen(&rig, 0, 10, DVec2::new(0.5, 0.5)), None);
+        for outside in [
+            DVec2::new(-0.01, 32.0),
+            DVec2::new(32.0, -0.01),
+            DVec2::new(64.0, 32.0),
+            DVec2::new(32.0, 64.0),
+            DVec2::new(f64::NAN, 32.0),
+        ] {
+            assert_eq!(seen(&rig, 0, 10, outside), None, "{outside}");
+        }
+        assert!(seen(&rig, 0, 10, DVec2::new(63.99, 32.0)).is_some());
+    }
+
     /// The gain and the vignette apply in linear light.
     #[test]
     fn render_lens_applies_gain_and_vignette_in_linear_light() {
@@ -4072,6 +4282,20 @@ mod tests {
         Ok(())
     }
 
+    /// How far past its own edge of `lens`'s frame the direction `theta`
+    /// degrees off its axis lands along its image's +x, +y, −x and −y, in
+    /// pixels: below 0 inside the frame.
+    fn past_the_edge(lens: &LensTruth, theta: f64) -> [f64; 4] {
+        let side = f64::from(lens.side);
+        let at = |phi: f64| lens.model.forward(lens_dir(theta, phi)).unwrap();
+        [
+            at(0.0).x - side,
+            at(90.0).y - side,
+            -at(180.0).x,
+            -at(270.0).y,
+        ]
+    }
+
     /// The X5-like truth at 768² under maps A, B and C: centres 2 to 3 px
     /// off the slot's on each axis, and a frame that cuts the image
     /// circle on all four sides at 106°, where r is 393 to 399 px under C.
@@ -4104,6 +4328,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The V6 readings under which the X5-like V6 truth's frame doesn't
+    /// cut track 0's circle on all four sides at 768² under map C. Both
+    /// read the tangential pair as (d6, d5) and the prism at d9 by axis,
+    /// whose y terms pull the bottom of the circle in. With each: where
+    /// its +y direction lands at 106°, in pixels down the frame, and the
+    /// angle past which the circle reaches the bottom edge, to the 0.01°
+    /// below. Without the pair's extension the direction lands 1.19 px
+    /// inside the edge, which the circle reaches between 106.54° and
+    /// 106.55°; with it, 0.25 px inside, and between 106.11° and 106.12°.
+    /// The other three sides are cut, by 6.7 px or more, and so are all
+    /// four of track 1's.
+    const V6_UNCUT: [(TruthV6, f64, f64); 2] = [
+        (
+            TruthV6 {
+                tangential: Some(Tangential {
+                    pair: PairOrder::D6D5,
+                    extension: false,
+                }),
+                prism: Some(Prism {
+                    at: PrismAt::D9,
+                    order: PrismOrder::ByAxis,
+                }),
+            },
+            766.805,
+            106.54,
+        ),
+        (
+            TruthV6 {
+                tangential: Some(Tangential {
+                    pair: PairOrder::D6D5,
+                    extension: true,
+                }),
+                prism: Some(Prism {
+                    at: PrismAt::D9,
+                    order: PrismOrder::ByAxis,
+                }),
+            },
+            767.751,
+            106.11,
+        ),
+    ];
+
+    /// The X5-like V6 calibration at 768² under map C, read through each
+    /// of the 21 V6 readings (amendment 4): `x5_like`'s centres, and a
+    /// frame that cuts the image circle on all four sides at 106°, as
+    /// `x5_like`'s does. The two readings of `V6_UNCUT` are left out, and
+    /// held to miss where its doc says they do, each side on its own.
+    #[test]
+    fn x5_like_v6_cuts_its_circle_under_every_reading() {
+        let cal = x5_like_v6();
+        assert_eq!(cal.generation(), Generation::V6);
+        let v3 = compose(&x5_like(), &x5_like_planted(), 0, [X5_LIKE_SIDE; 2]);
+        let mut cut_under = 0;
+        // The least that an uncut reading's other three sides are cut by.
+        let mut least_cut = f64::INFINITY;
+        for v6 in TruthV6::all() {
+            let planted = Planted {
+                v6,
+                ..x5_like_planted()
+            };
+            let rig = compose(&cal, &planted, 0, [X5_LIKE_SIDE; 2]);
+            for (t, lens) in rig.lenses.iter().enumerate() {
+                let c = lens.model.intrinsics().1;
+                assert_eq!(c, v3.lenses[t].model.intrinsics().1, "{v6:?}, track {t}");
+                assert_eq!(lens.theta_max, IMAGE_CIRCLE_DEG.to_radians());
+            }
+            if let Some((_, y, reach)) = V6_UNCUT.iter().find(|(uncut, ..)| *uncut == v6) {
+                // Track 0's +y direction alone lands inside, `y` px down
+                // the frame, and the other three sides are cut.
+                let lens = &rig.lenses[0];
+                let past = past_the_edge(lens, IMAGE_CIRCLE_DEG);
+                let down = f64::from(lens.side) + past[1];
+                assert!((down - y).abs() < 0.005, "{v6:?}: track 0's +y at {down}");
+                for side in [0, 2, 3] {
+                    assert!(past[side] > 0.0, "{v6:?}: side {side} by {}", past[side]);
+                    least_cut = least_cut.min(past[side]);
+                }
+                // The circle reaches the bottom edge within 0.01° past
+                // `reach`, and no sooner.
+                assert_eq!(cut(lens, reach + 0.01), Ok(()), "{v6:?}");
+                must_fail("the bottom edge reached 0.01° sooner", cut(lens, *reach));
+                assert_eq!(cut(&rig.lenses[1], IMAGE_CIRCLE_DEG), Ok(()), "{v6:?}");
+                continue;
+            }
+            for (t, lens) in rig.lenses.iter().enumerate() {
+                assert_eq!(cut(lens, IMAGE_CIRCLE_DEG), Ok(()), "{v6:?}, track {t}");
+                // Control: 95° off the axis, inside on all four sides.
+                must_fail("95° taken for the circle's edge", cut(lens, 95.0));
+                let c = lens.model.intrinsics().1;
+                for k in 0..8 {
+                    let d = lens_dir(IMAGE_CIRCLE_DEG, f64::from(k) * 45.0);
+                    let r = (lens.model.forward(d).unwrap() - c).length();
+                    assert!(
+                        (386.0..=404.0).contains(&r),
+                        "{v6:?}, track {t}, {k}: r = {r}"
+                    );
+                }
+            }
+            cut_under += 1;
+        }
+        assert_eq!(cut_under, 21 - V6_UNCUT.len());
+        assert!(least_cut >= 6.7, "{least_cut}");
+        must_fail(
+            "the uncut readings' other sides cut by 6.8 px",
+            at_least(least_cut, 6.8),
+        );
     }
 
     /// `kb_like` swaps each lens for an equidistant KB lens of

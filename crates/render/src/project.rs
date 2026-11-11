@@ -91,7 +91,8 @@ impl ViewParams {
     }
 
     /// The lens point at `(x, y)` of a `size` target, in pixels from the
-    /// top-left corner: [`pixel::to_lens`] over the frame.
+    /// top-left corner: [`spherecut_sphere::pixel::to_lens`] over the
+    /// frame.
     pub fn lens_point(&self, size: (u32, u32), x: f64, y: f64) -> DVec2 {
         let [fx, fy, fw, fh] = self.frame(size);
         DVec2::new(
