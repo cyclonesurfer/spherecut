@@ -1024,6 +1024,21 @@ the writer's own `sv3d` is neither. Our reader of `sv3d` stays lenient
 and the check is what tells. The export's `sa3d` check also wants what
 FFmpeg 6.1 takes (D52).
 
+*Updated 2026-11-11 (review-fix slice):* what the 256 MiB `moov` limit
+costs in memory (F132). The parser reads the whole `moov` payload into
+one buffer, up to 256 MiB, and copies each leaf it keeps out of it: the
+sample tables whatever their size, and others up to 1 MiB. A hostile
+`moov` made of sample tables is held twice while it is parsed, so
+probe's peak is about 512 MiB, bounded but twice the limit; that
+matters for the GUI, which probes in its own process. `inject` holds
+more: the parsed tree, its own copy of `moov`'s bytes, a copy for each
+placing pass, and a tree and a copy for each re-reading of the edited
+`moov` to find its chunk tables, so a few times the `moov` at its peak.
+It reads only Spherecut's own muxer's output (`encode.rs`), never a
+file a user hands it, so no hostile `moov` reaches it. Keeping the
+sample tables as ranges into the one buffer would bring probe's peak to
+the limit; nothing does that yet.
+
 ## D16. `inject` and `Mp4Writer` write atomically
 
 *2026-10-23, M0. Updates D4.*
