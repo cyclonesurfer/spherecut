@@ -188,12 +188,8 @@ struct State {
     waits: u64,
     /// A locked pair's group, while one is set.
     group: Option<Group>,
-    /// The streams whose inserts wait for room now: the time of the frame
-    /// each waits with, whether it decodes ahead
-    /// ([`FrameCache::insert_ahead`]), which the backstop counts, and its
-    /// stop token: one already stopped is on its way out, to a newer
-    /// request, and the backstop doesn't count it.
-    waiting: BTreeMap<usize, (Time, bool, StopToken)>,
+    /// The streams whose inserts wait for room now, and how each waits.
+    waiting: BTreeMap<usize, Waiter>,
     /// The newest request each stream has landed or failed.
     landed: BTreeMap<usize, u64>,
     resyncs: u64,
@@ -210,6 +206,23 @@ struct Group {
     /// The newest request a hold was made for: an older one's worker,
     /// stopped on its way, makes none.
     request: u64,
+}
+
+/// An insert waiting for room.
+#[derive(Debug)]
+struct Waiter {
+    /// The time of the frame it waits with.
+    time: Time,
+    /// Whether it decodes ahead ([`FrameCache::insert_ahead`]), which the
+    /// backstop counts.
+    ahead: bool,
+    /// Its stop token: one already stopped is on its way out, to a newer
+    /// request, and the backstop doesn't count it.
+    stop: StopToken,
+    /// Which wait it is, the count of waits when it began: a stopped
+    /// waiter of an earlier open that wakes late takes out its own entry,
+    /// not the one a newer worker of its stream put in since.
+    wait: u64,
 }
 
 /// What holds a group's base where it is for now, each member's flag
@@ -465,8 +478,8 @@ impl State {
         let mut at: Option<Time> = None;
         for m in members {
             match self.waiting.get(&m) {
-                Some((t, true, stop)) if !stop.is_stopped() => {
-                    at = Some(at.map_or(*t, |a| a.min(*t)));
+                Some(w) if w.ahead && !w.stop.is_stopped() => {
+                    at = Some(at.map_or(w.time, |a| a.min(w.time)));
                 }
                 _ => return false,
             }
@@ -867,7 +880,7 @@ impl FrameCache {
     ) -> Insert {
         may_block("waiting for room in the frame cache");
         let mut g = self.lock();
-        let mut waited = false;
+        let mut waited = None;
         let r = loop {
             if g.closed || stop.is_stopped() {
                 break Insert::Stopped;
@@ -878,10 +891,19 @@ impl FrameCache {
             if let Some(r) = g.offer(stream, &frame) {
                 break r;
             }
-            if !waited {
+            if waited.is_none() {
                 g.waits += 1;
-                g.waiting.insert(stream, (frame.time, ahead, stop.clone()));
-                waited = true;
+                let wait = g.waits;
+                g.waiting.insert(
+                    stream,
+                    Waiter {
+                        time: frame.time,
+                        ahead,
+                        stop: stop.clone(),
+                        wait,
+                    },
+                );
+                waited = Some(wait);
             }
             if g.backstop() {
                 // The other member hears of it as it wakes.
@@ -894,7 +916,9 @@ impl FrameCache {
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
         };
-        if waited {
+        if let Some(wait) = waited
+            && g.waiting.get(&stream).is_some_and(|w| w.wait == wait)
+        {
             g.waiting.remove(&stream);
         }
         drop(g);

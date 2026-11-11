@@ -915,6 +915,56 @@ fn the_backstop_resyncs_members_stuck_ahead() {
     assert_eq!((got.len(), base, resyncs), (0, Some(at(2)), 0));
 }
 
+/// A stopped waiter that wakes late, as one of an earlier open does when
+/// it missed the wake after its token stopped, takes out its own entry
+/// among the waiters, not the one a newer worker of its stream put in
+/// since: the stats, and the backstop, still count the newer one.
+#[test]
+fn a_late_stopped_waiter_leaves_the_newer_one_counted() {
+    // A first insert waits on stream 0 and its token stops with no wake;
+    // with `newer`, a second waits on stream 0 before the first wakes.
+    // The waiters counted once the first has gone.
+    let run = |newer: bool| {
+        let c = Arc::new(FrameCache::new(60, Time::from_secs(1)));
+        let k = (0..)
+            .find(|&k| c.try_insert(0, frame(k, 1, k as u64, 10)) == Insert::Full)
+            .unwrap();
+        let wait = |stop: StopToken| {
+            let c = c.clone();
+            std::thread::spawn(move || c.insert(0, frame(k, 1, k as u64, 10), &stop))
+        };
+        let begun = |waits: u64| {
+            let start = Instant::now();
+            while c.stats().waits < waits {
+                assert!(start.elapsed() < Duration::from_secs(10));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        };
+        let (old, new) = (StopSource::new(), StopSource::new());
+        let first = wait(old.next());
+        begun(1);
+        old.next();
+        let second = newer.then(|| {
+            let second = wait(new.next());
+            begun(2);
+            second
+        });
+        assert_eq!(first.join().unwrap(), Insert::Stopped);
+        let left = c.stats().waiting;
+        new.shutdown();
+        c.wake();
+        if let Some(second) = second {
+            assert_eq!(second.join().unwrap(), Insert::Stopped);
+        }
+        assert_eq!(c.stats().waiting, 0);
+        left
+    };
+    assert_eq!(run(true), 1);
+
+    // Control: no newer waiter, and none is left.
+    must_fail("no newer waiter", run(false) == 1);
+}
+
 // The model-checked property test.
 
 const FRAMES: i64 = 24;
