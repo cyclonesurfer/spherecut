@@ -1052,20 +1052,30 @@ fn the_gpu_time_covers_the_ingest() {
     let mut runs = Vec::new();
     for _ in 0..5 {
         let start = std::time::Instant::now();
-        uploader.upload(gpu, &frame, &slot).unwrap();
+        let stats = uploader.upload(gpu, &frame, &slot).unwrap();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let wall = start.elapsed().as_secs_f64() * 1e3;
-        // The other tests poll the same device, and the one whose poll
-        // finds the read-back done runs its callback after letting the
-        // device go, so the reading can come a moment after this wait.
-        let timed = (0..1000)
-            .find_map(|_| {
-                uploader.poll(gpu).or_else(|| {
+        // Each reading comes once, from whichever collects it first: the
+        // upload's own stats when another test's poll ran the read-back's
+        // callback before the upload returned, else a later poll. Another
+        // test's poll can also take the callback and run it a moment after
+        // this wait, so the wait for it is a deadline, not a count.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let timed = stats
+            .gpu_ms
+            .or_else(|| {
+                loop {
+                    if let Some(ms) = uploader.poll(gpu) {
+                        break Some(ms);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    let _ = gpu.device.poll(wgpu::PollType::Poll);
                     std::thread::sleep(std::time::Duration::from_millis(1));
-                    None
-                })
+                }
             })
-            .expect("a GPU time once idle");
+            .expect("a GPU time within 10 s of the upload's work being done");
         let timed = f64::from(timed);
         eprintln!("GPU {timed:.3} ms of {wall:.3} ms");
         runs.push(timed / wall);

@@ -56,7 +56,10 @@ pub struct UploadStats {
     /// The GPU time of the latest upload whose timestamps are back (not
     /// necessarily this one's): its ingest passes and mips, on either
     /// path (the belt's copies come before the span, as `write_texture`'s
-    /// do). `None` without timestamps, or before any is back.
+    /// do). `None` without timestamps, or before any is back. Each
+    /// reading is given once, here or by a later [`Uploader::poll`],
+    /// never both: another thread's poll of the device can bring this
+    /// upload's own back before the upload returns.
     pub gpu_ms: Option<f32>,
 }
 
@@ -531,7 +534,8 @@ impl Uploader {
 
     /// Runs map callbacks (the timers' read-backs, the belt's chunks)
     /// without waiting, and gives the GPU time read since the last call,
-    /// if any. On a lost device it reads nothing more.
+    /// if any. On a lost device it reads nothing more. A reading an
+    /// upload's [`UploadStats::gpu_ms`] gave is not given again here.
     pub fn poll(&mut self, gpu: &Gpu) -> Option<f32> {
         if gpu.is_lost() {
             return None;
