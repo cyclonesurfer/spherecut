@@ -788,9 +788,13 @@ fn fixed(v: f64, decimals: usize) -> String {
 /// be finite: a NaN or an infinity prints as Rust writes it, which no
 /// camera does.
 ///
-/// `planted` names the conventions the strings are printed under. M3.2
-/// prints `cal`'s stored numbers as they are, so no token depends on it
-/// yet; the files M3.5 writes print a rig's truth through it (7.2).
+/// `planted` names the conventions the strings are printed under, and no
+/// token depends on it: the strings are `cal`'s canvas numbers as stored,
+/// never scaled to a track, as the X5 writes the same strings in every
+/// master, LRV and mode (plan 3.1). Only [`crate::lens::compose`] scales
+/// a block to a track. The files M3.5 writes print a rig's stored numbers
+/// through this unchanged; plan 7.2's "scaled to the lens size" is stale
+/// on this.
 pub fn print(cal: &CalibTruth, planted: &Planted) -> String {
     // The stored numbers are printed as they are, whatever is planted.
     let _ = planted;
