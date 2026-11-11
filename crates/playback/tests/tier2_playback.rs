@@ -113,7 +113,7 @@ use spherecut_playback::decoder::choose;
 use spherecut_playback::{
     CacheBudget, Counter, DecoderPreference, HwSupport, LockSpec, LockStatus, PerfStats, Player,
     PlayerConfig, PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, SlotFrame,
-    SlotStats, Stage, StreamFormat, ZeroCopy,
+    SlotState, SlotStats, Stage, StreamFormat, ZeroCopy,
 };
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::vkshare::Copied;
@@ -2586,9 +2586,14 @@ fn refused(e: RenderError) -> NotCompared {
 /// the two renders must be the same bytes. A surface the decoder took
 /// back while it was held would show a later picture. Every other frame
 /// is also taken on the GPU right after its decode, before its download,
-/// as the upload thread takes it while later decodes may still read it
-/// as a reference, and must render as the copy too. Returns the frames
-/// compared, and of those, the ones taken right after their decode.
+/// and must render as the copy too. On path B that is the upload
+/// thread's order: the copier copies the image out as soon as the decoder
+/// hands it over. It is one thread, so no later decode runs during the
+/// copy, as one may on the player's decode thread. On path A the take
+/// only imports the planes, and the GPU reads them when they render,
+/// after the download, so the order there is the held take's. Returns the
+/// frames compared, and of those, the ones taken right after their
+/// decode.
 fn compare_zero_copy(
     rig: &Rig,
     how: &OnDevice,
@@ -3347,17 +3352,23 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// real-time pass keeps its samples for the pacing rule; and two
 /// [`slot_pass`]es of the locked pair's first pairs read every slot back
 /// as a software decode of the pair makes it, and as each other, slot for
-/// slot. The controls: the pair opened unlocked holds no lock, which
-/// [`lock_held`] says (a failure in `zero_copy_pair_matches_copy`, never
-/// a skip); the second pass's lenses swapped differ from the first's;
-/// each pass's first slot, judged as its lens's next frame and as the
-/// other lens's, fails as the frame it is; a pass judged against the
+/// slot, as does a third whose every present read while the slots stood
+/// still ([`Before::Quiet`]). The controls: the pair opened unlocked holds
+/// no lock, which [`lock_held`] says (a failure in
+/// `zero_copy_pair_matches_copy`, never a skip); the second pass's lenses
+/// swapped differ from the first's, and it a frame short names the frame;
+/// each pass's first right slot, judged as its lens's next frame and as
+/// the other lens's, fails as the frame it is; a pass judged against the
 /// truth with its lenses' frames crossed finds every slot wrong, tells
 /// each apart as the other lens's frame at its place (the same read
-/// again and in the cache), and fails the report; lens 0's slot read for
-/// both fails the codes' check, lens 1 a frame late in one present fails
-/// the harness's count, and lens 1 where another seek left it fails the
-/// landing's.
+/// again, and each lens's first in the cache as in the slot), and fails
+/// the report; counts planted break [`path_rule`] (a kept pass with a
+/// frame downloaded or refused, a copied one with a frame on the GPU) or
+/// skip it (a kept pass with none on the GPU); [`stood_still`] fails with
+/// a slot free before the reads or claimed during them; lens 0's slot
+/// read for both fails the codes' check, lens 1 a frame late in one
+/// present fails the harness's count, and lens 1 where another seek left
+/// it fails the landing's.
 #[test]
 fn the_bench_harness_plays_a_locked_pair() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -3385,8 +3396,21 @@ fn the_bench_harness_plays_a_locked_pair() {
     let u = unthrottled_with(&rig, &path, &streams, &run, limit, Some(&mut each)).unwrap();
     let r = realtime(&rig, &path, &streams, &run, Duration::from_millis(2500)).unwrap();
     let truth = Truth::decode(&path, &streams, 4 + REACH).unwrap();
-    let passes = [(); 2].map(|_| slot_pass(&rig, &path, &streams, &run, 4, false, &truth));
-    let unlocked = slot_pass(&rig, &path, &streams, &Run::software(), 4, false, &truth);
+    let passes = [(); 2].map(|_| slot_pass(&rig, &path, &streams, &run, 4, Reads::NOW, &truth));
+    let quiet = Reads {
+        before: Before::Quiet,
+        watched: false,
+    };
+    let still = slot_pass(&rig, &path, &streams, &run, 4, quiet, &truth);
+    let unlocked = slot_pass(
+        &rig,
+        &path,
+        &streams,
+        &Run::software(),
+        4,
+        Reads::NOW,
+        &truth,
+    );
     // The truth with each lens's frames given as the other's.
     let crossed = Truth {
         lenses: (0..2)
@@ -3396,7 +3420,7 @@ fn the_bench_harness_plays_a_locked_pair() {
             })
             .collect(),
     };
-    let misjudged = slot_pass(&rig, &path, &streams, &run, 4, false, &crossed);
+    let misjudged = slot_pass(&rig, &path, &streams, &run, 4, Reads::NOW, &crossed);
     let landings = seek_landings(&rig, &path, &streams, &run, Some((&mut reader, rate))).unwrap();
     std::fs::remove_dir_all(&dir).ok();
 
@@ -3434,9 +3458,28 @@ fn the_bench_harness_plays_a_locked_pair() {
         assert!(pts(0).eq(pts(1)), "{:?}", p.keys.keys());
         assert_eq!(p.counts.downloaded(), p.counts.uploaded, "{:?}", p.counts);
     }
-    // Two runs of the same path, slot for slot.
+    // Two runs of the same path, slot for slot, and a third read while
+    // the slots stood still.
     let (first, second) = (passes[0].hashes(), passes[1].hashes());
     assert_eq!(same_slots(&first, &second), Ok(8));
+    assert_eq!((still.broken.as_deref(), still.wrong().count()), (None, 0));
+    assert_eq!((still.quiet, still.unquiet), (4, 0), "{still:?}");
+    assert_eq!(same_slots(&first, &still.hashes()), Ok(8));
+    // The path rules, on counts planted: a kept pass all on the GPU and a
+    // copied one all through system memory keep to them.
+    let kept = Run {
+        zero_copy: ZeroCopy::Vulkan,
+        ..Run::only(HwKind::Vulkan)
+    };
+    let copied = Run::only(HwKind::Vulkan);
+    let counts = |copied, refused| PassCounts {
+        uploaded: 8,
+        copied,
+        refused,
+        ..PassCounts::default()
+    };
+    path_rule(&kept, &counts(8, 0), None).unwrap();
+    path_rule(&copied, &counts(0, 0), None).unwrap();
 
     // Controls.
     let swapped = second
@@ -3447,22 +3490,55 @@ fn the_bench_harness_plays_a_locked_pair() {
         "the second run's lenses swapped",
         same_slots(&first, &swapped),
     );
+    let mut short = second.clone();
+    short.pop_last();
+    let short = must_fail("the second run a frame short", same_slots(&first, &short));
+    assert!(
+        short.contains("8 and 7 frames; only the first: lens 1 pts"),
+        "{short}"
+    );
+    for (name, run, c) in [
+        ("a kept pass with a frame downloaded", &kept, counts(7, 0)),
+        ("a kept pass with a frame refused", &kept, counts(8, 1)),
+        ("a copied pass with a frame copied", &copied, counts(1, 0)),
+    ] {
+        let off = must_fail(name, path_rule(run, &c, None));
+        assert!(matches!(off, Off::Broken(_)), "{name}: {off:?}");
+    }
+    let off = must_fail(
+        "a kept pass with no frame on the GPU",
+        path_rule(&kept, &counts(0, 8), None),
+    );
+    assert!(matches!(off, Off::NotKept(_)), "{off:?}");
+    let words: Vec<(usize, u64)> = (0..6).map(|i| (i, 16 * i as u64 + 2)).collect();
+    assert!(stood_still(6, &words, &words));
+    must_fail(
+        "a slot free before the reads",
+        stood_still(6, &words[1..], &words[1..]),
+    );
+    let mut claimed = words.clone();
+    claimed[3].1 += 8;
+    must_fail(
+        "a slot claimed while they read",
+        stood_still(6, &words, &claimed),
+    );
     assert_eq!(unlocked.broken, None);
     let unlocked = must_fail(
         "the pair opened unlocked holds a lock",
         lock_held(&unlocked),
     );
     assert!(unlocked.contains("the lock ended None"), "{unlocked}");
-    for p in &passes {
+    for p in passes.iter().chain([&still]) {
         check_controls(p.controls.as_ref().unwrap());
     }
     // Judged against the crossed truth, every slot is wrong, told apart
-    // as the other lens's frame at its place, the same when read again
-    // and in the cache as in the slot; and the report fails it as a copy
-    // side's fault.
+    // as the other lens's frame at its place and the same when read
+    // again, each lens's first in the cache as in the slot and the rest
+    // not looked up; and the report fails it as a copy side's fault.
     assert_eq!(misjudged.broken, None);
     assert_eq!(misjudged.wrong().count(), 8, "{misjudged:?}");
-    for (&(lens, _), s) in misjudged.wrong() {
+    assert!(misjudged.controls.is_none(), "{misjudged:?}");
+    for (&(lens, pts), s) in misjudged.wrong() {
         let w = s.first_wrong.as_ref().unwrap();
         assert_eq!(
             w.wrong.like().map(|l| (l.lens, l.off)),
@@ -3471,7 +3547,12 @@ fn the_bench_harness_plays_a_locked_pair() {
             w.wrong
         );
         assert!(matches!(w.again, Again::Same), "{}", w.again);
-        assert!(matches!(w.cached, Cached::AsSlot), "{}", w.cached);
+        let first = misjudged.keys.keys().find(|k| k.0 == lens) == Some(&(lens, pts));
+        if first {
+            assert!(matches!(w.cached, Cached::AsSlot), "{}", w.cached);
+        } else {
+            assert!(matches!(w.cached, Cached::NotLooked), "{}", w.cached);
+        }
     }
     let report = pair_report(&[Played {
         file: "pair64-matched".into(),
@@ -4342,7 +4423,10 @@ impl std::fmt::Display for Again {
 
 /// A wrong slot's frame as the cache holds it then, downloaded from its
 /// decoder's device where it is on one: the truth's, the slot's bytes or
-/// others; or gone from the cache.
+/// others; or gone from the cache. Only each lens's first wrong frame of
+/// a pass is looked up: the download is FFmpeg's, under its frame lock,
+/// on the test's thread while the decoders run, which moves the timing
+/// under test for the frames after it.
 #[derive(Debug)]
 enum Cached {
     Right,
@@ -4350,6 +4434,7 @@ enum Cached {
     Other,
     Gone,
     Failed(String),
+    NotLooked,
 }
 
 impl std::fmt::Display for Cached {
@@ -4360,6 +4445,7 @@ impl std::fmt::Display for Cached {
             Cached::Other => write!(f, "other bytes"),
             Cached::Gone => write!(f, "gone"),
             Cached::Failed(e) => write!(f, "unread ({e})"),
+            Cached::NotLooked => write!(f, "not looked up"),
         }
     }
 }
@@ -4419,8 +4505,9 @@ impl PassCounts {
     }
 }
 
-/// A pass's controls, planted at its first slot read: the slot judged as
-/// its lens's next frame, and as the other lens's frame at its place.
+/// A pass's controls, planted at its first slot the truth judges right:
+/// the slot judged as its lens's next frame, and as the other lens's
+/// frame at its place.
 #[derive(Debug)]
 struct Controls {
     lens: usize,
@@ -4441,6 +4528,16 @@ struct SlotPass {
     broken: Option<String>,
     not_kept: Option<String>,
     controls: Option<Controls>,
+    /// With [`Before::Quiet`], the presents whose reads the slots stood
+    /// still over, and those they didn't (the wait for them ran out, or
+    /// a slot changed while they read).
+    quiet: u32,
+    unquiet: u32,
+    /// With [`Reads::watched`], each stream's distinct images the
+    /// [`PoolWatch`] saw, and their bytes.
+    pool: Vec<(usize, u64)>,
+    /// The lenses whose first wrong frame was looked up in the cache.
+    looked: HashSet<usize>,
 }
 
 impl SlotPass {
@@ -4477,25 +4574,154 @@ fn lock_held(p: &SlotPass) -> Result<(), String> {
     }
 }
 
+/// How long a [`Before::Quiet`] read waits for the slots to stand still
+/// before it reads anyway, and counts the present as not quiet.
+const QUIET: Duration = Duration::from_secs(2);
+
+/// What a slot pass does before each present's reads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Before {
+    /// Reads at once.
+    #[default]
+    Nothing,
+    /// Waits for the GPU to finish the work submitted so far. That moves
+    /// the reads' timing, and nothing more: the upload thread may still be
+    /// between staging the copier's wait on wgpu's queue and its own
+    /// submit, which a read's submit then takes.
+    Idle,
+    /// Waits, at most [`QUIET`], until every live slot is Ready or Shown:
+    /// none is free for the upload thread to claim and none is being
+    /// written, so that it is copying nothing out and has staged no wait
+    /// that a read's submit could take. A present counts as quiet when no
+    /// slot changed by the end of its reads ([`stood_still`]).
+    Quiet,
+}
+
+/// How a slot pass reads its slots.
+#[derive(Debug, Clone, Copy, Default)]
+struct Reads {
+    before: Before,
+    /// A [`PoolWatch`] fed every present, as [`unthrottled_with`]'s path B
+    /// passes feed one, and as this check's passes had when odin's
+    /// mismatches came: it takes FFmpeg's frame lock from a thread of its
+    /// own and holds frames while it looks.
+    watched: bool,
+}
+
+impl Reads {
+    /// Reads at once, with no watch.
+    const NOW: Reads = Reads {
+        before: Before::Nothing,
+        watched: false,
+    };
+}
+
+/// Why a pass's frames didn't come the way its run says.
+#[derive(Debug)]
+enum Off {
+    /// A kept run's frame came through system memory or was refused by
+    /// the GPU, or a copied run's came on the GPU: the pass didn't play
+    /// the path it names, a failure.
+    Broken(String),
+    /// A kept run took no frame on the GPU at all: the decoder or the GPU
+    /// turned zero copy down here, a skip.
+    NotKept(String),
+}
+
+/// Whether the frames `run` uploaded, `c`, came the way it says: every
+/// one of a kept run's on the GPU (copied out or imported), none of a
+/// copied run's. `refusal` is the player's reason the GPU turned the
+/// decoder's frames down, where it has one.
+fn path_rule(run: &Run, c: &PassCounts, refusal: Option<&String>) -> Result<(), Off> {
+    let on_gpu = c.copied + c.imported;
+    if run.zero_copy == ZeroCopy::Off {
+        return match on_gpu {
+            0 => Ok(()),
+            n => Err(Off::Broken(format!(
+                "a copied run took {n} frames on the GPU"
+            ))),
+        };
+    }
+    if on_gpu == 0 {
+        Err(Off::NotKept(format!(
+            "no frame taken on the GPU, {} refused{}",
+            c.refused,
+            because(refusal)
+        )))
+    } else if c.downloaded() > 0 || c.refused > 0 {
+        Err(Off::Broken(format!(
+            "{} of its {} frames uploaded came through system memory, {} refused by the GPU{}",
+            c.downloaded(),
+            c.uploaded,
+            c.refused,
+            because(refusal)
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// The words of `player`'s Ready and Shown slots, by slot: a claim, a
+/// discard, a publish or a show changes a slot's.
+fn slot_words(player: &Player) -> Vec<(usize, u64)> {
+    player
+        .slots()
+        .views()
+        .iter()
+        .map(|v| (v.index, v.word))
+        .collect()
+}
+
+/// Waits, at most [`QUIET`], until the upload thread has nothing left to
+/// do while `p` is on screen: every live slot of `player`'s Ready or
+/// Shown, and each Ready one ahead of the frame its stream shows (one
+/// behind it, a frame the presenter gave back, the upload thread frees
+/// and writes again). The live slots, and the words then.
+fn settle(player: &Player, p: &Presented) -> (usize, Vec<(usize, u64)>) {
+    let until = Instant::now() + QUIET;
+    loop {
+        let active = player.slots().stats().active;
+        let views = player.slots().views();
+        let ahead = views.iter().all(|v| {
+            v.state != SlotState::Ready
+                || p.frames
+                    .iter()
+                    .any(|f| f.stream == v.frame.stream && f.frame.time < v.frame.time)
+        });
+        if (views.len() == active && ahead) || Instant::now() >= until {
+            return (active, views.iter().map(|v| (v.index, v.word)).collect());
+        }
+        std::thread::sleep(Duration::from_micros(250));
+    }
+}
+
+/// Whether the slots stood still over a present's reads: every one of
+/// the `active` live slots Ready or Shown before them (`before`), so that
+/// none was free for the upload thread to claim or being written, and
+/// none changed by their end (`after`), a claim moving a slot's version
+/// on. The upload thread then copied nothing out while they read, and
+/// had staged no wait of the copier's that their submits could take.
+fn stood_still(active: usize, before: &[(usize, u64)], after: &[(usize, u64)]) -> bool {
+    before.len() == active && before == after
+}
+
 /// `count` presents of `streams` of `path`, opened as `run` on `rig` and
 /// played unthrottled, each slot shown read back from the GPU (level 0,
-/// which the mips are made from) and judged against `truth`, byte for
-/// byte; with `idle`, each present's reads wait first for the GPU to
-/// finish the work submitted so far. A wrong slot is read again while
-/// held, and its frame looked up in the cache. There is no [`PoolWatch`]:
-/// it takes FFmpeg's frame lock from another thread and holds frames,
-/// which moves the timing under test. Broken when the run fails, stalls
-/// or ends short, a locked run's lock doesn't hold, a kept run's frame
-/// came to its slot through system memory or was refused by the GPU, or
-/// a copied run's came on the GPU; not kept when a kept run took no frame
-/// on the GPU at all.
+/// which the mips are made from) as `reads` says and judged against
+/// `truth`, byte for byte. A wrong slot is read again while held, and a
+/// lens's first wrong frame is looked up in the cache. There is no
+/// [`PoolWatch`] unless `reads` asks for one: it takes FFmpeg's frame
+/// lock from another thread and holds frames, which moves the timing
+/// under test. Broken when the run fails, stalls or ends short, a locked
+/// run's lock doesn't hold, or its frames break [`path_rule`]; not kept
+/// when a kept run took no frame on the GPU at all.
 fn slot_pass(
     rig: &Rig,
     path: &Path,
     streams: &[Option<usize>],
     run: &Run,
     count: usize,
-    idle: bool,
+    reads: Reads,
     truth: &Truth,
 ) -> SlotPass {
     let begun = Instant::now();
@@ -4518,8 +4744,12 @@ fn slot_pass(
     };
     // Each upload seen, by slot and version: the frame it holds.
     let mut uploads: HashMap<(usize, u64), (usize, i64)> = HashMap::new();
+    let mut watch = None;
     let played = (|| -> Result<(), String> {
         open(&player, path, streams, run)?;
+        if reads.watched {
+            watch = PoolWatch::of(&player, run, streams.len());
+        }
         let (mut next, mut rate) = (None, None);
         for n in 0..count {
             if let Some(t) = next {
@@ -4547,7 +4777,10 @@ fn slot_pass(
                 }
                 std::thread::sleep(Duration::from_micros(250));
             };
-            look(rig, &player, truth, &lenses, idle, &p, &mut pass)?;
+            if let Some(w) = &watch {
+                w.shown(&p);
+            }
+            look(rig, &player, truth, &lenses, reads.before, &p, &mut pass)?;
             if n == 0 {
                 rate = stream_rate(&player);
                 player.play();
@@ -4560,6 +4793,7 @@ fn slot_pass(
         }
         Ok(())
     })();
+    pass.pool = watch.map_or_else(Vec::new, PoolWatch::finish);
     let snap = common::snapshot(&player);
     let perf = player.perf();
     pass.counts = PassCounts {
@@ -4579,31 +4813,16 @@ fn slot_pass(
     }
     let joined = join(player);
     pass.elapsed = begun.elapsed();
-    let c = &pass.counts;
-    let on_gpu = c.copied + c.imported;
     let mut broken = played.err();
     if broken.is_none() && run.locked {
         broken = lock_held(&pass).err();
     }
-    if run.zero_copy != ZeroCopy::Off {
-        if on_gpu == 0 {
-            pass.not_kept = Some(format!(
-                "no frame taken on the GPU, {} refused{}",
-                c.refused,
-                because(snap.import_refused.as_ref())
-            ));
-        } else if broken.is_none() && (c.downloaded() > 0 || c.refused > 0) {
-            broken = Some(format!(
-                "{} of its {} frames uploaded came through system memory, {} refused by the \
-                 GPU{}",
-                c.downloaded(),
-                c.uploaded,
-                c.refused,
-                because(snap.import_refused.as_ref())
-            ));
+    match path_rule(run, &pass.counts, snap.import_refused.as_ref()) {
+        Ok(()) => {}
+        Err(Off::NotKept(why)) => pass.not_kept = Some(why),
+        Err(Off::Broken(why)) => {
+            broken.get_or_insert(why);
         }
-    } else if broken.is_none() && on_gpu > 0 {
-        broken = Some(format!("a copied run took {on_gpu} frames on the GPU"));
     }
     if let Err(e) = joined {
         broken = Some(broken.map_or(e.clone(), |b| format!("{b}; {e}")));
@@ -4612,21 +4831,28 @@ fn slot_pass(
     pass
 }
 
-/// Read back each slot `p` shows, as lens `lenses[stream]`, and judge it
-/// against `truth`, into `pass`: a wrong one read again and looked up in
-/// `player`'s cache. The pass's first read also plants its controls.
+/// Read back each slot `p` shows, as lens `lenses[stream]`, after what
+/// `before` waits for, and judge it against `truth`, into `pass`: a wrong
+/// one read again, and a lens's first wrong one looked up in `player`'s
+/// cache. The pass's first slot the truth judges right plants its
+/// controls.
 fn look(
     on: &Rig,
     player: &Player,
     truth: &Truth,
     lenses: &[usize],
-    idle: bool,
+    before: Before,
     p: &Presented,
     pass: &mut SlotPass,
 ) -> Result<(), String> {
-    if idle {
-        on.gpu.wait_for_submitted().map_err(|e| e.to_string())?;
-    }
+    let settled = match before {
+        Before::Nothing => None,
+        Before::Idle => {
+            on.gpu.wait_for_submitted().map_err(|e| e.to_string())?;
+            None
+        }
+        Before::Quiet => Some(settle(player, p)),
+    };
     for f in &p.frames {
         let lens = *lenses
             .get(f.stream)
@@ -4634,7 +4860,9 @@ fn look(
         let pts = f.frame.pts;
         let slot = read_slot(&on.gpu, f)?;
         let index = truth.index(lens, pts);
+        let right = truth.holds(&slot, lens, index);
         if pass.controls.is_none()
+            && right
             && let Some(i) = index
         {
             let other = (lens + 1) % truth.lenses.len();
@@ -4644,7 +4872,6 @@ fn look(
                 crossed: (other != lens).then(|| truth.judge(&slot, other, i)),
             });
         }
-        let right = truth.holds(&slot, lens, index);
         let told = pass.told();
         let seen = pass.keys.entry((lens, pts)).or_default();
         seen.index = index;
@@ -4669,14 +4896,28 @@ fn look(
             Ok(_) => Again::Other,
             Err(e) => Again::Failed(e),
         };
-        seen.first_wrong = Some(Showing {
-            slot: f.slot,
-            run: f.frame.run,
-            seq: f.frame.seq,
-            wrong,
-            again,
-            cached: cached(player, f, &slot, truth, lens, index),
-        });
+        let cached = if pass.looked.insert(lens) {
+            cached(player, f, &slot, truth, lens, index)
+        } else {
+            Cached::NotLooked
+        };
+        if let Some(seen) = pass.keys.get_mut(&(lens, pts)) {
+            seen.first_wrong = Some(Showing {
+                slot: f.slot,
+                run: f.frame.run,
+                seq: f.frame.seq,
+                wrong,
+                again,
+                cached,
+            });
+        }
+    }
+    if let Some((active, words)) = settled {
+        if stood_still(active, &words, &slot_words(player)) {
+            pass.quiet += 1;
+        } else {
+            pass.unquiet += 1;
+        }
     }
     Ok(())
 }
@@ -4707,10 +4948,10 @@ fn cached(
     }
 }
 
-/// The controls a pass planted (M3 plan 4.1, rule 1): its first slot
-/// judged as its lens's next frame and as the other lens's frame must
-/// fail, and [`Truth::like`] must name the frame it is: a frame early of
-/// its own lens, and the other lens's at its place.
+/// The controls a pass planted (M3 plan 4.1, rule 1): its first right
+/// slot judged as its lens's next frame and as the other lens's frame
+/// must fail, and [`Truth::like`] must name the frame it is: a frame
+/// early of its own lens, and the other lens's at its place.
 fn check_controls(c: &Controls) {
     let late = must_fail("a slot judged as its lens's next frame", c.late.clone());
     assert_eq!(
@@ -4867,17 +5108,31 @@ fn nv12_and_i420_slots_read_back_as_one_picture() {
 }
 
 /// Whether two passes' slots, `got` and `want` by lens and pts, hold the
-/// same frames byte for byte; the frames that differ, or the frames one
-/// showed and the other didn't. The frames compared.
+/// same frames byte for byte; the frames that differ, or how many frames
+/// each showed and the first few that only one did. The frames compared.
 fn same_slots(
     got: &BTreeMap<(usize, i64), u64>,
     want: &BTreeMap<(usize, i64), u64>,
 ) -> Result<usize, String> {
     if got.keys().ne(want.keys()) {
+        let only = |a: &BTreeMap<(usize, i64), u64>, b: &BTreeMap<(usize, i64), u64>| {
+            let keys: Vec<String> = a
+                .keys()
+                .filter(|k| !b.contains_key(k))
+                .map(|(lens, pts)| format!("lens {lens} pts {pts}"))
+                .collect();
+            match keys.len() {
+                0 => "none".to_string(),
+                n if n <= 4 => keys.join(", "),
+                n => format!("{} and {} more", keys[..4].join(", "), n - 4),
+            }
+        };
         return Err(format!(
-            "the passes showed other frames: {:?} against {:?}",
-            got.keys().collect::<Vec<_>>(),
-            want.keys().collect::<Vec<_>>()
+            "the passes showed {} and {} frames; only the first: {}; only the second: {}",
+            got.len(),
+            want.len(),
+            only(got, want),
+            only(want, got)
         ));
     }
     let differ: Vec<String> = got
@@ -4911,44 +5166,65 @@ struct Variant {
     /// The lenses it opens, by their place among the file's.
     lenses: &'static [usize],
     locked: bool,
-    /// Each present's reads wait first for the GPU to finish the work
-    /// submitted so far.
-    idle: bool,
+    reads: Reads,
 }
 
 /// The ways: locked, as the app plays a pair, first; then, on clip 9's
 /// path B, where odin's mismatches came, unlocked, each lens alone
-/// through the player, and locked with each read after the GPU idles.
-const VARIANTS: [Variant; 5] = [
+/// through the player, and locked three more ways: each read after the
+/// GPU idles, each read while the slots stand still, and with a
+/// [`PoolWatch`] fed every present, as when the mismatches came.
+const VARIANTS: [Variant; 7] = [
     Variant {
         name: "locked",
         lenses: &[0, 1],
         locked: true,
-        idle: false,
+        reads: Reads::NOW,
     },
     Variant {
         name: "unlocked",
         lenses: &[0, 1],
         locked: false,
-        idle: false,
+        reads: Reads::NOW,
     },
     Variant {
         name: "lens 0 alone",
         lenses: &[0],
         locked: false,
-        idle: false,
+        reads: Reads::NOW,
     },
     Variant {
         name: "lens 1 alone",
         lenses: &[1],
         locked: false,
-        idle: false,
+        reads: Reads::NOW,
     },
     Variant {
         name: "locked, read idle",
         lenses: &[0, 1],
         locked: true,
-        idle: true,
+        reads: Reads {
+            before: Before::Idle,
+            watched: false,
+        },
+    },
+    Variant {
+        name: "locked, read quiet",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads {
+            before: Before::Quiet,
+            watched: false,
+        },
+    },
+    Variant {
+        name: "locked, pool watched",
+        lenses: &[0, 1],
+        locked: true,
+        reads: Reads {
+            before: Before::Nothing,
+            watched: true,
+        },
     },
 ];
 
@@ -5005,10 +5281,24 @@ impl Played {
             .map(|((lens, pts), s)| format!("lens {lens} pts {pts} x{}", s.shown))
             .collect();
         let c = &p.counts;
+        let mut also = String::new();
+        if p.quiet + p.unquiet > 0 {
+            also += &format!(", quiet {} of {}", p.quiet, p.quiet + p.unquiet);
+        }
+        if !p.pool.is_empty() {
+            also += &format!(
+                ", pool {} images",
+                p.pool
+                    .iter()
+                    .map(|(images, _)| images.to_string())
+                    .collect::<Vec<_>>()
+                    .join("+")
+            );
+        }
         format!(
             "{}, {}, {}, {name}: {} frames, {} wrong: {verdict}; resyncs {}, unpaired {}, \
              decoded {}, uploaded {} ({} copied, {} imported, {} downloaded, {} refused), \
-             shown twice: {}; {:.1} s",
+             shown twice: {}{also}; {:.1} s",
             self.file,
             self.path,
             self.variant,
@@ -5175,19 +5465,22 @@ fn pair_report(played: &[Played]) -> Vec<String> {
 /// holds on the device a lens (M3 plan section 9). Each variant runs a
 /// copied pass, a kept one, and each again, so that each side's
 /// steadiness shows; clip 9's path B also plays unlocked, each lens
-/// alone, and locked with each read after the GPU idles. A wrong slot is
-/// told apart: its kept or copied side, its planes' differences and
-/// bands, whether those bands are a frame of either lens near it, its
-/// slot, run and seq, a second read, its frame in the cache, and how
-/// often it was shown and uploaded. Every pass and file runs before the
-/// test fails, and the report (one row a pass, one line a wrong frame)
-/// goes to stderr and the bench notes. Each pass plants controls: its
-/// first slot judged as its lens's next frame, and as the other lens's,
-/// must fail as the frame it is. A kept pass any of whose frames came
-/// through system memory or was refused by the GPU, or a pass that
-/// fails, stalls, ends short or shows the lenses apart locked, fails it;
-/// one that keeps no frame on the GPU at all skips, as a file or path not
-/// here does, never a pass with one left out.
+/// alone, and locked three more ways ([`VARIANTS`]): each read after the
+/// GPU idles, each read while the slots stand still, and with a
+/// [`PoolWatch`]. A wrong slot is told apart: its kept or copied side,
+/// its planes' differences and bands, whether those bands are a frame of
+/// either lens near it, its slot, run and seq, a second read, its frame
+/// in the cache (each lens's first wrong one a pass), and how often it
+/// was shown and uploaded. Every pass and file runs before the test
+/// fails, and the report (one row a pass, one line a wrong frame) goes to
+/// stderr and the bench notes. Each pass plants controls: its first right
+/// slot judged as its lens's next frame, and as the other lens's, must
+/// fail as the frame it is. A pass that breaks [`path_rule`] (a kept one
+/// with a frame through system memory or refused by the GPU, a copied one
+/// with a frame on the GPU), or fails, stalls, ends short or shows the
+/// lenses apart locked, fails it; a kept one that keeps no frame on the
+/// GPU at all skips, as a file or path not here does, never a pass with
+/// one left out.
 #[test]
 #[ignore = "tier2: needs a GPU that keeps decoded frames on it, and the X5 samples or hw-test's perf pairs"]
 fn zero_copy_pair_matches_copy() {
@@ -5274,7 +5567,7 @@ fn zero_copy_pair_matches_copy() {
                     ("kept 2", true),
                 ] {
                     let (on, run) = if is_kept { (on, &kept) } else { (&rig, &copy) };
-                    let p = slot_pass(on, path, &streams, run, ZERO_COPY_FRAMES, v.idle, &truth);
+                    let p = slot_pass(on, path, &streams, run, ZERO_COPY_FRAMES, v.reads, &truth);
                     if let Some(why) = p.not_kept.as_ref().filter(|_| is_kept) {
                         let why = format!("{name}, {}: {why}", kept.label);
                         if !missing.contains(&why) {
