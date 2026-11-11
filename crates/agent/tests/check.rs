@@ -279,7 +279,7 @@ fn a_cubemap_has_its_shape_checked_and_fails_youtube() {
     let file = d.inject(
         &three_two,
         "t-cube.mp4",
-        write::sv3d("t", &cube),
+        write::sv3d("t", &cube).unwrap(),
         Vec::new(),
     );
     let r = check(&tools, &file, Some("youtube_360"));
@@ -291,7 +291,7 @@ fn a_cubemap_has_its_shape_checked_and_fails_youtube() {
     let file = d.inject(
         &two_one,
         "t-cube21.mp4",
-        write::sv3d("t", &cube),
+        write::sv3d("t", &cube).unwrap(),
         Vec::new(),
     );
     let r = check(&tools, &file, None);
@@ -314,7 +314,7 @@ fn bounds_change_the_shape_an_equirect_must_have() {
         let file = d.inject(
             &src,
             &format!("t-b{w}.mp4"),
-            write::sv3d("t", &half),
+            write::sv3d("t", &half).unwrap(),
             Vec::new(),
         );
         let r = check(&tools, &file, None);
