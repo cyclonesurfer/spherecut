@@ -39,7 +39,8 @@ pub const USAGE: wgpu::TextureUsages =
 const IMPORTED: wgpu::TextureUses = wgpu::TextureUses::COPY_SRC.union(wgpu::TextureUses::RESOURCE);
 
 /// The layout wgpu-hal tracks an import of `format` in from the start
-/// ([`IMPORTED`]'s), which the acquire leaves it in.
+/// (that of `COPY_SRC` and `RESOURCE` together, the state wgpu is told
+/// it is made in), which the acquire leaves it in.
 pub fn imported_layout(format: wgpu::TextureFormat) -> vk::ImageLayout {
     wgpu::hal::vulkan::conv::derive_image_layout(IMPORTED, format)
 }
