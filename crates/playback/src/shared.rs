@@ -304,6 +304,15 @@ impl Status {
             .collect()
     }
 
+    /// The members of the open's lock group while it is locked with its
+    /// group base on, whose cache rules run from the base and who catch
+    /// up to the group's `until`: `None` for an open not locked, and
+    /// under the test switch that turns the base off.
+    pub(crate) fn grouped(&self) -> Option<[usize; 2]> {
+        let g = self.lock.as_ref()?;
+        (g.status == LockStatus::Locked && !g.spec.test.no_group_base).then_some(g.members)
+    }
+
     /// Player stream `stream` couldn't open, or decode after any
     /// fallback: a pending group it is a member of is refused with
     /// `"open"`, and what the player says of it.

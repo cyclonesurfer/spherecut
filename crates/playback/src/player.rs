@@ -825,6 +825,9 @@ impl Player {
             return;
         }
         self.end_open(&mut ui, now);
+        // No group without a pair; with the cache's lock taken, the next
+        // open's clears it.
+        self.shared.cache.try_set_group(None);
         ui.path = None;
         ui.target = None;
         self.shared.playing.store(false, Ordering::Release);
@@ -1290,7 +1293,9 @@ impl Player {
     }
 
     /// Show the target's frames, set the clock to its time, and play if
-    /// that is wanted. Whether a frame changed.
+    /// that is wanted. Whether a frame changed. A locked pair whose
+    /// keyframe landings differ shows neither: both lenses seek exactly
+    /// to the later one first.
     fn show_target(
         &self,
         ui: &mut Ui,
@@ -1298,31 +1303,23 @@ impl Player {
         picked: Vec<Option<SlotView>>,
         now: Instant,
     ) -> bool {
+        match self.later_landing(ui, target) {
+            Ok(None) => {}
+            Ok(Some(later)) => {
+                ui.target = None;
+                self.seek_with(ui, later, SeekMode::Exact, now);
+                return false;
+            }
+            // The status lock is taken: the next present looks again.
+            Err(()) => return false,
+        }
         let mut changed = false;
         for (i, v) in picked.iter().enumerate() {
             if let Some(v) = v {
                 changed |= self.show(ui, i, v, now, false);
             }
         }
-        let landed = ui
-            .view
-            .iter()
-            .find_map(|s| s.landed.filter(|l| l.id == target.id));
-        if let Some(l) = landed {
-            let t = if target.step.is_some()
-                || l.time > target.at
-                || matches!(
-                    l.exactness,
-                    Some(
-                        Exactness::AfterLast
-                            | Exactness::Truncated { .. }
-                            | Exactness::KeyframeOnly
-                    )
-                ) {
-                l.time
-            } else {
-                target.at
-            };
+        if let Some(t) = Self::landing_time(ui, target) {
             ui.clock.set(t, now);
         }
         ui.target = None;
@@ -1523,10 +1520,7 @@ impl Player {
         if !ui.clock.is_running() {
             return;
         }
-        let Some(first) = ui.view.first() else {
-            return;
-        };
-        let (Some(end), last) = (first.end, first.last) else {
+        let Some((stream, end, last)) = Self::end_of(ui) else {
             return;
         };
         if t >= end {
@@ -1535,7 +1529,7 @@ impl Player {
                 return;
             }
             Self::pause_ui(&self.shared, ui, now);
-            let shown = ui.shown.first().and_then(|s| s.as_ref());
+            let shown = ui.shown.get(stream).and_then(|s| s.as_ref());
             let at = last.or_else(|| {
                 let f = shown?.view.frame;
                 let before = f.duration.and_then(|d| end.checked_sub(d).ok());
@@ -1547,6 +1541,88 @@ impl Player {
             ui.at_end = true;
             self.shared.event(PlayerEvent::Ended);
         }
+    }
+
+    /// The stream whose end ends playback, with that end and its last
+    /// frame's time once decoding reached it: the first stream, or for a
+    /// locked pair the member that ends first, so that a lens with fewer
+    /// frames ends the pair on its last (M3 plan section 9).
+    fn end_of(ui: &Ui) -> Option<(usize, Time, Option<Time>)> {
+        if ui.lock == Some(LockStatus::Locked) {
+            ui.view
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| Some((i, v.end?, v.last)))
+                .min_by_key(|&(_, end, _)| end)
+        } else {
+            let v = ui.view.first()?;
+            Some((0, v.end?, v.last))
+        }
+    }
+
+    /// The clock's time once `target`'s frames are up: a landing's own
+    /// time for a step, a landing after the time asked for, or one that
+    /// says it isn't the frame shown there (past the end, short of
+    /// damage, a keyframe); else the time asked for. Of the first stream
+    /// that landed, or for a locked pair the earliest of its members'
+    /// (M3 plan section 9), so that a lens that landed short sets it.
+    fn landing_time(ui: &Ui, target: Target) -> Option<Time> {
+        let mut times = ui
+            .view
+            .iter()
+            .filter_map(|s| s.landed.filter(|l| l.id == target.id))
+            .map(|l| {
+                if target.step.is_some()
+                    || l.time > target.at
+                    || matches!(
+                        l.exactness,
+                        Some(
+                            Exactness::AfterLast
+                                | Exactness::Truncated { .. }
+                                | Exactness::KeyframeOnly
+                        )
+                    )
+                {
+                    l.time
+                } else {
+                    target.at
+                }
+            });
+        if ui.lock == Some(LockStatus::Locked) {
+            times.min()
+        } else {
+            times.next()
+        }
+    }
+
+    /// For a locked pair whose members landed keyframe `target` on
+    /// frames of different times, the later of them, which both seek to
+    /// exactly (M3 plan section 9); `None` otherwise, and under the test
+    /// switch that keeps such landings. `Err` while the status lock is
+    /// taken. Never waits.
+    fn later_landing(&self, ui: &Ui, target: Target) -> Result<Option<Time>, ()> {
+        if ui.lock != Some(LockStatus::Locked) || target.mode != SeekMode::Keyframe {
+            return Ok(None);
+        }
+        let times: Vec<Time> = ui
+            .view
+            .iter()
+            .filter_map(|s| s.landed.filter(|l| l.id == target.id))
+            .map(|l| l.time)
+            .collect();
+        let (Some(&first), Some(&later)) = (times.iter().min(), times.iter().max()) else {
+            return Ok(None);
+        };
+        if first == later {
+            return Ok(None);
+        }
+        let st = self.shared.try_status().ok_or(())?;
+        let kept = st.epoch != ui.epoch
+            || st
+                .lock
+                .as_ref()
+                .is_none_or(|g| g.spec.test.no_later_landing);
+        Ok((!kept).then_some(later))
     }
 
     /// The audio output's numbers, while a file with audio is open and
@@ -1615,6 +1691,10 @@ impl Player {
             .collect();
         if let Some(c) = shared.cache.try_stats() {
             s.cache = Some(c);
+        }
+        // The group base, as the cache last told it.
+        if let Some(lock) = s.lock.as_mut() {
+            lock.base = s.cache.and_then(|c| c.base);
         }
         s.slots = shared.slots.stats();
         s.perf = shared.perf.snapshot();

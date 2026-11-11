@@ -124,6 +124,7 @@ struct State {
     /// Per stream, the request whose landing was last unpinned.
     unpinned: Vec<u64>,
     waits: u64,
+    resyncs: u64,
     budget_at: Instant,
     stats_at: Instant,
     memory_at: Instant,
@@ -146,6 +147,7 @@ impl UploadThread {
             too_small: 0,
             unpinned: Vec::new(),
             waits: 0,
+            resyncs: 0,
             budget_at: Instant::now(),
             stats_at: Instant::now(),
             memory_at: Instant::now(),
@@ -223,17 +225,22 @@ impl UploadThread {
         });
     }
 
-    /// The cache's numbers: its waits for the counter, and the notice
-    /// when the budget holds too few frames. And the GPU memory of slots
-    /// the setting no longer uses, once nothing holds them.
+    /// The cache's numbers: its waits and a locked pair's resyncs for the
+    /// counters, and the notice when the budget holds too few frames. And
+    /// the GPU memory of slots the setting no longer uses, once nothing
+    /// holds them.
     fn cache_stats(&self, st: &mut State) {
         st.stats_at = Instant::now();
         self.shared.slots.trim();
         let stats = self.shared.cache.stats();
-        self.shared
-            .perf
-            .add(Counter::CacheWaits, stats.waits.saturating_sub(st.waits));
+        let perf = &self.shared.perf;
+        perf.add(Counter::CacheWaits, stats.waits.saturating_sub(st.waits));
+        perf.add(
+            Counter::PairResyncs,
+            stats.resyncs.saturating_sub(st.resyncs),
+        );
         st.waits = stats.waits;
+        st.resyncs = stats.resyncs;
         let live = self.shared.live.load(Ordering::Acquire);
         if stats.too_small && st.too_small != live && self.shared.is_current(live) {
             st.too_small = live;
@@ -342,6 +349,8 @@ impl UploadThread {
         // while the clock waited (paused, or for that frame) nothing
         // freed it.
         let active = slots.stats().active;
+        // A locked pair's group base, so that both members' frames from
+        // the newest time both hold stay wanted.
         let playhead = shared.cache.playhead();
         let waiting = if target != 0 {
             streams.iter().enumerate().any(|(i, s)| {
