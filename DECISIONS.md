@@ -1899,7 +1899,11 @@ run path A. And the Tier 2 comparison missed the cause twice:
 `zero_copy_matches_copy_path` failed on odin on the same frame (X5 frame
 26, view 0) at 0d491ae and at 0663e05 without naming a cause, and the
 likely one, RADV's DCC on the slots' 8-bit planes, was found by D67's
-pair check, not by it (D77).
+pair check, not by it (D77). The comparison now also imports and
+renders every other frame before its download, the order the player
+takes, and a render that differs says where the frame first parts from
+its download: the import's planes, the slot's, or neither, so the
+render (F113, F114).
 
 *Updated 2026-10-30 by slice 5b's path B, as built* (`docs/design/m1-5b.md`).
 FFmpeg's Vulkan Video decodes on wgpu's own device:
