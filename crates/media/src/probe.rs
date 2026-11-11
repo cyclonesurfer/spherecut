@@ -656,9 +656,9 @@ fn stream_kind(t: ff::media::Type) -> StreamKind {
 /// Read a file's streams as FFmpeg's demuxer reads its header, without
 /// `avformat_find_stream_info` (so an `SA3D` box's audio is still
 /// "ambisonic 1", not the AAC decoder's "4.0"), under the same
-/// confinement as [`probe`], and with nothing from our box reader. FFmpeg stops reading once `cancel` is
-/// set. A file FFmpeg can't open fails as it does for [`probe`], with
-/// what FFmpeg logged.
+/// confinement as [`probe`], and with nothing from our box reader.
+/// FFmpeg stops reading once `cancel` is set. A file FFmpeg can't open
+/// fails as it does for [`probe`], with what FFmpeg logged.
 pub fn demuxer_view(
     src: Source<'_>,
     cancel: Option<Arc<AtomicBool>>,

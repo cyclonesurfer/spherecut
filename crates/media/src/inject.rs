@@ -900,8 +900,9 @@ mod tests {
     /// runs it, widens that table to a `co64` and places every box again,
     /// here twice, until every entry fits (F129).
     ///
-    /// Control: the same `moov` left after the media data keeps its
-    /// `stco`s.
+    /// Controls: the entries moved by the first pass's `moov` length, the
+    /// length before any table grew, are not the placed ones; and the same
+    /// `moov` left after the media data keeps its `stco`s.
     #[test]
     fn a_moov_moved_ahead_of_4_gib_of_media_widens_its_tables() {
         use spherecut_testkit::control::must_fail;
@@ -932,6 +933,13 @@ mod tests {
         let chunks = chunks.map(u64::from);
         assert_eq!(tables(&placed), at(chunks.map(|c| c + len)));
         assert_eq!(tables(&moov_bytes), at(chunks));
+        // A place() that stopped after its first pass would move each
+        // entry by the moov it placed then, before any table grew.
+        let first = moov.len() as u64;
+        must_fail(
+            "offsets moved by the first pass's moov length",
+            tables(&placed) == at(chunks.map(|c| c + first)),
+        );
 
         let mut last = moov.clone();
         let (placed, offsets, _) = place(&boxes, 2, &mut last, 0).unwrap();
@@ -1504,6 +1512,22 @@ mod tests {
         spherecut_testkit::control::must_fail(
             "the lexical reading of the path naming the file written",
             dir.join("far.mp4").exists(),
+        );
+
+        // A `..` in the path given, after a linked folder: `link/..` is
+        // the folder holding `link`'s target, `other`, so the file written
+        // is `other/x.mp4` (F129).
+        std::fs::create_dir_all(dir.join("other").join("sub")).unwrap();
+        symlink("other/sub", dir.join("link")).unwrap();
+        let out = dir.join("link").join("..").join("x.mp4");
+        inject(&a, &out, &spherical_edits()).unwrap();
+        let tree = mp4::read_file(&dir.join("other").join("x.mp4")).unwrap();
+        assert!(spherical::read_tracks(&tree)[0].v2.is_some());
+        // Control: read lexically, `link/../x.mp4` names `x.mp4` beside
+        // `link`, which nothing wrote.
+        spherecut_testkit::control::must_fail(
+            "the lexical reading of the given path naming the file written",
+            dir.join("x.mp4").exists(),
         );
     }
 
