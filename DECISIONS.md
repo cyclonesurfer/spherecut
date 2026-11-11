@@ -1892,8 +1892,10 @@ above are withdrawn (F088, F115). wgpu has a hook for the ownership
 transfer after all: a raw barrier recorded through
 `CommandEncoder::as_hal_mut`, which path A has submitted ahead of each
 upload since M3.8 (`docs/design/m1-5b.md`, "The acquire"), from
-`VK_QUEUE_FAMILY_FOREIGN_EXT` on every device Spherecut makes now that
-`gpu.rs` opens its devices with that family's extension too (D31).
+`VK_QUEUE_FAMILY_FOREIGN_EXT` on every device Spherecut makes where the
+driver lists that family's extension, now that `gpu.rs` opens its
+devices with it too (D31); without it the acquire still names
+`VK_QUEUE_FAMILY_EXTERNAL`.
 "ANV reads imported DMA-BUFs without it" was never run: no Intel GPU has
 run path A. And the Tier 2 comparison missed the cause twice:
 `zero_copy_matches_copy_path` failed on odin on the same frame (X5 frame
@@ -6015,12 +6017,13 @@ Two of the lock's review fixes reach every player, locked or not:
 
 *Updated 2026-11-11 (review-fix slice):* "out of memory, making or
 writing a slot, kills that slot" now means the slot's own memory (F118).
-Path B's copier allocates a buffer of its own for each copy out of
-FFmpeg's image; when that fails, the frame alone is downloaded and
-uploaded as bytes, with a warning, and neither the slot nor zero copy
-for later opens is given up (`upload::fallback_for`). The copier's other
-failures are told apart too (F117): a timeout or a lost device is the
-GPU's failure (`GpuFailed`), not a refused frame.
+Path B's copier takes a buffer from its pool, or allocates one, for each
+copy out of FFmpeg's image; when the copier runs out of memory, the
+frame alone is downloaded and uploaded as bytes, with a warning, and
+neither the slot nor zero copy for later opens is given up
+(`upload::fallback_for`). The copier's other failures are told apart
+too (F117): a timeout or a lost device is the GPU's failure
+(`GpuFailed`), not a refused frame.
 
 ## D35. Audio and A/V sync
 

@@ -640,7 +640,7 @@ impl UploadThread {
             Ok(stats) => return Ok(stats),
             Err(failed) => failed,
         };
-        match (fallback_for(&e, from_copier), e) {
+        let what = match (fallback_for(&e, from_copier), e) {
             (Fallback::Sticky, RenderError::Import(why)) => {
                 self.shared.perf.add(Counter::ImportsRefused, 1);
                 let mut status = self.shared.status();
@@ -650,12 +650,14 @@ impl UploadThread {
                     );
                     status.import_refused = Some(why);
                 }
+                "a frame the GPU can't import"
             }
             (Fallback::ThisFrame, e) => {
                 tracing::warn!("downloading a frame the copier had no memory for: {e}");
+                "a frame the copier had no memory for"
             }
             (_, e) => return Err(e),
-        }
+        };
         let start = Instant::now();
         let down = match f.to_system() {
             Some(Ok(d)) => d,
@@ -663,7 +665,7 @@ impl UploadThread {
                 // The frame doesn't know its file; the open does.
                 let path = self.shared.status().path.clone().unwrap_or_default();
                 return Err(RenderError::Invalid(format!(
-                    "downloading a frame the GPU can't import: {}",
+                    "downloading {what}: {}",
                     e.or_path(&path)
                 )));
             }
@@ -806,8 +808,8 @@ enum Fallback {
     /// Downloaded, and zero copy off for the opens after: the GPU
     /// refuses the decoder's frames.
     Sticky,
-    /// Downloaded, this frame alone: the copier had no memory for its
-    /// buffer, which says nothing of the slot or of the next frame.
+    /// Downloaded, this frame alone: the copier ran out of memory, which
+    /// says nothing of the slot or of the next frame.
     ThisFrame,
     /// The upload fails as any other does: a slot without memory dies,
     /// a lost device stops uploads, and anything else drops the frame.
