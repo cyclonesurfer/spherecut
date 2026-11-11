@@ -56,15 +56,17 @@
 //!   unlocked and then opened as a locked pair, and each perf pair locked
 //!   beside the app's run: rows of unpaired presents, pairs presented,
 //!   drops, `pair_wait`, pair resyncs, slots, each lens's decodes and
-//!   path B's pool, and a verdict a mode (Pass, Redirect to 8 slots, or
-//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, a new pair at 99 %
-//!   or more of the real-time presents that owed one, and at most 1 point
-//!   more dropped a lens than unlocked; at 8K25 on path B no pair apart
-//!   and the pacing rule met, with the pairs and `pair_wait` of each
-//!   second that dropped. A present owes a frame when its clock ran into
-//!   a later one since the present before, short of the end, or when it
-//!   is a loop's first after the seek back, so a rate above the presents'
-//!   and the loops of a short master owe only what can be shown ([`Owed`]).
+//!   path B's pool, a note beside each run, locked or not, of
+//!   `MemAvailable` as each of its passes began, and a verdict a mode
+//!   (Pass, Redirect to 8 slots, or Kill): at 8K30, 5.7K60 and 4K120 no
+//!   pair apart, a new pair at 99 % or more of the real-time presents
+//!   that owed one, and at most 1 point more dropped a lens than
+//!   unlocked; at 8K25 on path B no pair apart and the pacing rule met,
+//!   with the pairs and `pair_wait` of each second that dropped. A
+//!   present owes a frame when its clock ran into a later one since the
+//!   present before, short of the end, or when it is a loop's first after
+//!   the seek back, so a rate above the presents' and the loops of a
+//!   short master owe only what can be shown ([`Owed`]).
 //!   The engine counts a locked pair's drops (and skips) once a pair and
 //!   an unlocked player's for each stream, so the unlocked count is
 //!   divided by its streams; the frames the presents' cadence passes over
@@ -1257,6 +1259,7 @@ fn unthrottled_with(
         // Held, its frames' slots would stay out of use: with two streams,
         // two of the four, and no stream could show its next frame.
         drop(first);
+        let mem_available = mem_available_now();
         player.play();
         let mut meter = Meter::new(player.perf().clone(), streams.len(), Instant::now());
         let mut timeline = Timeline::new(path, run, "unthrottled", player.perf(), meter.begun);
@@ -1304,7 +1307,8 @@ fn unthrottled_with(
         let pass = meter.finish(Instant::now());
         // The cache's counts take its lock, which the UI thread mustn't.
         drop(ui);
-        let pass = finish_pass(pass, &player, watch);
+        let mut pass = finish_pass(pass, &player, watch);
+        pass.mem_available = mem_available;
         if let Some(t) = timeline {
             t.write();
         }
@@ -1345,9 +1349,7 @@ fn realtime(
         // loop seeks back.
         let mut presents = Vec::new();
         let mut samples = Vec::new();
-        let mem_available = std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|m| mem_available(&m));
+        let mem_available = mem_available_now();
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
@@ -1723,19 +1725,47 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
     }
 }
 
+/// `MemAvailable` now, in bytes, where `/proc/meminfo` says.
+fn mem_available_now() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| mem_available(&m))
+}
+
+/// The note beside a run's rows of `MemAvailable` as each of its
+/// `passes` began, unthrottled then real time where both ran, so that a
+/// locked run's rows and the unlocked run's beside them can be read
+/// against the memory each had (copy-path slumps follow it, D42).
+fn mem_note(name: &str, passes: &[&Pass]) -> String {
+    let each: Vec<String> = passes
+        .iter()
+        .zip(["unthrottled", "real time"])
+        .map(|(p, pass)| match p.mem_available {
+            Some(bytes) => format!("{} MiB {pass}", bytes >> 20),
+            None => format!("not read {pass}"),
+        })
+        .collect();
+    format!(
+        "{name}: MemAvailable as each pass began: {}",
+        each.join(", ")
+    )
+}
+
 /// A two-stream run's rows of P-LOCK's (M3 plan 4.3), locked or not,
 /// from its `passes`, unthrottled then real time where both ran: the
 /// unpaired presents over them all, each lens's decodes since the open,
-/// path B's pool and the slots in the last; of a real-time pass, the share
-/// of the presents that owed a frame that put one up, the frames dropped
-/// and skipped a lens and `MemAvailable` as it began; of a locked run, its pair
-/// resyncs, the pairs it presented, `pair_wait` and its lock. Both runs
-/// record their slots, since the lock takes all of `MAX_SLOTS` and the
-/// unlocked player its default.
+/// path B's pool and the slots in the last, and a note of `MemAvailable`
+/// as each pass began ([`mem_note`]); of a real-time pass, the share of
+/// the presents that owed a frame that put one up, the frames dropped and
+/// skipped a lens and `MemAvailable` as it began; of a locked run, its
+/// pair resyncs, the pairs it presented, `pair_wait` and its lock. Both
+/// runs record their slots, since the lock takes all of `MAX_SLOTS` and
+/// the unlocked player its default.
 fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
     let Some(last) = passes.last() else {
         return;
     };
+    bench::note(mem_note(name, passes));
     let over = |of: fn(&Pass) -> u64| passes.iter().map(|p| of(p)).sum::<u64>() as f64;
     let real_time = passes.len() > 1;
     let pass = if real_time {
@@ -3705,13 +3735,15 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// again, each lens's first in the cache as in the slot and the slot's
 /// own frame, its Y samples its own lens's beside the crossed truth's,
 /// off the GFX11 R8 signature), and fails the report, which counts them
-/// by path and side; counts planted break [`path_rule`] (a kept pass with a
-/// frame downloaded or refused, a copied one with a frame on the GPU) or
-/// skip it (a kept pass with none on the GPU); [`stood_still`] fails with
-/// a slot free before the reads or claimed during them; lens 0's slot
-/// read for both fails the codes' check, lens 1 a frame late in one
-/// present fails the harness's count, and lens 1 where another seek left
-/// it fails the landing's.
+/// by path and side; counts planted break [`path_rule`] (a kept pass with
+/// a frame downloaded or refused, a copied one with a frame on the GPU)
+/// or skip it (a kept pass with none on the GPU); the note of
+/// `MemAvailable` beside P-LOCK's rows gives both passes', and says when
+/// a pass didn't read it; [`stood_still`] fails with a slot free before
+/// the reads or claimed during them; lens 0's slot read for both fails
+/// the codes' check, lens 1 a frame late in one present fails the
+/// harness's count, and lens 1 where another seek left it fails the
+/// landing's.
 #[test]
 fn the_bench_harness_plays_a_locked_pair() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -3806,6 +3838,25 @@ fn the_bench_harness_plays_a_locked_pair() {
     assert_eq!(apart(&r.presents), 0);
     assert!(r.shown > 0 && !r.samples.is_empty());
     assert_eq!(r.samples.len(), r.presents.len());
+    // MemAvailable as each pass began, as the note beside P-LOCK's rows
+    // gives it; a pass that didn't read it says so.
+    let mem = mem_note("pair64", &[&u, &r]);
+    assert!(
+        u.mem_available.is_some() && r.mem_available.is_some(),
+        "{mem}"
+    );
+    assert!(
+        mem.starts_with("pair64: MemAvailable as each pass began: ")
+            && mem.contains(" MiB unthrottled, ")
+            && mem.ends_with(" MiB real time"),
+        "{mem}"
+    );
+    let unread = mem_note("pair64", &[&Pass::default(), &r]);
+    must_fail(
+        "a pass that didn't read MemAvailable noted as read",
+        unread.contains(" MiB unthrottled"),
+    );
+    assert!(unread.contains("not read unthrottled, "), "{unread}");
     // Its presents scored as P-LOCK scores them: some owed a pair, and
     // its drops count once a pair.
     assert!(r.seconds.iter().any(|s| s.due > 0), "{:?}", r.seconds);
