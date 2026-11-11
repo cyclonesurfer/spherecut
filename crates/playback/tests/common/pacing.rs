@@ -4,7 +4,9 @@
 //! frames:
 //!
 //! - the pairs presented are at least [`SHARE`] of the frames the
-//!   slowest lens hands out;
+//!   slowest lens hands out, counted alike: pairs of frames it handed out
+//!   after the warm-up began, since a lens that leads the clock handed
+//!   its window out before;
 //! - the time presented trails that lens's newest frame by at most
 //!   [`TRAIL`] frames, once the frame has had one present to go up: its
 //!   newest as the present before saw it, and never past the clock's
@@ -15,10 +17,11 @@
 //! failed, [`pacing_cut`] one that its own length ends, and [`pooled`]
 //! several runs whose share is judged together, over at least
 //! [`JUDGED`] frames; [`handed_out`] counts what a run's slowest lens
-//! handed out after the warm-up, and [`longest_freeze`] how long its
-//! pair stood still against the clock. [`play`] drives a run on a
-//! `ManualClock` and gathers them, [`play_steady`] drives one that keeps
-//! to the rule, and [`play_with`] one whose clock a test moves itself.
+//! handed out after the warm-up, and [`freezes`] how long its pair stood
+//! still against the clock, from how far behind it. [`play`] drives a
+//! run on a `ManualClock` and gathers them, [`play_steady`] drives one
+//! that keeps to the rule, and [`play_with`] one whose clock a test
+//! moves itself.
 
 use std::cell::Cell;
 use std::time::{Duration, Instant};
@@ -45,10 +48,11 @@ pub const TRAIL: i64 = 2;
 /// fewer, one pair a held-up present missed fails it.
 pub const JUDGED: u64 = 20;
 
-/// The most frames [`play`] moves the clock on at a present: a test
-/// thread held up between two presents moves it on two frames, not past
-/// frames no present was there to show, which would count against the
-/// engine.
+/// The most frames [`play`] moves the clock on at a present, for a
+/// [`Pace`] whose frames are shorter than a present: a test thread held
+/// up between two presents moves it on two frames, not past frames no
+/// present was there to show, which would count against the engine. A
+/// pace whose frames are longer than a present moves it on one.
 pub const MOST_A_PRESENT: i64 = 2;
 
 /// What one present of a run showed, and where its lenses were.
@@ -97,8 +101,9 @@ impl Sample {
 /// How a run kept to the rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Paced {
-    /// The pairs presented after the warm-up, and the frames the slowest
-    /// lens handed out meanwhile.
+    /// The pairs presented after the warm-up of frames the slowest lens
+    /// handed out meanwhile (past its newest at the present before the
+    /// warm-up), and those frames.
     pub pairs: u64,
     pub handed_out: u64,
     /// The most frames the time presented trailed the slowest lens's
@@ -176,34 +181,59 @@ pub fn pooled(runs: &[&[Sample]], rate: FrameRate) -> Result<Vec<Paced>, Unpaced
     Ok(each)
 }
 
-/// The longest a run's pair stood still after the warm-up, in frames the
-/// clock ran meanwhile: between one present that put a new pair up and
-/// the next, or to the run's last present. A pair that slides into ever
-/// longer freezes outgrows whatever bound the catch-up gives, and one
-/// that freezes outgrows it at once.
-pub fn longest_freeze(samples: &[Sample], rate: FrameRate) -> i64 {
+/// A stand-still of a run's pair: from the present that put the pair up
+/// (sample `at`), at the clock's frame `clock` and `lag` frames behind
+/// it, for `frames` frames of the clock, to the present that put the next
+/// pair up or to the run's last (sample `until`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Freeze {
+    pub at: usize,
+    pub until: usize,
+    pub clock: i64,
+    pub lag: i64,
+    pub frames: i64,
+}
+
+/// The stand-stills of a run's pair that reach past the warm-up, each in
+/// full from the present that put its pair up (a present with no pair
+/// stands still too). A pair behind the clock stands still while its
+/// slowest lens catches up, so how long it may stand depends on how far
+/// behind it was: a pair that slides into freezes longer than its
+/// catch-ups take outgrows any bound on that, and one that freezes
+/// outgrows it at once.
+pub fn freezes(samples: &[Sample], rate: FrameRate) -> Vec<Freeze> {
     let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
-    let Some(start) = warm(samples, rate) else {
-        return 0;
-    };
-    let mut since = frame(samples[start].clock);
-    let mut longest = 0;
-    for at in start..samples.len() {
-        let s = &samples[at];
-        let new = s.shown.is_some() && (at == 0 || samples[at - 1].shown != s.shown);
-        longest = longest.max(frame(s.clock) - since);
-        if new {
-            since = frame(s.clock);
+    let mut ups = Vec::new();
+    let mut up: Option<Time> = None;
+    for (at, s) in samples.iter().enumerate() {
+        if s.shown.is_some() && s.shown != up {
+            ups.push(at);
+            up = s.shown;
         }
     }
-    longest
+    let last = samples.len().saturating_sub(1);
+    (ups.iter().enumerate())
+        .filter_map(|(i, &at)| {
+            let clock = frame(samples[at].clock);
+            let until = ups.get(i + 1).copied().unwrap_or(last);
+            let shown = frame(samples[at].shown?);
+            Some(Freeze {
+                at,
+                until,
+                clock,
+                lag: clock.saturating_sub(shown),
+                frames: frame(samples[until].clock).saturating_sub(clock),
+            })
+        })
+        .filter(|f| f.clock.saturating_add(f.frames) >= WARM_UP)
+        .collect()
 }
 
 /// The frames the slowest lens of a run handed out after the warm-up, as
 /// [`pacing`] counts them, whatever else the run did: 0 for a run that
 /// never passed the warm-up.
 pub fn handed_out(samples: &[Sample], rate: FrameRate) -> u64 {
-    warm(samples, rate).map_or(0, |start| handed_out_from(samples, start))
+    warm(samples, rate).map_or(0, |start| handed_out_from(samples, start).0)
 }
 
 /// The first sample past the warm-up.
@@ -213,14 +243,22 @@ fn warm(samples: &[Sample], rate: FrameRate) -> Option<usize> {
 }
 
 /// The frames the slowest lens handed out from the sample before `start`
-/// to the last.
-fn handed_out_from(samples: &[Sample], start: usize) -> u64 {
+/// to the last, and that lens's newest frame at that sample: the frames
+/// it handed out are those past it. The slowest lens is the one behind
+/// there, its newest frame the earlier (or none), whose frames are the
+/// pairs' to come, or where the two are level the one that hands out
+/// fewer: a lens that leads, held back by its window, may hand out
+/// catch-up landings that the lens behind passes over on its way to a
+/// later one.
+fn handed_out_from(samples: &[Sample], start: usize) -> (u64, Option<Time>) {
     let base = &samples[start.saturating_sub(1)];
     let last = samples.last().unwrap_or(base);
-    (0..2)
-        .map(|m| last.handed_out[m].saturating_sub(base.handed_out[m]))
-        .min()
-        .unwrap_or(0)
+    let each = [0, 1].map(|m| last.handed_out[m].saturating_sub(base.handed_out[m]));
+    let slowest = match base.newest {
+        [a, b] if a != b => usize::from(b < a),
+        _ => usize::from(each[1] < each[0]),
+    };
+    (each[slowest], base.newest[slowest])
 }
 
 /// The pacing rule, with or without its last part.
@@ -268,26 +306,35 @@ fn counted(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced> {
         }
         trailed = trailed.max(frames);
     }
+    // The pairs of frames the slowest lens handed out after the warm-up
+    // began, as its count is: a pair of a frame it handed out before
+    // counts against nothing.
+    let (handed_out, past) = handed_out_from(samples, start);
     let pairs = (start..samples.len())
         .filter(|&at| {
             let s = &samples[at];
-            s.shown.is_some() && (at == 0 || samples[at - 1].shown != s.shown)
+            s.shown.is_some_and(|t| past.is_none_or(|p| t > p))
+                && (at == 0 || samples[at - 1].shown != s.shown)
         })
         .count() as u64;
     Ok(Paced {
         pairs,
-        handed_out: handed_out_from(samples, start),
+        handed_out,
         trailed,
     })
 }
 
 /// How a paced run moves its clock: a frame of `rate` every `period` of
-/// wall time, from frame 0 to `frames`, the clip's end.
+/// wall time, from frame 0 to `frames`, the clip's end, and at most
+/// `most` frames at a present ([`MOST_A_PRESENT`], or 1 where a frame
+/// lasts longer than a present, so that a present held up never passes
+/// a frame over).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pace {
     pub rate: FrameRate,
     pub period: Duration,
     pub frames: i64,
+    pub most: i64,
 }
 
 /// Play `player`, opened on `clock` and showing its first pair, at
@@ -298,8 +345,7 @@ pub struct Pace {
 /// own time the clock leaves out: time it held the presents up that
 /// isn't the engine's, which would have the clock run on past frames
 /// no present was there to show. The clock keeps to the wall clock's
-/// frame, less that, but moves on at most [`MOST_A_PRESENT`] frames a
-/// present.
+/// frame, less that, but moves on at most `pace.most` frames a present.
 pub fn play(
     player: &Player,
     clock: &ManualClock,
@@ -318,7 +364,7 @@ pub fn play(
             .rate
             .time_to_frame(clock.now(), Rounding::Floor)
             .unwrap();
-        let k = k.min(from + MOST_A_PRESENT).min(pace.frames);
+        let k = k.min(from + pace.most).min(pace.frames);
         let at = pace.rate.frame_to_time(k).unwrap();
         if clock.is_running() && clock.now() < at {
             clock.set(at, Instant::now());

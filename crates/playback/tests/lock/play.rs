@@ -24,7 +24,7 @@ use spherecut_playback::{
 use spherecut_render::readback::read_texture;
 use spherecut_testkit::control::must_fail;
 
-use crate::common::pacing::{self, Pace, Sample, Unpaced};
+use crate::common::pacing::{self, Freeze, Pace, Sample, Unpaced};
 use crate::common::per_stream::{Hold, Lens, PerStream};
 use crate::common::{self, pts, snapshot};
 use crate::{GaveUp, WAIT, Wait, timed, wait_for};
@@ -479,26 +479,47 @@ struct Case {
 }
 
 impl Case {
-    /// The longest a pair of the case may stand still after the warm-up,
-    /// in the clock's frames: as long as its slowest lens takes to decode
-    /// the leading lens's window, the most a catch-up passes while the
-    /// other lens leads, or the window itself where that is longer; then
-    /// `TRAIL` more, and the most a present held up moves the clock
-    /// (`MOST_A_PRESENT`), for the present that puts the pair up. A pair
-    /// that slides into ever longer freezes outgrows it.
-    fn longest_freeze(&self) -> i64 {
+    /// The longest a pair of the case may stand still after a present
+    /// that put it up `lag` frames behind the clock, in the clock's
+    /// frames: as long as its slowest lens takes to finish the frame in
+    /// hand and decode its way to where the clock was then, which a
+    /// catch-up to the clock takes, or the leading lens's window where
+    /// that is longer; then `TRAIL` more, and the most a present held up
+    /// moves the clock (`MOST_A_PRESENT`), for the present that puts the
+    /// pair up. A pair whose lenses all trail the clock (the leading one
+    /// held back by its window, once the pair is a window behind) catches
+    /// up to it, decoding every frame it passes over, and lands as far
+    /// behind as the catch-up took: below real time, its freezes grow by
+    /// its slowest lens's cost over the frame period at each catch-up, as
+    /// an unlocked lens's do. A pair whose freezes grow faster outgrows
+    /// the bound, and one that freezes at the clock outgrows it at once.
+    fn longest_freeze(&self, lag: i64) -> i64 {
         let window = i64::try_from(self.budget / 4).unwrap();
-        let decode = self.slowest.as_nanos() * self.budget as u128 / 4;
+        let decode = self.slowest.as_nanos() * u128::try_from(lag.max(0) + 1).unwrap();
         let frames = i64::try_from(decode.div_ceil(self.pace.period.as_nanos())).unwrap();
         frames.max(window) + pacing::TRAIL + pacing::MOST_A_PRESENT
+    }
+
+    /// The frames of the case's clock its slowest lens's decoder waited
+    /// for a CPU through `freeze` (`decoding`, by sample), which the
+    /// freeze may last on top of [`Case::longest_freeze`]: on a CPU busy
+    /// beyond the tests, each frame the lens decodes takes its cost and
+    /// the wait to be woken once that has passed, so a catch-up takes
+    /// longer than its cost says. On a CPU that isn't busy it is next to
+    /// nothing.
+    fn waited(&self, freeze: &Freeze, decoding: &[Duration]) -> i64 {
+        let at = |i: usize| decoding.get(i).copied().unwrap_or_default();
+        let waited = at(freeze.until).saturating_sub(at(freeze.at));
+        i64::try_from(waited.as_nanos().div_ceil(self.pace.period.as_nanos())).unwrap()
     }
 }
 
 /// What a run of the pacing test saw: its samples, what its presents
 /// showed, the pair resyncs (the cache's own count, which takes each at
 /// once) and the unpaired presents counted, the presents after the
-/// warm-up whose pair wasn't up a present on, and the frames lens 1
-/// decoded after the warm-up, catch-ups' included.
+/// warm-up whose pair wasn't up a present on, the frames lens 1
+/// decoded after the warm-up, catch-ups' included, and how long its
+/// decoder had waited for a CPU by each sample.
 struct Played {
     samples: Vec<Sample>,
     seen: Mismatches,
@@ -506,6 +527,7 @@ struct Played {
     unpaired: u64,
     late: u64,
     decoded: u64,
+    decoding: Vec<Duration>,
 }
 
 /// Four cases: on a 90-frame clip whose clock moves a frame every 3 ms,
@@ -516,34 +538,46 @@ struct Played {
 /// After the first 30 frames of each, the pacing rule holds, the share
 /// judged over the four together ([`pacing::pooled`]) on 20 frames handed
 /// out or more; no pair stands still longer than its slowest lens takes
-/// to catch up a window ([`Case::longest_freeze`]); the presents whose
-/// pair wasn't up a present on are at most one, or a quarter of the
-/// frames handed out, over the three slow cases and in the fourth
-/// ([`settled`]); and no pair resyncs but where the budget was halved,
-/// which may, though in practice it doesn't (base.rs's
+/// to catch up to where the clock was as it went up
+/// ([`Case::longest_freeze`]); the presents whose pair wasn't up a
+/// present on are at most one, or a quarter of the frames handed out,
+/// over the three slow cases and in the fourth ([`settled`]); and no
+/// pair resyncs but where the budget was halved, which may, though in
+/// practice it doesn't (base.rs's
 /// `a_shrinking_budget_mid_play_resyncs_the_pair` holds the backstop to
-/// its control). The clock moves on at most two frames a present, and a
-/// present gives its pair as long again as the engine's threads waited
-/// for a CPU, so that neither a test thread held up nor a CPU busy
-/// beyond the tests is counted against the engine. The
-/// controls: the group base and the group `until` off fails the rule by
+/// its control). The clock moves on at most two frames a present, one
+/// in the fourth case, whose frames are longer than a present; a present
+/// gives its pair as long again as the engine's threads waited for a
+/// CPU, and a freeze as long again as lens 1's decoder did
+/// ([`Case::waited`]), so that neither a test thread held up nor a CPU
+/// busy beyond the tests is counted against the engine. The controls:
+/// the group base and the group `until` off fails the rule by
 /// trailing, and the presents late; a run that hands out a frame fewer
-/// than [`pacing::JUDGED`] after the warm-up is too few to judge; and a
-/// pair whose freezes double fails the freeze, though it keeps to the
-/// rule.
+/// than [`pacing::JUDGED`] after the warm-up is too few to judge; the
+/// fourth case's run with every third pair passed over has too few
+/// pairs; and, at a slow case's own length, a pair whose freezes double
+/// at the clock, and one whose catch-ups take five times its lag, fail
+/// the freeze, though they keep to the rule.
 #[test]
 fn a_locked_pair_paces_to_its_slowest_lens() {
     let _alone = alone();
     let _time = timed("a_locked_pair_paces_to_its_slowest_lens");
     const FRAMES: i64 = 90;
     const WITHIN: i64 = 60;
+    // Between presents, beside the millisecond `pacing::play` sleeps.
+    const PRESENTS: Duration = Duration::from_millis(3);
+    // A frame every `period` ms, on a clip of `frames`: at most two a
+    // present while a frame is shorter than one, else one.
     let pace = |frames: i64, period: u64| Pace {
         rate: RATE,
         period: ms(period),
         frames,
+        most: if ms(period) < PRESENTS + ms(1) {
+            pacing::MOST_A_PRESENT
+        } else {
+            1
+        },
     };
-    // Between presents, beside the millisecond `pacing::play` sleeps.
-    const PRESENTS: Duration = Duration::from_millis(3);
     let lens = |frames: i64, cost_us: u64| {
         Lens::default()
             .frames(frames as u64)
@@ -604,7 +638,12 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         let mut halved = !case.halve;
         let mut late = 0;
         let mut warm = None;
+        // How long lens 1's decoder waited for a CPU by each present, from
+        // here on (`Played::decoding`).
+        let decoder = Queued::named("decode-v1");
+        let mut decoding = Vec::new();
         let mut samples = pacing::play(&player, &clock, case.pace, [0, 1], WAIT, |p, s| {
+            decoding.push(decoder.since());
             let queued = Queued::read();
             if let Some(p) = p {
                 seen.check(p);
@@ -644,6 +683,7 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
                     seen.check(p);
                 }
                 samples.push(Sample::of(p.as_ref(), &snapshot(&player), [0, 1]));
+                decoding.push(decoder.since());
             }
         }
         let resyncs = player.cache().stats().resyncs;
@@ -657,6 +697,7 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
             unpaired,
             late,
             decoded,
+            decoding,
         }
     };
     // A case's own checks: no pair apart, no resync unless the budget
@@ -666,7 +707,7 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         if played.resyncs > 0 && !case.halve {
             return Err(format!("{} resyncs", played.resyncs));
         }
-        unfrozen(case, &played.samples)?;
+        unfrozen(case, &played.samples, &played.decoding)?;
         Ok::<_, String>(())
     };
     let cases = [
@@ -696,13 +737,21 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         panic!("{e:?}; {}", each.join("; "))
     });
     for ((case, p), paced) in cases.iter().zip(&played).zip(&paced) {
+        // The freezes longer than a present held up and the trail give,
+        // each from where the clock was, how far behind, and its bound.
+        let freezes: Vec<String> = (pacing::freezes(&p.samples, RATE).iter())
+            .filter(|f| f.frames > pacing::TRAIL + pacing::MOST_A_PRESENT)
+            .map(|f| {
+                let most = case.longest_freeze(f.lag) + case.waited(f, &p.decoding);
+                format!("{} from {}, {} behind, of {most}", f.frames, f.clock, f.lag)
+            })
+            .collect();
         eprintln!(
-            "{}: {paced:?}, lens 1 decoding {} frames meanwhile; its pair still for {} frames at \
-             most of {}, {} resyncs, {} presents late",
+            "{}: {paced:?}, lens 1 decoding {} frames meanwhile; its pair still for [{}] frames, \
+             {} resyncs, {} presents late",
             case.name,
             p.decoded,
-            pacing::longest_freeze(&p.samples, RATE),
-            case.longest_freeze(),
+            freezes.join("; "),
             p.resyncs,
             p.late
         );
@@ -742,7 +791,7 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
     // Control: a run that shows a pair at every frame after the warm-up
     // hands out one frame too few to judge the share by; a frame longer,
     // it hands out enough.
-    let pairs = |last: i64| sliding(&(pacing::WARM_UP..=last).collect::<Vec<_>>());
+    let pairs = |last: i64| sliding(&(pacing::WARM_UP..=last).map(|k| (k, k)).collect::<Vec<_>>());
     let judged = pacing::WARM_UP + i64::try_from(pacing::JUDGED).unwrap() - 1;
     let e = must_fail(
         "a run a frame too short to judge",
@@ -756,50 +805,101 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
     );
     pacing::pooled(&[&pairs(judged)[..]], RATE)
         .unwrap_or_else(|e| panic!("a run long enough to judge: {e:?}"));
-    // Control: a pair whose freezes double, 4 frames of the clock and
-    // then 8, 16, 32 and 64, though each pair it shows is the slowest
-    // lens's newest.
-    let slide = sliding(&[30, 34, 42, 58, 90, 154]);
-    pacing::pacing(&slide, RATE).unwrap_or_else(|e| panic!("the slide's rule: {e:?}"));
-    must_fail("a pair whose freezes double", unfrozen(&cases[0], &slide));
+    // Control: the fourth case's run as a presenter would have shown it
+    // that passed every third pair over, showing the pair before: two
+    // pairs in three of the frames handed out, too few.
+    let skipped = skipping(&played[3].samples);
+    let e = must_fail(
+        "every third pair passed over",
+        pacing::pooled(&[&skipped[..]], RATE),
+    );
+    assert!(matches!(e, Unpaced::FewPairs { .. }), "{e:?}");
+    // Controls, at a slow case's own length, each pair the slowest lens's
+    // newest, as the rule asks: a pair at the clock whose freezes double,
+    // 4 frames of it and then 8, 16 and 32 (to the end); and one whose
+    // catch-ups take five times its lag where its slowest lens takes
+    // three, 8 frames behind at frame 30 and 40 frames still, then 40
+    // behind.
+    let slow_case = &cases[1];
+    let slides = [
+        (
+            "a pair whose freezes double",
+            vec![(30, 30), (34, 34), (42, 42), (58, 58), (90, 89)],
+        ),
+        (
+            "a pair whose catch-ups take five times its lag",
+            vec![(21, 21), (30, 22), (70, 30), (90, 89)],
+        ),
+    ];
+    for (name, ups) in slides {
+        let slide = sliding(&ups);
+        pacing::pacing(&slide, RATE).unwrap_or_else(|e| panic!("{name}: the rule: {e:?}"));
+        let decoding = vec![Duration::ZERO; slide.len()];
+        must_fail(name, unfrozen(slow_case, &slide, &decoding));
+    }
     // Control, to come with the engine's planted publish delay (unit A's
     // `LockTest::publish_delay`, written in by unit C once merged): the
     // fourth case run again with each slot published 4 ms late must fail
     // `settled`, its pair late at about one present in three.
 }
 
-/// A run of a pair that shows a new pair, the slowest lens's newest,
-/// only at the clock's frames `at`, and stands still between them: a
-/// present a frame of the clock, each lens handing its frame out as the
-/// pair shows it, to the last of `at`, the end.
-fn sliding(at: &[i64]) -> Vec<Sample> {
-    let end = *at.last().unwrap();
+/// A run of a pair that keeps up with the clock, a pair at each of its
+/// frames, until the first of `ups`, and from there shows a new pair only
+/// at the clock's frames `ups` name, each with the frame it shows, and
+/// stands still between them: a present a frame of the clock, each lens
+/// handing its frame out as the pair shows it, the slowest lens's newest,
+/// to the last of `ups`, the end.
+fn sliding(ups: &[(i64, i64)]) -> Vec<Sample> {
+    let (first, end) = (ups[0].0, ups[ups.len() - 1].0);
     (0..=end)
         .map(|k| {
-            let shown = at.iter().rev().find(|&&a| a <= k).map_or(0, |&a| a);
-            let handed = u64::try_from(at.iter().filter(|&&a| a <= k).count()).unwrap();
+            let up = &ups[..ups.partition_point(|&(a, _)| a <= k)];
+            let shown = up.last().map_or(k, |&(_, f)| f);
+            let handed = u64::try_from(first.min(k + 1) + up.len() as i64).unwrap();
             Sample {
-                clock: RATE.frame_to_time(k).unwrap(),
-                shown: Some(RATE.frame_to_time(shown).unwrap()),
+                clock: at(k),
+                shown: Some(at(shown)),
                 handed_out: [handed; 2],
-                newest: [Some(RATE.frame_to_time(shown).unwrap()); 2],
+                newest: [Some(at(shown)); 2],
                 end: k == end,
             }
         })
         .collect()
 }
 
+/// `samples` as a presenter would have shown them that passed over each
+/// pair of a frame a multiple of three, showing the pair before.
+fn skipping(samples: &[Sample]) -> Vec<Sample> {
+    let mut shown = Vec::<Sample>::with_capacity(samples.len());
+    for s in samples {
+        let passed = s.shown.is_some_and(|t| frame_of(t) % 3 == 0);
+        let before = shown.last().and_then(|b| b.shown);
+        shown.push(Sample {
+            shown: if passed { before } else { s.shown },
+            ..*s
+        });
+    }
+    shown
+}
+
 /// Whether a run of `case` never stood its pair still after the warm-up
-/// longer than [`Case::longest_freeze`].
-fn unfrozen(case: &Case, samples: &[Sample]) -> Result<i64, String> {
-    let still = pacing::longest_freeze(samples, RATE);
-    if still <= case.longest_freeze() {
-        Ok(still)
-    } else {
-        Err(format!(
-            "the pair stood still for {still} frames of the clock, more than {}",
-            case.longest_freeze()
-        ))
+/// longer than [`Case::longest_freeze`] gives for how far behind the
+/// clock it was as it went up, and [`Case::waited`] for its slowest
+/// lens's decoder kept from a CPU meanwhile (`decoding`, by sample): its
+/// longest freeze, or the first too long.
+fn unfrozen(case: &Case, samples: &[Sample], decoding: &[Duration]) -> Result<i64, String> {
+    let freezes = pacing::freezes(samples, RATE);
+    let most = |f: &Freeze| case.longest_freeze(f.lag) + case.waited(f, decoding);
+    match freezes.iter().find(|f| f.frames > most(f)) {
+        Some(f) => Err(format!(
+            "the pair stood still for {} frames of the clock from frame {}, {} behind it, more \
+             than {}",
+            f.frames,
+            f.clock,
+            f.lag,
+            most(f)
+        )),
+        None => Ok(freezes.iter().map(|f| f.frames).max().unwrap_or(0)),
     }
 }
 
@@ -851,38 +951,57 @@ fn starved(queued: &Queued) -> Duration {
     queued.since().min(3 * SETTLE)
 }
 
-/// How long each thread of this process but the caller has waited for a
-/// CPU while it could run, as the kernel counts it: the second field of
-/// `/proc/self/task/<tid>/schedstat`, in nanoseconds. Empty where the
-/// kernel doesn't count it.
-struct Queued(HashMap<OsString, u64>);
+/// How long each thread of this process but the caller, or each named
+/// with a prefix, has waited for a CPU while it could run, as the kernel
+/// counts it: the second field of `/proc/self/task/<tid>/schedstat`, in
+/// nanoseconds. Empty where the kernel doesn't count it.
+struct Queued {
+    waited: HashMap<OsString, u64>,
+    named: Option<&'static str>,
+}
 
 impl Queued {
+    /// Every thread but the caller.
     fn read() -> Queued {
+        Queued::of(None)
+    }
+
+    /// The threads whose names begin with `prefix`, the other tests'
+    /// players' among them.
+    fn named(prefix: &'static str) -> Queued {
+        Queued::of(Some(prefix))
+    }
+
+    fn of(named: Option<&'static str>) -> Queued {
         let me = std::fs::read_link("/proc/thread-self").ok();
         let me = me.as_deref().and_then(Path::file_name);
         let tasks = std::fs::read_dir("/proc/self/task")
             .into_iter()
             .flatten()
             .flatten();
-        Queued(
-            tasks
-                .filter(|task| Some(task.file_name().as_os_str()) != me)
-                .filter_map(|task| {
-                    let stat = std::fs::read_to_string(task.path().join("schedstat")).ok()?;
-                    let waited = stat.split_whitespace().nth(1)?.parse().ok()?;
-                    Some((task.file_name(), waited))
-                })
-                .collect(),
-        )
+        let read = |task: &std::fs::DirEntry, file: &str| {
+            std::fs::read_to_string(task.path().join(file)).ok()
+        };
+        let waited = tasks
+            .filter(|task| match named {
+                Some(prefix) => read(task, "comm").is_some_and(|n| n.starts_with(prefix)),
+                None => Some(task.file_name().as_os_str()) != me,
+            })
+            .filter_map(|task| {
+                let stat = read(&task, "schedstat")?;
+                let waited = stat.split_whitespace().nth(1)?.parse().ok()?;
+                Some((task.file_name(), waited))
+            })
+            .collect();
+        Queued { waited, named }
     }
 
     /// How long the threads have waited for a CPU since `self` was read,
     /// between them: a thread begun since counts all its own.
     fn since(&self) -> Duration {
-        let now = Queued::read();
-        let waited = (now.0.iter())
-            .map(|(task, &ns)| ns.saturating_sub(self.0.get(task).copied().unwrap_or(0)))
+        let now = Queued::of(self.named);
+        let waited = (now.waited.iter())
+            .map(|(task, &ns)| ns.saturating_sub(self.waited.get(task).copied().unwrap_or(0)))
             .sum::<u64>();
         Duration::from_nanos(waited)
     }
