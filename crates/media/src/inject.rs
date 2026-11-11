@@ -390,35 +390,8 @@ pub fn rewrite_into(
         _ => order.iter().take_while(|b| b.offset < moov.offset).count(),
     };
     let tail = tree.file_size - tree.trailing_bytes;
-    // Chunk offsets move with their box. A stco entry that would pass
-    // 4 GiB makes its table a co64, which grows moov; then again.
-    let mut placed = loop {
-        let mut new_offset = Vec::with_capacity(order.len());
-        let mut pos = 0;
-        for (i, b) in order.iter().enumerate() {
-            if i == moov_at {
-                pos += moov_bytes.len() as u64;
-            }
-            new_offset.push(pos);
-            pos += b.size;
-        }
-        if moov_at == order.len() {
-            pos += moov_bytes.len() as u64;
-        }
-        let total = pos + tree.trailing_bytes;
-        let moved = |c: u64| -> Option<u64> {
-            let i = order
-                .iter()
-                .position(|b| (b.offset..b.offset + b.size).contains(&c))?;
-            Some(c - order[i].offset + new_offset[i])
-        };
-        let mut shifted = moov_bytes.clone();
-        match shift_chunk_offsets(&mut shifted, &moved)? {
-            None => break (shifted, new_offset, total),
-            Some(stco) => widen_chunk_table(&mut moov_bytes, stco)?,
-        }
-    };
-    let (new_moov, _, total) = &mut placed;
+    let spans: Vec<(u64, u64)> = order.iter().map(|b| (b.offset, b.size)).collect();
+    let (new_moov, _, total) = &place(&spans, moov_at, &mut moov_bytes, tree.trailing_bytes)?;
 
     let dest = out.dest().to_path_buf();
     let copy_err = |error| InjectError::Copy {
@@ -460,6 +433,50 @@ pub fn rewrite_into(
     file.flush().map_err(write_err(&dest))?;
     progress(*total, *total);
     Ok(())
+}
+
+/// Where the top-level boxes go once `moov` is placed among them, for
+/// [`rewrite_into`]. `boxes` are the other top-level boxes' offsets and
+/// sizes in the input, in order; `moov` goes before `boxes[moov_at]`, or
+/// after the last when `moov_at` is their count, and `trailing` bytes
+/// follow. Every chunk offset in `moov_bytes` moves with the box it
+/// points into. A `stco` entry the move takes past 4 GiB makes its table
+/// a `co64`, which grows `moov` and so moves every box after it again;
+/// then again, until every entry fits. Returns the placed `moov`, each
+/// box's new offset and the file's new size; `moov_bytes` keeps the
+/// widened tables, with the input's offsets.
+fn place(
+    boxes: &[(u64, u64)],
+    moov_at: usize,
+    moov_bytes: &mut Vec<u8>,
+    trailing: u64,
+) -> Result<(Vec<u8>, Vec<u64>, u64), InjectError> {
+    loop {
+        let mut new_offset = Vec::with_capacity(boxes.len());
+        let mut pos = 0;
+        for (i, &(_, size)) in boxes.iter().enumerate() {
+            if i == moov_at {
+                pos += moov_bytes.len() as u64;
+            }
+            new_offset.push(pos);
+            pos += size;
+        }
+        if moov_at == boxes.len() {
+            pos += moov_bytes.len() as u64;
+        }
+        let total = pos + trailing;
+        let moved = |c: u64| -> Option<u64> {
+            let i = boxes
+                .iter()
+                .position(|&(offset, size)| (offset..offset + size).contains(&c))?;
+            Some(c - boxes[i].0 + new_offset[i])
+        };
+        let mut shifted = moov_bytes.clone();
+        match shift_chunk_offsets(&mut shifted, &moved)? {
+            None => return Ok((shifted, new_offset, total)),
+            Some(stco) => widen_chunk_table(moov_bytes, stco)?,
+        }
+    }
 }
 
 /// A box's type, and its extended type for a `uuid`.
@@ -849,6 +866,76 @@ mod tests {
         assert_eq!(wide, want);
     }
 
+    /// The chunk tables of a `moov`'s tracks: each's type, and its first
+    /// offset.
+    fn tables(moov: &[u8]) -> Vec<(String, u64)> {
+        let tree = mp4::read(&mut io::Cursor::new(moov.to_vec())).unwrap();
+        assert!(tree.warnings.is_empty(), "{:?}", tree.warnings);
+        tree.tracks()
+            .map(|t| {
+                let stbl = t.path(&[b"mdia", b"minf", b"stbl"]).unwrap();
+                match (stbl.child(b"stco"), stbl.child(b"co64")) {
+                    (Some(b), None) => (
+                        "stco".into(),
+                        u64::from(u32::from_be_bytes(b.payload[8..12].try_into().unwrap())),
+                    ),
+                    (None, Some(b)) => (
+                        "co64".into(),
+                        u64::from_be_bytes(b.payload[8..16].try_into().unwrap()),
+                    ),
+                    other => panic!("{other:?}"),
+                }
+            })
+            .collect()
+    }
+
+    /// Moving `moov` ahead of the media data can take a `stco` entry past
+    /// 4 GiB, as a long export's would be: [`place`], as `rewrite_into`
+    /// runs it, widens that table to a `co64` and places every box again,
+    /// here twice, until every entry fits (F129).
+    ///
+    /// Control: the same `moov` left after the media data keeps its
+    /// `stco`s.
+    #[test]
+    fn a_moov_moved_ahead_of_4_gib_of_media_widens_its_tables() {
+        use spherecut_testkit::control::must_fail;
+
+        let ventry = bx(b"hvc1", &cat(&[vec![0u8; 78], bx(b"hvcC", &[9; 5])]));
+        let aentry = bx(b"mp4a", &cat(&[vec![0u8; 28], bx(b"esds", &[7; 5])]));
+        // Chunks just under 4 GiB, in 4 GiB of media data after a 20-byte
+        // `ftyp`, with `moov` last.
+        let chunks = [u32::MAX - 100, u32::MAX - 50];
+        let moov = bx(
+            b"moov",
+            &cat(&[
+                trak(b"vide", ventry, chunks[0]),
+                trak(b"soun", aentry, chunks[1]),
+            ]),
+        );
+        let boxes = [(0, 20), (20, 1 << 32)];
+        let mut moov_bytes = moov.clone();
+        let (placed, offsets, total) = place(&boxes, 1, &mut moov_bytes, 3).unwrap();
+        // Each `stco` of one entry is 4 bytes longer as a `co64`.
+        let len = placed.len() as u64;
+        assert_eq!(len, moov.len() as u64 + 8);
+        assert_eq!(offsets, [0, 20 + len]);
+        assert_eq!(total, 20 + len + (1 << 32) + 3);
+        let at = |offsets: [u64; 2]| -> Vec<(String, u64)> {
+            offsets.iter().map(|&o| ("co64".into(), o)).collect()
+        };
+        let chunks = chunks.map(u64::from);
+        assert_eq!(tables(&placed), at(chunks.map(|c| c + len)));
+        assert_eq!(tables(&moov_bytes), at(chunks));
+
+        let mut last = moov.clone();
+        let (placed, offsets, _) = place(&boxes, 2, &mut last, 0).unwrap();
+        assert_eq!((&placed, offsets), (&moov, vec![0, 20]));
+        must_fail(
+            "a moov left last widened",
+            tables(&placed).iter().all(|(t, _)| t == "co64"),
+        );
+    }
+
     /// A file with video+audio tracks whose single chunks hold known bytes.
     fn file(faststart: bool) -> (Vec<u8>, usize) {
         file_padded(faststart, 0, 0)
@@ -1003,6 +1090,128 @@ mod tests {
         assert_eq!(&out[offs[1] as usize..offs[1] as usize + 9], b"AUDIODATA");
         // No temp files left behind.
         assert_eq!(listing(&dir), ["in.mp4", "out.mp4", "out2.mp4"]);
+    }
+
+    /// Whether `offsets` point at the video's and the audio's chunks in
+    /// `bytes`.
+    fn point_at_the_data(bytes: &[u8], offsets: &[(String, u64)]) -> bool {
+        let chunk = |o: u64| bytes.get(o as usize..o as usize + 9);
+        offsets.len() == 2
+            && chunk(offsets[0].1) == Some(&b"VIDEODATA"[..])
+            && chunk(offsets[1].1) == Some(&b"AUDIODATA"[..])
+    }
+
+    /// An input whose chunk tables are already `co64`s is rewritten with
+    /// `moov` moved first and the `co64`s kept, their offsets moved with
+    /// the data (F129).
+    ///
+    /// Control: the input's offsets don't point at the data in the
+    /// output.
+    #[test]
+    fn a_co64_input_keeps_its_co64s_with_the_offsets_moved() {
+        use spherecut_testkit::control::must_fail;
+
+        let (bytes, _) = file(false);
+        let tree = mp4::read(&mut io::Cursor::new(bytes.clone())).unwrap();
+        let at = tree.moov().unwrap().offset as usize;
+        // `moov` is last, so widening its tables moves nothing else.
+        let mut moov = bytes[at..].to_vec();
+        while let Some(&(t, _)) = chunk_tables(&moov).unwrap().iter().find(|(_, w)| !w) {
+            widen_chunk_table(&mut moov, t).unwrap();
+        }
+        let input = cat(&[bytes[..at].to_vec(), moov.clone()]);
+        let before = tables(&moov);
+        assert!(before.iter().all(|(t, _)| t == "co64"), "{before:?}");
+        assert!(point_at_the_data(&input, &before));
+
+        let dir = tmpdir("co64");
+        let (a, b) = (dir.join("in.mp4"), dir.join("out.mp4"));
+        std::fs::write(&a, &input).unwrap();
+        let mut out = TempFile::create(&b).unwrap();
+        let finish = Finish {
+            moov_first: true,
+            ..Finish::default()
+        };
+        rewrite_into(&a, &mut out, &spherical_edits(), &finish, &mut |_, _| true).unwrap();
+        out.persist_new().unwrap();
+        let bytes = std::fs::read(&b).unwrap();
+        let tree = mp4::read(&mut io::Cursor::new(bytes.clone())).unwrap();
+        assert!(tree.damage().is_empty(), "{:?}", tree.damage());
+        let top: Vec<String> = tree.top.iter().map(|b| b.fourcc.to_string()).collect();
+        assert_eq!(top, ["ftyp", "moov", "mdat"]);
+        let moov = tree.moov().unwrap();
+        let moov = &bytes[moov.offset as usize..(moov.offset + moov.size) as usize];
+        let after = tables(moov);
+        assert!(after.iter().all(|(t, _)| t == "co64"), "{after:?}");
+        assert!(point_at_the_data(&bytes, &after), "{after:?}");
+        must_fail(
+            "the input's offsets in the output",
+            point_at_the_data(&bytes, &before),
+        );
+    }
+
+    /// An `sv3d` is replaced by a shorter one and by a longer one, with
+    /// `moov` before the data, so every chunk offset moves each time
+    /// (F129).
+    ///
+    /// Control: the shorter file's `sv3d` doesn't name the longer source.
+    #[test]
+    fn an_sv3d_is_replaced_by_one_of_another_size() {
+        use spherecut_testkit::control::must_fail;
+
+        let dir = tmpdir("resize");
+        let a = dir.join("in.mp4");
+        std::fs::write(&a, file(true).0).unwrap();
+        let edit = |source: &str| {
+            [EntryEdit {
+                track: TrackKind::Video,
+                boxes: cat(&[write::st3d(StereoMode::Mono), write::sv3d_equirect(source)]),
+            }]
+        };
+        let long = "a metadata source much longer than the other";
+        let (b, c, d) = (
+            dir.join("long.mp4"),
+            dir.join("short.mp4"),
+            dir.join("long-again.mp4"),
+        );
+        inject(&a, &b, &edit(long)).unwrap();
+        inject(&b, &c, &edit("x")).unwrap();
+        inject(&c, &d, &edit(long)).unwrap();
+        let source = |bytes: &[u8]| {
+            let tree = mp4::read(&mut io::Cursor::new(bytes.to_vec())).unwrap();
+            let v2 = spherical::read_tracks(&tree)[0].v2.clone();
+            v2.and_then(|v| v.metadata_source)
+        };
+        let mut sizes = Vec::new();
+        for (path, want) in [(&b, long), (&c, "x"), (&d, long)] {
+            let bytes = std::fs::read(path).unwrap();
+            let tree = mp4::read(&mut io::Cursor::new(bytes.clone())).unwrap();
+            assert!(tree.damage().is_empty(), "{:?}", tree.damage());
+            let ventry = tree
+                .tracks()
+                .next()
+                .unwrap()
+                .path(&[b"mdia", b"minf", b"stbl", b"stsd", b"hvc1"])
+                .unwrap();
+            let kinds: Vec<String> = ventry
+                .children
+                .iter()
+                .map(|c| c.fourcc.to_string())
+                .collect();
+            assert_eq!(kinds, ["hvcC", "st3d", "sv3d"], "{want}");
+            assert_eq!(source(&bytes).as_deref(), Some(want));
+            let moov = tree.moov().unwrap();
+            let moov = &bytes[moov.offset as usize..(moov.offset + moov.size) as usize];
+            assert!(point_at_the_data(&bytes, &tables(moov)), "{want}");
+            sizes.push(bytes.len());
+        }
+        assert_eq!(sizes[0] - sizes[1], long.len() - 1);
+        assert_eq!(std::fs::read(&d).unwrap(), std::fs::read(&b).unwrap());
+        let short = std::fs::read(&c).unwrap();
+        must_fail(
+            "the shorter file's sv3d naming the longer source",
+            source(&short).as_deref() == Some(long),
+        );
     }
 
     #[test]
@@ -1266,6 +1475,30 @@ mod tests {
             }
             r => panic!("{r:?}"),
         }
+
+        // A linked folder holding a link whose target climbs out with
+        // `..`: the kernel takes `..` from where the folder link points,
+        // `real/deep`, so the file written is `real/far.mp4` (F129).
+        let deep = dir.join("real").join("deep");
+        std::fs::create_dir_all(&deep).unwrap();
+        symlink("real/deep", dir.join("folder")).unwrap();
+        symlink("../far.mp4", deep.join("out.mp4")).unwrap();
+        inject(&a, &dir.join("folder").join("out.mp4"), &spherical_edits()).unwrap();
+        let far = dir.join("real").join("far.mp4");
+        let tree = mp4::read_file(&far).unwrap();
+        assert!(spherical::read_tracks(&tree)[0].v2.is_some());
+        assert!(
+            deep.join("out.mp4")
+                .symlink_metadata()
+                .unwrap()
+                .is_symlink()
+        );
+        // Control: read lexically, `folder/../far.mp4` names a file beside
+        // `folder`, which nothing wrote.
+        spherecut_testkit::control::must_fail(
+            "the lexical reading of the path naming the file written",
+            dir.join("far.mp4").exists(),
+        );
     }
 
     #[test]
