@@ -216,8 +216,7 @@ fn doctor_opens_no_network_socket() {
         "strace saw no open of lavapipe's ICD:\n{log_text}"
     );
     // ... and no network socket.
-    let sockets = common::inet_sockets(&log_text);
-    assert!(sockets.is_empty(), "{sockets:#?}");
+    common::assert_no_network(&log_text);
 }
 
 /// `doctor --file` on a synthetic `.insv`: whether it can be stitched

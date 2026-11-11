@@ -2,7 +2,8 @@
 //! D24): playlists, concat scripts and other containers are refused by
 //! name, a file whose name looks like a URL or a protocol is read as that
 //! file, and under strace nothing opens a network socket or the files a
-//! playlist lists.
+//! playlist lists. Nor do `frame` and `render` (`assert_no_network`,
+//! whose own controls are a DNS lookup's lines).
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -10,8 +11,17 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Instant;
 
 use spherecut_core::FrameRate;
+use spherecut_core::project::file::{self, head_hash};
+use spherecut_core::project::{
+    Aspect, AudioChoice, Codec as ProjectCodec, Edit, EncoderChoice, ExportSettings, Fingerprint,
+    InitialView, Media, MediaId, MediaVideo, Orientation, Output as ProjectOutput, Project,
+    Quality,
+};
+use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
+use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 
@@ -234,8 +244,7 @@ fn probe_opens_no_network_socket_and_no_listed_file() {
         .collect();
     assert!(private.is_empty(), "{private:#?}");
     assert!(!opened("x.mp4"), "{log}");
-    let sockets = common::inet_sockets(&log);
-    assert!(sockets.is_empty(), "{sockets:#?}");
+    common::assert_no_network(&log);
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -272,12 +281,118 @@ fn frame_opens_no_network_socket() {
     // The trace saw frame open its input ...
     assert!(log.contains("\"clip.mp4\""), "{log}");
     // ... and no network socket, nor a connection anywhere.
-    let sockets = common::inet_sockets(&log);
-    assert!(sockets.is_empty(), "{sockets:#?}");
-    let connects: Vec<&str> = log.lines().filter(|l| l.contains("connect(")).collect();
-    assert!(
-        connects.iter().all(|l| l.contains("AF_UNIX")),
-        "{connects:#?}"
-    );
+    common::assert_no_network(&log);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A project of `clip`, saved as `dir/p.spherecut`, as `render.rs`
+/// makes them: the whole clip to a 1920×1080 frame, the camera ahead,
+/// H.264 in software at the medium preset, no audio.
+fn project(dir: &Path, clip: &Path) -> PathBuf {
+    let dec = FfmpegBackend::new()
+        .open_video(clip, &VideoRequest::default())
+        .unwrap();
+    let info = dec.info();
+    let media = Media {
+        id: MediaId::NEW,
+        path: clip.to_path_buf(),
+        fingerprint: Fingerprint {
+            bytes: std::fs::metadata(clip).unwrap().len(),
+            head: head_hash(clip).unwrap(),
+        },
+        video: MediaVideo {
+            stream: info.index as u32,
+            width: info.size.0,
+            height: info.size.1,
+            rate: info.frame_rate().unwrap(),
+            duration: info.duration.unwrap(),
+        },
+    };
+    let view = InitialView {
+        orientation: Orientation::IDENTITY,
+        fov_deg: 90.0,
+        projection: Projection::Rectilinear,
+    };
+    let mut p = Project::untitled(media, view).unwrap();
+    let sequence = p.the_sequence().id;
+    p.apply(&[
+        Edit::SetOutput {
+            sequence,
+            output: ProjectOutput::Flat {
+                aspect: Aspect::Wide,
+                short_side: 1080,
+            },
+        },
+        Edit::SetExport {
+            sequence,
+            export: ExportSettings {
+                codec: ProjectCodec::H264,
+                quality: Quality::Medium,
+                encoder: EncoderChoice::Software,
+                audio: AudioChoice::None,
+                motion_blur: false,
+            },
+        },
+    ])
+    .unwrap();
+    let path = dir.join("p.spherecut");
+    file::save(&p, &path).unwrap();
+    path
+}
+
+/// The same for render (D24): exporting a project, its clip decoded and
+/// encoded in software and rendered on lavapipe, opens no network
+/// socket, nor a connection anywhere.
+#[test]
+fn render_opens_no_network_socket() {
+    let start = Instant::now();
+    let dir = tmp("strace-render");
+    let clip = media::write(
+        &Spec {
+            name: "clip".into(),
+            pattern: Pattern::Grid,
+            width: 1024,
+            height: 512,
+            frames: 6,
+            spherical: true,
+            ..Spec::default()
+        },
+        &dir,
+    )
+    .unwrap();
+    let project = project(&dir, &clip);
+    let log = dir.join("strace.log");
+    let out = common::strace(&log, "socket,connect,openat")
+        .current_dir(&dir)
+        .arg(env!("CARGO_BIN_EXE_spherecut"))
+        .arg("render")
+        .arg(&project)
+        .args([
+            "-o",
+            "out.mp4",
+            "--json",
+            "--adapter",
+            "cpu",
+            "--decoder",
+            "software",
+        ])
+        .env_remove("SPHERECUT_ADAPTER")
+        .env_remove("SPHERECUT_LOG")
+        .env_remove("SPHERECUT_DEBUG_PANIC")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(dir.join("out.mp4").is_file());
+    let log = std::fs::read_to_string(&log).unwrap();
+    // The trace saw render open the project's clip ...
+    let clip = format!("\"{}\"", clip.display());
+    assert!(
+        log.lines()
+            .any(|l| l.contains("openat(") && l.contains(&clip)),
+        "strace saw no open of {clip}:\n{log}"
+    );
+    // ... and no network socket, nor a connection anywhere.
+    common::assert_no_network(&log);
+    std::fs::remove_dir_all(&dir).ok();
+    eprintln!("render_opens_no_network_socket took {:?}", start.elapsed());
 }
