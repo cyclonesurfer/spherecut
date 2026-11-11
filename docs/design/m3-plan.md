@@ -200,6 +200,222 @@ corrected to match, hold the detail, and win where the two differ.*
      check and M3.6's `samples_thumbnail_orientation` no longer wait on an answer, and M3.12
      compares clip 12, once Pat exports it, where the fit leaves a question open. Question 2 and
      22.1's M3.6 and M3.12 rows say so in place; 8.6, 8.8 and 19.4 are not rewritten.
+5. **What M3.4 settled (2026-11-10).** These override the sections they name, which are not
+   rewritten. D65, and D63's note of that date, hold the detail and the measurements.
+   - **The weights where no feather weighs (6.2, 10.3, 11.2; 22.1's M3.6 row).** 6.2's feathered
+     weights are both 0 wherever the seam's plane lies further past 90° on both lenses than h (the
+     X5's baseline puts it 0.46° past at q = 0.5 m⁻¹ and 3.1° at 3.34) or one lens's mask ends short
+     of the other's band, and normalised they left such covered directions black (3304 pixels of a
+     512 × 256 equirect on Pat's V3 at 768² under a feather of 0 at q = 0.5 m⁻¹). `Rig::weights`
+     now gives such a direction whole to the covering lens with the smaller θ on its own
+     parallax-corrected ray, ½ each at equal θ, and is (0, 0) only where no mask covers; wherever a
+     feather weighs, nothing changed. Where `feather_at` shrinks one lens's h and the θ meet inside
+     the wider band, the switch falls on that band's end, not where the θ meet, and that is kept.
+     So 10.3's "black where both are 0" is black only where no lens covers, and M3.7's WGSL copies
+     the rule as built, comparing θ (cos θ_b will do), not θ − h, held to sphere's mirror-pair test
+     of the tie. 11.2's bound h ≤ min(θ_max, θ_frame) − 90° now keeps only the blend smooth, needs
+     no floor tied to q, and is negative for θ_max from 85° to 90°, which 11.2 allows: M3.9 floors
+     it at 0 or starts θ_max at 90°. D63's note holds the rule until D64, which M3.5 starts, takes
+     it over; D65 holds M3.4's half and M3.6 adds the fit's, as 22.1's M3.6 row says in place.
+   - **What M3.7's shader matches (10.3 to 10.5, 13.2, 14; 22.1's M3.7 row).**
+     `reference::render_rig` and `RigDebug`'s modes 4 to 7. Beyond 10.3: the mask's θ test is made
+     in angle, or the cosine form guarded (bound ≥ 0), since from λ = 7.25 on Pat's V3 lens 0 at
+     768² the bound is negative while the frame term still passes the axis, and the unguarded
+     cosine covers up to 108 of 401 directions that the angle refuses (the mask test needs a case
+     between λ = 7.26 and 7.57); λ is luma's footprint LOD (amendment 4 clamps it at 0 in the
+     margin); a lens with no image for one of a pixel's five rays doesn't cover it; under `level0`
+     a lens's taps are level 0's while its mask and weight stay at its footprint's LOD; the gains
+     go on by calibration block in linear light, and the blend comes before f16. Modes 6 (the
+     weights as (w0, 0, w1)) and 7 (|g0 lin0 − g1 lin1| × 8 where both cover, unclamped, so it
+     passes 1: 1.20 on `reference_rig`'s 45° seam view of `SeamLines` at q = 0, which an 8-bit
+     view clips) are the nearest f16 with no dim and no OETF; 4 and 5 are blocks 0 and 1, not
+     tracks, and end as the stitch does, with the gain. `dfish_lod_heatmap` needs a rig's LOD map,
+     which the reference lacks and M3.7 builds. The margin grows with λ, so an equirect coarser
+     than about 2.5° a pixel has a gap at the seam that no lens covers (2.7 % of the X5-like rig's
+     picture at 128 px wide, 26 % at 64, none from 160): M3.10's overview and small `look` tiles
+     render at 160 px or more and scale down, or cap the margin. 22.1's M3.7 row names the weights
+     rule, the θ test in angle and the strip output (below) in place.
+   - **The prepared pair (8.4, 8.9, 10.4, 19.6).** `reference::LensPair::new(lenses)` holds a
+     pair's two track pictures with their f64 mip chains and nothing of a rig; `render_rig_of` and
+     `seam::strips_of` take it and a rig per call and give, bit for bit, what `render_rig` and
+     `strips` give, and `seam::strip_coverage(rig, spec)` gives `Strip::valid` with nothing
+     sampled. A pair costs 11 to 17 ms to make at 768² and about 0.5 s and 470 MB at 3840². Of a
+     pair made, Tier 1's strips take 33 to 36 ms at 768² and 45 ms at 3840², Tier 2's 245 ms at
+     3840², and `bin_shifts` with `signature` 32 ms (Tier 1) and 280 to 340 ms (Tier 2). So one
+     candidate on one frame costs about 70 ms at 768² and 0.55 to 0.6 s at Tier 2 on 3840², on four
+     free cores: 19.6's 15 s for the recovery holds at most about 200, while stage F as 8.4 writes
+     it (V3 and 21 readings on ten frames) is 220 a class at every step, about 2 minutes a pass at
+     Tier 2 against 8.9's "minutes". M3.6 therefore makes one pair per pair of frames, unwraps
+     once per frame and class and moves between candidates and steps on predicted fields (below),
+     or states the budget it needs; it decides against the machine's memory whether 8.4's ten
+     frames are held at once (4.7 GB at 3840²), and minds that each call already deals its rows to
+     `row_threads()` threads (at most 16). The calls refuse a rig whose blocks share a track,
+     before any chain is built. The reference has no pair form of `render_blurred`: M3.5's `frame
+     <insv>` and 10.4's no-GPU path make one `LensPair` per pair of frames and average
+     `render_rig_of` over the views as `render_blurred` averages, never `render_rig` once per view
+     or tile. 19.6's M3.6 line gives the cost in place.
+   - **The prediction (8.3, 8.4, 8.6).** `predict_bins` and `predict_through`
+     (`tests/common/predict.rs`) and `apart_deg` (private to `tests/instrument.rs`) are test code:
+     they solve through synth's `lens::seen`, and synth is only a dev-dependency of render. M3.6's
+     fit needs a candidate's field without images (stage J, the ranking by along fields, a gross
+     field's size, the steps above), so it lifts `predict_through` (a rig, a spec and what each
+     block's picture shows) into `render::seam` and feeds it from sphere alone; `Rig::unproject` is
+     at q = 0, so a near candidate's field needs its depth. The tests keep `predict_bins` on synth's
+     `seen` as the independent prediction (4.1 rule 2).
+   - **A bin's three states (8.2 to 8.4, 8.6).** A `BinShift` is invalid (its shift NaN, never 0),
+     valid without information, or valid with it (`BinShift::informed`). It has no information
+     where its normalised patch's texture, each eigenvalue of its normal matrix per sample, is under
+     `NOISE_FLOOR` (3) times its mismatch 1 − NCC (per direction: a horizon in a noisy sky informs
+     across itself only), or where the patch less three samples at each edge doesn't clear the
+     floor by itself (a sky bin beside texture). Such a bin keeps its shift, NCC, `contrast` and log
+     gains and counts in `valid_bins`, `median_ncc` and `log_gain`, but is fitted to by nothing and
+     places no neighbour. So 8.3's "a textureless bin is marked invalid, never zero" holds of the
+     shift, not of `valid`, and 8.4 to 8.6's bins (8.6's usable take: 12 of 18 at each side) are
+     bins with information (`Signature.informed_bins`). The floor is 2.6 times the most that noise
+     alone reached; it and every other floor but 8.2's 0.95 and 0.01 and the log gain's 16
+     samples, which nothing measured, were set on synthetic strips, and none has met footage.
+   - **Reading bins and terms (8.2, 8.4, 8.6).** A sample under 0.01 stays in the shift and leaves
+     the log ratio only, and a channel's log gain needs 16 samples. `BinShift` is in degrees at
+     either tier, nothing converting Tier 2's to source pixels; it carries lens 0's strip onto lens
+     1's (blocks, not tracks), across positive towards the front lens and along towards +φ, and
+     `log_gain` is ln(lens 1 / lens 0). `info` is a 2 × 2 matrix, across and along, in degrees⁻² of
+     the normalised patch, without its contrast or the noise's scale (at a fiftieth of the contrast,
+     the same information and fifty times the error), and in those units a bin's own mismatch is 2
+     (1 − `ncc`): M3.6 weights a bin by its information over its mismatch, not by 8.4's one common
+     factor, and gates it on its own `ncc`, at a value no one has set or measured (a track showing
+     another scene leaves 59 bins valid at NCC near 0; true models' medians are 0.988 to 0.990). A
+     bin part sky and part texture (texture over a fifth of its columns) has 0.85 to 1.7 times a
+     textured bin's information and measures up to three times worse, and neither floor takes it.
+     `Signature` gains `term_se_deg` and `informed_bins`. A term is NaN only short of rank: in units
+     of one bin's noise its standard error is 0.12 to 0.17 over the ring, 1.6 at most over two
+     opposite sides of 12 bins and 47 for a0 over one 90° arc, so the decisiveness rule and 8.4's
+     at-rest test read `term_se_deg` or the fit's covariance, never a bin count (half a ring's own
+     scatter reaches the at-rest 0.02° at 2 % noise). `term_se_deg` is the bins' noise as the fit's
+     leftovers show it: a bias the bins share (a texture that aliases) isn't in it, and it takes
+     each bin's information at its word, which a part-sky bin or one of fainter texture than the
+     rest has too much of. A shift past the ±3° search comes back valid at an alias. 8.2's
+     per-sector q is M3.6's, not `signature`'s.
+   - **Beside a depth step, and in the dark (8.2, 8.3).** A bin beside a step in the field reads
+     across it through the smoothing, 0.16 px at a 0.9° step and up to 0.36 px at 1.5° (Tier 1),
+     so 8.3's 0.05 px doesn't hold in the two bins either side of one (clip 8's wall). A bin keeps
+     its own match against a neighbour's shift only where its search had an NCC at every shift; one
+     that can't tell starts from the neighbour's, and three Lucas–Kanade steps cross about 3 strip
+     px, so beside a step of 0.6° to 0.8° with its search cut short it arrives within 0.09 px and
+     is discarded as unsettled (a bin is invalid when its last step moves it over 0.1 strip px, or
+     when steps from a handed shift end 0.05 under its best NCC). The shift has no dark floor but a
+     patch contrast of 0.2 %, while footage's dark samples are noise. M3.6 measures each on clips 8
+     to 10, and allows more steps or adds a dark floor where they cost it bins.
+   - **No NCC collapse (4.2, 8.2, 8.4, 8.6, 10.5).** No gross control brings the median NCC under
+     0.5 on rung 1's scenes: with the turn left out the bins lock a checker period away at 0.97 (on
+     `Grid`, which the seam checks don't measure, the half turn maps the graticule onto itself:
+     0.998 in a probe), and equidistant lenses on Mei's pictures and KB read as equisolid give 0.97.
+     NCC < 0.5 only implies gross; its control is a track showing another scene (0.085), and the
+     gross controls are told by their predicted size (`apart_deg`: 90°, 5.1°, 18.2°), a
+     misregistration of 11.5 to 16.2 px and failing the ideal. 10.5's `dfish_rect_seam_*` control
+     (the turn left out, NCC < 0.5) can't fail on these scenes, so M3.7 holds it by its predicted
+     size (90°), its misregistration (16.2 px) and its failing the ideal, not by the NCC, and keeps
+     an NCC < 0.5 control only as a track showing another scene. M3.6's stage G and 8.6's gross rule
+     don't read a high NCC on a texture that repeats inside the search as the right class.
+   - **Parallax along the seam (3.3, 8.2, 8.4, 8.6, 10.5).** Depth also moves a seam point along
+     the seam, by the centres' offset in the seam's plane times q, a first harmonic on c1/d1;
+     "never along" holds only for centres on the lens axis. `x5_like` (Pat's V3 t_x, −4.46 mm) has
+     4.30 mm: d1 at −0.134 of a0 at every depth; Pat's V6 has 0.64 mm, so at 1.5 m V3 and V6
+     differ by about 0.14° along (0.164° against 0.024°). The signature can't tell this d1 from the
+     centres' difference; only a candidate's predicted field can. So on clips 8 and 10, ranking V3,
+     V6 and the readings by their along fields (8.2, Q5 of 8.6) predicts each candidate's along
+     parallax from its own centres, and 8.4's sector q, then not linear in the across shifts alone,
+     feeds the along prediction through the rig, or V3's parallax lands on the freed relative
+     centre. On `x5_like`, 10.5's `dfish_stitch_distance` control (q = 0) lands on d1 as well (about
+     0.16° beside its 1.20°), so M3.7 names both terms, as the matrix's depth rows do.
+   - **3.4's table on the images (3.4, 8.2).** Rows with a figure at 768² hold within 15 % or 0.2 px
+     (the slice's tolerance; a figure under 0.2 px is held signed to 0.05 px of one worked for it,
+     `Budget::hold_small`), but for three. V3 against V6 gives an a0 of 0.03° to 0.04° a lens
+     (−0.145 px measured for −0.137 worked on lens 0 at 768², about 0.7 px at 3840²), not 0.15°,
+     which is fx alone. The binding reversed in Tier 1's rig is 13.9 px across (about 3.7°) and 9.1
+     px along, since the swapped centres add 0.26° across per pixel of their difference (5.1 px on
+     `x5_like`), so 8.2's "inside the ±3° search" fails: 28 of 72 bins lie past it, and on Pat's V6
+     a1/b1 reaches 3.25° where the roll turns about T_1's axis. Both lenses' Euler yaws read wrong
+     give 1.1° (4.19 px) on `x5_like`, a case the table lacks: its 0.3° to 0.6° is one lens's, which
+     the images hold at 2.29 px. The 10 m row and 3.4's other two V6 readings, {D6D5 with
+     extension, D9 Interleaved} and {D5D6, D7 ByAxis}, which the pair isn't rendered under, stay
+     predictions.
+   - **Rung 1 as built (4.2, 8.3, 8.8; amendment 4; 22.1's M3.4 row).** Five scenes (`SeamLines`
+     and `Grid` near and far through `x5_like`, far `SeamLines` through `kb_like`). The seam checks
+     and the matrix read `SeamLines`' three pairs alone (`Grid`'s strips are never measured); the
+     exposure step runs on far `SeamLines` alone; no check reads a frame number, so rung 1 needed
+     no frame code, against amendment 4's "needs it". Until `Grid`'s back-hemisphere code is built,
+     8.8's "the round trip's frame codes read wrong if mirrored" rests on det +1 alone: the first
+     slice whose pictures pass frame 0 (M3.5's 8-frame rung-3 file) builds it, or 8.8 drops the
+     clause. "No channel 0.1 off the CPU reference" is rung 2's; the ideal is sampled 8² a pixel,
+     as `Grid`'s floors move by up to 2.7 dB with it. 4.2's band control, lens 1 turned 0.13° about
+     +Y, lowers the band's PSNR by 0.6 to 0.8 dB but leaves the stitch only 0.2 to 0.4 dB under the
+     better lens, failing no 1 dB rule; it is held to lower the PSNR and to fail the
+     misregistration (0.35 px). The band's control is lens 1 yawed 0.5° (4.0 to 5.5 dB under on the
+     side seams, 2.0 to 2.5 dB on `SeamLines`' poles), and rolled 0.5° on `Grid`'s poles (6.2 to 8.5
+     dB), where the yaw turns the graticule about its own pole. The band rule is relative, seeing
+     an error one lens has and none both share (the near pairs at q = 0 pass it 8.3 to 8.9 dB
+     worse), so M3.7's `dfish_rect_seam_*` doesn't lean on it for a shared error. 3 dB over the
+     common-mode control holds on `Grid` (4.32 dB), seeing a slip from about 0.5°, and on
+     `SeamLines` (2.92 dB) sees none and is recorded. 8.3's step 3 takes the images' largest term
+     as right where it is another named term predicted within 0.03° of the prediction's largest,
+     the ratio rule holding the pair; 10.5's `dfish_seam_registration` attributes by the same rule.
+     The matrix holds the tracks swapped over the 44 bins whose whole patch the search holds, and
+     attributes the three gross controls by their predicted size, not a term. With these, 22.1's
+     M3.4 row is met.
+   - **Units and the strip (4.2, 8.2, 8.3, 10.4, 10.5, 13.4).** 8.3's 0.05 px and the 0.1 px of 4.2
+     and 10.5 are strip pixels, 3.81 a degree both ways; by 3.4's source scales (6.0 along) the
+     matrix's largest row, 0.048 strip px, is 0.066 px. `StripSpec::TIER1` is 1372 × 61 and `TIER2`
+     2880 × 128, a pixel's centre looking along `StripSpec::dir`. 13.4's 1440 × 128 is neither and
+     has two scales: Measure seam (M3.13) takes a tier's size, or a spec gains a second scale. No
+     view draws the strips' grid, and a strip is no crop of an equirect, so M3.7 adds an output
+     whose pixels look along `StripSpec::dir`, with `valid` from `strip_coverage`, for 10.4's GPU
+     strips. It holds what a `Strip` holds, each lens's linear light at unit gain with no dim and
+     no OETF, in an f16 target (the CPU strips aren't rounded), since `bin_shifts` reads its 0.95,
+     its 0.01 and its log gains in that domain. Modes 4 and 5 carry the gain, the dim, f16 and the
+     OETF, so 10.4's "the instrument's strips have the GPU's shape", 10.5's
+     `dfish_seam_registration` and Measure seam (13.4's "DEBUG 4 and 5") hold of the new output,
+     and Measure seam's photometric step reads the log gains at unit gain, less the frame's gains.
+   - **The weighted metrics (8.1).** `diff_stats_weighted`'s last parameter is `threshold`, in
+     `diff_stats`' unit scale, and reads the weights as a mask. Each refuses an empty mask (a
+     `Mismatch`, not ∞ dB), so a caller skips a view the band misses. `ssim_weighted` counts a
+     window by its centre's weight, so a mask is eroded by 5 px where its edge must not count.
+     `band_weights` is 1 only where a lens of the rig it is given covers, so a check takes the true
+     rig's mask.
+   - **`x5_like_v6` (7.1; amendment 4).** It cuts its circle on all four sides under 19 of the 21
+     readings: under {(d6, d5), with or without its extension; prism at d9 by axis} track 0's circle
+     ends 1.19 px and 0.25 px inside its bottom edge (reaching it only at 106.54° and 106.11°), a
+     sliver of black about 6° past the 100° mask, and synth's test holds the two by name
+     (`V6_UNCUT`). Rung 1's V6 pair is rendered under {D5D6 with extension, D9 by axis}.
+   - **Time (19.6; 22.1's M3.5 row).** M3.4 takes about 13.6 s of its 15 s on four free cores in the
+     debug build: the instrument binary 10.4 to 10.6 s of an 11 s share, `reference_rig` 1.7 s of
+     2.0, `seam` 1.3 of 1.5. The instrument binary costs about 41 CPU-seconds (40.5 s on one core)
+     and has no share left, nor has `seam` for another test of its size, so M3.6's recovery and
+     M3.7's rung 2 run in binaries of their own and render their own pairs. A 768² pair rendered
+     afresh through synth costs about 0.5 s in the debug build (0.6 s with three equirects), about
+     half of it the lens's inverse, and its 512 × 256 equirect 54 ms once the pair is made ready.
+     Rung 1's camera, pairs, far rig (q = 0, unit gains, the 512 × 256 equirect), `Scene`, `Masks`,
+     ideals, attribution (`Plant`, `Lands`, `attribute_to`) and `apart_deg` are private to
+     `tests/instrument.rs`, and `RenderCache::shared()` is one process's. M3.5's rung 3, whose
+     render must equal rung 1's within its 3 s, runs through camera and `Still::open_pair`, which
+     render's `tests/common` doesn't reach: M3.5 puts the fixtures where rung 3 and rung 2 both
+     reach (a library such as synth or testkit, or render's `tests/common` if rung 3 lives in
+     render's tests), and M3.7 reuses them. This supersedes D65's "M3.7 lifts them into
+     `tests/common`", ARCHITECTURE's round-trip paragraph and `tests/instrument.rs`'s module doc,
+     which M3.5 corrects when it moves the fixtures. 19.6's M3.4, M3.5 and M3.7 lines say so in
+     place.
+   - **Open, with who settles each (8.2, 8.4, 8.6, 10.3, 11.2).** M3.6's 8.5 suite (camera-like
+     noise, libx265 at CRF 23) is the first coded noise the floors meet, which were set on white
+     noise: it prints `informed_bins` and each term's `term_se_deg` there before relying on them.
+     Clips 8 to 10, in M3.6, are where the floors, the interior's three samples and the three steps
+     first meet footage (true texture under the floor and noise over it are both possible), where
+     the per-bin NCC gate and a part-sky bin's weight are set, and where `fit-matrix` shows whether
+     a scene that doesn't repeat inside the search makes a gross control collapse the NCC before
+     stage G leans on it. The log gain's 16 samples are unmeasured: M3.6 or M3.15 measures them or
+     adds a test. The feather's bound below θ_max = 90° is M3.9's; whether the shader refuses a
+     `RigLens::side` that differs from its picture (the reference's "frame term defeated" control
+     relies on its not refusing) and the coarse outputs' gap are M3.7's and M3.10's; whether the
+     uncut readings' sliver reaches the strips is for the first slice that renders a truth under one
+     (M3.6's `fit-matrix`, over all 21) to measure, or to change the truth so all 21 cut.
 
 ## 1. Summary
 
@@ -2245,8 +2461,8 @@ The stitch shader's cost is P-SHADE's (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K on 
 
 Each new suite prints its time against its budget: camera ≤ 1 s, its 100k run apart (M3.2);
 sphere's properties and rung 0 ≤ 30 s in release (M3.3); metrics, seam self-tests, the
-attribution matrix and rung 1 ≤ 15 s (M3.4: about 5 pair renders at about 2 s each, 7.1, the ideals, `render_rig` for about 14 controls and their strips [G]); rung 3 and `frame --reference` ≤ 3 s (M3.5); the fit's
-recovery ≤ 15 s (M3.6: 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7); the lock ≤ 10 s (M3.8); schema, edits
+attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
+recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8); schema, edits
 and agents ≤ 3 s (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
 (M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s to `cargo xtask
 check`; each slice note records the growth.
@@ -2315,8 +2531,8 @@ one reviewer each.
 | **M3.3** Lens maths | (a) `Unified`, `Canonical`, V3's reading and `V6Reading` (21 values), the inverse, `limit_theta`, `KbLens`; (b) `sphere::rig` (6.2) with `rig::theta_frame` (6.1); (c) `synth::lens`, `synth::lens::compose` with its hand-worked unit tests, `RigTruth`'s ground plane, per-lens time offset and rolling-shutter readout, the per-binary render cache (7.1), and `SeamLines`; rung 0 | M3.0 (c) | 6.3's properties at 100k in ≤ 30 s; rung 0 on every truth model; all 1152 `EulerConv` values and all 21 `V6Reading` values distinct; `euler_twins_are_quarter_turns` (6.2): the twin groups for sampled stored angles, whose common rotations are exactly the quarter turns about Z once stage G's −Z filter is applied; synth's self-tests, `compose`'s hand-worked values among them; `Rig::build` agrees with `compose` (6.3's Against synth) | none | none | nothing |
 | **M3.4** The instrument | (a) weighted metrics (8.1); (b) `reference::render_rig` with debug modes 4 to 7; (c) strips, shifts, signature and self-tests (8.2); (d) the attribution matrix (8.3); rung 1 with every control | M3.3 | each control fails and is attributed to the term 8.3's step 1 predicts (prediction within 0.05 px rms, crosstalk under its bound); the common-mode control passes every seam check and fails the comparison with the ideal (4.2); rung 1 within 4.2's thresholds; 3.4's budget matches the images; within 19.6's budget (≤ 15 s) | none | none | nothing |
 | **M3.5** The file | (a) `write_insv` (N-track `Mp4Writer`, LRV, faults); (b) `to_calibration`, `known` with the placeholder entry, probe's geometry blocks; (c) `Still::open_pair` and `frame <insv>` on the CPU reference; rung 3's CPU half | M3.2, M3.4 | rung 3's planes hash equal and its render equals rung 1's; each trailer `InsvFault` (`TruncatedTrailer` to `VarintOverflow`) a clear error naming the record (5.5); ≤ 3 s; `frame` of clip 8 renders in Tier 2c | none | 8 | nothing new (placeholder geometry) |
-| **M3.6** The fit, provisional | (a) `render::seam::fit` (8.4); (b) `rig-fit`, `xtask fit-matrix` (from then on part of 4.1 rule 6's push rule for any slice that touches `render::seam`, `sphere::rig` or `synth::lens`); (c) `fit_recovers_planted_geometry` (8.5); (d) the run on clips 8 to 10: `known`'s provisional X5 entry, `samples_lens_offset_is_zero`, `samples_thumbnail_orientation` (Pat agreed, 2026-11-01), P-GAIN's first numbers | M3.5 | 8.5's expected verdicts met in Tier 1 and in `fit-matrix`, the redirect and out-of-family truths included; `docs/research/m3/fit-clip{8,9,10}.md` with σ, the ranking, each question settled or open, the directions stage F leaves undetermined, and the fine class open on clips 8 to 10; the X5 entry written from the run whatever the rules decide (the decisive value, the redirect's, or the best candidate as "best of N, not decisive", 8.6), the placeholder kept, with `stitchable: false`, only if clips 8 and 10 fail the gross rule; k = 0 by 5σ or the offset recorded; D64 and D65 drafted | none | 8, 9, 10 | **the first stitched stills of clip 8** (`spherecut frame`), with the provisional numbers; if the gross rule fails, a note that says so and what the design note will look at |
-| **M3.7** Stitch on the GPU | (a) `fs_rig` and its structs (10.3); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
+| **M3.6** The fit, provisional | (a) `render::seam::fit` (8.4); (b) `rig-fit`, `xtask fit-matrix` (from then on part of 4.1 rule 6's push rule for any slice that touches `render::seam`, `sphere::rig` or `synth::lens`); (c) `fit_recovers_planted_geometry` (8.5); (d) the run on clips 8 to 10: `known`'s provisional X5 entry, `samples_lens_offset_is_zero`, `samples_thumbnail_orientation` (Pat agreed, 2026-11-01), P-GAIN's first numbers | M3.5 | 8.5's expected verdicts met in Tier 1 and in `fit-matrix`, the redirect and out-of-family truths included; `docs/research/m3/fit-clip{8,9,10}.md` with σ, the ranking, each question settled or open, the directions stage F leaves undetermined, and the fine class open on clips 8 to 10; the X5 entry written from the run whatever the rules decide (the decisive value, the redirect's, or the best candidate as "best of N, not decisive", 8.6), the placeholder kept, with `stitchable: false`, only if clips 8 and 10 fail the gross rule; k = 0 by 5σ or the offset recorded; D64 and D65's fit half drafted (D65's instrument half is M3.4's: amendment 5) | none | 8, 9, 10 | **the first stitched stills of clip 8** (`spherecut frame`), with the provisional numbers; if the gross rule fails, a note that says so and what the design note will look at |
+| **M3.7** Stitch on the GPU | (a) `fs_rig` and its structs (10.3, as amendment 5 corrects it: the weights where no feather weighs, the mask's θ in angle, an output on the strips' grid); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
 | **M3.8** Frame lock | section 9: (a) `MediaBackend::track_timing` (`FfmpegBackend` from P-TRK's MP4 tables, `None` otherwise), the open checks, `LockRefused` and `LensShort`; (b) `pick_pair`, `unpaired_presents` over every stream, `pair_wait`, `pair_resyncs`; (c) the group base in `FrameCache` (`set_group`, Tg as the members' playhead), the group `until`, group seeks and the end, the resync backstop; (d) slots and their floor of 2 per member, per-lens fallback; the `PerStream` test backend and the readback tests | M3.0 (`track_timing`); M3.1 (`mux_video_streams`' MP4 output, the corner codes, the two-track MP4 perf clips and the 2×64² test files) | `pick_pair`'s property at 100k; `a_locked_pair_never_shows_mismatched_frames` at 0 unpaired by tag and by content, its lock-off control above 0 on both; `a_locked_pair_paces_to_its_slowest_lens` meets the pacing rule in every case and its control fails; each planted fault refused by name, and the one-frame-short lens locked and ended at the shorter lens with one `LensShort`; the slot floor unlocks within `WAIT` and its no-floor control times out; the fallback test keeps lens 0 on hardware with one notice; old two-stream tests pass; on odin 0 unpaired by tag and by corner code, `zero_copy_pair_matches_copy` (9), and P-LOCK's verdict (8K25 on path B included) with the slot count | odin | 1, 2, 3, 4 (P-LOCK's 8K30, 8K25, 5.7K60 and 4K120) and 9 (real-time play), and M3.1's MP4 perf clips | the raw view never shows the lenses at different frames, and a lagging lens slows the pair instead of freezing it; `unpaired` and `pair_wait` in the overlay |
 | **M3.9** Schema 2 | section 11: (a) the model, migration and `validate`; (b) the three ops, their inverses, examples and core's per-op samples (`core/tests/project_edits.rs:1095`); the reference project's optional camera media 11, a synthetic `.insv` the agent test writes and probes; agent `edit()`'s server-side expansion of `set_source`'s camera form and `wired()`'s filter for it (11.3); 11.4's comparison in `check`, `render` and the summary; (c) `project_media`, 11.5's export and viewer fixture, agent `project create`, the `not_yet` refusals | M3.5 | both fixtures; the edit property at 100k; `validate` at each bound; the missing-`source` refusal; `project_create_x5` (Tier 2c) gives the trailer's hash; D57's example test with 24 ops, the three new ones applied to media 11 and undone exactly (`set_stitch`'s example setting both a tune and gains), `set_source`'s camera form read from the file (11.3); an old project renders the same bytes under a newer (fake) table entry | none | 8 | agents' projects of `.insv` files record camera, calibration and geometry; agents tag a file as equirect with `set_source` |
 | **M3.10** Stitched in the app | 13.2, 13.3 without profiles, 13.5, 11.4's notice: (a) open flow, `Doc.rig`, `DrawKey`, "Stitch it" and "Treat as equirect" (`set_source`, 18.2), and a `Known` entry with `stitchable: false` shown as lenses with a notice (5.3); (b) viewer, overview, Raw lenses, the lock's notices (`LensShort`, the slot-floor unlock); (c) the Stitch pane; (d) kittests and smoke, with the perf clips as `.insv` files (synth's trailer appended, 7.2) | M3.7, M3.8, M3.9, M3.1 (the 2×2880² perf clip `bench_playback_x5_stitched` gates on, 19.4); what Pat sees waits for M3.6 | rung 5 within 1 LSB on 11.5's fixture, its `Tune::default()` control missing; 13.5's kittests, among them "Treat as equirect" in one undo step and the `stitchable: false` notice; on odin `gui_smoke` on clip 8 at 8K30 ≥ 99 % presented with UI p99 within refresh, and `bench_playback_x5_stitched` (19.4); seam screenshots in the note, under M3.6's provisional entry (if M3.6 hasn't merged, the note says "placeholder geometry" and the screenshots wait for it) | odin | 1, 3, 8, and M3.1's 2×2880² perf clip | once M3.6 has merged, **clip 8 plays stitched** under its provisional geometry; per-lens numbers in the Stitch pane |
