@@ -40,7 +40,7 @@
 //! - A slot the GPU has no memory for is Dead (risk 11): the ring plays
 //!   on with one fewer.
 //! - A locked pair (M3 plan section 9) uses all [`MAX_SLOTS`], whatever
-//!   the setting ([`SlotRing::set_pair`]): its present shows both lenses'
+//!   the setting (`SlotRing::set_pair`): its present shows both lenses'
 //!   slots or neither, so the pair on screen and each lens's next frame
 //!   take four, and a fifth and sixth let the frames after them come up.
 //!
@@ -238,7 +238,7 @@ impl SlotRing {
     }
 
     /// How many slots are used: the setting, or every slot while a
-    /// locked pair is open ([`set_pair`](Self::set_pair)). Never waits.
+    /// locked pair is open (`set_pair`). Never waits.
     pub fn active(&self) -> usize {
         if self.pair.load(Ordering::Acquire) {
             self.slots.len()
