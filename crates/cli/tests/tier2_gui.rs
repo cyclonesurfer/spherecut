@@ -68,6 +68,29 @@
 //! Its runs go to the same directory, listed in `gui-proto.json`.
 //! `the_prototype_gates_fail_what_they_say` is their Tier 1 check.
 //!
+//! `gui_decode_behind` checks that the UI keeps to the display while
+//! decode falls behind (perf.md's target, D40), which `gui_smoke` can't:
+//! it fails any run that drops frames, and odin's default path keeps
+//! up. Its three runs play for 20 s each with the smoke run's hidden
+//! flags: run 0 holds decode to a frame in 50 ms (20 fps of a 30 fps
+//! seam clip, `--smoke-decode-floor-ms 50`) on the default path; run 1
+//! plays the noisy 5.7K 10-bit clip on VA-API with its frames copied
+//! (`--smoke-decoder vaapi`, `SPHERECUT_ZERO_COPY=0`), where VA-API
+//! decodes HEVC Main 10; run 2, the control, is run 0 with the UI
+//! waiting for each decoded frame (`--smoke-control-ui-waits`). After
+//! the first second each run must have run as asked with decode behind
+//! (at most 85% of the frames expected shown), and runs 0 and 1 must
+//! hold the UI's gates above (90% presented, a p99 of at most 1.5
+//! refresh periods) with no blocking call on the UI thread; run 1 must
+//! also decode on VA-API and download its frames. Decode keeping up on
+//! run 1 is inconclusive, not a failure. Drops, decode's drops and A/V
+//! aren't judged. The control must block, and must fail the UI's gates
+//! as a slow UI in a window drawn; a control that passes them, or that
+//! didn't run as asked, fails the test. Its runs are listed in
+//! `gui-decode-behind.json`, its documents and screenshots
+//! `gui-behind-<n>.*`; `the_behind_gates_fail_what_they_say` is the
+//! gates' Tier 1 check.
+//!
 //! Run with `cargo xtask hw-test`; plain `cargo test` lists them as
 //! ignored.
 
@@ -114,6 +137,15 @@ const MAX_INTERVAL_P99_PERIODS: f64 = 1.5;
 const PROTO_SUMMARY: &str = "gui-proto.json";
 const PROTO_LOCKED: &str = "the screen is locked: unlock it, keep it on, and run the GUI part \
      again with `cargo xtask hw-test --only gui_proto --no-tier1`";
+
+/// `gui_decode_behind`'s runs (D40): decode is behind when at most this
+/// share of the frames expected is shown; the floor that holds it there
+/// on the default path; the summary hw-test reads; and why nothing ran.
+const MAX_SHOWN_BEHIND: f64 = 0.85;
+const DECODE_FLOOR_MS: u32 = 50;
+const BEHIND_SUMMARY: &str = "gui-decode-behind.json";
+const BEHIND_LOCKED: &str = "the screen is locked: unlock it, keep it on, and run the GUI part \
+     again with `cargo xtask hw-test --only gui_decode_behind --no-tier1`";
 
 /// One clip to run.
 struct Clip {
@@ -859,6 +891,401 @@ fn gui_proto() {
     );
 }
 
+/// Which of `gui_decode_behind`'s runs a document is, for
+/// [`judge_behind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Behind {
+    /// Run 0: the default path, decode held to a frame in
+    /// [`DECODE_FLOOR_MS`].
+    Floor,
+    /// Run 1: VA-API, its frames copied, on the noisy 5.7K 10-bit clip:
+    /// behind where VA-API is slow, as on odin.
+    VaapiCopied,
+    /// Run 2, the control: run 0 with the UI waiting for each decoded
+    /// frame.
+    Control,
+}
+
+impl Behind {
+    /// The run's flags beside the smoke run's own.
+    fn flags(self) -> Vec<String> {
+        let floor = || {
+            vec![
+                "--smoke-decode-floor-ms".to_string(),
+                DECODE_FLOOR_MS.to_string(),
+            ]
+        };
+        match self {
+            Behind::Floor => floor(),
+            Behind::VaapiCopied => vec!["--smoke-decoder".into(), "vaapi".into()],
+            Behind::Control => {
+                let mut f = floor();
+                f.push("--smoke-control-ui-waits".into());
+                f
+            }
+        }
+    }
+
+    /// What the document's `asked` must say.
+    fn asked(self) -> Value {
+        let floor = f64::from(DECODE_FLOOR_MS);
+        match self {
+            Behind::Floor => {
+                json!({"decoder": null, "decode_floor_ms": floor, "control_ui_waits": false})
+            }
+            Behind::VaapiCopied => {
+                json!({"decoder": "vaapi", "decode_floor_ms": null, "control_ui_waits": false})
+            }
+            Behind::Control => {
+                json!({"decoder": null, "decode_floor_ms": floor, "control_ui_waits": true})
+            }
+        }
+    }
+}
+
+/// What [`judge_behind`] makes of a run.
+#[derive(Debug, Default)]
+struct Verdict {
+    /// Why the run fails beside the UI's gates; for the control, why it
+    /// didn't run as asked.
+    failed: Vec<String>,
+    /// Why the run says nothing of a UI with decode behind, which isn't
+    /// a failure: VA-API kept up.
+    inconclusive: Option<String>,
+    /// Why the UI misses its gates ([`ui_gates`]).
+    ui: Vec<String>,
+}
+
+/// The frames shown of those expected after the first second, per lens
+/// for a locked pair as [`judge`] counts them, and their unit.
+fn shown_of(r: &Value) -> Option<(f64, f64, &'static str)> {
+    let frames = &judged(r)["frames"];
+    let (lenses, unit) = per_lens(r);
+    let shown = frames["shown"].as_f64()?;
+    let expected = frames["expected"].as_f64().filter(|e| *e > 0.0)?;
+    Some((shown / lenses, expected / lenses, unit))
+}
+
+/// "380 of 570 frames shown (67%)".
+fn shown_words(r: &Value) -> Option<String> {
+    shown_of(r).map(|(s, e, unit)| format!("{s:.0} of {e:.0} {unit} shown ({:.0}%)", 100.0 * s / e))
+}
+
+/// The run in `doc`, `kind` of `gui_decode_behind`'s, by its gates (D40),
+/// after the first second: the run must have run as asked, with decode
+/// behind (at most [`MAX_SHOWN_BEHIND`] of the frames expected shown),
+/// and the UI must hold [`ui_gates`]. Runs 0 and 1 must make no
+/// blocking call on the UI thread; the control must make one, since it
+/// waits. On run 1 decode must be VA-API's, its frames downloaded (the
+/// copy path); and decode keeping up there is inconclusive, not a
+/// failure. Drops, decode's own drops and A/V aren't judged: with decode
+/// behind, frames are dropped by design.
+fn judge_behind(doc: &Value, kind: Behind) -> Verdict {
+    let mut v = Verdict::default();
+    if doc["ok"] != true {
+        v.failed.push(format!(
+            "the run failed: {} ({})",
+            doc["error"]["message"].as_str().unwrap_or("no message"),
+            doc["error"]["code"].as_str().unwrap_or("no code")
+        ));
+        return v;
+    }
+    let r = &doc["result"];
+    if r["refresh_hz"].as_f64().is_none() {
+        v.failed
+            .push("the monitor gave no refresh rate, so nothing can be judged".into());
+        return v;
+    }
+    // Numbers as numbers: the document's 50.0 is the flag's 50.
+    let a = &r["asked"];
+    let want = kind.asked();
+    let same = |k: &str| match (a[k].as_f64(), want[k].as_f64()) {
+        (Some(x), Some(y)) => x == y,
+        _ => a[k] == want[k],
+    };
+    if !["decoder", "decode_floor_ms", "control_ui_waits"]
+        .into_iter()
+        .all(same)
+    {
+        v.failed
+            .push(format!("the document says it was asked {a}, not {want}"));
+    }
+    match shown_of(r) {
+        Some((shown, expected, _)) if shown > MAX_SHOWN_BEHIND * expected => {
+            let why = format!("decode kept up: {}", shown_words(r).unwrap_or_default());
+            if kind == Behind::VaapiCopied {
+                v.inconclusive = Some(why);
+            } else {
+                v.failed.push(why);
+            }
+        }
+        Some(_) => {}
+        None => v
+            .failed
+            .push("no frames expected in the document, so it can't say decode was behind".into()),
+    }
+    v.ui = ui_gates(r, judged(r));
+    match (kind, r["blocked_on_ui_thread"].as_u64()) {
+        (Behind::Control, Some(1..)) => {}
+        (Behind::Control, _) => v
+            .failed
+            .push("the UI never waited: no blocking call on the UI thread".into()),
+        (_, Some(0)) => {}
+        (_, Some(n)) => v
+            .failed
+            .push(format!("{n} blocking calls on the UI thread")),
+        (_, None) => v.failed.push("no blocking count in the document".into()),
+    }
+    if kind == Behind::VaapiCopied {
+        let decoder = r["streams"][0]["decoder"].as_str();
+        if decoder != Some("vaapi") {
+            v.failed.push(format!(
+                "asked for VA-API, decoded on {}",
+                decoder.unwrap_or("nothing")
+            ));
+        }
+        if r["stages"]["download"]["samples"].as_u64().unwrap_or(0) == 0 {
+            v.failed
+                .push("no frame was downloaded: not the copy path".into());
+        }
+    }
+    v
+}
+
+/// Run 0's or 1's verdict as a check: why it fails, the UI's gates with
+/// the rest unless decode kept up (inconclusive).
+fn run_verdict(v: &Verdict) -> Result<(), Vec<String>> {
+    let mut why = v.failed.clone();
+    if v.inconclusive.is_none() {
+        why.extend(v.ui.iter().cloned());
+    }
+    if why.is_empty() { Ok(()) } else { Err(why) }
+}
+
+/// The UI's gates alone, as a check: the control must fail them.
+fn ui_verdict(v: &Verdict) -> Result<(), Vec<String>> {
+    if v.ui.is_empty() {
+        Ok(())
+    } else {
+        Err(v.ui.clone())
+    }
+}
+
+/// Why the control fails the test: it didn't run as asked (so the gates
+/// are untested here), it passed the UI's gates, or it failed them but
+/// not as a slow UI in a window drawn. Empty when it failed as it must.
+fn control_failed(v: &Verdict) -> Vec<String> {
+    if !v.failed.is_empty() {
+        return vec![format!(
+            "the control didn't run as asked, so the gates are untested here: {}",
+            v.failed.join("; ")
+        )];
+    }
+    if v.ui.is_empty() {
+        return vec!["the control passed the UI gates".into()];
+    }
+    if !v.ui.iter().any(|w| w.contains("the window drawn")) {
+        return vec![format!(
+            "the control failed the UI gates, but not as a slow UI in a window drawn: {}",
+            v.ui.join("; ")
+        )];
+    }
+    Vec::new()
+}
+
+#[test]
+#[ignore = "tier2: needs a desktop session (GNOME or Hyprland) on a GPU"]
+fn gui_decode_behind() {
+    let session = tier2::require_graphical_session();
+    let out = std::env::var_os("SPHERECUT_GUI_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(format!("gui-decode-behind-{}", std::process::id()))
+        });
+    std::fs::create_dir_all(&out).unwrap();
+    let locked = tier2::session_locked();
+    let summary = |vaapi_hevc: &[String],
+                   runs: &[Value],
+                   not_run: &[(String, String)],
+                   inconclusive: &[(String, String)]| {
+        let pairs = |l: &[(String, String)]| {
+            l.iter()
+                .map(|(l, w)| json!({"label": l, "why": w}))
+                .collect::<Vec<_>>()
+        };
+        let s = json!({
+            "session": session.found.describe(),
+            "env": session.env.iter().map(|(k, v)| format!("{k}={}", v.to_string_lossy())).collect::<Vec<_>>(),
+            "locked": locked,
+            "vaapi_hevc": vaapi_hevc,
+            "max_shown_behind": MAX_SHOWN_BEHIND,
+            "runs": runs,
+            "not_run": pairs(not_run),
+            "inconclusive": pairs(inconclusive),
+        });
+        std::fs::write(
+            out.join(BEHIND_SUMMARY),
+            serde_json::to_string_pretty(&s).unwrap() + "\n",
+        )
+        .unwrap();
+    };
+    if locked == Some(true) {
+        summary(&[], &[], &[("every run".into(), BEHIND_LOCKED.into())], &[]);
+        panic!("{BEHIND_LOCKED}");
+    }
+
+    let vaapi_hevc = vaapi_hevc();
+    let made = out.join("media");
+    std::fs::create_dir_all(&made).unwrap();
+    let seam = media::write(
+        &Spec {
+            name: "gui-behind".into(),
+            pattern: Pattern::Seam,
+            width: 3840,
+            height: 1920,
+            frames: 300,
+            codec: Codec::Hevc,
+            spherical: true,
+            ..Spec::default()
+        },
+        &made,
+    )
+    .unwrap();
+    let mut planned: Vec<(u64, &str, PathBuf, Behind)> = vec![(
+        0,
+        "decode held to 20 fps (default path)",
+        seam.clone(),
+        Behind::Floor,
+    )];
+    let mut not_run: Vec<(String, String)> = Vec::new();
+    let copied = "VA-API copied, noisy 5.7K 10-bit";
+    match tier2::perf_clip(&format!("{PERF_5K7_10BIT}.mp4")) {
+        Ok(_) if !vaapi_hevc.iter().any(|p| p == "HEVC Main 10") => not_run.push((
+            copied.into(),
+            "doctor's check says VA-API doesn't decode HEVC Main 10 here".into(),
+        )),
+        Ok(path) => planned.push((1, copied, path, Behind::VaapiCopied)),
+        Err(why) => not_run.push((copied.into(), why)),
+    }
+    planned.push((
+        2,
+        "the control: decode held, the UI waiting for each decoded frame",
+        seam,
+        Behind::Control,
+    ));
+
+    let mut runs = Vec::new();
+    let mut failed = Vec::new();
+    let mut inconclusive = Vec::new();
+    let mut control = None;
+    for (n, label, clip, kind) in planned {
+        let json = out.join(format!("gui-behind-{n}.json"));
+        let png = out.join(format!("gui-behind-{n}.png"));
+        let _ = std::fs::remove_file(&json);
+        let _ = std::fs::remove_file(&png);
+        let role = if kind == Behind::Control {
+            "control"
+        } else {
+            "run"
+        };
+        let mut asked = vec![kind.flags().join(" ")];
+        if kind == Behind::VaapiCopied {
+            asked.push("SPHERECUT_ZERO_COPY=0".into());
+        }
+        let row = |failed: &[String], gates: &[String], behind: Option<String>, shot: bool| {
+            json!({
+                "n": n,
+                "label": label,
+                "clip": clip.display().to_string(),
+                "asked": asked,
+                "role": role,
+                "behind": behind,
+                "document": json.display().to_string(),
+                "screenshot": shot.then(|| png.display().to_string()),
+                "failed": failed,
+                "gates": gates,
+            })
+        };
+        eprintln!("==> {label}: {}", clip.display());
+        if tier2::session_locked() == Some(true) {
+            let why = "not run: the screen locked during the runs".to_string();
+            failed.push(format!("{label}: {why}"));
+            runs.push(row(&[why], &[], None, false));
+            continue;
+        }
+        let mut cmd = smoke_cmd(&clip, &json, &png, None);
+        cmd.args(kind.flags());
+        match kind {
+            Behind::VaapiCopied => {
+                cmd.env("SPHERECUT_ZERO_COPY", "0");
+            }
+            Behind::Floor | Behind::Control => {
+                cmd.env_remove("SPHERECUT_ZERO_COPY");
+            }
+        }
+        let (status, stderr) = window(&session, cmd);
+        let doc = std::fs::read(&json)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+        let v = match &doc {
+            Some(d) => judge_behind(d, kind),
+            None => Verdict {
+                failed: vec![format!(
+                    "no document (exit {status:?}): {}",
+                    stderr.lines().last().unwrap_or("")
+                )],
+                ..Verdict::default()
+            },
+        };
+        let mut why = match kind {
+            Behind::Control => control_failed(&v),
+            Behind::Floor | Behind::VaapiCopied => run_verdict(&v).err().unwrap_or_default(),
+        };
+        if why.is_empty() && status != Some(0) {
+            why.push(format!(
+                "exit {status:?}: {}",
+                stderr.lines().last().unwrap_or("")
+            ));
+        }
+        if !why.is_empty() && tier2::session_locked() == Some(true) {
+            why.push("the screen was locked by the run's end".into());
+        }
+        if let Some(i) = &v.inconclusive {
+            inconclusive.push((label.to_string(), i.clone()));
+        }
+        for w in &why {
+            failed.push(format!("{label}: {w}"));
+        }
+        let behind = doc.as_ref().and_then(|d| shown_words(&d["result"]));
+        runs.push(row(&why, &v.ui, behind, png.is_file()));
+        if kind == Behind::Control {
+            control = Some(v);
+        }
+    }
+    summary(&vaapi_hevc, &runs, &not_run, &inconclusive);
+    for (label, why) in &not_run {
+        eprintln!("not run: {label}: {why}");
+    }
+    for (label, why) in &inconclusive {
+        eprintln!("inconclusive: {label}: {why}");
+    }
+    assert!(
+        failed.is_empty(),
+        "{} of {} runs failed:\n{}",
+        runs.iter().filter(|r| r["failed"] != json!([])).count(),
+        runs.len(),
+        failed.join("\n")
+    );
+    // The control fails the UI's gates, as a slow UI in a window drawn.
+    let v = control.expect("the control ran");
+    let why = must_fail("a UI that waits for each decoded frame", ui_verdict(&v));
+    assert!(
+        why.iter().any(|w| w.contains("the window drawn")),
+        "{why:?}"
+    );
+}
+
 /// The prototype's gates on documents made up to fail each one (Tier 1).
 #[test]
 fn the_prototype_gates_fail_what_they_say() {
@@ -1136,6 +1563,203 @@ fn the_gates_fail_what_they_say() {
     unlocked["result"]["frames"] = json!({"shown": 1200, "dropped": 0});
     pair_fails(&unlocked, "no unpaired count");
     pair_fails(&unlocked, "no pair_resyncs count");
+}
+
+/// `gui_decode_behind`'s gates on documents made up to pass and to fail
+/// each one (Tier 1).
+#[test]
+fn the_behind_gates_fail_what_they_say() {
+    // Decode held to 20 fps of a 30 fps clip on a 60 Hz display: 380 of
+    // 570 frames after the first second, the UI on time.
+    let floor = || {
+        json!({
+            "ok": true,
+            "result": {
+                "refresh_hz": 60.0,
+                "asked": {"decoder": null, "decode_floor_ms": 50.0, "control_ui_waits": false},
+                "ui": {"presented": 0.99, "p99": 17.2, "expected": 1200.0, "frames": 1188, "passes": 1188},
+                "settled": {
+                    "ui": {"presented": 0.99, "p99": 17.2, "expected": 1140.0, "frames": 1129, "passes": 1129},
+                    "frames": {"shown": 380, "dropped": 190, "decode_dropped": 0, "expected": 570.0},
+                },
+                "streams": [{"decoder": "vulkan", "decode": "Vulkan Video"}],
+                "stages": {"decode": {"samples": 400}, "download": {"samples": 0}},
+                "blocked_on_ui_thread": 0,
+            },
+        })
+    };
+    let vaapi = || {
+        let mut d = floor();
+        d["result"]["asked"] =
+            json!({"decoder": "vaapi", "decode_floor_ms": null, "control_ui_waits": false});
+        d["result"]["streams"][0] = json!({"decoder": "vaapi", "decode": "VA-API"});
+        d["result"]["stages"]["download"]["samples"] = json!(300);
+        d
+    };
+    for (d, kind) in [(floor(), Behind::Floor), (vaapi(), Behind::VaapiCopied)] {
+        let v = judge_behind(&d, kind);
+        assert_eq!(run_verdict(&v), Ok(()), "{kind:?}: {v:?}");
+        assert_eq!(v.inconclusive, None);
+    }
+    // The floor run's flag, as a number: the document's 50.0 is 50.
+    let mut whole = floor();
+    whole["result"]["asked"]["decode_floor_ms"] = json!(50);
+    assert_eq!(run_verdict(&judge_behind(&whole, Behind::Floor)), Ok(()));
+    // VA-API keeping up says nothing of the UI with decode behind:
+    // inconclusive, not failed, its UI gates aside.
+    let mut kept = vaapi();
+    kept["result"]["settled"]["frames"]["shown"] = json!(568);
+    kept["result"]["settled"]["ui"]["p99"] = json!(50.0);
+    let v = judge_behind(&kept, Behind::VaapiCopied);
+    assert_eq!(
+        v.inconclusive.as_deref(),
+        Some("decode kept up: 568 of 570 frames shown (100%)")
+    );
+    assert_eq!(run_verdict(&v), Ok(()), "{v:?}");
+
+    // Each gate on a document made to fail it.
+    let fails = |name: &str, d: &Value, kind: Behind, has: &str| -> Verdict {
+        let v = judge_behind(d, kind);
+        let why = must_fail(name, run_verdict(&v));
+        assert!(
+            why.iter().any(|w| w.contains(has)),
+            "{name}: {has:?} not in {why:?}"
+        );
+        v
+    };
+    let mut slow = floor();
+    slow["result"]["settled"]["ui"] =
+        json!({"presented": 0.33, "p99": 17.2, "expected": 1140.0, "frames": 376, "passes": 376});
+    let v = fails(
+        "a UI presenting a third of its frames",
+        &slow,
+        Behind::Floor,
+        "33% of the UI frames expected were presented, the window drawn",
+    );
+    must_fail("a UI presenting a third of its frames", ui_verdict(&v));
+    let mut late = floor();
+    late["result"]["settled"]["ui"]["p99"] = json!(50.0);
+    let v = fails(
+        "a UI p99 of 50 ms",
+        &late,
+        Behind::Floor,
+        "UI p99 50.0 ms, over 1.5 × the 60 Hz period",
+    );
+    must_fail("a UI p99 of 50 ms", ui_verdict(&v));
+    let mut kept_up = floor();
+    kept_up["result"]["settled"]["frames"]["shown"] = json!(568);
+    let v = fails(
+        "a floor run whose decode kept up",
+        &kept_up,
+        Behind::Floor,
+        "decode kept up: 568 of 570 frames shown",
+    );
+    assert_eq!(v.inconclusive, None);
+    let mut no_rate = floor();
+    no_rate["result"]["refresh_hz"] = Value::Null;
+    fails(
+        "a run without a refresh rate",
+        &no_rate,
+        Behind::Floor,
+        "the monitor gave no refresh rate, so nothing can be judged",
+    );
+    let mut blocked = floor();
+    blocked["result"]["blocked_on_ui_thread"] = json!(2);
+    fails(
+        "a run that blocked the UI thread",
+        &blocked,
+        Behind::Floor,
+        "2 blocking calls on the UI thread",
+    );
+    let mut on_vulkan = vaapi();
+    on_vulkan["result"]["streams"][0]["decoder"] = json!("vulkan");
+    fails(
+        "a VA-API run decoded on Vulkan",
+        &on_vulkan,
+        Behind::VaapiCopied,
+        "asked for VA-API, decoded on vulkan",
+    );
+    let mut not_copied = vaapi();
+    not_copied["result"]["stages"]["download"]["samples"] = json!(0);
+    fails(
+        "a VA-API run that downloaded nothing",
+        &not_copied,
+        Behind::VaapiCopied,
+        "no frame was downloaded: not the copy path",
+    );
+    let mut unasked = floor();
+    unasked["result"]["asked"]["decode_floor_ms"] = Value::Null;
+    fails(
+        "a floor run without its floor",
+        &unasked,
+        Behind::Floor,
+        "the document says it was asked",
+    );
+    // A document from before the flags has no `asked`.
+    let mut old = floor();
+    old["result"]["asked"] = Value::Null;
+    fails(
+        "a document from before the flags",
+        &old,
+        Behind::Floor,
+        "the document says it was asked null",
+    );
+    fails(
+        "a run that failed",
+        &json!({"ok": false, "error": {"code": "timed_out", "message": "no frame"}}),
+        Behind::Floor,
+        "the run failed: no frame (timed_out)",
+    );
+
+    // The control: decode held, the UI waiting for each decoded frame,
+    // so it presents a frame a decoded frame and blocks each time.
+    let waits = || {
+        let mut d = floor();
+        d["result"]["asked"]["control_ui_waits"] = json!(true);
+        d["result"]["settled"]["ui"] = json!({"presented": 0.33, "p99": 50.0, "expected": 1140.0, "frames": 376, "passes": 376});
+        d["result"]["blocked_on_ui_thread"] = json!(399);
+        d
+    };
+    let v = judge_behind(&waits(), Behind::Control);
+    assert_eq!(control_failed(&v), Vec::<String>::new(), "{v:?}");
+    let why = must_fail("a UI that waits for each decoded frame", ui_verdict(&v));
+    assert!(
+        why.iter().any(|w| w.contains("the window drawn")),
+        "{why:?}"
+    );
+    // A control that holds the gates fails the test; so does one that
+    // didn't run as asked, or that failed them as a window not drawn.
+    let mut held = waits();
+    held["result"]["settled"]["ui"] = floor()["result"]["settled"]["ui"].clone();
+    assert_eq!(
+        control_failed(&judge_behind(&held, Behind::Control)),
+        ["the control passed the UI gates"]
+    );
+    let mut never_waited = waits();
+    never_waited["result"]["blocked_on_ui_thread"] = json!(0);
+    let why = control_failed(&judge_behind(&never_waited, Behind::Control));
+    assert!(
+        why[0].starts_with(
+            "the control didn't run as asked, so the gates are untested here: the UI never waited"
+        ),
+        "{why:?}"
+    );
+    let mut caught_up = waits();
+    caught_up["result"]["settled"]["frames"]["shown"] = json!(568);
+    let why = control_failed(&judge_behind(&caught_up, Behind::Control));
+    assert!(why[0].contains("decode kept up: 568 of 570"), "{why:?}");
+    let mut hidden = waits();
+    hidden["result"]["settled"]["ui"] =
+        json!({"presented": 0.33, "p99": 50.0, "expected": 1140.0, "frames": 376, "passes": 1130});
+    let why = control_failed(&judge_behind(&hidden, Behind::Control));
+    assert!(
+        why[0].starts_with("the control failed the UI gates, but not as a slow UI"),
+        "{why:?}"
+    );
+    // The control's own flags are asked of it: run 0's document isn't
+    // the control's.
+    let why = control_failed(&judge_behind(&floor(), Behind::Control));
+    assert!(why[0].contains("the document says it was asked"), "{why:?}");
 }
 
 #[test]
