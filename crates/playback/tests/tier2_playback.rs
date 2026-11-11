@@ -827,8 +827,9 @@ impl Meter {
 /// clock passed (119.88 fps shown at 60 Hz owes 60 a second), and none
 /// while the clock stands: at the end, and through the seek, the landing
 /// and the preroll of a loop, which a short master makes every 3 to 5 s.
-/// The share presented is the presents that put a new frame up (a new
-/// pair, for a locked pair) over the presents that owed one.
+/// The share presented is the new frames put up (new pairs, for a locked
+/// pair), at whatever present, over the presents that owed one
+/// ([`presented_share`]).
 #[derive(Debug, Default)]
 struct Owed {
     /// The time the present before was for.
@@ -1799,9 +1800,12 @@ fn due_after_first(r: &Pass) -> Option<f64> {
     (due > 0).then_some(due as f64)
 }
 
-/// Of those presents, the share that put a new frame up (a new pair, of
-/// a locked pair), in %. A loop's seek owes the play's first frame and
-/// its landing puts it up unowed, so the two even out.
+/// The new frames put up in those seconds (new pairs, of a locked pair),
+/// at whatever present, over those presents, in %: a frame put up a
+/// present late, at a present that owed none (a frame lasts two presents
+/// at 8K30), still counts: a pair a present late shows in the late
+/// presents' row, not here. A loop's seek owes the play's first frame and its
+/// landing puts it up unowed, so the two even out.
 fn presented_share(r: &Pass) -> Option<f64> {
     Some(100.0 * r.after_first(|s| s.shown) as f64 / due_after_first(r)?)
 }
@@ -5973,17 +5977,18 @@ fn zero_copy_pair_matches_copy() {
 /// the clip's end puts nothing new up and has the clock set back to the
 /// last frame; then the loop's seek to the start stands for `stand`
 /// presents (the seek, the landing, which puts frame 0 up at the last of
-/// them, and the preroll) and plays on. A `held` present keeps the frame
-/// it owes back, as a pair waiting on a lens would; a `jumped` one finds
-/// the clock a frame further on, as after a tick the UI thread missed,
-/// and passes a frame over. The engine counts frames passed over once for
-/// a locked pair and for each of `streams` otherwise.
+/// them, and the preroll) and plays on. A present `held` (by its index and
+/// the frame its clock is in) keeps the frame it owes back, as a pair
+/// waiting on a lens would; a `jumped` one finds the clock a frame
+/// further on, as after a tick the UI thread missed, and passes a frame
+/// over. The engine counts frames passed over once for a locked pair and
+/// for each of `streams` otherwise.
 fn simulated(
     mode: Mode,
     frames: i64,
     stand: u64,
     (streams, locked): (usize, bool),
-    held: impl Fn(u64) -> bool,
+    held: impl Fn(u64, i64) -> bool,
     jumped: impl Fn(u64) -> bool,
 ) -> Pass {
     let (n, d) = mode.rate();
@@ -6027,7 +6032,7 @@ fn simulated(
                     (at(frames - 1), false, true, false, 0)
                 } else {
                     let f = rate.time_to_frame(time, Rounding::Floor).unwrap();
-                    if f > shown && !held(k) {
+                    if f > shown && !held(k, f) {
                         let passed = f - shown - 1;
                         shown = f;
                         (time, true, false, true, passed as u64)
@@ -6058,8 +6063,11 @@ fn wall_second_share(r: &Pass) -> f64 {
 /// count per present, so 4K120 at 60 Hz presents and a 5.7K60 master
 /// that loops every 3.17 s present all they owe and pass; drops compare
 /// a lens to a lens, the unlocked count divided by its streams; a stall
-/// is Kill. Each has a control that must fail: a real shortfall of pairs,
-/// a real excess of drops, a pass that stands still while its clock runs.
+/// is Kill. Each has a control that must fail: a real shortfall of pairs
+/// (a pair held back, which the present after passes over, and one that
+/// stands still at each loop's end, which passes nothing over and fails
+/// the share alone), a real excess of drops, a pass that stands still
+/// while its clock runs.
 #[test]
 fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     let unthrottled = || Pass {
@@ -6067,16 +6075,17 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
         ..Pass::default()
     };
     let never = |_: u64| false;
+    let kept = |_: u64, _: i64| false;
     let pair = (2, true);
     let apart = (2, false);
     // 4K120 at 60 Hz: 4.89 s of 586 frames, every present owing one and
     // passing one over, which counts as dropped on both sides until
     // `Counter::Skipped` takes it out.
-    let k4 = |held: &dyn Fn(u64) -> bool, (streams, locked): (usize, bool)| {
+    let k4 = |held: &dyn Fn(u64, i64) -> bool, (streams, locked): (usize, bool)| {
         simulated(Mode::K4_120, 586, 4, (streams, locked), held, never)
     };
-    let unlocked = k4(&never, apart);
-    let locked = (unthrottled(), k4(&never, pair));
+    let unlocked = k4(&kept, apart);
+    let locked = (unthrottled(), k4(&kept, pair));
     let (verdict, line) = held_verdict(&unlocked, &locked);
     assert_eq!(verdict, Verdict::Pass, "4K120: {line}");
     let r = &locked.1;
@@ -6085,24 +6094,26 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     assert!(wall_second_share(r) < 51.0, "{}", wall_second_share(r));
     let (dropped, before) = (dropped_share(r).unwrap(), dropped_share(&unlocked).unwrap());
     assert!((dropped - before).abs() < 0.5, "{line}");
-    // The control: a pair held back at one present in 20.
-    let short = (unthrottled(), k4(&|k| k % 20 == 7, pair));
+    // The control: a pair held back at one present in 20, short of the
+    // presents owed (and dropping its frame at the present after).
+    let short = (unthrottled(), k4(&|k, _| k % 20 == 7, pair));
     let (verdict, line) = held_verdict(&unlocked, &short);
     must_fail(
         "4K120 holding a pair back at 1 present in 20",
         verdict == Verdict::Pass,
     );
     assert_eq!(verdict, Verdict::Redirect, "{line}");
+    assert!(presented_share(&short.1).unwrap() < 99.0, "{line}");
 
     // 5.7K60: 3.17 s of 190 frames, five or six loops in 20 s, each
     // standing four presents that owe nothing but the seek's.
-    let k57 = |held: &dyn Fn(u64) -> bool,
+    let k57 = |held: &dyn Fn(u64, i64) -> bool,
                jumped: &dyn Fn(u64) -> bool,
                (streams, locked): (usize, bool)| {
         simulated(Mode::K5_7_60, 190, 4, (streams, locked), held, jumped)
     };
-    let unlocked = k57(&never, &never, apart);
-    let locked = (unthrottled(), k57(&never, &never, pair));
+    let unlocked = k57(&kept, &never, apart);
+    let locked = (unthrottled(), k57(&kept, &never, pair));
     let (verdict, line) = held_verdict(&unlocked, &locked);
     assert_eq!(verdict, Verdict::Pass, "5.7K60: {line}");
     let r = &locked.1;
@@ -6112,27 +6123,45 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
         "5.7K60 locked: {line}; wall seconds would say {:.2} %",
         wall_second_share(r)
     );
-    let short = (unthrottled(), k57(&|k| k % 40 == 7, &never, pair));
+    let short = (unthrottled(), k57(&|k, _| k % 40 == 7, &never, pair));
     let (verdict, line) = held_verdict(&unlocked, &short);
     must_fail(
         "5.7K60 holding a pair back at 1 present in 40",
         verdict == Verdict::Pass,
     );
     assert_eq!(verdict, Verdict::Redirect, "{line}");
+    assert!(presented_share(&short.1).unwrap() < 99.0, "{line}");
+    // The control for the share alone: a pair that stands still for the
+    // last 4 frames of each loop, which the loop's seek leaves unshown
+    // and passes nothing over, short of the presents owed by 2 % and
+    // dropping no more than the unlocked run.
+    let stood = (unthrottled(), k57(&|_, f| f >= 186, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &stood);
+    must_fail(
+        "5.7K60 standing still for each loop's last 4 frames",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    let (dropped, before) = (
+        dropped_share(&stood.1).unwrap(),
+        dropped_share(&unlocked).unwrap(),
+    );
+    assert!(dropped - before <= 0.0, "{line}");
+    assert!(presented_share(&stood.1).unwrap() < 99.0, "{line}");
 
     // Drops a lens: the unlocked baseline passes a frame over on each
     // stream at 1 present in 100, which its counter sums to 2 %, and
     // the locked pair at 1 in 70 (1.4 %) passes at 0.4 points more a lens.
-    let unlocked = k57(&never, &|k| k % 100 == 50, apart);
+    let unlocked = k57(&kept, &|k| k % 100 == 50, apart);
     let a_lens = dropped_share(&unlocked).unwrap();
     // About 1 %: a jump that falls on a loop's restart passes nothing over.
     assert!((0.8..=1.1).contains(&a_lens), "{a_lens:.2} % a lens");
-    let locked = (unthrottled(), k57(&never, &|k| k % 70 == 50, pair));
+    let locked = (unthrottled(), k57(&kept, &|k| k % 70 == 50, pair));
     let (verdict, line) = held_verdict(&unlocked, &locked);
     assert_eq!(verdict, Verdict::Pass, "drops a lens: {line}");
     // The control: 1 in 40 (2.5 %) is 1.5 points more a lens, which the
     // summed baseline's 2 % would have let pass.
-    let more = (unthrottled(), k57(&never, &|k| k % 40 == 20, pair));
+    let more = (unthrottled(), k57(&kept, &|k| k % 40 == 20, pair));
     let (verdict, line) = held_verdict(&unlocked, &more);
     must_fail(
         "a pair dropping 1.5 points more a lens",
@@ -6145,7 +6174,7 @@ fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
     // A real-time pass that stood still while its clock ran is Kill.
     let stood = Pass {
         stalled: Some("no new frame for 5s while the clock ran, at 2.000 s".into()),
-        ..k57(&never, &never, pair)
+        ..k57(&kept, &never, pair)
     };
     let (verdict, line) = held_verdict(&unlocked, &(unthrottled(), stood));
     assert_eq!(verdict, Verdict::Kill, "{line}");
