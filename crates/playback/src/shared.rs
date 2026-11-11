@@ -19,6 +19,7 @@ use crate::audio::AudioOutput;
 use crate::budget::{AutoBudget, CacheBudget};
 use crate::cache::FrameCache;
 use crate::decoder::{HwPromise, HwSupport};
+use crate::lock::{LockSpec, LockStatus};
 use crate::perf::{MemoryStats, PerfStats};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::slots::SlotRing;
@@ -110,6 +111,17 @@ pub struct StreamStatus {
     pub last: Option<Time>,
     pub landed: Option<Landed>,
     pub seeks: SeekCounts,
+    /// Frames the worker handed out, from seeks, steps and decoding on,
+    /// and the clip time of the last of them.
+    pub handed_out: u64,
+    pub newest: Option<Time>,
+    /// Frames its decoder decoded, handed out or passed over (catching
+    /// up), as [`DecodeStats::frames_decoded`] counts them: the decodes
+    /// the stream cost, which a lens that passes frames over still pays
+    /// (M3 plan amendment 4, K2).
+    ///
+    /// [`DecodeStats::frames_decoded`]: spherecut_media::backend::DecodeStats::frames_decoded
+    pub decoded: u64,
 }
 
 /// The budget in force, and what it was worked out from.
@@ -140,6 +152,28 @@ pub(crate) struct Status {
     pub(crate) import_refused: Option<String>,
     /// The upload thread's last reading of the memory, once a second.
     pub(crate) memory: Option<MemoryStats>,
+    /// The open's lock group, when it opened a locked pair.
+    pub(crate) lock: Option<LockGroup>,
+}
+
+/// A locked pair's group (M3 plan section 9): what it was asked for, its
+/// members, where it is, and the one time its members catch up to.
+#[derive(Debug, Clone)]
+#[allow(
+    dead_code,
+    reason = "the M3.8 units form the group and read its parts; remove once they do"
+)]
+pub(crate) struct LockGroup {
+    pub(crate) spec: LockSpec,
+    /// The player streams locked together, by their place in what was
+    /// opened: the frame cache's keys for them.
+    pub(crate) members: [usize; 2],
+    pub(crate) status: LockStatus,
+    /// The group's catch-up time: raised to the clock's time when a
+    /// member falls more than 2 frames behind it, never past the newest
+    /// frame every other member holds, and cleared by a seek or a step.
+    /// No member catches up on its own.
+    pub(crate) until: Option<Time>,
 }
 
 /// Shared by every thread of a player.

@@ -41,15 +41,17 @@ use spherecut_media::backend::{
 };
 use spherecut_media::decode::open_hw_device;
 use spherecut_media::doctor::CheckResult;
+use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
     HwPromise, HwSupport, PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError,
-    PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState,
+    PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState, StreamStatus,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
 use spherecut_synth::media::{self, Codec, Gop, Spec, VFR_TIMESCALE, vfr_ticks};
+use spherecut_testkit::control::must_fail;
 
 use common::{gpu, player, pts, snapshot, until};
 
@@ -780,6 +782,10 @@ impl MediaBackend for SlowSecond {
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
     }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
 }
 
 /// The synthetic clip, its frames coming `delay_ms` apart once that is
@@ -862,6 +868,10 @@ impl MediaBackend for Slowed {
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
     }
 }
 
@@ -1093,6 +1103,10 @@ impl MediaBackend for Held {
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
     }
 }
 
@@ -1413,6 +1427,24 @@ fn two_streams_play_on_three_slots_with_the_second_decoder_behind() {
         clock.set(at(k), Instant::now());
         lands(&player, &[k, k]);
     }
+    // Each stream's status counts the frames its worker handed out, and
+    // the decodes they cost, one at least a frame. Its control: a status
+    // with a frame handed out that nothing decoded.
+    let counted = |s: &StreamStatus| s.handed_out > 0 && s.decoded >= s.handed_out;
+    for (i, s) in snapshot(&player).streams.iter().enumerate() {
+        assert!(
+            counted(s),
+            "stream {i}: {} handed out, {} decoded",
+            s.handed_out,
+            s.decoded
+        );
+    }
+    let undecoded = StreamStatus {
+        handed_out: 3,
+        decoded: 2,
+        ..StreamStatus::default()
+    };
+    must_fail("a frame handed out undecoded", counted(&undecoded));
     common::join(player);
 }
 
@@ -1529,6 +1561,10 @@ impl MediaBackend for FaultBackend {
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
     }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
 }
 
 fn h264(dir: &TempDir) -> PathBuf {
@@ -1600,6 +1636,16 @@ fn a_fallback_from_a_failing_device_reaches_the_snapshot() {
     common::join(player);
 }
 
+/// `FaultBackend` on a 2×64² two-track MP4 without the GOP fault, its
+/// plan on lens 1 only: the pair locks (no `LockRefused`), lens 0 stays
+/// on hardware, pairs keep coming under the pacing rule, and the notice
+/// comes exactly once (M3 plan section 9).
+#[test]
+#[ignore = "M3.8 unit (d)"]
+fn a_fallback_on_one_lens_keeps_the_pair_locked() {
+    todo!()
+}
+
 /// FFmpeg's backend, with every Vulkan decode on FFmpeg's device on
 /// lavapipe, which has no video decode, whatever GPU the machine has:
 /// left to itself the backend opens the GPU behind the default render
@@ -1666,6 +1712,10 @@ impl MediaBackend for LavapipeBackend {
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
     }
 }
 

@@ -59,6 +59,7 @@ use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
+use crate::lock::{LockSnapshot, LockSpec};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -170,6 +171,20 @@ pub enum PlayerEvent {
     CacheTooSmall {
         budget: u64,
         frame_bytes: u64,
+    },
+    /// A pair opened with [`Player::open_locked`] isn't locked, by the
+    /// [`field`](crate::lock::field) that differs between its lenses
+    /// (`"timing"` for a track with no tables, `"open"` for a member that
+    /// couldn't open), or unlocked (`"slots"`, the GPU's memory below two
+    /// live slots a member): its streams show unlocked, as raw lenses.
+    LockRefused {
+        field: &'static str,
+    },
+    /// Stream `stream` of a locked pair has `frames` fewer frames than
+    /// the other, so the pair ends at its last; said once, at open.
+    LensShort {
+        stream: usize,
+        frames: u64,
     },
 }
 
@@ -353,6 +368,9 @@ pub struct PlayerSnapshot {
     pub import_refused: Option<String>,
     /// The process's memory and the GPU's, read once a second.
     pub memory: Option<MemoryStats>,
+    /// The open's lock group, for a pair opened with
+    /// [`Player::open_locked`].
+    pub lock: Option<LockSnapshot>,
     /// Whether what the threads report was read now; false when its lock
     /// was taken, and it is the copy from before.
     pub fresh: bool,
@@ -378,6 +396,7 @@ impl Default for PlayerSnapshot {
             gpu_error: None,
             import_refused: None,
             memory: None,
+            lock: None,
             fresh: false,
         }
     }
@@ -770,6 +789,20 @@ impl Player {
                 error: PlayerError::new("thread_failed", format!("starting the open: {e}")),
             });
         }
+    }
+
+    /// Open video streams `streams` of `path`, by their indices in the
+    /// file, as a frame-locked pair (M3 plan section 9), paused at their
+    /// first frames: player streams 0 and 1, the group's members. Each
+    /// stream's timing is read through the backend whatever the decoder,
+    /// and nothing of the pair shows until the lenses agree and the group
+    /// forms, or the lock is refused ([`PlayerEvent::LockRefused`]) and
+    /// they show unlocked, as [`open_streams`](Self::open_streams) shows
+    /// them. Locked, they show only as pairs of one clip time, and end at
+    /// the shorter lens ([`PlayerEvent::LensShort`]).
+    #[expect(unused_variables, reason = "M3.8 unit (a) writes the body")]
+    pub fn open_locked(&self, path: PathBuf, streams: [usize; 2], lock: LockSpec) {
+        todo!()
     }
 
     /// Close the open file: its threads stopped, nothing shown, and the
@@ -1540,6 +1573,11 @@ impl Player {
             s.memory = st.memory;
             s.streams = st.streams.clone();
             s.has_audio = st.audio.is_some();
+            s.lock = st.lock.as_ref().map(|g| LockSnapshot {
+                status: g.status,
+                base: None,
+                until: g.until,
+            });
             ui.snapshot_epoch = st.epoch;
         }
         s.epoch = ui.epoch;
@@ -1547,6 +1585,7 @@ impl Player {
         if !current {
             s.streams.clear();
             s.has_audio = false;
+            s.lock = None;
         }
         s.path = ui.path.clone();
         s.playing = ui.clock.is_running();

@@ -130,6 +130,14 @@ impl MediaBackend for FaultBackend {
     ) -> Result<Box<dyn spherecut_media::backend::AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
     }
+
+    fn track_timing(
+        &self,
+        path: &Path,
+        stream: usize,
+    ) -> Result<Option<spherecut_media::mp4::TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
 }
 
 /// FNV-1a over every row of every plane, without padding.

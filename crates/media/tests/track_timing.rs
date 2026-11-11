@@ -1000,6 +1000,24 @@ fn a_fragmented_file_is_its_own_error() {
     );
 }
 
+/// `FfmpegBackend::track_timing` answers an MP4 or MOV stream's tables
+/// as `mp4::track_timing` reads them, numbered as `VideoRequest::stream`
+/// numbers streams, and `Ok(None)` for any other container (M3 plan
+/// section 9).
+#[test]
+#[ignore = "M3.8 unit (a)"]
+fn ffmpeg_answers_mp4_tables_and_none_elsewhere() {
+    todo!()
+}
+
+/// `FfmpegBackend::track_timing` answers a fragmented MP4's track with
+/// `Ok(None)`, not an error (M3 plan amendment 3).
+#[test]
+#[ignore = "M3.8 unit (a)"]
+fn ffmpeg_answers_a_fragmented_track_with_none() {
+    todo!()
+}
+
 #[test]
 fn a_second_table_is_an_error_naming_it() {
     let _time = timed("a_second_table_is_an_error_naming_it");

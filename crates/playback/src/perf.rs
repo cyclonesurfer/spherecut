@@ -42,10 +42,13 @@ pub enum Stage {
     /// it, positive when the frame is late, negative when early
     /// (presenter).
     AvOffset,
+    /// How far the pair a locked group shows trails the clock's time,
+    /// at each present (presenter, M3 plan section 9).
+    PairWait,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 10] = [
+    pub const ALL: [Stage; 11] = [
         Stage::Decode,
         Stage::Download,
         Stage::Convert,
@@ -56,6 +59,7 @@ impl Stage {
         Stage::UiFrame,
         Stage::ShownInterval,
         Stage::AvOffset,
+        Stage::PairWait,
     ];
 
     /// Its name in the smoke run's JSON and the benchmark reports.
@@ -71,6 +75,7 @@ impl Stage {
             Stage::UiFrame => "ui_frame",
             Stage::ShownInterval => "shown_interval",
             Stage::AvOffset => "av_offset",
+            Stage::PairWait => "pair_wait",
         }
     }
 }
@@ -111,10 +116,19 @@ pub enum Counter {
     /// 7.3).
     Projected,
     EncodedOnly,
+    /// Presents at which the player's streams show frames of different
+    /// clip times, over every stream it shows, locked or not (presenter,
+    /// M3 plan section 9). It compares the slots' time tags, not their
+    /// pictures.
+    UnpairedPresents,
+    /// Times a locked group sought both lenses to the trailing lens's
+    /// newest frame because no time both held lay ahead (the backstop of
+    /// section 9).
+    PairResyncs,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 15] = [
+    pub const ALL: [Counter; 17] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
@@ -130,6 +144,8 @@ impl Counter {
         Counter::ImportsRefused,
         Counter::Projected,
         Counter::EncodedOnly,
+        Counter::UnpairedPresents,
+        Counter::PairResyncs,
     ];
 
     pub fn name(self) -> &'static str {
@@ -149,6 +165,8 @@ impl Counter {
             Counter::ImportsRefused => "imports_refused",
             Counter::Projected => "projected",
             Counter::EncodedOnly => "encoded_only",
+            Counter::UnpairedPresents => "unpaired_presents",
+            Counter::PairResyncs => "pair_resyncs",
         }
     }
 }

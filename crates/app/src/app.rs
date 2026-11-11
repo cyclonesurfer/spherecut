@@ -191,7 +191,7 @@ pub enum DoctorState {
     Lost,
 }
 
-/// Everything but the tiles, which [`Behavior`] borrows while the tree
+/// Everything but the tiles, which `Behavior` borrows while the tree
 /// draws.
 #[derive(Debug)]
 pub struct AppState {
@@ -468,7 +468,7 @@ impl SpherecutApp {
         self.state.overview_frame = None;
     }
 
-    /// The player's threads are told to stop; [`crate::run`] joins them
+    /// The player's threads are told to stop; [`crate::run`](fn@crate::run) joins them
     /// after the event loop, never here.
     pub fn begin_shutdown(&self) {
         if let Some(p) = &self.state.player {
@@ -477,7 +477,7 @@ impl SpherecutApp {
     }
 
     /// The threads of the jobs still running (the doctor's checks, a
-    /// listing, a probe), given up, for [`crate::run`] to join after the
+    /// listing, a probe), given up, for [`crate::run`](fn@crate::run) to join after the
     /// event loop.
     pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
         let s = &mut self.state;
@@ -768,10 +768,14 @@ impl AppState {
                 ))
                 .fix("Set a larger cache: SPHERECUT_FRAME_CACHE_MIB=4096 spherecut"),
             ),
+            // The lock's notices are M3.10's (13.2): until then nothing
+            // opens a locked pair.
             PlayerEvent::AudioLate
             | PlayerEvent::Decoder { .. }
             | PlayerEvent::StreamEnded { .. }
-            | PlayerEvent::Ended => {}
+            | PlayerEvent::Ended
+            | PlayerEvent::LockRefused { .. }
+            | PlayerEvent::LensShort { .. } => {}
         }
     }
 

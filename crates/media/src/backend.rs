@@ -14,7 +14,7 @@
 //! it, either fails the decode ([`Fallback::Fail`]) or hands it to
 //! software, which says so with [`DecoderEvent::FellBack`] and goes on
 //! from the frame after the last one returned (DECISIONS D30). Slice 5b
-//! adds a GPU-resident [`FrameStorage`] variant. Audio streams decode
+//! adds a GPU-resident `FrameStorage` variant. Audio streams decode
 //! through their own demuxer and decoder, to the output's rate and
 //! channels on the same clip time axis (`media::audio`, D35).
 
@@ -31,6 +31,7 @@ use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use thiserror::Error;
 
 use crate::hw::RenderNode;
+use crate::mp4::TrackTiming;
 use crate::probe::{ProbeError, ProbeReport};
 use crate::spherical::{Projection, StereoMode};
 use crate::{HwDevice, HwError, HwRefusal, MediaError, ff, ffi};
@@ -55,6 +56,15 @@ pub trait MediaBackend: Send + Sync + std::fmt::Debug {
         path: &Path,
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError>;
+    /// The timing tables of video stream `stream` of `path`, numbered as
+    /// [`VideoRequest::stream`] numbers them, for the frame lock to
+    /// compare between a camera's lenses (M3 plan section 9): `Ok(None)`
+    /// for a track with no tables, such as one in a container other than
+    /// MP4 or in a fragmented MP4, which refuses the lock with `"timing"`.
+    /// Read whatever decoder opens the stream. It has no default body, so
+    /// that every backend says what it answers: a backend that wraps
+    /// another passes it on, since `Ok(None)` would refuse every lock.
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError>;
 }
 
 /// How to open a video stream. Build one from [`VideoRequest::default`],
@@ -1239,6 +1249,14 @@ impl MediaBackend for FfmpegBackend {
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         Ok(Box::new(crate::audio::FfmpegAudio::open(path, req)?))
+    }
+
+    /// From [`crate::mp4::track_timing`] for a stream of an MP4 or MOV
+    /// file, `Ok(None)` for any other container and for a fragmented MP4
+    /// ([`crate::mp4::Mp4Error::Fragmented`], M3 plan amendment 3).
+    #[expect(unused_variables, reason = "M3.8 unit (a) writes the body")]
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        todo!()
     }
 }
 

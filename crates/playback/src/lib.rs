@@ -3,8 +3,9 @@
 //! export drive; its decode workers, one per video stream; the bounded
 //! frame cache between them and the upload thread, and the budget it is
 //! sized by; the GPU slots the upload thread fills and the presenter
-//! shows from; and the numbers the performance overlay, the smoke run
-//! and the benchmarks read.
+//! shows from; a camera's two lenses locked into pairs ([`lock`], M3
+//! plan section 9); and the numbers the performance overlay, the smoke
+//! run and the benchmarks read.
 //!
 //! Threads (plan section 8.1): the UI thread, which only sends commands
 //! and reads with `try_lock` and atomics; a transient `open` worker per
@@ -22,6 +23,7 @@ pub mod audio;
 pub mod budget;
 pub mod cache;
 pub mod decoder;
+pub mod lock;
 pub mod perf;
 pub mod player;
 mod shared;
@@ -38,6 +40,7 @@ pub use cache::{CacheStats, FrameCache, Insert, MIN_FRAMES};
 pub use decoder::{
     DecoderChoice, DecoderPreference, HwDecodeCheck, HwKeeper, HwPromise, HwSupport, StreamFormat,
 };
+pub use lock::{LockSnapshot, LockSpec, LockStatus, LockTest};
 pub use perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage, StageSummary};
 pub use player::{
     PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent,

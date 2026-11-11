@@ -704,6 +704,31 @@ impl FrameCache {
         self.lock().playhead
     }
 
+    /// Lock streams `members` together from now on, or no longer with
+    /// `None`: a locked pair's group (M3 plan section 9), set at open.
+    /// The cache's rules for the members (each one's current frame, its
+    /// window, eviction and back-pressure) and [`playhead`](Self::playhead),
+    /// which the upload thread starts each wanted list from, then run
+    /// from the [group base](Self::group_base) instead of the time the
+    /// presenter gives, so that each member's frame there is never
+    /// evicted and the faster lens decodes at most its window past it.
+    #[expect(unused_variables, reason = "M3.8 unit (c) writes the body")]
+    #[track_caller]
+    pub fn set_group(&self, members: Option<[usize; 2]>) {
+        todo!()
+    }
+
+    /// The group base Tg, while a group is set: the largest time at or
+    /// before the presenter's playhead at which every member holds a
+    /// frame, worked out again whenever a frame goes in or the playhead
+    /// moves; the playhead itself from a seek or a step until every
+    /// member has landed or failed, and whenever no such time exists.
+    /// `None` without a group.
+    #[track_caller]
+    pub fn group_base(&self) -> Option<Time> {
+        todo!()
+    }
+
     /// Hold at most `bytes` from now on, evicting down to it.
     #[track_caller]
     pub fn set_budget(&self, bytes: u64) {

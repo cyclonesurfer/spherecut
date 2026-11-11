@@ -871,7 +871,7 @@ pub(crate) const DEMUXERS: [&str; 2] = [MOV_DEMUXER, "matroska,webm"];
 /// FFmpeg's name for its MOV/MP4 demuxer.
 const MOV_DEMUXER: &str = "mov,mp4,m4a,3gp,3g2,mj2";
 
-/// The containers of [`DEMUXERS`], as errors name them.
+/// The containers of `DEMUXERS`, as errors name them.
 pub const CONTAINERS: &str = "MP4/MOV and Matroska/WebM";
 
 /// Why [`open_input`] opened nothing.
@@ -1435,7 +1435,7 @@ impl HwDevice {
     }
 
     /// [`hw_pixel`](Self::hw_pixel) as FFmpeg's int, to compare with
-    /// [`frame_format`].
+    /// `frame_format`.
     pub fn hw_pix_fmt(&self) -> c_int {
         self.pix_fmt as c_int
     }

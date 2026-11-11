@@ -693,6 +693,25 @@ fn frames_holding_a_surface_stay_under_their_streams_cap() {
     assert_eq!(c.stats().surfaces, 4);
 }
 
+/// A locked group's base is the newest clip time at or before the
+/// playhead at which every member holds a frame, worked out again as
+/// frames go in and the playhead moves, and the playhead itself while no
+/// such time exists (M3 plan section 9).
+#[test]
+#[ignore = "M3.8 unit (c)"]
+fn the_group_base_is_the_newest_common_time() {
+    todo!()
+}
+
+/// The cache's rules run from the group base: the faster member decodes
+/// at most its window past it, held back to the slower one, and each
+/// member's frame at the base is never evicted.
+#[test]
+#[ignore = "M3.8 unit (c)"]
+fn the_group_base_holds_the_faster_lens_back() {
+    todo!()
+}
+
 // The model-checked property test.
 
 const FRAMES: i64 = 24;

@@ -26,6 +26,7 @@ use spherecut_media::backend::{
     Timing, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::color::{self, ColorContext};
+use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_media::spherical::Projection;
 
@@ -64,7 +65,9 @@ impl Default for SyntheticClip {
 /// when that is closer, at `frame_cost` a frame, and stops between frames
 /// (and every millisecond within one) once its token says to. With
 /// `audio`, the clip has [`SyntheticAudio`]; without, it has no audio
-/// stream.
+/// stream. Every stream asked for is the clip, as stream 0, and its
+/// timing tables are those an MP4 track of the clip would have
+/// ([`MediaBackend::track_timing`]).
 #[derive(Debug, Clone, Default)]
 pub struct SyntheticBackend {
     pub clip: SyntheticClip,
@@ -108,6 +111,10 @@ impl SyntheticAudio {
 
 /// Frames in a [`SyntheticAudio`] chunk.
 pub const AUDIO_CHUNK: usize = 1024;
+
+/// The ticks a second of [`SyntheticBackend`]'s timing tables, as MP4
+/// muxers' 90 kHz, wherever a frame lasts a whole number of them.
+pub const TIMESCALE: u32 = 90_000;
 
 /// Sample `i` of [`SyntheticAudio`]: a ramp that says which it is, exactly
 /// (see [`audio_index`]), and stays within ±1.
@@ -174,6 +181,51 @@ impl MediaBackend for SyntheticBackend {
             pos: 0,
             end,
             valve: audio.valve.clone(),
+        }))
+    }
+
+    /// The tables of an MP4 track holding the clip, whatever the stream:
+    /// [`TIMESCALE`], with each frame its duration in those ticks where
+    /// that is whole, else the rate's numerator with each frame its
+    /// denominator; every frame shown at its decode time from 0, with no
+    /// edit list or composition offsets; and a sync sample every `keyint`
+    /// frames from the first.
+    fn track_timing(&self, path: &Path, _stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        let clip = &self.clip;
+        let invalid = |reason: &str| MediaError::Decode {
+            path: path.to_path_buf(),
+            reason: reason.into(),
+        };
+        if clip.frames == 0 || clip.keyint == 0 {
+            return Err(invalid(
+                "a synthetic clip needs frames and a keyframe interval",
+            ));
+        }
+        // A frame lasts den / num seconds, the rate reduced.
+        let rate = clip.rate.as_rational();
+        let ticks = i64::from(TIMESCALE)
+            .checked_mul(rate.den())
+            .ok_or_else(|| invalid("the frame rate's denominator is too large"))?;
+        let (timescale, delta) = if ticks % rate.num() == 0 {
+            (i64::from(TIMESCALE), ticks / rate.num())
+        } else {
+            (rate.num(), rate.den())
+        };
+        let too_large = || invalid("the frame rate doesn't fit an MP4's 32-bit tables");
+        let timescale = u32::try_from(timescale).map_err(|_| too_large())?;
+        let delta = u32::try_from(delta).map_err(|_| too_large())?;
+        let frames = u32::try_from(clip.frames)
+            .map_err(|_| invalid("too many frames for an MP4's 32-bit tables"))?;
+        let keyint = usize::try_from(clip.keyint).unwrap_or(usize::MAX);
+        Ok(Some(TrackTiming {
+            timescale,
+            count: clip.frames,
+            first_shown: 0,
+            first_pts: 0,
+            edit: None,
+            stts: vec![(frames, delta)],
+            ctts_hash: None,
+            stss: Some((1..=frames).step_by(keyint).collect()),
         }))
     }
 }
@@ -581,7 +633,8 @@ impl Gate {
 /// `inner`, with every video open and decode held until `gate` is
 /// released: an open waits for the gate or the request's shutdown flag
 /// (and fails on the flag), a seek or `next_frame` for the gate or its
-/// stop token. Probing and audio pass straight through.
+/// stop token. Probing, audio and the timing tables pass straight
+/// through.
 #[derive(Debug, Clone)]
 pub struct GatedBackend<B> {
     pub inner: B,
@@ -631,6 +684,10 @@ impl<B: MediaBackend> MediaBackend for GatedBackend<B> {
         req: &AudioRequest,
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
     }
 }
 
@@ -815,6 +872,72 @@ mod tests {
         d.catch_up(Some(at(29)));
         assert_eq!(note(&next(d)), 29);
         assert!(matches!(d.next_frame(&never).unwrap(), NextFrame::End));
+    }
+
+    /// The tables a synthetic clip answers are an MP4's of the clip: its
+    /// rate in 90 kHz ticks, or in the rate's own where a frame isn't a
+    /// whole number of them, its frames and its keyframes. Two clips the
+    /// same but for their keyframes are told apart by `stss`, as the
+    /// frame lock tells them.
+    #[test]
+    fn synthetic_tables_follow_the_clip() {
+        let tables = |clip: SyntheticClip| {
+            SyntheticBackend::new(clip)
+                .track_timing(Path::new("tables"), 3)
+                .unwrap()
+                .unwrap()
+        };
+        let t = tables(SyntheticClip::default());
+        assert_eq!(
+            t,
+            TrackTiming {
+                timescale: 90_000,
+                count: 30,
+                first_shown: 0,
+                first_pts: 0,
+                edit: None,
+                stts: vec![(30, 3000)],
+                ctts_hash: None,
+                stss: Some(vec![1, 9, 17, 25]),
+            }
+        );
+        let at = |rate: FrameRate, frames: u64, keyint: u64| {
+            tables(SyntheticClip {
+                rate,
+                frames,
+                keyint,
+                ..SyntheticClip::default()
+            })
+        };
+        let ntsc = at(FrameRate::FPS_29_97, 20, 30);
+        assert_eq!((ntsc.timescale, &ntsc.stts), (90_000, &vec![(20, 3003)]));
+        assert_eq!(ntsc.stss, Some(vec![1]));
+        let film = at(FrameRate::FPS_23_976, 5, 1);
+        assert_eq!((film.timescale, &film.stts), (24_000, &vec![(5, 1001)]));
+        assert_eq!(film.stss, Some(vec![1, 2, 3, 4, 5]));
+        // A clip with no frames or no keyframe interval has no tables.
+        let none = SyntheticBackend::new(SyntheticClip {
+            keyint: 0,
+            ..SyntheticClip::default()
+        });
+        assert!(none.track_timing(Path::new("none"), 0).is_err());
+
+        // A clip agrees with a shorter one over their common prefix; GOPs
+        // of 8 and 10 must not.
+        let agree =
+            |a: &TrackTiming, b: &TrackTiming| match (a.stts_mismatch(b), a.stss_mismatch(b)) {
+                (None, None) => Ok(()),
+                got => Err(got),
+            };
+        agree(&at(FrameRate::FPS_30, 90, 8), &at(FrameRate::FPS_30, 60, 8)).unwrap();
+        let gop = spherecut_testkit::control::must_fail(
+            "GOPs of 8 and 10",
+            agree(
+                &at(FrameRate::FPS_30, 90, 8),
+                &at(FrameRate::FPS_30, 90, 10),
+            ),
+        );
+        assert_eq!(gop, (None, Some(8)));
     }
 
     #[test]

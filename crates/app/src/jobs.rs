@@ -2,7 +2,7 @@
 //! doctor's checks, a directory listing, a probe. Each runs on its own
 //! named thread and sends one result back; the UI thread only
 //! `try_recv`s. A job given up before it ends leaves its thread in
-//! [`Threads`], which [`crate::run`] joins once the window has gone.
+//! [`Threads`], which [`crate::run`](fn@crate::run) joins once the window has gone.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
@@ -86,7 +86,7 @@ impl<T> Job<T> {
 
 /// The threads of jobs given up before they ended: a listing of a folder
 /// left since, a probe of a file closed since, any job at exit. They are
-/// joined after the event loop ([`crate::run`]), so that none is still in
+/// joined after the event loop ([`crate::run`](fn@crate::run)), so that none is still in
 /// a driver or FFmpeg while the process's exit tears those down.
 #[derive(Debug, Default)]
 pub struct Threads(Vec<JoinHandle<()>>);

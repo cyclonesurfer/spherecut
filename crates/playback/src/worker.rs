@@ -159,6 +159,8 @@ impl OpenJob {
                     ..StreamStatus::default()
                 })
                 .collect();
+            // An unlocked open; `open_locked`'s forms its group.
+            st.lock = None;
             std::mem::replace(&mut st.audio, audio)
         };
         // The last open's audio, if this holds it last, outside the lock.
@@ -750,20 +752,21 @@ impl Worker {
         }
     }
 
-    /// The decoder handed out `f`.
+    /// The decoder handed out `f`: counted in the stream's status, with
+    /// the frames decoded since the last, which clears a failure it
+    /// reported.
     fn took(&mut self, dec: &mut dyn VideoDecode, f: Arc<VideoFrame>) {
+        let time = f.time;
         self.last = Some(f);
         self.unsaved = true;
         self.at_end = false;
         self.failed = false;
         let stats = dec.stats();
         let perf = &self.shared.perf;
-        perf.add(
-            Counter::FramesDecoded,
-            stats
-                .frames_decoded
-                .saturating_sub(self.seen.frames_decoded),
-        );
+        let decoded = stats
+            .frames_decoded
+            .saturating_sub(self.seen.frames_decoded);
+        perf.add(Counter::FramesDecoded, decoded);
         perf.record(Stage::Decode, stats.last_decode_ms as f32);
         if stats.last_download_ms > 0.0 {
             perf.record(Stage::Download, stats.last_download_ms as f32);
@@ -772,12 +775,16 @@ impl Worker {
             perf.record(Stage::Convert, stats.last_convert_ms as f32);
         }
         self.seen = stats;
-        if std::mem::take(&mut self.reported) {
-            self.shared.stream(self.epoch, self.stream, |s| {
+        let cleared = std::mem::take(&mut self.reported);
+        self.shared.stream(self.epoch, self.stream, |s| {
+            s.handed_out += 1;
+            s.newest = Some(time);
+            s.decoded += decoded;
+            if cleared {
                 s.error = None;
                 s.failed_request = None;
-            });
-        }
+            }
+        });
     }
 
     /// Put the frame last handed out in the cache, waiting for room;

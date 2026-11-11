@@ -30,6 +30,9 @@
 //! run: after [`STALL`] with no UI pass it writes a `timed_out` document
 //! saying when the passes stopped and whether eframe's logic still ran,
 //! and exits the process.
+//!
+//! [`PerfStats`]: spherecut_playback::PerfStats
+//! [`PerfStats::samples_after`]: spherecut_playback::PerfStats::samples_after
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

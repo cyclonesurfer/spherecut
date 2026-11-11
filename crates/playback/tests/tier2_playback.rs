@@ -2562,6 +2562,34 @@ fn the_bench_harness_plays_both_tracks_of_a_pair() {
     );
 }
 
+/// [`play_pair`] with the pair opened locked, in Tier 1: pair64-matched
+/// played unthrottled on lavapipe in software to the end of both lenses,
+/// with no pair shown unmatched (M3 plan section 9).
+#[test]
+#[ignore = "M3.8 unit (d)"]
+fn the_bench_harness_plays_a_locked_pair() {
+    todo!()
+}
+
+/// Each X5 sample's two lenses opened locked: 100 exact seeks land both
+/// on one frame, by pts and, on the 2×3840² perf clip, by corner code;
+/// clip 9 and the perf clip play in real time with no pair unmatched,
+/// read back from both presented slots on every frame of the perf clip
+/// (M3 plan section 9).
+#[test]
+#[ignore = "M3.8 unit (d)"]
+fn samples_lens_pairs_frame_locked() {
+    todo!()
+}
+
+/// A locked pair on the GPU's own frames (path A or B) shows the same
+/// pairs, read back, as the copy path (M3 plan section 9).
+#[test]
+#[ignore = "M3.8 unit (d)"]
+fn zero_copy_pair_matches_copy() {
+    todo!()
+}
+
 /// K2's engine half holds VA-API's copied pass to 36 fps a lens in every
 /// full second, on VA-API throughout and without a stall, and decides
 /// nothing on any other run.
