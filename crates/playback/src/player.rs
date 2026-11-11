@@ -934,13 +934,20 @@ impl Player {
     }
 
     fn seek_with(&self, ui: &mut Ui, at: Time, mode: SeekMode, now: Instant) {
+        self.shared.perf.add(Counter::Seeks, 1);
+        if ui.target.is_some() {
+            self.shared.perf.add(Counter::SeeksSuperseded, 1);
+        }
+        self.start_seek(ui, at, mode, now);
+    }
+
+    /// [`seek_with`](Self::seek_with) without counting it: for a locked
+    /// pair's exact seek to its later keyframe landing, part of the seek
+    /// counted already.
+    fn start_seek(&self, ui: &mut Ui, at: Time, mode: SeekMode, now: Instant) {
         let shared = &self.shared;
         let token = shared.stop.next();
         let id = ui.next_id();
-        shared.perf.add(Counter::Seeks, 1);
-        if ui.target.is_some() {
-            shared.perf.add(Counter::SeeksSuperseded, 1);
-        }
         ui.target = Some(Target {
             id,
             at,
@@ -1307,7 +1314,7 @@ impl Player {
             Ok(None) => {}
             Ok(Some(later)) => {
                 ui.target = None;
-                self.seek_with(ui, later, SeekMode::Exact, now);
+                self.start_seek(ui, later, SeekMode::Exact, now);
                 return false;
             }
             // The status lock is taken: the next present looks again.
@@ -1511,11 +1518,12 @@ impl Player {
         }
     }
 
-    /// Pause at the end, once the clock passes the first stream's, on its
-    /// last frame: one whose upload came too late for its time comes up
-    /// once it is uploaded. Before decoding reached the end (the end is the
-    /// container's duration), a frame's length before it, as the frame on
-    /// screen lasts.
+    /// Pause at the end, once the clock passes the first stream's, or for
+    /// a locked pair the end of the member that ends first
+    /// ([`end_of`](Self::end_of)), on its last frame: one whose upload
+    /// came too late for its time comes up once it is uploaded. Before
+    /// decoding reached the end (the end is the container's duration), a
+    /// frame's length before it, as the frame on screen lasts.
     fn check_end(&self, ui: &mut Ui, t: Time, now: Instant) {
         if !ui.clock.is_running() {
             return;

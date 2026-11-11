@@ -360,7 +360,8 @@ fn the_group_until_stays_within_the_other_lens() {
 
 /// Keyframe seeks whose landings differ (tables planted to agree over
 /// GOPs that don't) go exact to the later landing on both lenses, and
-/// the clock takes the group's landing.
+/// the clock takes the group's landing. The exact seek is part of the
+/// one asked for, and counts no seek of its own.
 #[test]
 fn keyframe_landings_that_differ_go_exact_to_the_later() {
     let _time = timed("keyframe_landings_that_differ_go_exact_to_the_later");
@@ -368,7 +369,7 @@ fn keyframe_landings_that_differ_go_exact_to_the_later() {
     // lens 1's tables planted as lens 0's, so that the pair locks. A
     // keyframe seek to frame 35 lands lens 0 on 32 and lens 1 on 30.
     // Where the lenses landed, what shows and the clock, by frame, once
-    // the seek is shown.
+    // the seek is shown, and the seeks counted.
     let lens0 = Lens::default().frames(90);
     let tables = lens0.derived_tables();
     let lens1 = Lens::default()
@@ -396,9 +397,10 @@ fn keyframe_landings_that_differ_go_exact_to_the_later() {
             .map(|x| x.landed.map(|l| frame_of(l.time)))
             .collect();
         let shown: Vec<_> = s.shown.iter().map(|f| f.map(|f| f.pts)).collect();
-        (landed, shown, frame_of(s.clock))
+        let seeks = s.perf.counter(Counter::Seeks);
+        (landed, shown, frame_of(s.clock), seeks)
     };
-    let both = |k| (vec![Some(k); 2], vec![Some(k); 2], k);
+    let both = |k| (vec![Some(k); 2], vec![Some(k); 2], k, 1);
     assert_eq!(seek(LockTest::default()), both(32));
 
     // Control: the landings kept as they came, each lens on its own
@@ -410,7 +412,7 @@ fn keyframe_landings_that_differ_go_exact_to_the_later() {
     let got = seek(kept);
     must_fail("keyframe landings kept", got == both(32));
     let apart = vec![Some(32), Some(30)];
-    assert_eq!(got, (apart.clone(), apart, 30));
+    assert_eq!(got, (apart.clone(), apart, 30, 1));
 }
 
 /// What a player said of a lock in `events`: a refusal by its field, or
