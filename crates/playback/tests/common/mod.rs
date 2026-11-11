@@ -1,9 +1,11 @@
 //! Shared by the engine's tests: one lavapipe device per test binary, a
-//! player on a backend, waits that fail instead of hanging, and the frame
-//! lock's backend, [`per_stream::PerStream`].
+//! player on a backend, waits that fail instead of hanging, the frame
+//! lock's backend, [`per_stream::PerStream`], and its pacing rule,
+//! [`pacing::pacing`].
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
+pub mod pacing;
 pub mod per_stream;
 
 use std::sync::{Arc, OnceLock};
