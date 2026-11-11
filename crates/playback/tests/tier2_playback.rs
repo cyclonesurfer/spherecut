@@ -4794,6 +4794,25 @@ struct PlaneDiff {
     bounds: Option<[u32; 4]>,
     /// The picture's bands it differs in.
     bands: Vec<u32>,
+    /// The aligned 8×4 cells it differs in, and the first [`CELLS`] of
+    /// them in raster order, each with its samples that differ.
+    cells: usize,
+    first_cells: Vec<Cell>,
+}
+
+/// The most aligned 8×4 cells a [`PlaneDiff`] keeps, and that odin's
+/// GFX11 R8 signature allows a frame ([`gfx11_r8`]): PR #32's wrong
+/// frames differed in one cell or two, and damage in more is of another
+/// scale.
+const CELLS: usize = 16;
+
+/// An aligned 8×4 cell of a plane in which samples differ: its corner,
+/// and its samples that differ as bits, bit `y%4 * 8 + x%8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    x: u32,
+    y: u32,
+    mask: u32,
 }
 
 impl PlaneDiff {
@@ -4802,9 +4821,16 @@ impl PlaneDiff {
     fn of(got: &Plane, want: &Plane, rows: u32) -> PlaneDiff {
         let mut d = PlaneDiff::default();
         let width = (got.width as usize).max(1);
+        // The cells of the row of cells under way, a mask each.
+        let mut masks = vec![0u32; width.div_ceil(8)];
+        let mut cell_row = 0;
         for (y, (g, w)) in (0u32..).zip(got.samples.chunks(width).zip(want.samples.chunks(width))) {
             if g == w {
                 continue;
+            }
+            if y / 4 != cell_row {
+                d.add_cells(&mut masks, cell_row);
+                cell_row = y / 4;
             }
             for (x, (a, b)) in (0u32..).zip(g.iter().zip(w)) {
                 if a == b {
@@ -4816,13 +4842,35 @@ impl PlaneDiff {
                     None => [x, y, x, y],
                     Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
                 });
+                masks[x as usize / 8] |= 1 << (y % 4 * 8 + x % 8);
             }
             let band = y / rows;
             if d.bands.last() != Some(&band) {
                 d.bands.push(band);
             }
         }
+        d.add_cells(&mut masks, cell_row);
         d
+    }
+
+    /// The cells of row of cells `row` that `masks` has samples in, a
+    /// mask a cell of the row, counted and kept up to [`CELLS`]; `masks`
+    /// left clear.
+    fn add_cells(&mut self, masks: &mut [u32], row: u32) {
+        for (x, mask) in (0u32..).zip(masks.iter_mut()) {
+            if *mask == 0 {
+                continue;
+            }
+            self.cells += 1;
+            if self.first_cells.len() < CELLS {
+                self.first_cells.push(Cell {
+                    x: x * 8,
+                    y: row * 4,
+                    mask: *mask,
+                });
+            }
+            *mask = 0;
+        }
     }
 }
 
@@ -5110,23 +5158,23 @@ impl Showing {
 
 /// Where a wrong showing falls against odin's GFX11 R8 signature, the
 /// fault PR #32 told apart on the RX 7600 under RADV with DCC on (the
-/// check's docs give the evidence): Y only, U and V right; the samples
-/// that differ inside one aligned 8×4 cell, in its right half (x%8 4..7:
-/// an aligned 4×2, or the 4×4) or across both halves (the 8×4); the same
-/// when read again; the cache right or not looked up; the pass with no
-/// resync and no unpaired present; and the frame shown once. `shown` is
-/// how often the frame was shown and `c` its pass's counts. On it, where
-/// in the cell; off it, every way it is off. It labels a line and never
-/// excuses one: every wrong frame fails the check either way.
+/// check's docs give the evidence): Y only, U and V right; Y's samples
+/// that differ in at most [`CELLS`] aligned 8×4 cells, each cell's one of
+/// its blocks ([`r8_block`]: the 4×2 at x%8 4..7, y%4 2..3, the right 4×4
+/// or the whole cell); the same when read again; the cache right or not
+/// looked up; the pass with no resync and no unpaired present; and the
+/// frame shown once. `shown` is how often the frame was shown and `c` its
+/// pass's counts. On it, each cell's block; off it, every way it is off.
+/// It labels a line and never excuses one: every wrong frame fails the
+/// check either way.
 fn gfx11_r8(w: &Showing, shown: u32, c: &PassCounts) -> Result<String, String> {
     let mut off = Vec::new();
     let mut shape = None;
     match &w.wrong {
         Wrong::Samples(d) => {
-            match d.planes[0].bounds.map(r8_cell) {
-                Some(Ok(s)) => shape = Some(s),
-                Some(Err(why)) => off.push(why),
-                None => off.push("Y right".into()),
+            match r8_cells(&d.planes[0]) {
+                Ok(s) => shape = Some(s),
+                Err(why) => off.push(why),
             }
             for (name, p) in ["U", "V"].iter().zip(&d.planes[1..]) {
                 if p.bounds.is_some() {
@@ -5157,34 +5205,60 @@ fn gfx11_r8(w: &Showing, shown: u32, c: &PassCounts) -> Result<String, String> {
     }
 }
 
-/// Where Y's samples that differ, `[x0, y0, x1, y1]` inclusive, lie in
-/// an aligned 8×4 cell, as [`gfx11_r8`] has it: an aligned 4×2 or the 4×4
-/// of its right half, or across both halves; or why they don't.
-fn r8_cell([x0, y0, x1, y1]: [u32; 4]) -> Result<String, String> {
-    let (cx, cy) = (x0 / 8 * 8, y0 / 4 * 4);
-    if (x1 / 8 * 8, y1 / 4 * 4) != (cx, cy) {
+/// Where Y's samples that differ, `y`, lie in their aligned 8×4 cells, as
+/// [`gfx11_r8`] has it: each cell's block ([`r8_block`]), in at most
+/// [`CELLS`] cells; or why they don't, each cell off it named.
+fn r8_cells(y: &PlaneDiff) -> Result<String, String> {
+    if y.cells == 0 {
+        return Err("Y right".into());
+    }
+    if y.cells > CELLS {
         return Err(format!(
-            "Y differs in x {x0}-{x1} y {y0}-{y1}, beyond one aligned 8x4 cell"
+            "Y differs in {} aligned 8x4 cells, more than the {CELLS} the signature allows",
+            y.cells
         ));
     }
-    let cell = format!("the 8x4 cell at x {cx} y {cy}");
-    let (c0, c1, r0, r1) = (x0 % 8, x1 % 8, y0 % 4, y1 % 4);
-    if c1 < 4 {
-        Err(format!(
-            "Y differs only in x%8 {c0}..{c1}, the left half of {cell}"
-        ))
-    } else if c0 < 4 {
-        Ok(format!(
-            "the 8x4 (x%8 {c0}..{c1}, y%4 {r0}..{r1}) of {cell}"
-        ))
-    } else if r0 / 2 == r1 / 2 {
-        Ok(format!(
-            "a 4x2 at x%8 4..7, y%4 {}..{} of {cell}",
-            r0 / 2 * 2,
-            r0 / 2 * 2 + 1
-        ))
+    let (mut on, mut off) = (Vec::new(), Vec::new());
+    for &c in &y.first_cells {
+        match r8_block(c) {
+            Ok(block) => on.push(block),
+            Err(why) => off.push(why),
+        }
+    }
+    if off.is_empty() {
+        Ok(on.join(" and "))
     } else {
-        Ok(format!("the 4x4 at x%8 4..7 of {cell}"))
+        Err(off.join(", "))
+    }
+}
+
+/// Which of odin's GFX11 R8 blocks Y's samples that differ in `cell` are:
+/// the 4×2 at x%8 4..7, y%4 2..3, the right 4×4 (x%8 4..7, y%4 0..3) or
+/// the whole cell, their box the block's, corner to corner (a sample
+/// inside it may be right, where the wrong byte happens to be the
+/// truth's); or where in the cell they are instead.
+fn r8_block(cell: Cell) -> Result<String, String> {
+    let of = format!("of the 8x4 cell at x {} y {}", cell.x, cell.y);
+    if cell.mask == 0 {
+        return Err(format!("no sample differs {of}"));
+    }
+    let row = |r: u32| cell.mask >> (r * 8) & 0xff;
+    let cols = (0..4).fold(0, |c, r| c | row(r));
+    let rows = (0..4).fold(0u32, |b, r| if row(r) != 0 { b | 1 << r } else { b });
+    let (c0, c1) = (cols.trailing_zeros(), 31 - cols.leading_zeros());
+    let (r0, r1) = (rows.trailing_zeros(), 31 - rows.leading_zeros());
+    let off = |why: &str| {
+        Err(format!(
+            "Y differs at x%8 {c0}..{c1}, y%4 {r0}..{r1} {of}: {why}"
+        ))
+    };
+    match (c0, c1, r0, r1) {
+        (4, 7, 2, 3) => Ok(format!("the 4x2 at x%8 4..7, y%4 2..3 {of}")),
+        (4, 7, 0, 3) => Ok(format!("the right 4x4 (x%8 4..7) {of}")),
+        (0, 7, 0, 3) => Ok(format!("the whole {of}")),
+        _ if c0 >= 4 => off("its right half, but neither its 4x2 at y%4 2..3 nor its whole 4x4"),
+        _ if c1 < 4 => off("its left half alone"),
+        _ => off("across its halves, short of the whole cell"),
     }
 }
 
@@ -6347,22 +6421,27 @@ impl std::fmt::Display for Wrongs {
 /// noise, judged as the check judges a slot. On odin's GFX11 R8 signature:
 /// a 4×2 of the frame the slot held before at x%8 4..7, y%4 2..3 of an
 /// aligned 8×4 cell (its eight samples listed beside the truth's and the
-/// frame before's, all eight the frame before's), one at y%4 0..1, the
-/// cell's right 4×4 and its whole 8×4, with the cache right (the slot's
-/// own frame, or another decode) or not looked up. The report fails on
-/// them all the same, a frame on the signature alone too, and counts them
-/// by path and side, the frames told apart on the signature and off it,
-/// and what the cache found. The controls, each off the signature and
-/// saying why: the cell's left half alone, a 4×2 across two cells, U
-/// wrong too, a second read with other bytes, the cache with other bytes,
-/// as the slot or gone, a pass that resynced or showed a pair apart, a
-/// frame shown twice, a frame the truth hasn't, and the whole frame
-/// before shown; fresh bytes where the frame before's were planted aren't
-/// counted as its, the samples stop at [`SAMPLES`], and the cache's frame
-/// of another run or seq isn't the slot's.
+/// frame before's, all eight the frame before's), the same with a sample
+/// inside it right, the cell's right 4×4, its whole 8×4, and two 4×2s in
+/// distant cells, with the cache right (the slot's own frame, or another
+/// decode) or not looked up; odin's three lines whose Y box spans cells,
+/// as two 4×2s at its corners on a plane of clip 9's; and [`CELLS`] 4×2s.
+/// The report fails on them all the same, a frame on the signature alone
+/// too, and counts them by path and side, the frames told apart on the
+/// signature and off it, and what the cache found. The controls, each off
+/// the signature and saying why: the cell's left half alone, a 4×2 across
+/// two cells, a 4×2 at y%4 0..1, one sample, a 4×2 across the cell's
+/// halves, two samples across them, a 4×2 short of its corners, a 4×2 on
+/// it beside a cell off it, Y wrong in every cell, one cell more than
+/// [`CELLS`], U wrong too, a second read with other bytes, the cache with
+/// other bytes, as the slot or gone, a pass that resynced or showed a
+/// pair apart, a frame shown twice, a frame the truth hasn't, and the
+/// whole frame before shown; fresh bytes where the frame before's were
+/// planted aren't counted as its, the samples stop at [`SAMPLES`], and
+/// the cache's frame of another run or seq isn't the slot's.
 #[test]
 fn the_pair_report_labels_odins_gfx11_r8_signature() {
-    let (width, height) = (32u32, 16u32);
+    let (width, height) = (64u32, 16u32);
     let noise = |seed: u32, (w, h): (u32, u32)| Plane {
         width: w,
         height: h,
@@ -6403,9 +6482,8 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
         run: 0,
         seq: 0,
     };
-    // `want` with Y in `xs` × `ys` taken from `from`.
-    let plant = |from: &Yuv, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
-        let mut slot = want.clone();
+    // `slot` with Y in `xs` × `ys` taken from `from`.
+    let put = |mut slot: Yuv, from: &Yuv, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
         for y in ys {
             for x in xs.clone() {
                 let at = (y * width + x) as usize;
@@ -6414,6 +6492,7 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
         }
         slot
     };
+    let plant = |from: &Yuv, xs, ys| put(want.clone(), from, xs, ys);
     let showing = |slot: &Yuv, again: Again, cached: Cached| Showing {
         slot: 1,
         run: 0,
@@ -6431,7 +6510,7 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
     let block = on(&plant(&stale, 12..16, 6..8));
     assert_eq!(
         gfx11_r8(&block, 1, &calm),
-        Ok("a 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4".into())
+        Ok("the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4".into())
     );
     let places: Vec<(u32, u32)> = block.samples.iter().map(|s| (s.x, s.y)).collect();
     let want_places: Vec<(u32, u32)> = (6..8).flat_map(|y| (12..16).map(move |x| (x, y))).collect();
@@ -6455,24 +6534,93 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
     );
     for (slot, cached, shape) in [
         (
-            plant(&stale, 20..24, 8..10),
+            put(plant(&stale, 12..16, 6..8), &want, 13..14, 6..7),
             Cached::NotLooked,
-            "a 4x2 at x%8 4..7, y%4 0..1 of the 8x4 cell at x 16 y 8",
+            "the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4",
         ),
         (
             plant(&stale, 4..8, 0..4),
             Cached::Right(Source::Another { run: 1, seq: 0 }),
-            "the 4x4 at x%8 4..7 of the 8x4 cell at x 0 y 0",
+            "the right 4x4 (x%8 4..7) of the 8x4 cell at x 0 y 0",
         ),
         (
             plant(&stale, 24..32, 12..16),
             own(),
-            "the 8x4 (x%8 0..7, y%4 0..3) of the 8x4 cell at x 24 y 12",
+            "the whole of the 8x4 cell at x 24 y 12",
+        ),
+        (
+            put(plant(&stale, 12..16, 2..4), &stale, 60..64, 14..16),
+            Cached::NotLooked,
+            "the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 0 and the 4x2 at x%8 4..7, \
+             y%4 2..3 of the 8x4 cell at x 56 y 12",
         ),
     ] {
         let s = showing(&slot, Again::Same, cached);
         assert_eq!(gfx11_r8(&s, 1, &calm), Ok(shape.into()), "{}", s.wrong);
     }
+
+    // On a plane of clip 9's lens: odin's three lines whose 16 Y samples'
+    // box spans cells (PR #32's logs give the box alone, its corners at
+    // x%8 4 and 7, y%4 2 and 3), as two 4×2s at its corners; and the most
+    // cells the signature allows, 4×2s in a row of cells.
+    let lens = Plane {
+        width: 3840,
+        height: 3840,
+        samples: vec![0; 3840 * 3840],
+    };
+    let blocks = |at: &[(u32, u32)]| {
+        let mut got = lens.clone();
+        for &(x, y) in at {
+            for y in y..y + 2 {
+                for x in x..x + 4 {
+                    got.samples[(y * lens.width + x) as usize] = 0x80;
+                }
+            }
+        }
+        let y = PlaneDiff::of(&got, &lens, BAND);
+        let s = Showing {
+            wrong: Wrong::Samples(Box::new(Diff {
+                planes: [y.clone(), PlaneDiff::default(), PlaneDiff::default()],
+                bands: y.bands.len(),
+                like: None,
+            })),
+            ..on(&plant(&stale, 12..16, 6..8))
+        };
+        (y, s)
+    };
+    let r8 = |x: u32, y: u32| {
+        format!(
+            "the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x {} y {}",
+            x / 8 * 8,
+            y / 4 * 4
+        )
+    };
+    for [x0, y0, x1, y1] in [
+        [3116, 298, 3295, 1539],
+        [2380, 1038, 2903, 1075],
+        [372, 1050, 1935, 2355],
+    ] {
+        let (y, s) = blocks(&[(x0, y0), (x1 - 3, y1 - 1)]);
+        assert_eq!((y.samples, y.bounds), (16, Some([x0, y0, x1, y1])));
+        assert_eq!(
+            gfx11_r8(&s, 1, &calm),
+            Ok(format!("{} and {}", r8(x0, y0), r8(x1 - 3, y1 - 1))),
+            "{}",
+            s.wrong
+        );
+    }
+    let row: Vec<(u32, u32)> = (0..=CELLS as u32).map(|i| (4 + 64 * i, 2)).collect();
+    let (_, most) = blocks(&row[..CELLS]);
+    let most = gfx11_r8(&most, 1, &calm);
+    assert_eq!(
+        most,
+        Ok(row[..CELLS]
+            .iter()
+            .map(|&(x, y)| r8(x, y))
+            .collect::<Vec<_>>()
+            .join(" and "))
+    );
+    let (_, beyond) = blocks(&row);
 
     // Off the signature, each saying why.
     let mut chroma = plant(&stale, 12..16, 6..8);
@@ -6495,14 +6643,74 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
             on(&plant(&stale, 8..12, 6..8)),
             1,
             &calm,
-            "Y differs only in x%8 0..3, the left half of the 8x4 cell at x 8 y 4",
+            "Y differs at x%8 0..3, y%4 2..3 of the 8x4 cell at x 8 y 4: its left half alone",
         ),
         (
             "a 4x2 across two cells",
             on(&plant(&stale, 14..18, 6..8)),
             1,
             &calm,
-            "beyond one aligned 8x4 cell",
+            "Y differs at x%8 6..7, y%4 2..3 of the 8x4 cell at x 8 y 4: its right half, but \
+             neither its 4x2 at y%4 2..3 nor its whole 4x4, Y differs at x%8 0..1, y%4 2..3 of \
+             the 8x4 cell at x 16 y 4: its left half alone",
+        ),
+        (
+            "a 4x2 at y%4 0..1",
+            on(&plant(&stale, 20..24, 8..10)),
+            1,
+            &calm,
+            "Y differs at x%8 4..7, y%4 0..1 of the 8x4 cell at x 16 y 8: its right half, but \
+             neither its 4x2 at y%4 2..3 nor its whole 4x4",
+        ),
+        (
+            "one sample",
+            on(&plant(&stale, 13..14, 7..8)),
+            1,
+            &calm,
+            "Y differs at x%8 5..5, y%4 3..3 of the 8x4 cell at x 8 y 4: its right half",
+        ),
+        (
+            "a 4x2 across the cell's halves",
+            on(&plant(&stale, 10..14, 6..8)),
+            1,
+            &calm,
+            "Y differs at x%8 2..5, y%4 2..3 of the 8x4 cell at x 8 y 4: across its halves, \
+             short of the whole cell",
+        ),
+        (
+            "two samples across the halves",
+            on(&plant(&stale, 11..13, 4..5)),
+            1,
+            &calm,
+            "Y differs at x%8 3..4, y%4 0..0 of the 8x4 cell at x 8 y 4: across its halves",
+        ),
+        (
+            "a 4x2 short of its corners",
+            on(&plant(&stale, 13..16, 6..8)),
+            1,
+            &calm,
+            "Y differs at x%8 5..7, y%4 2..3 of the 8x4 cell at x 8 y 4: its right half",
+        ),
+        (
+            "a 4x2 on it beside a cell off it",
+            on(&put(plant(&stale, 12..16, 6..8), &stale, 40..44, 8..10)),
+            1,
+            &calm,
+            "Y differs at x%8 0..3, y%4 0..1 of the 8x4 cell at x 40 y 8: its left half alone",
+        ),
+        (
+            "Y wrong in every cell",
+            on(&plant(&stale, 0..width, 0..height)),
+            1,
+            &calm,
+            "Y differs in 32 aligned 8x4 cells, more than the 16 the signature allows",
+        ),
+        (
+            "one cell more than the signature allows",
+            beyond,
+            1,
+            &calm,
+            "Y differs in 17 aligned 8x4 cells, more than the 16 the signature allows",
         ),
         ("U wrong too", on(&chroma), 1, &calm, "U differs"),
         (
@@ -6574,7 +6782,8 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
             on(&stale),
             1,
             &calm,
-            "beyond one aligned 8x4 cell, U differs, V differs",
+            "Y differs in 32 aligned 8x4 cells, more than the 16 the signature allows, U \
+             differs, V differs",
         ),
     ] {
         let off = must_fail(name, gfx11_r8(&s, shown, counts));
@@ -6582,7 +6791,10 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
     }
     let whole = on(&stale);
     let places: Vec<(u32, u32)> = whole.samples.iter().map(|s| (s.x, s.y)).collect();
-    assert_eq!(places, (0..width).map(|x| (x, 0)).collect::<Vec<_>>());
+    assert_eq!(
+        places,
+        (0..width).take(SAMPLES).map(|x| (x, 0)).collect::<Vec<_>>()
+    );
     let fresh = on(&plant(&picture(10), 12..16, 6..8));
     assert!(!fresh.samples.is_empty(), "{}", fresh.wrong);
     must_fail(
@@ -6682,7 +6894,7 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
     );
     assert!(
         line.ends_with(
-            "on the GFX11 R8 signature: a 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4"
+            "on the GFX11 R8 signature: the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4"
         ),
         "{line}"
     );
@@ -6737,20 +6949,22 @@ fn the_pair_report_labels_odins_gfx11_r8_signature() {
 ///   none on the perf pair: 141 frames wrong, path B kept 118, path A
 ///   kept 16, path B copy 6 and path A copy 1, a kept frame 3.3 % of the
 ///   time and a copied one 0.17 %; every one Y only (the R8Unorm plane,
-///   never the Rg8Unorm chroma), an aligned 4×2 (sometimes the 4×4 or
-///   the whole 8×4) at x%8 4..7 and y%4 2..3 of an aligned 8×4 cell, the
-///   same read again, the cache right wherever looked up (on the copied
-///   passes too, whose cached frame is the very bytes uploaded), never on
-///   a slot's first write, and no place twice. PR #33 ran it with
-///   `RADV_DEBUG=nodcc`: it passed twice, every frame right on every path,
-///   and a plain run between the two failed (45 wrong). The fault is in
-///   the slot's write on the GPU, or in every read of it, and needs
-///   RADV's DCC (delta colour compression); it isn't in the decoder,
-///   FFmpeg, the cache, the Copier or the import. Whether it is the write
-///   or the read, and the driver or the hardware, isn't known; DECISIONS
-///   has the fault and what keeps the slots out of DCC. Where a line's
-///   samples are the frame before's (its before column the slot's), the
-///   slot kept part of the frame it held before.
+///   never the Rg8Unorm chroma); the 4×2 at x%8 4..7 and y%4 2..3 of an
+///   aligned 8×4 cell in 134 lines, the cell's right 4×4 in three and its
+///   whole 8×4 in one, and in three two such 4×2s in distant cells (16
+///   samples whose box runs from one's corner to the other's: the logs
+///   give the box alone); the same read again, the cache right wherever
+///   looked up (on the copied passes too, whose cached frame is the very
+///   bytes uploaded), never on a slot's first write, and no place twice.
+///   PR #33 ran it with `RADV_DEBUG=nodcc`: it passed twice, every frame
+///   right on every path, and a plain run between the two failed (45
+///   wrong). The fault is in the slot's write on the GPU, or in every
+///   read of it, and needs RADV's DCC (delta colour compression); it
+///   isn't in the decoder, FFmpeg, the cache, the Copier or the import.
+///   Whether it is the write or the read, and the driver or the hardware,
+///   isn't known; DECISIONS has the fault and what keeps the slots out of
+///   DCC. Where a line's samples are the frame before's (its before
+///   column the slot's), the slot kept part of the frame it held before.
 /// - Wrong lines off the signature, called out: another fault, the line
 ///   saying how it is off. Kept passes wrong and copied ones right off
 ///   the signature point at path A or B's own steps (the import and its
