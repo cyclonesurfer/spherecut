@@ -738,9 +738,9 @@ fn unpaired_presents_count_over_every_stream() {
     common::join(player);
 }
 
-/// `pair_wait`'s samples, read after each present: each must be the
-/// clock's time less the time of the pair that present showed, in
-/// milliseconds.
+/// `pair_wait`'s samples, read after each present: each must be how far
+/// the clock's time is past the end of the pair that present showed
+/// (its time and duration), never less than 0, in milliseconds.
 #[derive(Debug, Default)]
 struct Waits {
     seen: u64,
@@ -763,8 +763,13 @@ impl Waits {
         let (seen, new) = perf.samples_after(Stage::PairWait, self.seen);
         self.seen = seen;
         let want = p.and_then(|p| {
-            let d = p.time.checked_sub(p.frames.first()?.frame.time).ok()?;
-            Some(d.to_secs_f64() * 1000.0)
+            let frame = p.frames.first()?.frame;
+            let end = frame
+                .time
+                .checked_add(frame.duration.unwrap_or(Time::ZERO))
+                .ok()?;
+            let d = p.time.checked_sub(end).ok()?;
+            Some(d.max(Time::ZERO).to_secs_f64() * 1000.0)
         });
         let right = match (new.as_slice(), want) {
             ([], _) => true,
@@ -780,7 +785,18 @@ impl Waits {
     }
 }
 
-/// `pair_wait` is how far the pair shown trails the clock.
+/// The check that `pair_wait` recorded nothing since `seen` samples, the
+/// count before a stretch: the samples recorded since, if any.
+fn none_since(perf: &PerfStats, seen: u64) -> Result<(), u64> {
+    match perf.samples_after(Stage::PairWait, seen).0 - seen {
+        0 => Ok(()),
+        n => Err(n),
+    }
+}
+
+/// `pair_wait` is how far the clock is past the end of the pair shown,
+/// recorded at each present while the clock runs and the pair is
+/// locked, and at no other.
 #[test]
 fn pair_wait_is_the_pairs_lag() {
     let _time = timed("pair_wait_is_the_pairs_lag");
@@ -791,6 +807,7 @@ fn pair_wait_is_the_pairs_lag() {
     // half.
     let frame_ms = RATE.frame_duration().to_secs_f64() * 1000.0;
     let lags = |max: f32| above(f64::from(max), 1.5 * frame_ms);
+    let samples = || perf.samples_after(Stage::PairWait, 0).0;
 
     // Lens 1 held at frame 3, the last the preroll from frame 1 waits
     // for, and the clock moved on to frame 6: the pair at 3 trails it by
@@ -808,15 +825,26 @@ fn pair_wait_is_the_pairs_lag() {
         clock.is_running().then_some(())
     })
     .expect("play never began");
+    let running = samples();
     clock.set(at(6), Instant::now());
     for _ in 0..4 {
         present();
         std::thread::sleep(Duration::from_millis(1));
     }
+    // Control of the check below: played locked, each present recorded.
+    must_fail("a locked pair played", none_since(&perf, running));
     player.pause();
     assert_eq!(waits.wrong, None);
     let lagged = lags(waits.max);
     assert_eq!(lagged.passes(), Some(true), "pair_wait: {lagged}");
+    // Paused, with the pair still three frames behind the clock, nothing
+    // is recorded.
+    let paused = samples();
+    for _ in 0..4 {
+        player.present(Instant::now());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    none_since(&perf, paused).unwrap_or_else(|n| panic!("{n} recorded while paused"));
 
     // Control: a pair the clock never leads by more than a frame, which
     // moves on once the pair at it shows.
@@ -828,6 +856,12 @@ fn pair_wait_is_the_pairs_lag() {
     });
     assert_eq!(waits.wrong, None);
     must_fail("a pair that keeps up", lags(waits.max));
+
+    // Unlocked, the lenses played record nothing.
+    open(&player, None);
+    let unlocked = samples();
+    step_through(&player, &clock, [2, 6], None, |_| ());
+    none_since(&perf, unlocked).unwrap_or_else(|n| panic!("{n} recorded unlocked"));
     common::join(player);
 }
 
