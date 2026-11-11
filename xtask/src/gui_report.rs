@@ -3,9 +3,13 @@
 //! leaves in its directory: `gui-smoke.json`, which lists the runs and
 //! their verdicts, and each run's `spherecut.smoke/1` document and
 //! screenshot. The screenshots are copied next to the report as
-//! `<report>-gui-<n>.png` and shown in it. Its "Timeline prototype"
-//! section (M2 plan section 12) is the same from `gui_proto`'s
-//! `gui-proto.json`, the screenshots as `<report>-proto-<n>.png`.
+//! `<report>-gui-<n>.png` and shown in it. Its "UI while decode falls
+//! behind" section (D40) is the same from `gui_decode_behind`'s
+//! `gui-decode-behind.json`, the screenshots as
+//! `<report>-behind-<n>.png`, with the control's row read as a control.
+//! Its "Timeline prototype" section (M2 plan section 12) is the same
+//! from `gui_proto`'s `gui-proto.json`, the screenshots as
+//! `<report>-proto-<n>.png`.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -14,18 +18,67 @@ use serde_json::Value;
 
 /// The summaries' file names, as the tests write them.
 pub const SUMMARY: &str = "gui-smoke.json";
+pub const BEHIND_SUMMARY: &str = "gui-decode-behind.json";
 pub const PROTO_SUMMARY: &str = "gui-proto.json";
 
-/// The section's Markdown for the runs in `dir`, with the screenshots
-/// copied beside `report`. `test` says how the `gui_smoke` test ended,
-/// for when there is no summary (it skipped, or didn't run).
+/// Which smoke runs a section shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `gui_smoke`'s: each clip played on the app's own path.
+    Smoke,
+    /// `gui_decode_behind`'s (D40): the UI with decode behind, and its
+    /// control.
+    Behind,
+}
+
+impl Kind {
+    /// The test, its summary's file name, and its screenshots' kind
+    /// beside the report.
+    fn test(self) -> &'static str {
+        match self {
+            Kind::Smoke => "gui_smoke",
+            Kind::Behind => "gui_decode_behind",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Kind::Smoke => SUMMARY,
+            Kind::Behind => BEHIND_SUMMARY,
+        }
+    }
+
+    fn shots(self) -> &'static str {
+        match self {
+            Kind::Smoke => "gui",
+            Kind::Behind => "behind",
+        }
+    }
+}
+
+/// The "GUI smoke run" section's Markdown for the runs in `dir`, with
+/// the screenshots copied beside `report`. `test` says how the
+/// `gui_smoke` test ended, for when there is no summary (it skipped, or
+/// didn't run).
 pub fn section(dir: &Path, report: &Path, test: &str) -> String {
+    section_of(dir, report, test, Kind::Smoke)
+}
+
+/// The "UI while decode falls behind" section's, from
+/// `gui_decode_behind`'s runs in `dir`, as [`section`].
+pub fn behind_section(dir: &Path, report: &Path, test: &str) -> String {
+    section_of(dir, report, test, Kind::Behind)
+}
+
+/// A section of `kind`'s smoke runs in `dir`, the screenshots copied
+/// beside `report` as `<report>-<kind>-<n>.png`.
+pub fn section_of(dir: &Path, report: &Path, test: &str, kind: Kind) -> String {
     let mut r = String::new();
-    let summary = std::fs::read(dir.join(SUMMARY))
+    let summary = std::fs::read(dir.join(kind.summary()))
         .ok()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let Some(s) = summary else {
-        let _ = writeln!(r, "No run: `gui_smoke` {test}.\n");
+        let _ = writeln!(r, "No run: `{}` {test}.\n", kind.test());
         return r;
     };
     // As logind had it; not known without loginctl.
@@ -34,19 +87,34 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         Some(false) => " The screen was unlocked when the runs began.",
         None => "",
     };
-    let _ = writeln!(
-        r,
-        "`gui_smoke` {test}. The session: {} ({}). VA-API decodes {} by doctor's check, so \
-         those clips must decode in hardware.{lock} Presented, the UI's intervals and the \
-         frames are counted after each run's first second, while the cache fills, as the \
-         playback benches count them.\n",
-        s["session"].as_str().unwrap_or("?"),
-        list(&s["env"]),
-        match list(&s["vaapi_hevc"]) {
-            l if l.is_empty() => "no HEVC profile".to_string(),
-            l => l,
-        }
-    );
+    let vaapi = match list(&s["vaapi_hevc"]) {
+        l if l.is_empty() => "no HEVC profile".to_string(),
+        l => l,
+    };
+    let _ = match kind {
+        Kind::Smoke => writeln!(
+            r,
+            "`gui_smoke` {test}. The session: {} ({}). VA-API decodes {vaapi} by doctor's \
+             check, so those clips must decode in hardware.{lock} Presented, the UI's \
+             intervals and the frames are counted after each run's first second, while the \
+             cache fills, as the playback benches count them.\n",
+            s["session"].as_str().unwrap_or("?"),
+            list(&s["env"]),
+        ),
+        Kind::Behind => writeln!(
+            r,
+            "`gui_decode_behind` {test}. The session: {} ({}). VA-API decodes {vaapi} by \
+             doctor's check.{lock} Each run plays with decode behind (at most {:.0}% of the \
+             frames expected shown) and must present 90% of the UI frames expected, with a UI \
+             p99 of at most 1.5 refresh periods and no blocking call on the UI thread (D40); \
+             the control, a UI that waits for each decoded frame, must fail those gates. \
+             Dropped frames aren't judged: with decode behind they are dropped by design. \
+             Counted after each run's first second.\n",
+            s["session"].as_str().unwrap_or("?"),
+            list(&s["env"]),
+            s["max_shown_behind"].as_f64().unwrap_or(0.85) * 100.0,
+        ),
+    };
     let runs = s["runs"].as_array().cloned().unwrap_or_default();
     let docs: Vec<Option<Value>> = runs
         .iter()
@@ -64,13 +132,8 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
     }
     for (run, doc) in runs.iter().zip(&docs) {
         let n = run["n"].as_u64().unwrap_or(0);
-        let failed = list_of(&run["failed"]);
-        let verdict = if failed.is_empty() {
-            "pass".to_string()
-        } else {
-            format!("**FAILED**: {}", failed.join("; "))
-        };
         let label = run["label"].as_str().unwrap_or("?");
+        let verdict = verdict(run, &s["inconclusive"]);
         let res = doc.as_ref().map(|d| &d["result"]);
         let cell =
             |f: &dyn Fn(&Value) -> Option<String>| res.and_then(f).unwrap_or_else(|| "-".into());
@@ -137,6 +200,22 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         let label = run["label"].as_str().unwrap_or("?");
         let _ = writeln!(r, "### {n}. {label}\n");
         let _ = writeln!(r, "`{}`\n", run["clip"].as_str().unwrap_or("?"));
+        if kind == Kind::Behind {
+            let asked = list(&run["asked"]);
+            let _ = writeln!(
+                r,
+                "Run with {}; {}.\n",
+                if asked.is_empty() {
+                    "no flag".to_string()
+                } else {
+                    format!("`{}`", asked.replace(", ", "`, `"))
+                },
+                match run["behind"].as_str() {
+                    Some(b) => format!("after the first second {b}"),
+                    None => "nothing shown to judge decode by".into(),
+                }
+            );
+        }
         match doc.as_ref().map(|d| &d["result"]).filter(|v| !v.is_null()) {
             Some(res) => {
                 let _ = writeln!(
@@ -175,7 +254,7 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
             }
         }
         if let Some(png) = run["screenshot"].as_str() {
-            match copy_beside(Path::new(png), report, n) {
+            match copy_named(Path::new(png), report, &named(report, kind.shots(), n)) {
                 Ok(name) => {
                     let _ = writeln!(r, "![{label}]({name})\n");
                 }
@@ -185,10 +264,14 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
             }
         }
     }
-    let not_run = s["not_run"].as_array().cloned().unwrap_or_default();
-    if !not_run.is_empty() {
-        let _ = writeln!(r, "Not run:\n");
-        for nr in not_run {
+    // Runs that say nothing of what they were for, as those not run.
+    for (key, title) in [("not_run", "Not run"), ("inconclusive", "Inconclusive")] {
+        let listed = s[key].as_array().cloned().unwrap_or_default();
+        if listed.is_empty() {
+            continue;
+        }
+        let _ = writeln!(r, "{title}:\n");
+        for nr in listed {
             let _ = writeln!(
                 r,
                 "- {}: {}",
@@ -199,6 +282,32 @@ pub fn section(dir: &Path, report: &Path, test: &str) -> String {
         let _ = writeln!(r);
     }
     r
+}
+
+/// A run's verdict cell: a control (`gui_decode_behind`'s) with nothing
+/// failed failed the gates as it must, and says which; a run listed in
+/// `inconclusive` with nothing failed is neither a pass nor a failure.
+fn verdict(run: &Value, inconclusive: &Value) -> String {
+    let failed = list_of(&run["failed"]);
+    if !failed.is_empty() {
+        return format!("**FAILED**: {}", failed.join("; "));
+    }
+    if run["role"] == "control" {
+        return format!(
+            "control, failed as it must: {}",
+            list_of(&run["gates"]).join("; ")
+        );
+    }
+    let listed = inconclusive
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|i| i["label"] == run["label"]);
+    if listed {
+        "inconclusive".to_string()
+    } else {
+        "pass".to_string()
+    }
 }
 
 /// The section's Markdown for the prototype's runs in `dir`, with the
@@ -350,21 +459,13 @@ pub fn proto_section(dir: &Path, report: &Path, test: &str) -> String {
     r
 }
 
-/// `report`'s screenshot `n`: its name beside the report.
-pub fn screenshot_name(report: &Path, n: u64) -> String {
-    named(report, "gui", n)
-}
-
-/// `<report>-<kind>-<n>.png`.
+/// `<report>-<kind>-<n>.png`: `gui`, `behind` and `proto` screenshots
+/// never share a name.
 fn named(report: &Path, kind: &str, n: u64) -> String {
     let stem = report
         .file_stem()
         .map_or_else(|| "report".into(), |s| s.to_string_lossy().into_owned());
     format!("{stem}-{kind}-{n}.png")
-}
-
-fn copy_beside(png: &Path, report: &Path, n: u64) -> std::io::Result<String> {
-    copy_named(png, report, &screenshot_name(report, n))
 }
 
 fn copy_named(png: &Path, report: &Path, name: &str) -> std::io::Result<String> {
@@ -587,6 +688,8 @@ fn stages(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use spherecut_testkit::control::must_fail;
+
     use super::*;
 
     /// A directory of its own, removed when dropped.
@@ -733,6 +836,156 @@ mod tests {
         assert_eq!(
             none,
             "No run: `gui_smoke` skipped: no graphical session.\n\n"
+        );
+    }
+
+    #[test]
+    fn the_behind_section_shows_each_run_and_the_control() {
+        let s = Scratch(std::env::temp_dir().join(format!("xtask-behind-{}", std::process::id())));
+        let dir = s.0.join("hw-gui");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = |asked: Value, presented: f64, p99: f64, shown: u64| {
+            serde_json::json!({
+                "schema": "spherecut.smoke/1", "ok": true, "warnings": [],
+                "result": {
+                    "adapter": {"name": "AMD Radeon RX 7600 (RADV NAVI33)", "driver": "radv", "driver_info": "Mesa 26.2.5"},
+                    "surface_format": "Bgra8UnormSrgb", "scale": 1.0, "native_scale": 1.0,
+                    "window": [1280, 800], "viewer": [900, 600], "refresh_hz": 60.0,
+                    "played_s": 20.0, "ended": false, "asked": asked,
+                    "ui": {"presented": presented, "p50": 16.7, "p99": p99, "frames": 1188, "passes": 1188},
+                    "settled": {"from_s": 1.0,
+                                "ui": {"presented": presented, "p50": 16.7, "p99": p99},
+                                "frames": {"shown": shown, "dropped": 190, "decode_dropped": 0, "expected": 570.0}},
+                    "streams": [{"decode": "Vulkan Video", "decoder": "vulkan"}],
+                    "stages": {"decode": {"samples": 400, "p50": 1.2, "p95": 2.0}},
+                    "blocked_on_ui_thread": 0,
+                }
+            })
+        };
+        let floor = serde_json::json!({"decoder": null, "decode_floor_ms": 50.0, "control_ui_waits": false});
+        std::fs::write(
+            dir.join("gui-behind-0.json"),
+            doc(floor, 0.99, 17.2, 380).to_string(),
+        )
+        .unwrap();
+        // A document from before the flags: no `asked`.
+        let mut old = doc(Value::Null, 0.99, 17.4, 568);
+        old["result"].as_object_mut().unwrap().remove("asked");
+        std::fs::write(dir.join("gui-behind-1.json"), old.to_string()).unwrap();
+        let waits =
+            serde_json::json!({"decoder": null, "decode_floor_ms": 50.0, "control_ui_waits": true});
+        std::fs::write(
+            dir.join("gui-behind-2.json"),
+            doc(waits, 0.33, 50.0, 376).to_string(),
+        )
+        .unwrap();
+        for n in 0..3 {
+            std::fs::write(dir.join(format!("gui-behind-{n}.png")), b"behind").unwrap();
+        }
+        let slow = "33% of the UI frames expected were presented, the window drawn (0 passes \
+                    without the UI): the UI was slow, each pass's own work unmeasured ms at p95";
+        let run = |n: u64,
+                   label: &str,
+                   asked: &[&str],
+                   role: &str,
+                   behind: &str,
+                   failed: Value,
+                   gates: Value| {
+            serde_json::json!({
+                "n": n, "label": label, "clip": "/o/media/gui-behind.mp4", "asked": asked, "role": role,
+                "behind": behind, "document": dir.join(format!("gui-behind-{n}.json")),
+                "screenshot": dir.join(format!("gui-behind-{n}.png")), "failed": failed, "gates": gates,
+            })
+        };
+        let summary = |control_failed: Value| {
+            serde_json::json!({
+                "session": "Wayland socket discovered",
+                "env": ["WAYLAND_DISPLAY=wayland-0"],
+                "locked": false,
+                "vaapi_hevc": ["HEVC Main", "HEVC Main 10"],
+                "max_shown_behind": 0.85,
+                "runs": [
+                    run(0, "decode held to 20 fps (default path)", &["--smoke-decode-floor-ms 50"], "run",
+                        "380 of 570 frames shown (67%)", serde_json::json!([]), serde_json::json!([])),
+                    run(1, "VA-API copied, noisy 5.7K 10-bit", &["--smoke-decoder vaapi", "SPHERECUT_ZERO_COPY=0"], "run",
+                        "568 of 570 frames shown (100%)", serde_json::json!([]), serde_json::json!([])),
+                    run(2, "the control", &["--smoke-decode-floor-ms 50 --smoke-control-ui-waits"], "control",
+                        "376 of 570 frames shown (66%)", control_failed, serde_json::json!([slow, "UI p99 50.0 ms, over 1.5 × the 60 Hz period (25.0 ms)"])),
+                ],
+                "not_run": [],
+                "inconclusive": [{"label": "VA-API copied, noisy 5.7K 10-bit", "why": "decode kept up: 568 of 570 frames shown (100%)"}],
+            })
+        };
+        std::fs::write(
+            dir.join(BEHIND_SUMMARY),
+            summary(serde_json::json!([])).to_string(),
+        )
+        .unwrap();
+        // gui_smoke's screenshot 0, already beside the report.
+        let reports = s.0.join("hw-reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        std::fs::write(reports.join("odin-abc-gui-0.png"), b"smoke").unwrap();
+        let report = reports.join("odin-abc.md");
+        let md = behind_section(&dir, &report, "passed");
+        eprintln!("{md}");
+        assert!(md.contains(
+            "`gui_decode_behind` passed. The session: Wayland socket discovered \
+             (WAYLAND_DISPLAY=wayland-0). VA-API decodes HEVC Main, HEVC Main 10 by doctor's \
+             check. The screen was unlocked when the runs began. Each run plays with decode \
+             behind (at most 85% of the frames expected shown)"
+        ));
+        assert!(md.contains(
+            "| 0 | decode held to 20 fps (default path) | pass | 99% | 16.7 / 17.2 | 60.00 Hz | 380 / 190 / 0 | Vulkan Video |"
+        ));
+        // The old document renders as any other.
+        assert!(md.contains(
+            "| 1 | VA-API copied, noisy 5.7K 10-bit | inconclusive | 99% | 16.7 / 17.4 | 60.00 Hz | 568 / 190 / 0 |"
+        ));
+        let reads_as_control =
+            |md: &str| md.contains("| 2 | the control | control, failed as it must: ");
+        assert!(reads_as_control(&md));
+        assert!(md.contains(&format!(
+            "| 2 | the control | control, failed as it must: {slow}; UI p99 50.0 ms, over 1.5 × \
+             the 60 Hz period (25.0 ms) | 33% |"
+        )));
+        assert!(md.contains(
+            "Run with `--smoke-decoder vaapi`, `SPHERECUT_ZERO_COPY=0`; after the first second \
+             568 of 570 frames shown (100%)."
+        ));
+        assert!(md.contains(
+            "Inconclusive:\n\n- VA-API copied, noisy 5.7K 10-bit: decode kept up: 568 of 570 \
+             frames shown (100%)"
+        ));
+        assert!(!md.contains("Not run:"));
+        // Its screenshots beside gui_smoke's, which stays as it was.
+        for n in 0..3 {
+            assert!(md.contains(&format!("](odin-abc-behind-{n}.png)")), "{n}");
+            assert_eq!(
+                std::fs::read(reports.join(format!("odin-abc-behind-{n}.png"))).unwrap(),
+                b"behind"
+            );
+        }
+        assert_eq!(
+            std::fs::read(reports.join("odin-abc-gui-0.png")).unwrap(),
+            b"smoke"
+        );
+        // The control: a control that passed the gates fails the run.
+        std::fs::write(
+            dir.join(BEHIND_SUMMARY),
+            summary(serde_json::json!(["the control passed the UI gates"])).to_string(),
+        )
+        .unwrap();
+        let md = behind_section(
+            &dir,
+            &report,
+            "**FAILED** (its output is under Tier 2 tests)",
+        );
+        must_fail("a control that passed the UI gates", reads_as_control(&md));
+        assert!(md.contains("| 2 | the control | **FAILED**: the control passed the UI gates |"));
+        // No summary: why, from the test's outcome.
+        assert_eq!(
+            behind_section(&s.0.join("nothing"), &report, "wasn't listed"),
+            "No run: `gui_decode_behind` wasn't listed.\n\n"
         );
     }
 

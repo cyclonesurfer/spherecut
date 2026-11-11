@@ -2073,6 +2073,12 @@ pub fn run(a: Args) -> Result<()> {
         &report_path,
         &gui_test("::gui_smoke"),
     ));
+    let _ = writeln!(r, "## UI while decode falls behind\n");
+    r.push_str(&crate::gui_report::behind_section(
+        &gui_out,
+        &report_path,
+        &gui_test("::gui_decode_behind"),
+    ));
     let _ = writeln!(r, "## Timeline prototype\n");
     r.push_str(&crate::gui_report::proto_section(
         &gui_out,

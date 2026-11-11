@@ -8,7 +8,7 @@ table. Numbers from the GPU-less cloud workspace are not recorded here.
 
 | Target | Measured by |
 |---|---|
-| The UI stays at display refresh even when decode falls behind | GUI smoke run frame times (from M1) |
+| The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (odin pending); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
 | 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
 | 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw` and `bench_playback_realtime_8k_8bit` (recorded, M3's budget), and the decode rows on 8K samples and their LRV proxies |
 | A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
