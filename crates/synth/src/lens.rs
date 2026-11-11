@@ -1194,7 +1194,10 @@ fn euler_rotation(euler: &TruthEuler, ypr_deg: [f64; 3]) -> DQuat {
 /// or, as OpenCV does, from pixel centres is a camera assumption the plan
 /// doesn't list: from centres, the slot's centre would sit 0.5 · s/src
 /// (0.5 · s/dst under B) further along each axis, 0.36 px at 3840² and
-/// 0.07 px at 768².
+/// 0.07 px at 768². Both lenses' centres move alike, which M3.6's fit
+/// reads as a relative tilt (about 0.02°, under stage J's 0.05°), so the
+/// seam cannot tell the two apart; synth plants the corner reading only,
+/// as sphere reads it.
 fn slot_model(cal: &CalibTruth, b: usize, planted: &Planted, side: u32) -> TruthModel {
     let block = &cal.blocks[b];
     let s = f64::from(side);
