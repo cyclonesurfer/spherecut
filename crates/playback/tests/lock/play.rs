@@ -488,10 +488,12 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
             (player.slots().views().len() == 6).then_some(())
         });
         assert!(full.is_some(), "the slots never filled");
+        let epoch = snapshot(&player).epoch;
         // Presents come every 4 ms or so, as from a 250 Hz display: a
         // frame handed out has a present's time to go up in its slot,
         // with its pair's, and the next lens 1 hands out, at least 7.5 ms
-        // on, a present of its own.
+        // on, a present of its own. A present whose pair isn't up yet
+        // waits for it, `SETTLE` at most.
         let mut halved = !halve;
         let mut samples = pacing::play(&player, &clock, pace, [0, 1], WAIT, |p, s| {
             if let Some(p) = p {
@@ -502,6 +504,10 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
                 halved = true;
             }
             std::thread::sleep(PRESENTS);
+            let began = Instant::now();
+            while !pair_up(&player, epoch, s) && began.elapsed() < SETTLE {
+                std::thread::sleep(ms(1));
+            }
         });
         // Play stops at the end, and the presents go on there, as a
         // window's do: until the pair shows the slowest lens's newest
@@ -563,6 +569,35 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
     assert!(e.contains("Trailed"), "{e}");
 }
 
+/// How long a present of the pacing test waits, past its own 4 ms, for
+/// the pair the pacing rule looks for next to go up. A catch-up hands
+/// out lens 1's frame some frames on, both lenses' frames there then go
+/// up at once, and on a CPU the other tests share, lavapipe took longer
+/// than one present for them (2 runs of the suite in about 50, the pair
+/// up one present later). A pair the lock never forms still fails the
+/// rule, `SETTLE` later.
+const SETTLE: Duration = Duration::from_millis(25);
+
+/// Whether the slots hold a pair, of open `epoch`, that the pacing rule
+/// takes at the present after `s`: both lenses' frames at one time, at
+/// most `s`'s clock and at most `TRAIL` frames before the slowest lens's
+/// newest frame as `s` saw it. True until both lenses have handed out a
+/// frame.
+fn pair_up(player: &Player, epoch: u64, s: &Sample) -> bool {
+    let [Some(n0), Some(n1)] = s.newest else {
+        return true;
+    };
+    let least = frame_of(n0.min(n1).min(s.clock)) - pacing::TRAIL;
+    let views = player.slots().views();
+    let times = |m: usize| {
+        views
+            .iter()
+            .filter(move |v| v.frame.epoch == epoch && v.frame.stream == m)
+            .map(|v| v.frame.time)
+    };
+    times(0).any(|t| t <= s.clock && frame_of(t) >= least && times(1).any(|u| u == t))
+}
+
 /// A locked pair asks for six slots, whatever the setting, until the
 /// next open.
 #[test]
@@ -606,8 +641,9 @@ fn of_slots(events: Vec<PlayerEvent>) -> (usize, Vec<&'static str>) {
 fn the_slot_floor_unlocks_the_pair() {
     let _time = timed("the_slot_floor_unlocks_the_pair");
     // Lenses of 150 frames, decoded at once. Three slot allocations fail,
-    // once play has shown frame 10, the clock a frame every 3 ms, or as
-    // a seek to frame 60 goes out; the clock then plays on to frame 30
+    // once play has shown frame 10, the clock a frame every 3 ms, or for
+    // the uploads of a seek to frame 60, planted as it goes out once the
+    // open's frames are all up; the clock then plays on to frame 30
     // and stops there, so that a pair that can't go on leaves the cache
     // full and the workers waiting for room. Whether new frames came,
     // both lenses past frame 20 or on the seek's frame, waiting as `wait`
@@ -620,8 +656,17 @@ fn the_slot_floor_unlocks_the_pair() {
         open(&player, Some(spec(test)), &mut seen);
         let mut moved = Instant::now();
         if mid_seek {
-            player.seek(at(60), SeekMode::Exact);
+            // Planted after the seek, the failures could come once its
+            // frames were up already, with nothing left to claim while
+            // paused; planted while the open's frames go up, they would
+            // fall on those.
+            let full = common::until(WAIT, || {
+                seen.present(&player);
+                (player.slots().views().len() == 6).then_some(())
+            });
+            assert!(full.is_some(), "the slots never filled");
             player.fail_slot_allocations(3);
+            player.seek(at(60), SeekMode::Exact);
         } else {
             player.play();
             let ten = common::until(WAIT, || {
