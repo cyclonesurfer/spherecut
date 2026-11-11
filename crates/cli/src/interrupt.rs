@@ -1,13 +1,15 @@
-//! SIGINT for `spherecut frame` (M1 plan section 5, DECISIONS D27 and
-//! D28): the binary's one FFI module, and its only `unsafe`.
+//! SIGINT for `spherecut frame`, `render` and `call` (M1 plan section 5,
+//! DECISIONS D27, D28 and D51): one of the binary's two modules allowed
+//! `unsafe`, with `exit`, mcp's way out past a stuck call.
 //!
 //! [`install`] sets a handler with `sigaction(2)` that does one thing,
 //! the only kind of thing a signal handler may do here: it stores `true`
-//! in a lock-free atomic, which [`interrupted`] reads. frame's main thread
-//! polls it every 10 ms while a worker thread does the work, and on the
-//! first Ctrl+C stops the work (`StopSource::shutdown`, which also raises
-//! FFmpeg's interrupt flag), so the run ends with exit 4 and no output
-//! file.
+//! in a lock-free atomic, which [`interrupted`] reads. The command's main
+//! thread polls it every 10 ms while the work runs on another thread, and
+//! on the first Ctrl+C stops the work (frame's `StopSource::shutdown`,
+//! which also raises FFmpeg's interrupt flag, render's export cancel,
+//! call's tool cancel), so the run ends with exit 4, `cancelled`; frame
+//! and render leave no output file.
 //!
 //! The handler is installed with `SA_RESETHAND`: the kernel restores the
 //! default action as it runs it, so a second Ctrl+C kills the process at
@@ -38,8 +40,8 @@ extern "C" fn on_sigint(_signal: libc::c_int) {
     INTERRUPTED.store(true, Ordering::SeqCst);
 }
 
-/// Install the SIGINT handler, once per process (`frame` only), unless
-/// SIGINT is ignored.
+/// Install the SIGINT handler, once per process (`frame`, `render` and
+/// `call`), unless SIGINT is ignored.
 pub fn install() -> std::io::Result<()> {
     // SAFETY: `sigaction` is a plain C struct, for which all zeroes is a
     // valid value (no handler, no flags, an empty mask), which the call
