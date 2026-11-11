@@ -3581,6 +3581,57 @@ fn codes_match(tag: i64, codes: [CornerCode; 2]) -> Result<(), String> {
     }
 }
 
+/// Whether `p` shows a locked pair's lenses apart by their tags: one
+/// lens alone, or the two at different times.
+fn tags_apart(p: &Presented) -> bool {
+    let time = |m: usize| {
+        p.frames
+            .iter()
+            .find(|f| f.stream == m)
+            .map(|f| f.frame.time)
+    };
+    time(0) != time(1)
+}
+
+/// What an unthrottled pass of a coded pair read back, as a table: the
+/// presents read, those apart by their tags (not read), those whose two
+/// slots' corner codes name different frames or a lens's slot holds the
+/// other lens's code (apart by code), and those whose codes agree but
+/// name another frame than the tags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodeTable {
+    read: usize,
+    apart_by_tag: usize,
+    apart_by_code: usize,
+    not_the_tag: usize,
+}
+
+impl CodeTable {
+    fn of(read: &[(i64, [CornerCode; 2])], apart_by_tag: usize) -> CodeTable {
+        let apart = |[a, b]: [CornerCode; 2]| a.frame != b.frame || (a.lens, b.lens) != (0, 1);
+        CodeTable {
+            read: read.len(),
+            apart_by_tag,
+            apart_by_code: read.iter().filter(|(_, c)| apart(*c)).count(),
+            not_the_tag: read
+                .iter()
+                .filter(|&&(tag, c)| !apart(c) && codes_match(tag, c).is_err())
+                .count(),
+        }
+    }
+}
+
+impl std::fmt::Display for CodeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} pairs' corner codes read back; unpaired by tag {}, by corner code {}, \
+             paired on another frame than the tags {}",
+            self.read, self.apart_by_tag, self.apart_by_code, self.not_the_tag
+        )
+    }
+}
+
 /// The presents of a pass that showed a locked pair's lenses apart by
 /// their tags: one lens alone, or the two at different times.
 fn apart(presents: &[[Option<Time>; 2]]) -> usize {
@@ -3684,6 +3735,30 @@ fn the_bench_harness_plays_a_locked_pair() {
     for (tag, codes) in &read {
         codes_match(*tag, *codes).unwrap();
     }
+    // Tier 2h's table of the presents read, and its control: lens 0's
+    // slot read for both, and a present apart by tag.
+    let none = CodeTable {
+        read: 30,
+        apart_by_tag: 0,
+        apart_by_code: 0,
+        not_the_tag: 0,
+    };
+    assert_eq!(CodeTable::of(&read, 0), none);
+    let crossed: Vec<_> = read.iter().map(|&(tag, [a, _])| (tag, [a, a])).collect();
+    let mut late = read.clone();
+    late[5].1 = [late[5].1[0], late[6].1[1]];
+    let mut stale = read.clone();
+    stale[5].1 = stale[4].1;
+    assert_eq!(
+        [
+            CodeTable::of(&crossed, 1),
+            CodeTable::of(&late, 0),
+            CodeTable::of(&stale, 0)
+        ]
+        .map(|t| (t.apart_by_tag, t.apart_by_code, t.not_the_tag)),
+        [(1, 30, 0), (0, 1, 0), (0, 0, 1)]
+    );
+    must_fail("a table with a pair apart", CodeTable::of(&late, 0) == none);
     assert_eq!((r.lock, r.unpaired), (Some(LockStatus::Locked), 0));
     assert_eq!(apart(&r.presents), 0);
     assert!(r.shown > 0 && !r.samples.is_empty());
@@ -3850,12 +3925,13 @@ fn the_bench_harness_plays_a_locked_pair() {
     );
 }
 
-/// A file a locked check plays: its name, its path and the rate its
-/// corner codes count at, where it has them.
-type LockedFile = (String, PathBuf, Option<FrameRate>);
+/// A file a locked check plays: its name, its path, and the rate its
+/// corner codes count at and its frames a lens, where it has them.
+type LockedFile = (String, PathBuf, Option<(FrameRate, i64)>);
 
 /// The two-lens files the locked Tier 2h checks play, with the rate
-/// their corner codes count at where they have them: clip 9's master
+/// their corner codes count at and their frames where they have them:
+/// clip 9's master
 /// (`handheld_flips`, handheld, where a pair shown apart would show,
 /// unlike clip 8's still tripod take) and the 2×3840² perf pair. Each
 /// file not here is a reason.
@@ -3876,7 +3952,7 @@ fn locked_files() -> (Vec<LockedFile>, Vec<String>) {
         Ok(path) => files.push((
             format!("perf clip {}", spec.name),
             path,
-            Some(spec.lenses[0].rate),
+            Some((spec.lenses[0].rate, i64::from(spec.lenses[0].frames))),
         )),
         Err(why) => missing.push(why),
     }
@@ -4038,10 +4114,12 @@ fn seek_landings(
 /// perf pair, by corner code; both play in real time with no pair shown
 /// apart, by the engine's count and the harness's; and the perf pair's
 /// corner codes, read back from both presented slots on every frame of an
-/// unthrottled pass, equal each other and the tags: the content check on
-/// path B and its pool. Each check's control plants a mismatch it must
-/// catch: lens 1 landed a frame off, the codes of lens 0's slot read for
-/// both, lens 1 a frame late in one present.
+/// unthrottled pass, every frame of the clip once and in order, equal
+/// each other and the tags: the content check on path B and its pool. A
+/// table gives the presents unpaired by tag and by corner code. Each
+/// check's control plants a mismatch it must catch: lens 1 landed a frame
+/// off, the codes of lens 0's slot read for both (which the table counts
+/// too), lens 1 a frame late in one present, a pass a frame short.
 #[test]
 #[ignore = "tier2: needs the X5 samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn samples_lens_pairs_frame_locked() {
@@ -4066,7 +4144,7 @@ fn samples_lens_pairs_frame_locked() {
         };
         let side = shape(&report).map_or(0, |((w, _), _, _)| w);
         let mut reader = coded.map(|_| CodeReader::new(&on.gpu, side));
-        let codes = reader.as_mut().zip(*coded);
+        let codes = reader.as_mut().zip(coded.map(|(rate, _)| rate));
         let landings = seek_landings(on, path, &streams, &run, codes)
             .unwrap_or_else(|e| panic!("{name}, {}: seeks: {e}", run.label));
         for l in &landings {
@@ -4118,32 +4196,62 @@ fn samples_lens_pairs_frame_locked() {
             r.paths_line()
         );
 
-        // Every frame's corner codes, unthrottled.
-        let (Some(reader), Some(rate)) = (reader.as_mut(), *coded) else {
+        // Every frame's corner codes, unthrottled: a present whose tags
+        // show the lenses apart is counted, not read, so that the table
+        // below gives both counts.
+        let (Some(reader), Some((rate, frames))) = (reader.as_mut(), *coded) else {
             continue;
         };
-        let mut read = Vec::new();
+        let (mut read, mut apart_by_tag) = (Vec::new(), 0);
         let mut each = |p: &Presented| {
-            read.push(pair_codes(reader, &on.gpu, p, rate)?);
+            if tags_apart(p) {
+                apart_by_tag += 1;
+            } else {
+                read.push(pair_codes(reader, &on.gpu, p, rate)?);
+            }
             Ok(ControlFlow::Continue(()))
         };
         let u = unthrottled_with(on, path, &streams, &run, GATED_UNTHROTTLED, Some(&mut each))
             .unwrap_or_else(|e| panic!("{name}, {}: unthrottled: {e}", run.label));
+        let table = CodeTable::of(&read, apart_by_tag);
+        eprintln!("{name}, {}: {table}; {}", run.label, u.paths_line());
         assert_eq!(u.stalled, None, "{name}, {}", run.label);
         assert_eq!((u.lock, u.unpaired), (Some(LockStatus::Locked), 0));
+        assert_eq!(
+            (table.apart_by_tag, table.apart_by_code, table.not_the_tag),
+            (0, 0, 0),
+            "{name}, {}: {table}",
+            run.label
+        );
         for (tag, codes) in &read {
             codes_match(*tag, *codes).unwrap_or_else(|e| panic!("{name}, {}: {e}", run.label));
         }
+        // Every frame of the clip, each once, in order: a pass cut off at
+        // its limit, or ended early, reads fewer.
+        let tags: Vec<i64> = read.iter().map(|(tag, _)| *tag).collect();
+        assert!(
+            tags.iter().copied().eq(0..frames),
+            "{name}, {}: {} frames read of {frames}, from {:?} to {:?}",
+            run.label,
+            tags.len(),
+            tags.first(),
+            tags.last()
+        );
         let (tag, codes) = read[read.len() / 2];
         must_fail(
             "lens 0's slot read for both",
             codes_match(tag, [codes[0], codes[0]]),
         );
-        eprintln!(
-            "{name}, {}: {} pairs' corner codes read back, each its tags' frame; {}",
-            run.label,
-            read.len(),
-            u.paths_line()
+        must_fail(
+            "a pass a frame short",
+            tags[..tags.len() - 1].iter().copied().eq(0..frames),
+        );
+        let crossed: Vec<(i64, [CornerCode; 2])> =
+            read.iter().map(|&(tag, [a, _])| (tag, [a, a])).collect();
+        let off = CodeTable::of(&crossed, 1);
+        must_fail(
+            "lens 0's slot read for both, and a present apart by tag, in the table",
+            (off.apart_by_tag, off.apart_by_code) == (0, 0),
         );
     }
     if !missing.is_empty() || !no_hardware.is_empty() {
