@@ -595,7 +595,9 @@ fn a_locked_pair_never_shows_mismatched_frames() {
     let e = must_fail("lens 1 held at the frame sought", on_screen);
     assert!(e.contains("never started"), "{e}");
     let e = must_fail("lens 1 held past the preroll's frames", ahead);
-    assert!(e.contains("the pair stood at Some([2, 2])"), "{e}");
+    let preroll = PREROLL_FRAMES as i64;
+    let stood = format!("the pair stood at {:?}", Some([preroll, preroll]));
+    assert!(e.contains(&stood), "{e}");
 }
 
 /// A case of the pacing test: its lenses, its clock, and its cache of
