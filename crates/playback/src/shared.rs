@@ -358,12 +358,14 @@ impl Status {
         Some(before)
     }
 
-    /// A slot died, leaving `live`: a locked group with fewer than
-    /// [`SLOT_FLOOR`] live slots a member unlocks, refused with
+    /// `live` slots are left, as a slot dies or as the lenses lock on a
+    /// ring some of whose slots died before: a locked group with fewer
+    /// than [`SLOT_FLOOR`] live slots a member unlocks, refused with
     /// `"slots"`, and its streams show unlocked as each one's frame
     /// comes (M3 plan section 9), unless the test switch keeps it locked.
     /// What the player says of it, for the caller to tell once the lock
-    /// is let go; the caller lets the cache's group go too.
+    /// is let go; the caller lets the cache's group go too, or never
+    /// sets it.
     pub(crate) fn below_floor(&mut self, live: usize) -> Option<PlayerEvent> {
         let g = self.lock.as_mut()?;
         if g.status != LockStatus::Locked

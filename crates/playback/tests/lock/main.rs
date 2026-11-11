@@ -63,14 +63,17 @@ enum Wait {
     /// For as long as [`WAIT`], or until the player is stuck
     /// ([`STUCK`]): a control.
     Stuck,
+    /// As `Stuck`, but stuck once nothing has moved for this long: for a
+    /// control whose player, once stuck, stays so for good.
+    StuckFor(Duration),
 }
 
 /// Why a wait gave up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GaveUp {
-    /// For [`STUCK`] straight, every live worker waited for room in the
-    /// cache while no stream handed out a frame or landed and the group
-    /// base stayed where it was.
+    /// For [`STUCK`] straight, or the time `Wait::StuckFor` gave, every
+    /// live worker waited for room in the cache while no stream handed
+    /// out a frame or landed and the group base stayed where it was.
     Stuck,
     /// [`WAIT`] passed.
     TimedOut,
@@ -80,6 +83,11 @@ enum GaveUp {
 /// or why it never came.
 fn wait_for<T>(player: &Player, wait: Wait, mut f: impl FnMut() -> Option<T>) -> Result<T, GaveUp> {
     let start = Instant::now();
+    let stuck = match wait {
+        Wait::Full => None,
+        Wait::Stuck => Some(STUCK),
+        Wait::StuckFor(d) => Some(d),
+    };
     let mut still: Option<(Instant, Progress)> = None;
     loop {
         if let Some(t) = f() {
@@ -88,12 +96,12 @@ fn wait_for<T>(player: &Player, wait: Wait, mut f: impl FnMut() -> Option<T>) ->
         if start.elapsed() >= WAIT {
             return Err(GaveUp::TimedOut);
         }
-        if wait == Wait::Stuck {
+        if let Some(stuck) = stuck {
             let s = player.snapshot();
             if s.fresh {
                 match (progress(&s), &still) {
                     (Some(now), Some((since, seen))) if now == *seen => {
-                        if since.elapsed() >= STUCK {
+                        if since.elapsed() >= stuck {
                             return Err(GaveUp::Stuck);
                         }
                     }

@@ -103,6 +103,13 @@ fn tick(clock: &ManualClock, moved: &mut Instant, period: Duration, to: i64) {
 /// frames: locked, the lock has formed by then. Each present goes
 /// through `check`.
 fn open(player: &Player, spec: Option<LockSpec>, check: &mut Mismatches) {
+    let status = open_as(player, spec, check);
+    assert_eq!(status, spec.map(|_| LockStatus::Locked));
+}
+
+/// [`open`], whatever becomes of the lock: its status once both lenses
+/// show their first frames.
+fn open_as(player: &Player, spec: Option<LockSpec>, check: &mut Mismatches) -> Option<LockStatus> {
     match spec {
         Some(spec) => player.open_locked(LENSES.into(), [0, 1], spec),
         None => player.open_streams(LENSES.into(), vec![Some(0), Some(1)]),
@@ -112,8 +119,7 @@ fn open(player: &Player, spec: Option<LockSpec>, check: &mut Mismatches) {
         assert!(began.elapsed() < WAIT, "the pair never showed");
         std::thread::sleep(ms(1));
     }
-    let status = snapshot(player).lock.map(|l| l.status);
-    assert_eq!(status, spec.map(|_| LockStatus::Locked));
+    snapshot(player).lock.map(|l| l.status)
 }
 
 /// The index of the frame `f`'s slot holds, read back from the GPU.
@@ -364,7 +370,7 @@ impl Mixed<'_> {
     }
 }
 
-/// Lens 1 2.5 to 3 times slower than lens 0 with jitter, 64 seeds of
+/// Lens 1 2.5 to 3 times slower than lens 0, jittered, 64 seeds of
 /// random seeks, plays, steps, pauses and rates: at every present both
 /// slots are read back and hold the same frame, the one their tags name,
 /// and after every seek and step both lenses land within `WAIT`. Its
@@ -376,19 +382,18 @@ fn a_locked_pair_never_shows_mismatched_frames() {
     let _time = timed("a_locked_pair_never_shows_mismatched_frames");
     // What the runs of `seeds` showed, locked or not, on a player of
     // their own, the presents it counted unpaired, and the seeds run: all
-    // of them, or until `enough`. Lens 0 at 0.2 ms a frame and lens 1 at
-    // 0.5 ms, each with up to 0.1 ms more drawn for each frame from its
-    // seed and open: lens 1 at 2.5 to 3 times lens 0's cost. The player
-    // is opened again for each seed, on three slots: locked, it takes
-    // six.
+    // of them, or until `enough`. Lens 0 at 0.2 ms a frame, and lens 1 at
+    // 0.5 ms with up to 0.1 ms more drawn for each frame from its seed
+    // and open: lens 1 at 2.5 to 3 times lens 0's cost. The player is
+    // opened again for each seed, on three slots: locked, it takes six.
     let runs = |lock: Option<LockSpec>, seeds: Range<u64>, enough: fn(&Mismatches) -> bool| {
-        let lens = |cost: u64, seed: u64| {
+        let lens = |cost: u64| {
             Lens::default()
                 .frames(MIXED_FRAMES as u64)
                 .cost(Duration::from_micros(cost))
-                .jitter(seed, Duration::from_micros(100))
         };
-        let backend = PerStream::pair(lens(200, seeds.start), lens(500, seeds.end));
+        let lens1 = lens(500).jitter(seeds.end, Duration::from_micros(100));
+        let backend = PerStream::pair(lens(200), lens1);
         let (player, clock) = player(backend, 3, 64 << 20);
         let mut seen = Mismatches::default();
         let mut run = 0;
@@ -438,8 +443,9 @@ fn a_locked_pair_never_shows_mismatched_frames() {
 /// On a 90-frame clip whose clock moves a frame every 3 ms, with lens 1
 /// at 2.5 to 3 times the frame period, both lenses slower than the clock,
 /// and the first case with the budget halved mid-play, the pacing rule
-/// holds after the first 30 frames. Its control, the group base and the
-/// group `until` off, freezes and fails it.
+/// holds after the first 30 frames, with at most `LATE` presents whose
+/// pair wasn't up a present on. Its control, the group base and the
+/// group `until` off, freezes and fails both.
 #[test]
 fn a_locked_pair_paces_to_its_slowest_lens() {
     let _alone = alone();
@@ -474,8 +480,9 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
     };
     // A run of `backend` locked by `test`, on a budget of 64 frames
     // halved once the clock passes frame 45 if `halve`: its samples,
-    // what its presents showed, and the resyncs and unpaired presents
-    // counted.
+    // what its presents showed, the resyncs and unpaired presents
+    // counted, and the presents after the warm-up whose pair wasn't up a
+    // present on.
     let run = |backend: PerStream, test: LockTest, halve: bool| {
         let (player, clock) = player(backend, 6, 64 * FRAME);
         let mut seen = Mismatches::default();
@@ -493,8 +500,9 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         // frame handed out has a present's time to go up in its slot,
         // with its pair's, and the next lens 1 hands out, at least 7.5 ms
         // on, a present of its own. A present whose pair isn't up yet
-        // waits for it, `SETTLE` at most.
+        // waits for it, `SETTLE` at most, and is counted late.
         let mut halved = !halve;
+        let mut late = 0;
         let mut samples = pacing::play(&player, &clock, pace, [0, 1], WAIT, |p, s| {
             if let Some(p) = p {
                 seen.check(p);
@@ -504,9 +512,12 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
                 halved = true;
             }
             std::thread::sleep(PRESENTS);
-            let began = Instant::now();
-            while !pair_up(&player, epoch, s) && began.elapsed() < SETTLE {
-                std::thread::sleep(ms(1));
+            if !pair_up(&player, epoch, s) {
+                late += u64::from(frame_of(s.clock) >= pacing::WARM_UP);
+                let began = Instant::now();
+                while !pair_up(&player, epoch, s) && began.elapsed() < SETTLE {
+                    std::thread::sleep(ms(1));
+                }
             }
         });
         // Play stops at the end, and the presents go on there, as a
@@ -532,18 +543,30 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         let counted = [Counter::PairResyncs, Counter::UnpairedPresents];
         let [resyncs, unpaired] = counted.map(|c| player.perf().count(c));
         common::join(player);
-        (samples, seen, resyncs, unpaired)
+        (samples, seen, resyncs, unpaired, late)
     };
-    // The check: the pacing rule, the content check, and no resync
-    // unless the budget was halved.
-    type Run = (Vec<Sample>, Mismatches, u64, u64);
-    let holds = |(samples, seen, resyncs, unpaired): Run, halved: bool| {
+    // At most `LATE` presents late: `SETTLE` covers a rare stall, never
+    // pairs that are slow to go up throughout.
+    let settled = |late: u64| {
+        if late <= LATE {
+            Ok(late)
+        } else {
+            Err(format!(
+                "{late} presents after the warm-up found their pair not up after {PRESENTS:?}"
+            ))
+        }
+    };
+    // The check: the pacing rule, the content check, no resync unless
+    // the budget was halved, and few presents late.
+    type Run = (Vec<Sample>, Mismatches, u64, u64, u64);
+    let holds = |(samples, seen, resyncs, unpaired, late): Run, halved: bool| {
         let paced = pacing::pacing(&samples, RATE).map_err(|e| format!("{e:?}"))?;
         seen.unmixed(unpaired)?;
         if resyncs > 0 && !halved {
             return Err(format!("{resyncs} resyncs"));
         }
-        Ok::<_, String>((paced, resyncs))
+        settled(late)?;
+        Ok::<_, String>((paced, resyncs, late))
     };
     for (name, backend, halve) in [
         ("lens 1 slow", one_slow(), false),
@@ -551,22 +574,23 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
         ("lens 1 slow, the budget halved", one_slow(), true),
     ] {
         let got = holds(run(backend, LockTest::default(), halve), halve);
-        let (paced, resyncs) = got.unwrap_or_else(|e| panic!("{name}: {e}"));
-        eprintln!("{name}: {paced:?}, {resyncs} resyncs");
+        let (paced, resyncs, late) = got.unwrap_or_else(|e| panic!("{name}: {e}"));
+        eprintln!("{name}: {paced:?}, {resyncs} resyncs, {late} presents late");
     }
 
     // Control: the group base and the group `until` off. Lens 0 runs
     // from the clock, its frames at lens 1's times gone before lens 1
-    // decodes them: no pair shows past the first.
+    // decodes them: no pair shows past the first, and every present
+    // after the freeze finds its pair not up.
     let off = LockTest {
         no_group_base: true,
         ..LockTest::default()
     };
-    let e = must_fail(
-        "no group base or until",
-        holds(run(one_slow(), off, false), false),
-    );
+    let frozen = run(one_slow(), off, false);
+    let late = frozen.4;
+    let e = must_fail("no group base or until", holds(frozen, false));
     assert!(e.contains("Trailed"), "{e}");
+    must_fail("no group base or until, the presents late", settled(late));
 }
 
 /// How long a present of the pacing test waits, past its own 4 ms, for
@@ -575,8 +599,13 @@ fn a_locked_pair_paces_to_its_slowest_lens() {
 /// up at once, and on a CPU the other tests share, lavapipe took longer
 /// than one present for them (2 runs of the suite in about 50, the pair
 /// up one present later). A pair the lock never forms still fails the
-/// rule, `SETTLE` later.
+/// rule, `SETTLE` later, and a present that waits is counted late.
 const SETTLE: Duration = Duration::from_millis(25);
+
+/// The most presents of a pacing run, after the warm-up, that may wait
+/// for their pair (`SETTLE`): more, and pairs are slow to go up
+/// throughout, not held up by a rare stall.
+const LATE: u64 = 3;
 
 /// Whether the slots hold a pair, of open `epoch`, that the pacing rule
 /// takes at the present after `s`: both lenses' frames at one time, at
@@ -634,22 +663,72 @@ fn of_slots(events: Vec<PlayerEvent>) -> (usize, Vec<&'static str>) {
     (dropped, refused)
 }
 
+/// How long the floor's and the failure's controls see nothing move
+/// before they call the player stuck, in place of `STUCK`. Each
+/// control's player, once stuck, stays so for good: the pair on screen
+/// holds every slot left, or the pair is held at a failed lens's last
+/// frame. Until then the clock, a frame every 2 or 3 ms, moves the group
+/// base, and the slots die before the pair sticks. A shorter wait loses
+/// nothing there, and keeps `play.rs` within its share of the suite's
+/// budget.
+const STALL: Duration = Duration::from_millis(500);
+
+/// What a run of the floor test saw: whether new frames came (or why
+/// they never did), the slots dropped, the lock's refusals and its
+/// status, and the slots dead.
+type Floor = (
+    Result<Vec<i64>, GaveUp>,
+    usize,
+    Vec<&'static str>,
+    Option<LockStatus>,
+    usize,
+);
+
 /// Slots killed to three, mid-play and mid-seek, unlock the pair with
-/// `LockRefused { field: "slots" }` within `WAIT`, never stuck. Its
-/// control, the lock without the floor, times out.
+/// `LockRefused { field: "slots" }` within `WAIT`, never stuck; and the
+/// pair opened again on the three slots left is refused with `"slots"`
+/// as it locks, and plays. Its controls, the lock without the floor, as
+/// the slots die and in the open again, get stuck.
 #[test]
 fn the_slot_floor_unlocks_the_pair() {
     let _time = timed("the_slot_floor_unlocks_the_pair");
-    // Lenses of 150 frames, decoded at once. Three slot allocations fail,
-    // once play has shown frame 10, the clock a frame every 3 ms, or for
-    // the uploads of a seek to frame 60, planted as it goes out once the
-    // open's frames are all up; the clock then plays on to frame 30
-    // and stops there, so that a pair that can't go on leaves the cache
-    // full and the workers waiting for room. Whether new frames came,
-    // both lenses past frame 20 or on the seek's frame, waiting as `wait`
-    // says; the slots dropped, the lock's refusals and its status, and
-    // the slots dead.
-    let kill = |test: LockTest, mid_seek: bool, wait: Wait| {
+    // Play on with the clock a frame every 3 ms to frame 30, where it
+    // stops, so that a pair that can't go on leaves the cache full and
+    // the workers waiting for room. Whether new frames came, both lenses
+    // past frame 20 or, `mid_seek`, on the seek's frame 60, waiting as
+    // `wait` says; then the events since the last call and the snapshot.
+    let play_on =
+        |player: &Player, clock: &ManualClock, moved: &mut Instant, mid_seek: bool, wait: Wait| {
+            let came = |shown: &[i64]| {
+                if mid_seek {
+                    shown == [60, 60]
+                } else {
+                    shown.len() == 2 && shown.iter().all(|&f| f > 20)
+                }
+            };
+            let shown = wait_for(player, wait, || {
+                tick(clock, moved, ms(3), 30);
+                let shown = pts(&player.present(Instant::now())?);
+                came(&shown).then_some(shown)
+            });
+            let (dropped, refused) = of_slots(player.events());
+            let s = snapshot(player);
+            (
+                shown,
+                dropped,
+                refused,
+                s.lock.map(|l| l.status),
+                s.slots.dead,
+            )
+        };
+    // Lenses of 150 frames, decoded at once, locked by `test`. Three slot
+    // allocations fail, once play has shown frame 10, or for the uploads
+    // of a seek to frame 60, planted as it goes out once the open's
+    // frames are all up; then play on. With `again`, the pair is opened
+    // once more on the same player, locked by its test, and played from
+    // the start in the same way, waiting as its wait says: the lock's
+    // status as both lenses show their first frames, and that open's run.
+    let kill = |test: LockTest, mid_seek: bool, wait: Wait, again: Option<(LockTest, Wait)>| {
         let backend = PerStream::pair(Lens::default().frames(150), Lens::default().frames(150));
         let (player, clock) = player(backend, 6, 64 << 20);
         let mut seen = Mismatches::default();
@@ -677,54 +756,69 @@ fn the_slot_floor_unlocks_the_pair() {
             assert!(ten.is_some(), "play never showed frame 10");
             player.fail_slot_allocations(3);
         }
-        let came = |shown: &[i64]| {
-            if mid_seek {
-                shown == [60, 60]
-            } else {
-                shown.len() == 2 && shown.iter().all(|&f| f > 20)
-            }
-        };
-        let shown = wait_for(&player, wait, || {
-            tick(&clock, &mut moved, ms(3), 30);
-            let shown = pts(&player.present(Instant::now())?);
-            came(&shown).then_some(shown)
+        let first: Floor = play_on(&player, &clock, &mut moved, mid_seek, wait);
+        let again = again.map(|(test, wait)| {
+            let status = open_as(&player, Some(spec(test)), &mut seen);
+            player.play();
+            let mut moved = Instant::now();
+            let run: Floor = play_on(&player, &clock, &mut moved, false, wait);
+            (status, run)
         });
-        let (dropped, refused) = of_slots(player.events());
-        let s = snapshot(&player);
         common::join(player);
-        (
-            shown,
-            dropped,
-            refused,
-            s.lock.map(|l| l.status),
-            s.slots.dead,
-        )
+        (first, again)
     };
-    // The control, the floor off, beside the checks: the pair on screen,
-    // with one lens's next frame up beside it, holds every slot left.
+    // The checks: the slots die to three and the pair unlocks, new
+    // frames coming; opened again, it is refused as it locks, and plays.
+    let unlocked = |(shown, dropped, refused, status, dead): Floor, what: &str| {
+        let shown = shown.unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        assert_eq!((dropped, dead), (3, 3), "{what}: {shown:?}");
+        assert_eq!(refused, ["slots"], "{what}");
+        assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
+    };
+    // The controls, the floor off, beside the checks: as the slots die,
+    // and in the open again, the pair on screen, with one lens's next
+    // frame up beside it, holds every slot left.
     let no_floor = LockTest {
         no_floor: true,
         ..LockTest::default()
     };
-    let control = std::thread::scope(|s| {
-        let control = s.spawn(|| kill(no_floor, false, Wait::Stuck));
-        for mid_seek in [false, true] {
-            let (shown, dropped, refused, status, dead) =
-                kill(LockTest::default(), mid_seek, Wait::Stuck);
-            let shown = shown.unwrap_or_else(|e| panic!("mid-seek {mid_seek}: {e:?}"));
-            assert_eq!((dropped, dead), (3, 3), "mid-seek {mid_seek}: {shown:?}");
-            assert_eq!(refused, ["slots"], "mid-seek {mid_seek}");
-            assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
-        }
-        control
-            .join()
-            .unwrap_or_else(|e| std::panic::resume_unwind(e))
+    let [dying, reopened] = std::thread::scope(|s| {
+        let dying = s.spawn(|| kill(no_floor, false, Wait::StuckFor(STALL), None));
+        let reopened = s.spawn(|| {
+            kill(
+                LockTest::default(),
+                false,
+                Wait::Stuck,
+                Some((no_floor, Wait::StuckFor(STALL))),
+            )
+        });
+        let again = Some((LockTest::default(), Wait::Stuck));
+        let (first, again) = kill(LockTest::default(), false, Wait::Stuck, again);
+        unlocked(first, "mid-play");
+        let (status, run) = again.unwrap();
+        assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
+        let (shown, dropped, refused, status, dead) = run;
+        let shown = shown.unwrap_or_else(|e| panic!("opened again: {e:?}"));
+        assert_eq!((dropped, dead), (0, 3), "opened again: {shown:?}");
+        assert_eq!(refused, ["slots"], "opened again");
+        assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
+        let (first, _) = kill(LockTest::default(), true, Wait::Stuck, None);
+        unlocked(first, "mid-seek");
+        [dying, reopened].map(|c| c.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
     });
-    let (shown, dropped, refused, status, _) = control;
+    let ((shown, dropped, refused, status, _), _) = dying;
     assert_eq!(must_fail("no floor", shown), GaveUp::Stuck);
     assert_eq!(
         (dropped, refused, status),
         (3, vec![], Some(LockStatus::Locked))
+    );
+    let (first, again) = reopened;
+    unlocked(first, "mid-play, before the open again without the floor");
+    let (status, (shown, dropped, refused, _, dead)) = again.unwrap();
+    assert_eq!(must_fail("no floor, opened again", shown), GaveUp::Stuck);
+    assert_eq!(
+        (status, dropped, refused, dead),
+        (Some(LockStatus::Locked), 0, vec![], 3)
     );
 }
 
@@ -770,7 +864,7 @@ fn a_member_that_fails_mid_play_ends_the_pair() {
         ..LockTest::default()
     };
     let (check, control) = std::thread::scope(|s| {
-        let control = s.spawn(|| end(off, Wait::Stuck));
+        let control = s.spawn(|| end(off, Wait::StuckFor(STALL)));
         let check = end(LockTest::default(), Wait::Full);
         let control = control.join();
         (

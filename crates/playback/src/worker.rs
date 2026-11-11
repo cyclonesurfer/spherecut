@@ -487,11 +487,15 @@ impl Worker {
                         s.decode = Some(path);
                     },
                     |st| {
-                        let events = st.settle_lock();
+                        let mut events = st.settle_lock();
                         let current = self.shared.is_current(self.epoch);
                         // Locked, the pair takes every slot, and the cache
                         // runs the members from the group base from now
-                        // on.
+                        // on. Slots that died before the lock, an earlier
+                        // open's or this one's while its lenses opened,
+                        // stay dead and count against the floor too: a
+                        // pair locked below it would wait for good for a
+                        // slot death that never comes.
                         if current
                             && st
                                 .lock
@@ -499,6 +503,7 @@ impl Worker {
                                 .is_some_and(|g| g.status == LockStatus::Locked)
                         {
                             self.shared.slots.set_pair(true);
+                            events.extend(st.below_floor(self.shared.slots.stats().active));
                         }
                         if let Some(members) = st.grouped()
                             && current
