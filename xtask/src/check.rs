@@ -70,6 +70,8 @@ pub fn run(a: Args) -> Result<()> {
             "warnings",
         ]),
     )?;
+    // The network lints must fail a crate that reaches the network (D32).
+    crate::controls::clippy_controls(&crate::workspace_root())?;
     // The FFmpeg bindings differ between releases (D2).
     crate::compat::from_check()?;
     run_step(
@@ -90,6 +92,8 @@ pub fn run(a: Args) -> Result<()> {
         }
     }
     run_step("cargo-deny", Command::new("cargo").args(["deny", "check"]))?;
+    // And the network bans a workspace that depends on it (D32).
+    crate::controls::deny_controls(&crate::workspace_root())?;
     run_step(
         "cargo-audit",
         Command::new("cargo").args(["audit", "--deny", "warnings"]),
