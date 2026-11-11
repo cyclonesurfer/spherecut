@@ -3314,9 +3314,12 @@ pub(crate) struct DrmLayer {
     pub pitch: u64,
 }
 
-/// Map the VA-API frame `src` to DRM PRIME for reading: FFmpeg syncs the
-/// surface and exports it with a layer per plane (FFmpeg's
-/// `vaapi_map_to_drm_esh`). The mapped frame holds `src`'s surface and
+/// Map the VA-API frame `src` to DRM PRIME for reading: FFmpeg's
+/// `vaapi_map_to_drm_esh` syncs the surface (`vaSyncSurface`, under the
+/// `AV_HWFRAME_MAP_READ` flag passed here, as read at n6.1, n7.1, n8.1
+/// and n9.0.2) and exports it with a layer per plane. That sync is the
+/// only thing that orders the decode before the GPU reads the import
+/// (`docs/design/m1-5b.md`). The mapped frame holds `src`'s surface and
 /// the exported fds until it is freed.
 pub(crate) fn map_drm_prime(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
     let mut dst = ff::frame::Video::empty();

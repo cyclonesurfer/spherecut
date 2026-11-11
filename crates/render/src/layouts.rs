@@ -209,7 +209,8 @@ pub(crate) fn fullscreen_pipeline(
     })
 }
 
-/// One draw of the full-screen triangle into `target`, cleared first.
+/// One draw of the full-screen triangle into `target`, over what
+/// `target` holds: the full-screen triangle covers every pixel.
 pub(crate) fn fullscreen_pass<'e>(
     enc: &'e mut wgpu::CommandEncoder,
     label: &str,
@@ -218,8 +219,8 @@ pub(crate) fn fullscreen_pass<'e>(
     pass(enc, label, target, wgpu::LoadOp::Load)
 }
 
-/// [`fullscreen_pass`] over what `target` holds, for a draw a scissor
-/// keeps to part of it.
+/// [`fullscreen_pass`] for a draw a scissor keeps to part of `target`,
+/// the rest left as it is.
 pub(crate) fn fullscreen_pass_over<'e>(
     enc: &'e mut wgpu::CommandEncoder,
     label: &str,

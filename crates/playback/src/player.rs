@@ -216,7 +216,11 @@ pub struct PlayerConfig {
     /// While playing, shows the frame due this much after the clock's
     /// time: video this much ahead of the audio (behind it when
     /// negative). Paused, the frame at the clock's time shows, as a
-    /// frame-exact seek or step put it.
+    /// frame-exact seek or step put it. The end and a span's out point
+    /// are the video's time, so a positive offset ends playback (or
+    /// loops the span) that much early in the audio's time, and the
+    /// audio's last `av_offset_ms` before them isn't heard; a negative
+    /// one plays the audio that much past them.
     pub av_offset_ms: i32,
     /// Slice 5b: which frames stay on the decoder's device and reach
     /// their slots on the GPU, instead of downloaded and uploaded. Vulkan
