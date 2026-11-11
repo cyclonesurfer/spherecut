@@ -709,42 +709,22 @@ mod tests {
         (image, texture)
     }
 
-    #[test]
-    fn the_acquire_runs_on_wgpus_queue_ahead_of_wgpus_reads() {
-        // A shared-device maker's device, which has the foreign family's
-        // extension where the driver lists it, as lavapipe does.
-        // SAFETY: one thing at a time on the device, from this thread.
-        let gpu = unsafe { crate::vkshare::single_queue_gpu(&crate::AdapterChoice::Cpu) }.unwrap();
-        // The check: the acquire names the foreign family.
-        let from_foreign = |gpu: &Gpu| -> Result<(), String> {
-            let (_, _, foreign) = acquire_parts(gpu).map_err(|e| e.to_string())?;
-            match acquired_from(foreign) {
-                vk::QUEUE_FAMILY_FOREIGN_EXT => Ok(()),
-                other => Err(format!("acquired from family {other:#x}")),
-            }
-        };
-        from_foreign(&gpu).unwrap();
-        // Its control: a device wgpu opened itself can't name it.
-        let plain = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
-        spherecut_testkit::control::must_fail("wgpu's own device", from_foreign(&plain));
-        // The acquire records and submits on wgpu's queue, and wgpu then
-        // reads the planes as the upload does, without an error.
-        let planes = [
-            stand_in(&gpu, wgpu::TextureFormat::R8Unorm),
-            stand_in(&gpu, wgpu::TextureFormat::Rg8Unorm),
-        ];
+    /// `planes` copied out by wgpu as the upload reads them, to a buffer,
+    /// under a validation error scope, and waited for: the error wgpu
+    /// raised, if any. The scope sees wgpu's own validation only, never
+    /// a barrier recorded through `as_hal_mut`.
+    fn copy_out(gpu: &Gpu, planes: &[&wgpu::Texture]) -> Option<wgpu::Error> {
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        acquire(&gpu, &planes).unwrap();
         let out = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 256 * 32 * 2,
+            size: 256 * 32 * planes.len() as u64,
             usage: wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let mut enc = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-        for (i, (_, t)) in planes.iter().enumerate() {
+        for (i, t) in planes.iter().enumerate() {
             enc.copy_texture_to_buffer(
                 t.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -762,15 +742,68 @@ mod tests {
         gpu.device
             .poll(wgpu::PollType::wait_indefinitely())
             .unwrap();
-        let error = pollster::block_on(scope.pop());
-        assert!(error.is_none(), "{error:?}");
-        // On wgpu's own device, the acquire runs from the external family.
-        let plain_planes = [stand_in(&plain, wgpu::TextureFormat::R8Unorm)];
-        acquire(&plain, &plain_planes).unwrap();
-        plain
-            .device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
+        pollster::block_on(scope.pop())
+    }
+
+    /// The acquire names the foreign family on a shared-device maker's
+    /// device and can't on one wgpu opened itself (the check and its
+    /// control); then a smoke run on lavapipe, which imports no DMA-BUF:
+    /// on stand-ins for the planes ([`stand_in`]) the acquire records and
+    /// submits on wgpu's queue, on both devices, and wgpu then copies the
+    /// planes out without an error of its own, where a plane it can't
+    /// copy from raises one (the scope's control). A wrong barrier, or the
+    /// order of the acquire and wgpu's reads, is invisible here: wgpu's
+    /// error scope sees its own validation only, never the raw barrier,
+    /// and this box has no Khronos validation layer. Real imports, and the
+    /// barrier under the validation layer, are odin's to run.
+    #[test]
+    fn the_acquire_names_its_family_and_submits_on_wgpus_queue() {
+        // A shared-device maker's device, which has the foreign family's
+        // extension where the driver lists it, as lavapipe does.
+        // SAFETY: one thing at a time on the device, from this thread.
+        let gpu = unsafe { crate::vkshare::single_queue_gpu(&crate::AdapterChoice::Cpu) }.unwrap();
+        // The check: the acquire names the foreign family.
+        let from_foreign = |gpu: &Gpu| -> Result<(), String> {
+            let (_, _, foreign) = acquire_parts(gpu).map_err(|e| e.to_string())?;
+            match acquired_from(foreign) {
+                vk::QUEUE_FAMILY_FOREIGN_EXT => Ok(()),
+                other => Err(format!("acquired from family {other:#x}")),
+            }
+        };
+        from_foreign(&gpu).unwrap();
+        // Its control: a device wgpu opened itself can't name it.
+        let plain = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        spherecut_testkit::control::must_fail("wgpu's own device", from_foreign(&plain));
+        // The smoke run, on the shared device (from the foreign family)
+        // and on wgpu's own (from the external one).
+        for gpu in [&gpu, &plain] {
+            let planes = [
+                stand_in(gpu, wgpu::TextureFormat::R8Unorm),
+                stand_in(gpu, wgpu::TextureFormat::Rg8Unorm),
+            ];
+            acquire(gpu, &planes).unwrap();
+            let error = copy_out(gpu, &[&planes[0].1, &planes[1].1]);
+            assert!(error.is_none(), "{error:?}");
+        }
+        // The scope's control: a plane wgpu can't copy from.
+        let uncopyable = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("no COPY_SRC"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        spherecut_testkit::control::must_fail(
+            "a plane wgpu can't copy from",
+            copy_out(&gpu, &[&uncopyable]).is_none(),
+        );
     }
 
     #[test]
