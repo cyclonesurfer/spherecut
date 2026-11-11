@@ -707,7 +707,7 @@ type Floor = (
 /// `LockRefused { field: "slots" }` within `WAIT`, never stuck; and the
 /// pair opened again on the three slots left is refused with `"slots"`
 /// as it locks, and plays. Its controls, the lock without the floor, as
-/// the slots die and in the open again, get stuck.
+/// the slots die mid-play and mid-seek and in the open again, get stuck.
 #[test]
 fn the_slot_floor_unlocks_the_pair() {
     let _time = timed("the_slot_floor_unlocks_the_pair");
@@ -795,14 +795,15 @@ fn the_slot_floor_unlocks_the_pair() {
         assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
     };
     // The controls, the floor off, beside the checks: as the slots die,
-    // and in the open again, the pair on screen, with one lens's next
-    // frame up beside it, holds every slot left.
+    // mid-play and mid-seek, and in the open again, the pair on screen,
+    // with one lens's next frame up beside it, holds every slot left.
     let no_floor = LockTest {
         no_floor: true,
         ..LockTest::default()
     };
-    let [dying, reopened] = std::thread::scope(|s| {
+    let [dying, seeking, reopened] = std::thread::scope(|s| {
         let dying = s.spawn(|| kill(no_floor, false, Wait::StuckFor(STALL), None));
+        let seeking = s.spawn(|| kill(no_floor, true, Wait::StuckFor(STALL), None));
         let reopened = s.spawn(|| {
             kill(
                 LockTest::default(),
@@ -823,13 +824,20 @@ fn the_slot_floor_unlocks_the_pair() {
         assert_eq!(status, Some(LockStatus::Refused { field: "slots" }));
         let (first, _) = kill(LockTest::default(), true, Wait::Stuck, None);
         unlocked(first, "mid-seek");
-        [dying, reopened].map(|c| c.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+        [dying, seeking, reopened]
+            .map(|c| c.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
     });
     let ((shown, dropped, refused, status, _), _) = dying;
     assert_eq!(must_fail("no floor", shown), GaveUp::Stuck);
     assert_eq!(
         (dropped, refused, status),
         (3, vec![], Some(LockStatus::Locked))
+    );
+    let ((shown, dropped, refused, status, dead), _) = seeking;
+    assert_eq!(must_fail("no floor, mid-seek", shown), GaveUp::Stuck);
+    assert_eq!(
+        (dropped, refused, status, dead),
+        (3, vec![], Some(LockStatus::Locked), 3)
     );
     let (first, again) = reopened;
     unlocked(first, "mid-play, before the open again without the floor");
