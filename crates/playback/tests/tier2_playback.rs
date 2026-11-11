@@ -49,13 +49,27 @@
 //!   2×2880² pair at 29.97, as this machine measures it: every full
 //!   second's frames decoded, the mean over the lenses, at 36 fps or
 //!   more. The 2×2880² pair at 59.94 is P only, where the X5 codes every
-//!   other picture as TSA_N, and a note says so beside its rows.
+//!   other picture as TSA_N, and a note says so beside its rows. P-LOCK
+//!   (M3 plan 4.3) adds each mode played as the app plays it by default,
+//!   unlocked and then opened as a locked pair, and each perf pair locked
+//!   beside the app's run: rows of unpaired presents, pairs presented,
+//!   drops, `pair_wait`, pair resyncs, slots, each lens's decodes and
+//!   path B's pool, and a verdict a mode (Pass, Redirect to 8 slots, or
+//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, at least 99 % of the
+//!   frames presented and at most 1 point more dropped than unlocked; at
+//!   8K25 on path B no pair apart and the pacing rule met, with the pairs
+//!   and `pair_wait` of each second that dropped.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
 //!   while there is none (clip 12 is still to come).
 //! - `bench_perf_clips_software_decode`: each perf clip's software decode
 //!   rate, which hw-test's report holds against "too easy" (150 fps).
+//! - `samples_lens_pairs_frame_locked` and `zero_copy_pair_matches_copy`
+//!   (Tier 2h): clip 9 and the 2×3840² perf pair opened locked, landing
+//!   and playing both lenses on one frame, read back from the slots by
+//!   corner code, and path B's and path A's slots byte for byte the copy
+//!   path's.
 //!
 //! Where the GPU, hardware decode of the format, the perf clips or the
 //! samples aren't there, a benchmark records what it can and skips with
@@ -64,25 +78,28 @@
 //! `the_bench_harness_plays_on_lavapipe` runs the same harness in Tier 1,
 //! in software on a small clip, with one stream and with two, and
 //! `the_bench_harness_plays_both_tracks_of_a_pair` plays a 2 × 64² pair
-//! as the perf pairs are played, so that neither can rot between hardware
-//! runs. Run the rest with `cargo xtask hw-test`.
+//! as the perf pairs are played, and `the_bench_harness_plays_a_locked_pair`
+//! plays it locked, reading its corner codes back as Tier 2h does, so
+//! that none can rot between hardware runs. Run the rest with `cargo
+//! xtask hw-test`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use spherecut_core::blocking::{OnBlock, mark_ui_thread_with, unmark_ui_thread};
-use spherecut_core::video::VideoPlanes;
-use spherecut_core::{Clock, FrameRate, ManualClock, StopToken, SystemClock, Time};
+use spherecut_core::video::{SampleBytes, VideoPlanes};
+use spherecut_core::{Clock, FrameRate, ManualClock, Rounding, StopToken, SystemClock, Time};
 use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodeMode, DecodePath, Fallback, FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame,
-    Transfer, VideoFrame, VideoRequest,
+    SeekMode, Transfer, VideoFrame, VideoRequest,
 };
 use spherecut_media::decode::VideoDecoder;
 use spherecut_media::detect::Layout;
@@ -90,22 +107,27 @@ use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
-    CacheBudget, Counter, DecoderPreference, HwSupport, PerfStats, Player, PlayerConfig,
-    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, SlotFrame, Stage, StreamFormat, ZeroCopy,
+    CacheBudget, Counter, DecoderPreference, HwSupport, LockSpec, LockStatus, PerfStats, Player,
+    PlayerConfig, PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, SlotFrame,
+    SlotStats, Stage, StreamFormat, ZeroCopy,
 };
 use spherecut_render::dmabuf::{self, Importer};
 use spherecut_render::vkshare::Copied;
-use spherecut_render::wgpu;
 use spherecut_render::{
     AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuTimers, Image, LinearTarget, Placement,
     Projector, RenderError, SlotShape, StillOptions, StillRenderer, ViewParams, upload,
 };
+use spherecut_render::{readback, wgpu};
 use spherecut_sphere::DQuat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_synth::code::{self as corner, CornerCode, Luma, Samples};
 use spherecut_synth::media::{self as synth_media, Codec, Spec};
 use spherecut_testkit::control::must_fail;
-use spherecut_testkit::{bench, tier2};
+use spherecut_testkit::samples::{self, Mode};
+use spherecut_testkit::{bench, fnv64, tier2};
+
+use common::pacing;
 
 /// One UI frame at 60 Hz.
 const TICK: Duration = Duration::from_nanos(16_666_667);
@@ -297,6 +319,7 @@ impl Rig {
                 label: format!("{kind} (Auto)"),
                 kind: Some(kind),
                 zero_copy: ZeroCopy::Off,
+                locked: false,
             }),
             DecodeMode::Software => Err(auto.why),
         }
@@ -343,6 +366,9 @@ struct Run {
     /// Video's decoded on the renderer's own device and copied out there;
     /// the rest are copied.
     zero_copy: ZeroCopy,
+    /// The two streams are opened as a locked pair
+    /// ([`Player::open_locked`]): P-LOCK's runs (M3 plan 4.3).
+    locked: bool,
 }
 
 impl Run {
@@ -353,6 +379,7 @@ impl Run {
             label: kind.to_string(),
             kind: Some(kind),
             zero_copy: ZeroCopy::Off,
+            locked: false,
         }
     }
 
@@ -362,7 +389,24 @@ impl Run {
             label: "software".into(),
             kind: None,
             zero_copy: ZeroCopy::Off,
+            locked: false,
         }
+    }
+
+    /// The same run with its two streams opened as a locked pair, its
+    /// rows called "…, locked".
+    fn locked(&self) -> Run {
+        Run {
+            label: format!("{}, locked", self.label),
+            locked: true,
+            ..self.clone()
+        }
+    }
+
+    /// Vulkan Video's frames decoded on the renderer's own device and
+    /// kept there (path B), where its rig shares the device.
+    fn path_b(&self) -> bool {
+        self.kind == Some(HwKind::Vulkan) && self.zero_copy.vulkan()
     }
 }
 
@@ -485,6 +529,9 @@ struct Second {
     dropped: u64,
     decode_dropped: u64,
     late: u64,
+    /// The longest `pair_wait` a present of a locked pair recorded in the
+    /// second, in ms.
+    pair_wait: f32,
 }
 
 /// What a pass found.
@@ -510,6 +557,32 @@ struct Pass {
     imported: u64,
     refused: u64,
     refusal: Option<String>,
+    /// The streams' frame rate, where the first stream gives one.
+    rate: Option<FrameRate>,
+    /// Presents whose streams showed frames of different times, as the
+    /// engine counts them (`unpaired_presents`, over every stream, locked
+    /// or not), and the times a locked pair sought both lenses again to
+    /// find a common frame (`pair_resyncs`).
+    unpaired: u64,
+    resyncs: u64,
+    /// Each stream's frames decoded since the open, handed out or passed
+    /// over ([`StreamStatus::decoded`]), at the end of the pass.
+    ///
+    /// [`StreamStatus::decoded`]: spherecut_playback::StreamStatus::decoded
+    lens_decoded: Vec<u64>,
+    /// The slots at the end of the pass.
+    slots: SlotStats,
+    /// A locked pair's lock at the end of the pass; `None` unlocked.
+    lock: Option<LockStatus>,
+    /// Path B's pool as the frames shown used it ([`PoolWatch`]), by
+    /// stream: its distinct Vulkan images and their bytes. Empty off path
+    /// B.
+    pool: Vec<(usize, u64)>,
+    /// Of a locked pair, each present's lenses' clip times, `None` for a
+    /// lens it showed nothing of, and its [`pacing::Sample`], up to the
+    /// first loop.
+    presents: Vec<[Option<Time>; 2]>,
+    samples: Vec<pacing::Sample>,
 }
 
 impl Pass {
@@ -587,6 +660,8 @@ struct Meter {
     base: [u64; 3],
     /// Frames imported and imports refused at the start of the pass.
     imports: [u64; 2],
+    /// Unpaired presents and pair resyncs at the start of the pass.
+    pairs: [u64; 2],
     at: [u64; 3],
     current: Second,
     seen: [u64; Stage::ALL.len()],
@@ -603,6 +678,7 @@ impl Meter {
             second: now,
             base: [0; 3],
             imports: [0; 2],
+            pairs: [0; 2],
             at: [0; 3],
             current: Second::default(),
             seen,
@@ -611,7 +687,12 @@ impl Meter {
         m.at = m.counts();
         m.base = m.at;
         m.imports = m.import_counts();
+        m.pairs = m.pair_counts();
         m
+    }
+
+    fn pair_counts(&self) -> [u64; 2] {
+        [Counter::UnpairedPresents, Counter::PairResyncs].map(|c| self.perf.count(c))
     }
 
     fn import_counts(&self) -> [u64; 2] {
@@ -641,11 +722,15 @@ impl Meter {
             self.seen[i] = recorded;
             let kept = self.perf.samples(s);
             let take = usize::try_from(new).unwrap_or(usize::MAX).min(kept.len());
+            let new = &kept[kept.len() - take..];
+            if s == Stage::PairWait {
+                self.current.pair_wait = new.iter().copied().fold(self.current.pair_wait, f32::max);
+            }
             self.pass
                 .stages
                 .entry(s.name())
                 .or_default()
-                .extend_from_slice(&kept[kept.len() - take..]);
+                .extend_from_slice(new);
         }
     }
 
@@ -685,6 +770,9 @@ impl Meter {
         let [imported, refused] = self.import_counts();
         self.pass.imported = imported - self.imports[0];
         self.pass.refused = refused - self.imports[1];
+        let [unpaired, resyncs] = self.pair_counts();
+        self.pass.unpaired = unpaired - self.pairs[0];
+        self.pass.resyncs = resyncs - self.pairs[1];
         self.pass
     }
 }
@@ -866,13 +954,116 @@ fn join(player: Player) -> Result<(), String> {
     }
 }
 
-fn paths(player: &Player) -> Vec<Option<DecodePath>> {
-    common::snapshot(player)
-        .streams
-        .iter()
-        .map(|s| s.decode.clone())
-        .collect()
+/// Open `streams` of `path` on `player` as `run` asks: two streams by
+/// index as a locked pair ([`Player::open_locked`]), else each stream on
+/// its own.
+fn open(player: &Player, path: &Path, streams: &[Option<usize>], run: &Run) -> Result<(), String> {
+    match (run.locked, streams) {
+        (false, _) => player.open_streams(path.to_path_buf(), streams.to_vec()),
+        (true, &[Some(a), Some(b)]) => {
+            player.open_locked(path.to_path_buf(), [a, b], LockSpec::default());
+        }
+        (true, _) => {
+            return Err(format!(
+                "a locked pair is two streams by index, not {streams:?}"
+            ));
+        }
+    }
+    Ok(())
 }
+
+/// What a pass's end adds to what its [`Meter`] counted: the streams'
+/// decodes, the slots and the lock, and the pool `watch` saw.
+fn finish_pass(mut pass: Pass, player: &Player, watch: Option<PoolWatch>) -> Pass {
+    let snap = common::snapshot(player);
+    pass.paths = snap.streams.iter().map(|s| s.decode.clone()).collect();
+    pass.refusal = snap.import_refused.clone();
+    pass.rate = stream_rate(player);
+    pass.lens_decoded = snap.streams.iter().map(|s| s.decoded).collect();
+    pass.slots = snap.slots;
+    pass.lock = snap.lock.map(|l| l.status);
+    pass.pool = watch.map_or_else(Vec::new, PoolWatch::finish);
+    pass
+}
+
+/// Path B's pool, as the frames shown used it (M3 plan section 9: a pair's
+/// pool may reach about 707 MB at 8K): a thread of its own, off the UI
+/// thread, looks each frame shown up in the cache and keeps the Vulkan
+/// images FFmpeg decoded it into, a stream at a time.
+struct PoolWatch {
+    shown: mpsc::Sender<(usize, Time)>,
+    thread: std::thread::JoinHandle<Vec<(usize, u64)>>,
+}
+
+impl PoolWatch {
+    /// A watch on `player`'s `streams` streams, for a run on path B.
+    fn of(player: &Player, run: &Run, streams: usize) -> Option<PoolWatch> {
+        if !run.path_b() {
+            return None;
+        }
+        let cache = player.cache().clone();
+        let (shown, frames) = mpsc::channel::<(usize, Time)>();
+        let thread = std::thread::spawn(move || {
+            let mut images = vec![HashSet::new(); streams];
+            let mut bytes = vec![0u64; streams];
+            for (stream, time) in frames {
+                let Some(frame) = cache.get(stream, time) else {
+                    continue;
+                };
+                let (Some(picture), Some(seen), Some(each)) = (
+                    frame.vulkan(),
+                    images.get_mut(stream),
+                    bytes.get_mut(stream),
+                ) else {
+                    continue;
+                };
+                picture.with_locked(&mut |states| seen.extend(states.iter().map(|s| s.image)));
+                // A picture's planes, each its size in texels by its
+                // texel's bytes, over the images that hold them.
+                let layout = frame.layout();
+                let held: u64 = picture
+                    .planes()
+                    .iter()
+                    .zip(&layout.planes)
+                    .map(|(p, d)| {
+                        let texel = u64::from(d.components)
+                            * match d.bytes {
+                                SampleBytes::One => 1,
+                                SampleBytes::Two => 2,
+                            };
+                        u64::from(p.size.0) * u64::from(p.size.1) * texel
+                    })
+                    .sum();
+                let images: HashSet<usize> = picture.planes().iter().map(|p| p.image).collect();
+                *each = (*each).max(held / images.len().max(1) as u64);
+            }
+            images
+                .iter()
+                .zip(bytes)
+                .map(|(i, b)| (i.len(), i.len() as u64 * b))
+                .collect()
+        });
+        Some(PoolWatch { shown, thread })
+    }
+
+    /// Note what `p` shows.
+    fn shown(&self, p: &Presented) {
+        for f in &p.frames {
+            let _ = self.shown.send((f.stream, f.frame.time));
+        }
+    }
+
+    /// Each stream's distinct images and their bytes.
+    fn finish(self) -> Vec<(usize, u64)> {
+        drop(self.shown);
+        self.thread.join().unwrap_or_default()
+    }
+}
+
+/// What [`unthrottled_with`] does with each new frame on screen besides
+/// count it: read it back, say, which waits for the GPU, so the pass isn't
+/// marked as the UI thread. It stops the pass with `Break`, or fails it.
+type Each<'a> = &'a mut dyn FnMut(&Presented) -> Result<ControlFlow<()>, String>;
 
 /// The unthrottled pass: the clock moved on to the next frame as soon as
 /// every stream shows the one it is at, through the file once or for
@@ -884,21 +1075,42 @@ fn unthrottled(
     run: &Run,
     limit: Duration,
 ) -> Result<Pass, String> {
+    unthrottled_with(rig, path, streams, run, limit, None)
+}
+
+/// [`unthrottled`], with `each` called at every new frame on screen, the
+/// first included, off the UI thread.
+fn unthrottled_with(
+    rig: &Rig,
+    path: &Path,
+    streams: &[Option<usize>],
+    run: &Run,
+    limit: Duration,
+    mut each: Option<Each<'_>>,
+) -> Result<Pass, String> {
     let clock = Arc::new(ManualClock::new(FrameRate::FPS_30.frame_duration()));
     let player = rig.player(clock.clone(), run)?;
-    player.open_streams(path.to_path_buf(), streams.to_vec());
+    open(&player, path, streams, run)?;
+    let watch = PoolWatch::of(&player, run, streams.len());
     let pass = (|| -> Result<Pass, String> {
-        let ui = UiThread::mark();
+        let ui = each.is_none().then(UiThread::mark);
         let first = first_frame(&player, streams.len())?;
         let rate = stream_rate(&player);
         let mut shown = first.frames[0].frame;
+        if let Some(w) = &watch {
+            w.shown(&first);
+        }
+        let mut stop = match each.as_mut() {
+            Some(f) => f(&first)?.is_break(),
+            None => false,
+        };
         // Held, its frames' slots would stay out of use: with two streams,
         // two of the four, and no stream could show its next frame.
         drop(first);
         player.play();
         let mut meter = Meter::new(player.perf().clone(), streams.len(), Instant::now());
         let mut timeline = Timeline::new(path, run, "unthrottled", player.perf(), meter.begun);
-        'pass: while meter.begun.elapsed() < limit {
+        'pass: while !stop && meter.begun.elapsed() < limit {
             let Some(next) = ends(&shown, rate) else {
                 return Err(format!("frame at {:?} has no duration", shown.time));
             };
@@ -915,6 +1127,12 @@ fn unthrottled(
                     meter.tick(now);
                     if let Some(t) = &mut timeline {
                         t.row(now, &player.snapshot(), 0, player.perf());
+                    }
+                    if let Some(w) = &watch {
+                        w.shown(&p);
+                    }
+                    if let Some(f) = each.as_mut() {
+                        stop = f(&p)?.is_break();
                     }
                     break;
                 }
@@ -933,9 +1151,7 @@ fn unthrottled(
                 std::thread::sleep(Duration::from_micros(250));
             }
         }
-        let mut pass = meter.finish(Instant::now());
-        pass.paths = paths(&player);
-        pass.refusal = player.snapshot().import_refused;
+        let pass = finish_pass(meter.finish(Instant::now()), &player, watch);
         drop(ui);
         if let Some(t) = timeline {
             t.write();
@@ -960,7 +1176,8 @@ fn realtime(
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
     let player = rig.player(clock, run)?;
     let mut screen = Screen::new(&rig.gpu, streams.len()).map_err(|e| e.to_string())?;
-    player.open_streams(path.to_path_buf(), streams.to_vec());
+    open(&player, path, streams, run)?;
+    let watch = PoolWatch::of(&player, run, streams.len());
     let pass = (|| -> Result<Pass, String> {
         let ui = UiThread::mark();
         let perf = player.perf().clone();
@@ -969,6 +1186,10 @@ fn realtime(
         let rate = stream_rate(&player);
         let mut last = first.frames[0].frame;
         drop(first);
+        // A locked pair's presents, for the pacing rule, until the first
+        // loop seeks back.
+        let mut presents = Vec::new();
+        let mut samples = Vec::new();
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
@@ -991,9 +1212,24 @@ fn realtime(
             if let Some(t) = &mut timeline {
                 t.row(now, &snap, meter.pass.loops, &perf);
             }
+            if run.locked && meter.pass.loops == 0 {
+                let time = |m: usize| {
+                    presented
+                        .as_ref()?
+                        .frames
+                        .iter()
+                        .find(|f| f.stream == m)
+                        .map(|f| f.frame.time)
+                };
+                presents.push([time(0), time(1)]);
+                samples.push(pacing::Sample::of(presented.as_ref(), &snap, [0, 1]));
+            }
             if let Some(p) = &presented {
                 if p.changed {
                     screen.draw(p, &perf).map_err(|e| e.to_string())?;
+                    if let Some(w) = &watch {
+                        w.shown(p);
+                    }
                 }
                 if let Some(f) = p.frames.first()
                     && f.frame != last
@@ -1023,9 +1259,9 @@ fn realtime(
             }
             meter.tick(now);
         }
-        let mut pass = meter.finish(Instant::now());
-        pass.paths = paths(&player);
-        pass.refusal = player.snapshot().import_refused;
+        let mut pass = finish_pass(meter.finish(Instant::now()), &player, watch);
+        pass.presents = presents;
+        pass.samples = samples;
         drop(ui);
         if let Some(t) = timeline {
             t.write();
@@ -1298,6 +1534,287 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
             because(why)
         ));
     }
+    if r.lens_decoded.len() == 2 {
+        record_pair(&name, run, &[u, r]);
+    }
+}
+
+/// A two-stream run's rows of P-LOCK's (M3 plan 4.3), locked or not,
+/// from its `passes`, unthrottled then real time where both ran: the
+/// unpaired presents over them all, each lens's decodes since the open
+/// and path B's pool in the last; of a locked run, its pair resyncs, the pairs it
+/// presented, `pair_wait`, its slots and its lock.
+fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
+    let Some(last) = passes.last() else {
+        return;
+    };
+    let over = |of: fn(&Pass) -> u64| passes.iter().map(|p| of(p)).sum::<u64>() as f64;
+    let pass = if passes.len() > 1 {
+        "real time"
+    } else {
+        "unthrottled"
+    };
+    bench::record(
+        &format!("{name}: unpaired presents"),
+        over(|p| p.unpaired),
+        "presents",
+    );
+    for (k, decoded) in last.lens_decoded.iter().enumerate() {
+        bench::record(
+            &format!("{name}: lens {k} decoded since the open, {pass}"),
+            *decoded as f64,
+            "frames",
+        );
+    }
+    for (k, (images, bytes)) in last.pool.iter().enumerate() {
+        bench::record(
+            &format!("{name}: path B pool, lens {k}, {pass}"),
+            *bytes as f64 / f64::from(1u32 << 20),
+            "MiB",
+        );
+        bench::note(format!(
+            "{name}: lens {k}'s frames shown were in {images} Vulkan images, {pass}"
+        ));
+    }
+    if !run.locked {
+        return;
+    }
+    bench::record(
+        &format!("{name}: pair resyncs"),
+        over(|p| p.resyncs),
+        "resyncs",
+    );
+    bench::record(
+        &format!("{name}: pairs presented, {pass}"),
+        last.shown as f64,
+        "pairs",
+    );
+    if let Some(share) = presented_share(last) {
+        bench::record(&format!("{name}: presented after 1 s"), share, "%");
+    }
+    for p in [50.0, 95.0] {
+        if let Some(ms) = last.stage(Stage::PairWait, p) {
+            bench::record(&format!("{name}: pair_wait p{p}, {pass}"), ms, "ms");
+        }
+    }
+    bench::record(&format!("{name}: slots"), last.slots.active as f64, "slots");
+    bench::note(format!(
+        "{name}: the lock {}; {} slots in use, {} dead, at the end",
+        match &last.lock {
+            Some(LockStatus::Locked) => "held".to_string(),
+            Some(LockStatus::Refused { field }) => format!("was refused or undone ({field})"),
+            Some(LockStatus::Pending) => "never settled".to_string(),
+            None => "was never asked for".to_string(),
+        },
+        last.slots.active,
+        last.slots.dead
+    ));
+}
+
+/// The frames a real-time pass's full seconds after the first had to
+/// show, at its rate.
+fn due_after_first(r: &Pass) -> Option<f64> {
+    let fps = r.rate?.to_f64();
+    let seconds = r.seconds.len().checked_sub(1).filter(|&n| n > 0)?;
+    Some(seconds as f64 * fps)
+}
+
+/// Of those frames, the share shown, in %.
+fn presented_share(r: &Pass) -> Option<f64> {
+    Some(100.0 * r.after_first(|s| s.shown) as f64 / due_after_first(r)?)
+}
+
+/// Of those frames, the share dropped, in %.
+fn dropped_share(r: &Pass) -> Option<f64> {
+    Some(100.0 * r.after_first(|s| s.dropped) as f64 / due_after_first(r)?)
+}
+
+/// P-LOCK's verdict (M3 plan 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// The lock as designed.
+    Pass,
+    /// The lock held every pair together but fell short of the frames:
+    /// `MAX_SLOTS` 6 → 8 for a locked pair, the plan's redirect.
+    Redirect,
+    /// The lock showed a pair apart, came undone or stalled, which more
+    /// slots wouldn't mend: M3.10 waits for a design note on the upload
+    /// schedule.
+    Kill,
+}
+
+/// What a locked run's `passes` did that fails P-LOCK outright: a pair
+/// shown apart, the lock refused or undone (the slot floor), a stall.
+fn lock_broken(passes: &[&Pass]) -> Vec<String> {
+    let mut broken = Vec::new();
+    for (pass, p) in ["unthrottled", "real time"].iter().zip(passes) {
+        if p.unpaired > 0 {
+            broken.push(format!("{pass}: {} unpaired presents", p.unpaired));
+        }
+        if p.lock != Some(LockStatus::Locked) {
+            broken.push(format!("{pass}: the lock ended {:?}", p.lock));
+        }
+        if let Some(why) = &p.stalled {
+            broken.push(format!("{pass}: stalled: {why}"));
+        }
+    }
+    broken
+}
+
+/// P-LOCK at 8K30, 5.7K60 and 4K120: the locked run's real-time pass
+/// presents at least 99 % of its frames and drops at most 1 percentage
+/// point more than `unlocked`'s, with no pair apart.
+fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
+    let broken = lock_broken(&[&locked.0, &locked.1]);
+    if !broken.is_empty() {
+        return (Verdict::Kill, broken.join("; "));
+    }
+    let r = &locked.1;
+    let (Some(shown), Some(dropped), Some(before)) = (
+        presented_share(r),
+        dropped_share(r),
+        dropped_share(unlocked),
+    ) else {
+        return (
+            Verdict::Kill,
+            "the real-time passes ran no full second after the first".into(),
+        );
+    };
+    let line = format!(
+        "0 unpaired, presented {shown:.2} % of the frames after 1 s, dropped {dropped:.2} % \
+         against {before:.2} % unlocked"
+    );
+    if shown >= 99.0 && dropped - before <= 1.0 {
+        (Verdict::Pass, line)
+    } else {
+        (Verdict::Redirect, line)
+    }
+}
+
+/// P-LOCK at 8K25 on path B, where the unlocked raw view decode-drops:
+/// no pair apart and the pacing rule met over the real-time pass up to
+/// its first loop, with the pairs presented and `pair_wait` in each
+/// second that dropped.
+fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
+    let broken = lock_broken(&[&locked.0, &locked.1]);
+    if !broken.is_empty() {
+        return (Verdict::Kill, broken.join("; "));
+    }
+    let r = &locked.1;
+    let drops: Vec<String> = r
+        .seconds
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.dropped > 0)
+        .map(|(i, s)| {
+            format!(
+                "second {i}: {} dropped ({} decode-dropped), {} pairs, pair_wait {:.1} ms at most",
+                s.dropped, s.decode_dropped, s.shown, s.pair_wait
+            )
+        })
+        .collect();
+    let drops = if drops.is_empty() {
+        "no second dropped".to_string()
+    } else {
+        drops.join(", ")
+    };
+    let Some(rate) = r.rate else {
+        return (Verdict::Kill, "the pass has no frame rate".into());
+    };
+    match pacing::pacing_cut(&r.samples, rate) {
+        Ok(paced) => (
+            Verdict::Pass,
+            format!("0 unpaired, the pacing rule met ({paced:?}); {drops}"),
+        ),
+        Err(why) => (
+            Verdict::Redirect,
+            format!("0 unpaired, the pacing rule failed: {why:?}; {drops}"),
+        ),
+    }
+}
+
+/// The camera's mode of a two-lens file, by its lenses' side and rate.
+fn x5_mode(report: &ProbeReport) -> Option<Mode> {
+    let ((w, h), fps, _) = shape(report)?;
+    Mode::ALL.into_iter().find(|m| {
+        let (n, d) = m.rate();
+        w == m.side() && h == m.side() && (fps - f64::from(n) / f64::from(d)).abs() < 0.01
+    })
+}
+
+/// P-LOCK (M3 plan 4.3) on one X5 mode: its pair played as the app plays
+/// it by default (D25), unlocked and then locked, both passes each, the
+/// locked rows beside the unlocked, and the verdict where the plan gives
+/// one: 8K30, 5.7K60 and 4K120 held to the unlocked raw view, 8K25 to the
+/// pacing rule on path B. `auto` is Auto's run, copied, and `copied` its
+/// passes, the unlocked ones where the app copies too. Stalls go into
+/// `stalls`; the verdict's line comes back.
+fn p_lock(
+    rig: &Rig,
+    mode: &str,
+    path: &Path,
+    report: &ProbeReport,
+    auto: &Run,
+    copied: Option<&(Pass, Pass)>,
+    stalls: &mut Vec<String>,
+) -> String {
+    let streams = lens_streams(report);
+    let class = x5_mode(report);
+    let shared = rig.as_app_plays(auto);
+    let (on, base) = match &shared {
+        Ok((on, kept)) => (on, kept.clone()),
+        Err(why) => {
+            bench::note(format!(
+                "{mode}, P-LOCK: copied, as the app plays it: {why}"
+            ));
+            (rig, auto.clone())
+        }
+    };
+    let fresh;
+    let unlocked = if shared.is_ok() {
+        fresh = record(on, mode, path, &streams, &base, RECORDED, RECORDED);
+        stalls.extend(stall(mode, &base, &fresh));
+        fresh.as_ref()
+    } else {
+        copied
+    };
+    let locked_run = base.locked();
+    let locked = record(on, mode, path, &streams, &locked_run, RECORDED, RECORDED);
+    stalls.extend(stall(mode, &locked_run, &locked));
+    let name = format!("P-LOCK, {mode}, {}", locked_run.label);
+    let Some(locked) = locked else {
+        return format!("{name}: Kill: the locked run didn't play (see its note)");
+    };
+    let (verdict, why) = match class {
+        Some(Mode::K8_25) if !base.path_b() => {
+            return format!(
+                "{name}: not decided: 8K25's verdict is on path B, and {}",
+                shared.err().unwrap_or_else(|| "the run copies".into())
+            );
+        }
+        Some(Mode::K8_25) => paced_verdict(&locked),
+        Some(Mode::K8_30 | Mode::K5_7_60 | Mode::K4_120) => match unlocked {
+            Some((_, r)) => held_verdict(r, &locked),
+            None => {
+                return format!("{name}: not decided: the unlocked run didn't play");
+            }
+        },
+        Some(Mode::K5_7_30) | None => {
+            let broken = lock_broken(&[&locked.0, &locked.1]);
+            return format!(
+                "{name}: recorded, P-LOCK names no verdict for this mode{}",
+                if broken.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", broken.join("; "))
+                }
+            );
+        }
+    };
+    format!(
+        "{name}: {verdict:?}: {why}; {} slots",
+        locked.1.slots.active
+    )
 }
 
 #[test]
@@ -1463,6 +1980,7 @@ fn play_pair(
                         because(u.refusal.as_ref())
                     ));
                 }
+                record_pair(&name, run, &[u]);
             }
             Err(why) => bench::not_measured(&name, format!("unthrottled: {why}")),
         }
@@ -1586,8 +2104,30 @@ fn bench_perf_pair(
         Ok(run) => runs.push((rig, run)),
         Err(why) => bench::not_measured(&format!("{clip}, SPHERECUT_ZERO_COPY=1"), why),
     }
+    // P-LOCK's rows (M3 plan 4.3): the app's run again, locked, recorded
+    // beside it.
+    let locked = (runs[0].0, runs[0].1.locked());
     let passes = play_pair(clip, path, &streams, &runs, GATED_UNTHROTTLED);
-    for ((_, run), pass) in runs.iter().zip(&passes) {
+    let held = play_pair(
+        clip,
+        path,
+        &streams,
+        std::slice::from_ref(&locked),
+        GATED_UNTHROTTLED,
+    );
+    for u in held.iter().flatten() {
+        let broken = lock_broken(&[u]);
+        bench::note(format!(
+            "{clip}, {}: P-LOCK recorded{}",
+            locked.1.label,
+            if broken.is_empty() {
+                ": 0 unpaired, the lock held".to_string()
+            } else {
+                format!(": {}", broken.join("; "))
+            }
+        ));
+    }
+    for ((_, run), pass) in runs.iter().chain([&locked]).zip(passes.iter().chain(&held)) {
         if let Ok(Pass {
             stalled: Some(why), ..
         }) = pass
@@ -1684,6 +2224,7 @@ fn bench_playback_x5_raw() {
     bench::note(format!("X5 raw: {}", rig.about()));
     let mut no_hardware = Vec::new();
     let mut stalls = Vec::new();
+    let mut verdicts = Vec::new();
     for (mode, (path, report)) in &modes {
         let streams = lens_streams(report);
         let format = format_of(report, streams[0]);
@@ -1696,8 +2237,22 @@ fn bench_playback_x5_raw() {
             Ok(run) => {
                 let passes = record(&rig, mode, path, &streams, &run, RECORDED, RECORDED);
                 stalls.extend(stall(mode, &run, &passes));
+                verdicts.push(p_lock(
+                    &rig,
+                    mode,
+                    path,
+                    report,
+                    &run,
+                    passes.as_ref(),
+                    &mut stalls,
+                ));
             }
-            Err(why) => no_hardware.push(format!("{mode}: {why}")),
+            Err(why) => {
+                verdicts.push(format!(
+                    "P-LOCK, {mode}: not decided: Auto decodes it in software here"
+                ));
+                no_hardware.push(format!("{mode}: {why}"));
+            }
         }
         for run in &others {
             let passes = record(&rig, mode, path, &streams, run, RECORDED, RECORDED);
@@ -1719,6 +2274,9 @@ fn bench_playback_x5_raw() {
             synth_media::PERF_PAIR_2880_2997
         ))
     ));
+    for verdict in &verdicts {
+        bench::note(verdict);
+    }
     assert!(stalls.is_empty(), "{}", stalls.join("; "));
     if no_hardware.len() == modes.len() + pairs.len() {
         tier2::skip(format!(
@@ -2562,32 +3120,730 @@ fn the_bench_harness_plays_both_tracks_of_a_pair() {
     );
 }
 
-/// [`play_pair`] with the pair opened locked, in Tier 1: pair64-matched
-/// played unthrottled on lavapipe in software to the end of both lenses,
-/// with no pair shown unmatched (M3 plan section 9).
+/// The corner codes (M3 plan 7.1) in the slots a pair shows, read back
+/// from the GPU: a slot's four corner blocks of luma copied on the GPU
+/// into one small texture and read back, then laid at their corners of a
+/// picture otherwise black and read as synth reads a picture. 8-bit luma
+/// only, as the perf pairs' and the 2×64² pairs' are.
+#[derive(Debug)]
+struct CodeReader {
+    side: u32,
+    block: u32,
+    blocks: wgpu::Texture,
+    luma: Vec<u8>,
+}
+
+impl CodeReader {
+    /// A reader for lenses `side` px square.
+    fn new(gpu: &Gpu, side: u32) -> CodeReader {
+        let block = corner::block_side(side);
+        let blocks = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("corner blocks"),
+            size: wgpu::Extent3d {
+                width: 2 * block,
+                height: 2 * block,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        CodeReader {
+            side,
+            block,
+            blocks,
+            luma: vec![0; side as usize * side as usize],
+        }
+    }
+
+    /// The code `f`'s slot holds. Waits for the GPU.
+    fn read(&mut self, gpu: &Gpu, f: &ShownFrame) -> Result<CornerCode, String> {
+        let texture = f
+            .gpu
+            .plane_texture(0)
+            .ok_or_else(|| format!("stream {}'s slot has no planes", f.stream))?;
+        let size = (texture.width(), texture.height());
+        if texture.format() != wgpu::TextureFormat::R8Unorm || size != (self.side, self.side) {
+            return Err(format!(
+                "stream {}'s slot is {:?} at {}x{}, not 8-bit luma {} px square",
+                f.stream,
+                texture.format(),
+                size.0,
+                size.1,
+                self.side
+            ));
+        }
+        let (b, far) = (self.block, self.side - self.block);
+        // In read_corners' order, each with its place in `blocks`.
+        let corners = [(0, 0), (far, 0), (0, far), (far, far)];
+        let at = |i: u32| (i % 2 * b, i / 2 * b);
+        let mut enc = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("corner blocks"),
+            });
+        for (i, &(x, y)) in (0u32..).zip(&corners) {
+            let (bx, by) = at(i);
+            enc.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x, y, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.blocks,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: bx, y: by, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: b,
+                    height: b,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        gpu.queue.submit([enc.finish()]);
+        let texels = readback::read_texture(gpu, &self.blocks, 0).map_err(|e| e.to_string())?;
+        let (b, side) = (b as usize, self.side as usize);
+        for (i, &(x, y)) in (0u32..).zip(&corners) {
+            let (bx, by) = at(i);
+            let (bx, by, x, y) = (bx as usize, by as usize, x as usize, y as usize);
+            for row in 0..b {
+                let from = (by + row) * 2 * b + bx;
+                let to = (y + row) * side + x;
+                self.luma[to..to + b].copy_from_slice(&texels.data[from..from + b]);
+            }
+        }
+        let luma = Luma {
+            samples: Samples::U8(&self.luma),
+            width: self.side,
+            height: self.side,
+            stride: side,
+            bits: 8,
+        };
+        corner::read_corner_code(&luma).map_err(|e| format!("stream {}: {e}", f.stream))
+    }
+}
+
+/// The frame index `time` is at `rate`.
+fn frame_index(rate: FrameRate, time: Time) -> i64 {
+    rate.time_to_frame(time, Rounding::Floor)
+        .unwrap_or(i64::MIN)
+}
+
+/// What `p` shows of a locked pair: the frame its slots' tags name, both
+/// lenses at one time, and the corner codes `reader` reads from lens 0's
+/// slot and then lens 1's; an error when the tags already show the
+/// lenses apart.
+fn pair_codes(
+    reader: &mut CodeReader,
+    gpu: &Gpu,
+    p: &Presented,
+    rate: FrameRate,
+) -> Result<(i64, [CornerCode; 2]), String> {
+    let lens = |m: usize| p.frames.iter().find(|f| f.stream == m);
+    let (Some(a), Some(b)) = (lens(0), lens(1)) else {
+        return Err(format!(
+            "a present showed {} of the two lenses",
+            p.frames.len()
+        ));
+    };
+    if a.frame.time != b.frame.time {
+        return Err(format!(
+            "the tags show the lenses apart: {:?} and {:?}",
+            a.frame.time, b.frame.time
+        ));
+    }
+    Ok((
+        frame_index(rate, a.frame.time),
+        [reader.read(gpu, a)?, reader.read(gpu, b)?],
+    ))
+}
+
+/// Whether `codes`, read from a pair's slots, lens 0's then lens 1's, are
+/// the frame `tag` their tags name, each of its own lens.
+fn codes_match(tag: i64, codes: [CornerCode; 2]) -> Result<(), String> {
+    let frame = u32::try_from(tag.rem_euclid(1 << corner::FRAME_BITS)).unwrap_or(0);
+    let want = [0, 1].map(|lens| CornerCode::of(lens, frame));
+    if codes == want {
+        Ok(())
+    } else {
+        Err(format!("frame {tag}'s pair holds {codes:?}, not {want:?}"))
+    }
+}
+
+/// The presents of a pass that showed a locked pair's lenses apart by
+/// their tags: one lens alone, or the two at different times.
+fn apart(presents: &[[Option<Time>; 2]]) -> usize {
+    presents
+        .iter()
+        .filter(|[a, b]| (a.is_some() || b.is_some()) && a != b)
+        .count()
+}
+
+/// [`play_pair`]'s passes with the pair opened locked, in Tier 1:
+/// pair64-matched played through both passes on lavapipe in software,
+/// with the corner codes of both slots read back at every frame of the
+/// unthrottled pass and after each of [`LOCKED_SEEKS`] exact seeks, as
+/// `samples_lens_pairs_frame_locked` reads the perf pair's (M3 plan
+/// section 9). Every pair is the frame its tags name, every seek lands
+/// both lenses on the frame that holds it, none is shown apart by the
+/// engine's count or the harness's, the lock holds on six slots, and the
+/// real-time pass keeps its samples for the pacing rule. The controls:
+/// the pair opened unlocked holds no lock, lens 0's slot read for both
+/// fails the codes' check, lens 1 a frame late in one present fails the
+/// harness's count, and lens 1 where another seek left it fails the
+/// landing's.
 #[test]
-#[ignore = "M3.8 unit (d)"]
 fn the_bench_harness_plays_a_locked_pair() {
-    todo!()
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("tier2-playback-locked-{}", std::process::id()));
+    let rig = Rig {
+        gpu: common::gpu().clone(),
+        node: hw::render_node(None, None),
+        hw: HwSupport::default(),
+    };
+    let spec = synth_media::pairs_64()
+        .into_iter()
+        .find(|p| p.name == synth_media::PAIR_64_MATCHED)
+        .unwrap();
+    let rate = spec.lenses[0].rate;
+    let path = synth_media::write_pair(&spec, &dir).unwrap();
+    let streams = lens_streams(&probe_file(&path));
+    let run = Run::software().locked();
+    let mut reader = CodeReader::new(&rig.gpu, spec.lenses[0].width);
+    let mut read = Vec::new();
+    let mut each = |p: &Presented| {
+        read.push(pair_codes(&mut reader, &rig.gpu, p, rate)?);
+        Ok(ControlFlow::Continue(()))
+    };
+    let limit = Duration::from_secs(60);
+    let u = unthrottled_with(&rig, &path, &streams, &run, limit, Some(&mut each)).unwrap();
+    let r = realtime(&rig, &path, &streams, &run, Duration::from_millis(2500)).unwrap();
+    let unlocked = unthrottled(&rig, &path, &streams, &Run::software(), limit).unwrap();
+    let landings = seek_landings(&rig, &path, &streams, &run, Some((&mut reader, rate))).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert_eq!(u.stalled, None);
+    assert_eq!(u.shown, 29);
+    assert_eq!(
+        (u.lock, u.unpaired, u.slots.active),
+        (Some(LockStatus::Locked), 0, 6)
+    );
+    let tags: Vec<i64> = read.iter().map(|(tag, _)| *tag).collect();
+    assert_eq!(tags, (0..30).collect::<Vec<_>>());
+    for (tag, codes) in &read {
+        codes_match(*tag, *codes).unwrap();
+    }
+    assert_eq!((r.lock, r.unpaired), (Some(LockStatus::Locked), 0));
+    assert_eq!(apart(&r.presents), 0);
+    assert!(r.shown > 0 && !r.samples.is_empty());
+    assert_eq!(r.samples.len(), r.presents.len());
+    assert_eq!(u.lens_decoded.len(), 2);
+    assert!(
+        u.lens_decoded.iter().all(|&d| d >= 29),
+        "{:?}",
+        u.lens_decoded
+    );
+    assert_eq!(landings.len(), LOCKED_SEEKS);
+    for l in &landings {
+        landed_together(l).unwrap();
+        assert!(l.codes.is_some(), "{l:?}");
+    }
+
+    // Controls.
+    must_fail(
+        "the pair opened unlocked holds a lock",
+        unlocked.lock == Some(LockStatus::Locked),
+    );
+    let (tag, codes) = read[5];
+    must_fail(
+        "lens 0's slot read for both",
+        codes_match(tag, [codes[0], codes[0]]),
+    );
+    let mut late = r.presents.clone();
+    let k = late.iter().position(|p| p[1].is_some()).unwrap();
+    late[k][1] = late[k][1].map(|t| t.checked_add(rate.frame_duration()).unwrap());
+    must_fail("lens 1 a frame late in one present", apart(&late) == 0);
+    let (a, b) = (
+        landings[0],
+        landings[1..]
+            .iter()
+            .find(|b| b.lenses[0] != landings[0].lenses[0])
+            .unwrap(),
+    );
+    must_fail(
+        "lens 1 landed where another seek left it",
+        landed_together(&Landing {
+            lenses: [a.lenses[0], b.lenses[1]],
+            ..a
+        }),
+    );
 }
 
-/// Each X5 sample's two lenses opened locked: 100 exact seeks land both
-/// on one frame, by pts and, on the 2×3840² perf clip, by corner code;
-/// clip 9 and the perf clip play in real time with no pair unmatched,
-/// read back from both presented slots on every frame of the perf clip
-/// (M3 plan section 9).
+/// A file a locked check plays: its name, its path and the rate its
+/// corner codes count at, where it has them.
+type LockedFile = (String, PathBuf, Option<FrameRate>);
+
+/// The two-lens files the locked Tier 2h checks play, with the rate
+/// their corner codes count at where they have them: clip 9's master
+/// (`handheld_flips`, handheld, where a pair shown apart would show,
+/// unlike clip 8's still tripod take) and the 2×3840² perf pair. Each
+/// file not here is a reason.
+fn locked_files() -> (Vec<LockedFile>, Vec<String>) {
+    let (mut files, mut missing) = (Vec::new(), Vec::new());
+    match tier2::samples_dir() {
+        Some(dir) => match samples::master_in(&dir, samples::entry("handheld_flips")) {
+            Ok(path) => files.push(("clip 9 (handheld_flips)".to_string(), path, None)),
+            Err(why) => missing.push(why),
+        },
+        None => missing.push("no samples directory (SPHERECUT_SAMPLES)".into()),
+    }
+    let spec = synth_media::perf_pairs()
+        .into_iter()
+        .find(|p| p.name == synth_media::PERF_PAIR_3840_2997)
+        .expect("synth's 2×3840² perf pair");
+    match tier2::perf_clip(&spec.file_name()) {
+        Ok(path) => files.push((
+            format!("perf clip {}", spec.name),
+            path,
+            Some(spec.lenses[0].rate),
+        )),
+        Err(why) => missing.push(why),
+    }
+    (files, missing)
+}
+
+/// The rig and the run a locked check plays `report`'s two lenses on, as
+/// the app plays them by default (D25), locked; why not, where Auto
+/// decodes them in software.
+fn locked_run<'a>(
+    rig: &'a Rig,
+    shared: &'a mut Option<Rig>,
+    report: &ProbeReport,
+) -> Result<(&'a Rig, Run), String> {
+    let format = format_of(report, lens_streams(report)[0]);
+    let auto = rig.auto(&format)?;
+    match rig.as_app_plays(&auto) {
+        Ok((on, kept)) => {
+            let on = shared.insert(on);
+            Ok((&*on, kept.locked()))
+        }
+        Err(why) => {
+            eprintln!("{}: copied, as the app plays it: {why}", auto.label);
+            Ok((rig, auto.locked()))
+        }
+    }
+}
+
+/// How many exact seeks [`samples_lens_pairs_frame_locked`] makes of each
+/// file.
+const LOCKED_SEEKS: usize = 100;
+
+/// Where an exact seek left a locked pair on screen.
+#[derive(Debug, Clone, Copy)]
+struct Landing {
+    target: Time,
+    /// Each lens's frame shown: its pts, its clip time and when it ends.
+    lenses: [Option<(i64, Time, Option<Time>)>; 2],
+    /// The frame the slots' tags name and the corner codes the slots
+    /// hold, where the file has them.
+    codes: Option<(i64, [CornerCode; 2])>,
+}
+
+/// Whether a seek landed both lenses on the one frame that holds its
+/// target, by pts, and by corner code where the landing read them.
+fn landed_together(l: &Landing) -> Result<(), String> {
+    let [Some(a), Some(b)] = l.lenses else {
+        return Err(format!("{l:?}: a lens shows nothing"));
+    };
+    if (a.0, a.1) != (b.0, b.1) {
+        return Err(format!(
+            "a seek to {:?} landed the lenses apart: {a:?} and {b:?}",
+            l.target
+        ));
+    }
+    if a.1 > l.target || a.2.is_some_and(|end| end <= l.target) {
+        return Err(format!(
+            "a seek to {:?} landed both on {a:?}, which doesn't hold it",
+            l.target
+        ));
+    }
+    match l.codes {
+        Some((tag, codes)) => codes_match(tag, codes),
+        None => Ok(()),
+    }
+}
+
+/// [`LOCKED_SEEKS`] exact seeks of the pair at `path` opened as `run` on
+/// `rig`, paused, each to the middle of a frame drawn at random (by a
+/// fixed seed), and where each landed once both lenses show the frame
+/// that holds it, or what they show after [`FIRST_FRAME`]; with the
+/// corner codes `codes` reads, at that rate, when given.
+fn seek_landings(
+    rig: &Rig,
+    path: &Path,
+    streams: &[Option<usize>],
+    run: &Run,
+    mut codes: Option<(&mut CodeReader, FrameRate)>,
+) -> Result<Vec<Landing>, String> {
+    let clock = Arc::new(ManualClock::new(FrameRate::FPS_30.frame_duration()));
+    let player = rig.player(clock, run)?;
+    open(&player, path, streams, run)?;
+    let landings = (|| -> Result<Vec<Landing>, String> {
+        drop(first_frame(&player, streams.len())?);
+        let rate = stream_rate(&player).ok_or("the lenses give no frame rate")?;
+        let frames = common::snapshot(&player)
+            .streams
+            .iter()
+            .filter_map(|s| s.info.as_ref()?.duration)
+            .map(|d| frame_index(rate, d))
+            .min()
+            .filter(|&n| n > 1)
+            .ok_or("the lenses give no length")?;
+        // SplitMix64, from a fixed seed.
+        let mut state: u64 = 0x5eed_0c0d_e5a1_0c4d;
+        let mut next = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^ (z >> 31)
+        };
+        let half = rate
+            .frame_duration()
+            .0
+            .checked_div(spherecut_core::Rational::new(2, 1).map_err(|e| e.to_string())?)
+            .map(Time)
+            .map_err(|e| e.to_string())?;
+        let mut landings = Vec::new();
+        for _ in 0..LOCKED_SEEKS {
+            let k = i64::try_from(next() % (frames - 1) as u64).unwrap_or(0);
+            let target = rate
+                .frame_to_time(k)
+                .and_then(|t| t.checked_add(half))
+                .map_err(|e| e.to_string())?;
+            player.seek(target, SeekMode::Exact);
+            let start = Instant::now();
+            let p = loop {
+                let p = player.present(Instant::now());
+                let holds = |p: &Presented| {
+                    p.frames.len() == 2
+                        && p.frames.iter().all(|f| {
+                            f.frame.time <= target && ends(&f.frame, Some(rate)) > Some(target)
+                        })
+                };
+                match p {
+                    Some(p) if holds(&p) || start.elapsed() > FIRST_FRAME => break Some(p),
+                    None if start.elapsed() > FIRST_FRAME => break None,
+                    _ => {}
+                }
+                stream_error(&player)?;
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let lens = |m: usize| {
+                let f = p.as_ref()?.frames.iter().find(|f| f.stream == m)?;
+                Some((f.frame.pts, f.frame.time, ends(&f.frame, Some(rate))))
+            };
+            let codes = match (&mut codes, &p) {
+                (Some((reader, at)), Some(p)) => pair_codes(reader, &rig.gpu, p, *at).ok(),
+                _ => None,
+            };
+            landings.push(Landing {
+                target,
+                lenses: [lens(0), lens(1)],
+                codes,
+            });
+        }
+        Ok(landings)
+    })();
+    let joined = join(player);
+    let landings = landings?;
+    joined?;
+    Ok(landings)
+}
+
+/// Each X5 sample's two lenses opened locked, as the app plays them by
+/// default (M3 plan section 9), on clip 9 and on the 2×3840² perf pair:
+/// 100 exact seeks land both lenses on one frame, by pts and, on the
+/// perf pair, by corner code; both play in real time with no pair shown
+/// apart, by the engine's count and the harness's; and the perf pair's
+/// corner codes, read back from both presented slots on every frame of an
+/// unthrottled pass, equal each other and the tags: the content check on
+/// path B and its pool. Each check's control plants a mismatch it must
+/// catch: lens 1 landed a frame off, the codes of lens 0's slot read for
+/// both, lens 1 a frame late in one present.
 #[test]
-#[ignore = "M3.8 unit (d)"]
+#[ignore = "tier2: needs the X5 samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn samples_lens_pairs_frame_locked() {
-    todo!()
+    tier2::require_hw_run();
+    let (files, missing) = locked_files();
+    if files.is_empty() {
+        tier2::skip(missing.join("; "));
+    }
+    let rig = Rig::hardware();
+    eprintln!("{}", rig.about());
+    let mut no_hardware = Vec::new();
+    for (name, path, coded) in &files {
+        let report = probe_file(path);
+        let streams = lens_streams(&report);
+        let mut shared = None;
+        let (on, run) = match locked_run(&rig, &mut shared, &report) {
+            Ok(r) => r,
+            Err(why) => {
+                no_hardware.push(format!("{name}: Auto decodes it in software here: {why}"));
+                continue;
+            }
+        };
+        let side = shape(&report).map_or(0, |((w, _), _, _)| w);
+        let mut reader = coded.map(|_| CodeReader::new(&on.gpu, side));
+        let codes = reader.as_mut().zip(*coded);
+        let landings = seek_landings(on, path, &streams, &run, codes)
+            .unwrap_or_else(|e| panic!("{name}, {}: seeks: {e}", run.label));
+        for l in &landings {
+            landed_together(l).unwrap_or_else(|e| panic!("{name}, {}: {e}", run.label));
+        }
+        assert!(
+            coded.is_none() || landings.iter().all(|l| l.codes.is_some()),
+            "{name}: a landing's codes weren't read"
+        );
+        // Control: lens 1 as another seek left it, a frame off.
+        let (a, b) = landings
+            .iter()
+            .zip(&landings[1..])
+            .find(|(a, b)| a.lenses[0].map(|l| l.1) != b.lenses[0].map(|l| l.1))
+            .expect("two seeks that landed on different frames");
+        let planted = Landing {
+            lenses: [a.lenses[0], b.lenses[1]],
+            ..*a
+        };
+        must_fail("lens 1 landed elsewhere", landed_together(&planted));
+        eprintln!(
+            "{name}, {}: {} exact seeks landed both lenses together",
+            run.label,
+            landings.len()
+        );
+
+        // Real time, no pair apart.
+        let r = realtime(on, path, &streams, &run, RECORDED)
+            .unwrap_or_else(|e| panic!("{name}, {}: real time: {e}", run.label));
+        assert_eq!(
+            (r.lock, r.unpaired, apart(&r.presents)),
+            (Some(LockStatus::Locked), 0, 0),
+            "{name}, {}: in real time",
+            run.label
+        );
+        let mut late = r.presents.clone();
+        if let Some(k) = late.iter().position(|p| p[1].is_some()) {
+            late[k][1] = late[k][1].and_then(|t| {
+                t.checked_add(r.rate.map_or(Time::ZERO, FrameRate::frame_duration))
+                    .ok()
+            });
+        }
+        must_fail("lens 1 a frame late in one present", apart(&late) == 0);
+        eprintln!(
+            "{name}, {}: {} pairs in {:.1} s of real time, none apart; {}",
+            run.label,
+            r.shown,
+            r.elapsed.as_secs_f64(),
+            r.paths_line()
+        );
+
+        // Every frame's corner codes, unthrottled.
+        let (Some(reader), Some(rate)) = (reader.as_mut(), *coded) else {
+            continue;
+        };
+        let mut read = Vec::new();
+        let mut each = |p: &Presented| {
+            read.push(pair_codes(reader, &on.gpu, p, rate)?);
+            Ok(ControlFlow::Continue(()))
+        };
+        let u = unthrottled_with(on, path, &streams, &run, GATED_UNTHROTTLED, Some(&mut each))
+            .unwrap_or_else(|e| panic!("{name}, {}: unthrottled: {e}", run.label));
+        assert_eq!(u.stalled, None, "{name}, {}", run.label);
+        assert_eq!((u.lock, u.unpaired), (Some(LockStatus::Locked), 0));
+        for (tag, codes) in &read {
+            codes_match(*tag, *codes).unwrap_or_else(|e| panic!("{name}, {}: {e}", run.label));
+        }
+        let (tag, codes) = read[read.len() / 2];
+        must_fail(
+            "lens 0's slot read for both",
+            codes_match(tag, [codes[0], codes[0]]),
+        );
+        eprintln!(
+            "{name}, {}: {} pairs' corner codes read back, each its tags' frame; {}",
+            run.label,
+            read.len(),
+            u.paths_line()
+        );
+    }
+    if !missing.is_empty() || !no_hardware.is_empty() {
+        tier2::skip(
+            missing
+                .iter()
+                .chain(&no_hardware)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
 }
 
-/// A locked pair on the GPU's own frames (path A or B) shows the same
-/// pairs, read back, as the copy path (M3 plan section 9).
+/// Each slot's planes of the first `count` pairs a locked pair shows,
+/// opened as `run` on `rig` and played unthrottled, read back from the
+/// GPU and hashed (level 0, which the mips are made from): by stream and
+/// pts. Fails when the lock doesn't hold, or a zero-copy run took no frame
+/// on the GPU or had one refused.
+fn slot_hashes(
+    rig: &Rig,
+    path: &Path,
+    streams: &[Option<usize>],
+    run: &Run,
+    count: usize,
+) -> Result<BTreeMap<(usize, i64), Vec<u64>>, String> {
+    let mut hashes = BTreeMap::new();
+    let mut pairs = 0;
+    let mut each = |p: &Presented| {
+        for f in &p.frames {
+            let planes = (0..)
+                .map_while(|i| f.gpu.plane_texture(i))
+                .map(|t| {
+                    readback::read_texture(&rig.gpu, t, 0)
+                        .map(|texels| fnv64(&texels.data))
+                        .map_err(|e| e.to_string())
+                })
+                .collect::<Result<Vec<u64>, String>>()?;
+            hashes.insert((f.stream, f.frame.pts), planes);
+        }
+        pairs += 1;
+        Ok(if pairs >= count {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        })
+    };
+    let u = unthrottled_with(rig, path, streams, run, GATED_UNTHROTTLED, Some(&mut each))?;
+    if u.lock != Some(LockStatus::Locked) || u.unpaired > 0 {
+        return Err(format!(
+            "the lock ended {:?} with {} unpaired presents",
+            u.lock, u.unpaired
+        ));
+    }
+    if run.zero_copy != ZeroCopy::Off && (u.imported == 0 || u.refused > 0) {
+        return Err(format!(
+            "{} frames taken on the GPU, {} refused{}",
+            u.imported,
+            u.refused,
+            because(u.refusal.as_ref())
+        ));
+    }
+    Ok(hashes)
+}
+
+/// Whether the zero-copy run's slots, `got`, hold the copy's, `want`,
+/// byte for byte: the same frames of each lens, every plane the same.
+/// The frames compared.
+fn same_slots(
+    got: &BTreeMap<(usize, i64), Vec<u64>>,
+    want: &BTreeMap<(usize, i64), Vec<u64>>,
+) -> Result<usize, String> {
+    if got.keys().ne(want.keys()) {
+        return Err(format!(
+            "the runs showed other frames: {:?} against {:?}",
+            got.keys().collect::<Vec<_>>(),
+            want.keys().collect::<Vec<_>>()
+        ));
+    }
+    match got.iter().find(|(k, v)| want.get(k) != Some(v)) {
+        Some(((stream, pts), _)) => Err(format!(
+            "stream {stream}'s frame at pts {pts} differs from the copy's"
+        )),
+        None => Ok(got.len()),
+    }
+}
+
+/// A locked pair kept on the GPU (path B where the device can be shared,
+/// and path A where the GPU imports VA-API's frames) shows the same
+/// pairs, each slot's planes read back byte for byte, as the copy path on
+/// the same decoder: the first [`ZERO_COPY_FRAMES`] pairs of clip 9 and
+/// of the 2×3840² perf pair, more than the decoder's surfaces beyond
+/// [`SURFACE_CAP`], so that the pool runs round while frames are held (M3
+/// plan section 9). The control plants a mismatch: the copy's lenses
+/// swapped must differ. Skips, with the reasons, when no path keeps the
+/// frames on the GPU here or a file isn't; never a pass with one left
+/// out.
 #[test]
-#[ignore = "M3.8 unit (d)"]
+#[ignore = "tier2: needs a GPU that keeps decoded frames on it, and the X5 samples or hw-test's perf pairs"]
 fn zero_copy_pair_matches_copy() {
-    todo!()
+    tier2::require_hw_run();
+    let (files, mut missing) = locked_files();
+    if files.is_empty() {
+        tier2::skip(missing.join("; "));
+    }
+    let rig = Rig::hardware();
+    eprintln!("{}", rig.about());
+    let shared = rig.shared();
+    for (name, path, _) in &files {
+        let report = probe_file(path);
+        let streams = lens_streams(&report);
+        let format = format_of(&report, streams[0]);
+        let check = format.check_format().unwrap_or("this format");
+        let mut paths: Vec<(&str, &Rig, HwKind, ZeroCopy)> = Vec::new();
+        match &shared {
+            Ok(on) if rig.hw.works(check, HwKind::Vulkan) => {
+                paths.push(("path B", on, HwKind::Vulkan, ZeroCopy::Vulkan));
+            }
+            Ok(_) => missing.push(format!(
+                "{name}: path B: Vulkan Video doesn't decode {check}"
+            )),
+            Err(why) => missing.push(format!("{name}: path B: the device can't be shared: {why}")),
+        }
+        if !rig.gpu.caps.dmabuf_import {
+            missing.push(format!("{name}: path A: the GPU can't import DMA-BUFs"));
+        } else if !rig.hw.works(check, HwKind::VaApi) {
+            missing.push(format!("{name}: path A: VA-API doesn't decode {check}"));
+        } else {
+            paths.push(("path A", &rig, HwKind::VaApi, ZeroCopy::All));
+        }
+        for (label, on, kind, zero_copy) in paths {
+            let kept = Run {
+                label: format!("{kind}, {label}"),
+                zero_copy,
+                ..Run::only(kind)
+            }
+            .locked();
+            let copy = Run::only(kind).locked();
+            let got = slot_hashes(on, path, &streams, &kept, ZERO_COPY_FRAMES);
+            let want = slot_hashes(&rig, path, &streams, &copy, ZERO_COPY_FRAMES)
+                .unwrap_or_else(|e| panic!("{name}, {}: {e}", copy.label));
+            let got = match got {
+                Ok(g) => g,
+                Err(why) => {
+                    missing.push(format!("{name}, {}: {why}", kept.label));
+                    continue;
+                }
+            };
+            let n = same_slots(&got, &want)
+                .unwrap_or_else(|e| panic!("{name}, {} against the copy: {e}", kept.label));
+            let swapped = want
+                .iter()
+                .map(|(&(stream, pts), v)| ((stream ^ 1, pts), v.clone()))
+                .collect();
+            must_fail("the copy's lenses swapped", same_slots(&got, &swapped));
+            eprintln!(
+                "{name}, {}: {n} frames, every slot's planes the copy's byte for byte",
+                kept.label
+            );
+        }
+    }
+    if !missing.is_empty() {
+        tier2::skip(missing.join("; "));
+    }
 }
 
 /// K2's engine half holds VA-API's copied pass to 36 fps a lens in every

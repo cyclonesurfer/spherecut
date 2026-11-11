@@ -12,7 +12,7 @@
 //! - play reaches the end.
 //!
 //! [`pacing`] holds a run's [`Sample`]s to it and names the part that
-//! failed; [`play`] drives a run on a `ManualClock` and gathers them,
+//! failed, and [`pacing_cut`] one that its own length ends; [`play`] drives a run on a `ManualClock` and gathers them,
 //! [`play_steady`] drives one that keeps to the rule, and [`play_with`]
 //! one whose clock a test moves itself.
 
@@ -117,6 +117,18 @@ pub enum Unpaced {
 /// `samples`, a run's presents in order, of a clip at `rate`, held to
 /// the pacing rule.
 pub fn pacing(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced> {
+    pacing_to(samples, rate, true)
+}
+
+/// [`pacing`] for a run that a length of its own may end before the
+/// clip's end, as a real-time benchmark's: the rule but its last part,
+/// play reaching the end, which a freeze fails anyway by trailing.
+pub fn pacing_cut(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced> {
+    pacing_to(samples, rate, false)
+}
+
+/// The pacing rule, with or without its last part.
+fn pacing_to(samples: &[Sample], rate: FrameRate, to_end: bool) -> Result<Paced, Unpaced> {
     let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
     let start = samples
         .iter()
@@ -162,7 +174,7 @@ pub fn pacing(samples: &[Sample], rate: FrameRate) -> Result<Paced, Unpaced> {
     if (pairs as f64) < SHARE * handed_out as f64 {
         return Err(Unpaced::FewPairs { pairs, handed_out });
     }
-    if !samples.iter().any(|s| s.end) {
+    if to_end && !samples.iter().any(|s| s.end) {
         return Err(Unpaced::NoEnd);
     }
     Ok(Paced {
