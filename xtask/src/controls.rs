@@ -1,9 +1,11 @@
 //! The check's own controls (DECISIONS D32): a lint or a ban that can't
 //! fail proves nothing, so `cargo xtask check` also runs clippy's network
-//! lints and cargo-deny's network bans (D8, D24) on scratch crates made
-//! to fail them, and on clean ones that must pass. The scratch crates go
-//! under the target directory's `xtask-controls/`.
+//! lints and cargo-deny's network bans (D8, D24), rustdoc's gate and the
+//! MSRV build (D1) on scratch crates made to fail them, and on clean ones
+//! that must pass. The scratch crates go under the target directory's
+//! `xtask-controls/`.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,8 +21,12 @@ const DIR: &str = "xtask-controls";
 /// `[workspace]` of its own, so that cargo never takes it for part of
 /// ours. Returns its directory.
 pub fn scratch_crate(name: &str, files: &[(&str, &str)]) -> Result<PathBuf> {
-    let base = crate::hw_test::target_dir(&crate::workspace_root()).join(DIR);
-    scratch_crate_in(&base, name, files)
+    scratch_crate_in(&base(), name, files)
+}
+
+/// `<target>/xtask-controls/`.
+fn base() -> PathBuf {
+    crate::hw_test::target_dir(&crate::workspace_root()).join(DIR)
 }
 
 fn scratch_crate_in(base: &Path, name: &str, files: &[(&str, &str)]) -> Result<PathBuf> {
@@ -217,6 +223,152 @@ pub fn deny_controls(root: &Path) -> Result<()> {
         }
     }
     eprintln!("==> cargo-deny's controls failed as they must");
+    Ok(())
+}
+
+/// A scratch crate for rustdoc's controls, `rustdoc/<name>`: a lib
+/// `doc_gate_control` from `lib` and a bin `doc-gate-control-bin` from
+/// `bin`, no dependencies, and an empty `[workspace]` of its own.
+fn doc_crate(name: &str, lib: &str, bin: &str) -> Result<PathBuf> {
+    let toml = manifest(
+        "doc-gate-control",
+        "0.1.0",
+        true,
+        "\n[[bin]]\nname = \"doc-gate-control-bin\"\npath = \"src/main.rs\"\n",
+    );
+    scratch_crate(
+        &format!("rustdoc/{name}"),
+        &[
+            ("Cargo.toml", &toml),
+            ("src/lib.rs", lib),
+            ("src/main.rs", bin),
+        ],
+    )
+}
+
+/// Rustdoc as the check runs it ([`crate::check::rustdoc_command`], the
+/// check's flags) on scratch crates built offline into
+/// `xtask-controls/target`: a clean one passes, and four must fail, each
+/// naming its fault: a link to nothing, a link to a name that is both a
+/// module and a macro, an unclosed HTML tag in a bin's private item's
+/// docs, and the first again under `RUSTDOCFLAGS=-A warnings`, which the
+/// check's `-D warnings` comes after.
+pub fn rustdoc_controls() -> Result<()> {
+    let target = base().join("target");
+    let doc = |dir: &Path, flags: OsString| {
+        outcome(
+            crate::check::rustdoc_command(Some(&dir.join("Cargo.toml")), flags)
+                .arg("--offline")
+                .env("CARGO_TARGET_DIR", &target),
+        )
+    };
+    let ours = || crate::check::rustdocflags(&[]);
+    let lib =
+        "//! A clean crate.\n\n/// Adds.\npub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n";
+    let bin = "//! Its bin.\n\n/// Says hello.\nfn hello() -> &'static str {\n    \"hello\"\n}\n\n\
+               fn main() {\n    println!(\"{}\", hello());\n}\n";
+    let clean = doc_crate("clean", lib, bin)?;
+    if let Err(stderr) = doc(&clean, ours())? {
+        bail!("rustdoc fails a clean scratch crate, so its controls say nothing:\n{stderr}");
+    }
+    let nowhere = "//! See [`nowhere`].\n";
+    let both = "//! [`file`] saves it.\n\n/// Files.\npub mod file {}\n";
+    let html = "//! Its bin.\n\n/// spherecut-look-<ms>-<n>.jpg\nfn hello() -> &'static str {\n    \
+                \"hello\"\n}\n\nfn main() {\n    println!(\"{}\", hello());\n}\n";
+    let allowed = vec![(
+        OsString::from("RUSTDOCFLAGS"),
+        OsString::from("-A warnings"),
+    )];
+    let controls = [
+        (
+            "a link to nothing",
+            "nowhere",
+            nowhere,
+            bin,
+            ours(),
+            "unresolved link",
+        ),
+        (
+            "a link to both a module and a macro",
+            "ambiguous",
+            both,
+            bin,
+            ours(),
+            "both a module and a macro",
+        ),
+        (
+            "an unclosed HTML tag in a bin's private docs",
+            "html",
+            lib,
+            html,
+            ours(),
+            "unclosed HTML tag `ms`",
+        ),
+        (
+            "a link to nothing under RUSTDOCFLAGS=-A warnings",
+            "allowed",
+            nowhere,
+            bin,
+            crate::check::rustdocflags(&allowed),
+            "unresolved link",
+        ),
+    ];
+    let count = controls.len();
+    for (what, name, lib, bin, flags, says) in controls {
+        let dir = doc_crate(name, lib, bin)?;
+        let stderr = must_fail(&format!("rustdoc on {what}"), doc(&dir, flags)?)?;
+        if !stderr.contains(says) {
+            bail!("rustdoc failed the control `{what}`, but not with \"{says}\":\n{stderr}");
+        }
+    }
+    eprintln!("==> rustdoc's {count} controls failed as they must");
+    Ok(())
+}
+
+/// The MSRV build's command ([`crate::check::msrv_command`]) on two
+/// scratch crates built offline into `xtask-controls/target`: one whose
+/// `rust-version` is `version` passes, and one a minor release past it
+/// must fail, cargo saying that it requires that rustc.
+pub fn msrv_controls(version: &str) -> Result<()> {
+    let (major, minor) = crate::machine::rustc_version(&format!("rustc {version}"))
+        .with_context(|| format!("{version:?} isn't a version"))?;
+    let past = format!("{major}.{}", minor + 1);
+    let target = base().join("target");
+    let at = |name: &str, rust: &str| -> Result<Result<String, String>> {
+        let dir = scratch_crate(
+            &format!("msrv/{name}"),
+            &[
+                (
+                    "Cargo.toml",
+                    &format!(
+                        "[package]\nname = \"msrv-control\"\nversion = \"0.1.0\"\n\
+                         edition = \"2021\"\nrust-version = \"{rust}\"\npublish = false\n\
+                         license = \"MIT\"\n\n[workspace]\n"
+                    ),
+                ),
+                ("src/lib.rs", "//! A crate for the MSRV build's controls.\n"),
+            ],
+        )?;
+        outcome(
+            crate::check::msrv_command(version, Some(&dir.join("Cargo.toml")), &target)
+                .arg("--offline"),
+        )
+    };
+    if let Err(stderr) = at("at", version)? {
+        bail!(
+            "the MSRV build fails a crate whose rust-version is {version}, so its controls \
+             say nothing:\n{stderr}"
+        );
+    }
+    let stderr = must_fail(
+        &format!("the MSRV build of a crate that needs Rust {past}"),
+        at("past", &past)?,
+    )?;
+    let says = format!("requires rustc {past}");
+    if !stderr.contains(&says) {
+        bail!("the MSRV build failed its control, but not with \"{says}\":\n{stderr}");
+    }
+    eprintln!("==> the MSRV build's controls failed as they must");
     Ok(())
 }
 
