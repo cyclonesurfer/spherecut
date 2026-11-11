@@ -1421,9 +1421,12 @@ mod text {
     use crate::camera::CameraFile;
     use crate::spherical::{Projection, StereoMode};
 
-    /// The lines of FFmpeg's log about a file, as the report shows them.
+    /// The lines of FFmpeg's log about a file, as the report shows them,
+    /// escaped: FFmpeg's lines can quote the file's own bytes (F102).
     pub fn ffmpeg_lines(log: &[String]) -> String {
-        log.iter().map(|l| format!("  ffmpeg     {l}\n")).collect()
+        log.iter()
+            .map(|l| format!("  ffmpeg     {}\n", escape_controls(l)))
+            .collect()
     }
 
     fn secs(t: Time) -> String {
@@ -1544,12 +1547,14 @@ mod text {
                 escape_controls(v)
             );
         }
+        // Warnings and damage can quote the file's own text, a box's
+        // type or a tag (F102).
         for w in &r.warnings {
-            let _ = writeln!(s, "  warning    {w}");
+            let _ = writeln!(s, "  warning    {}", escape_controls(&w.to_string()));
         }
         s += &ffmpeg_lines(&r.ffmpeg_log);
         for d in &r.damage {
-            let _ = writeln!(s, "  DAMAGE     {d}");
+            let _ = writeln!(s, "  DAMAGE     {}", escape_controls(&d.to_string()));
         }
         s
     }
@@ -2163,27 +2168,21 @@ mod tests {
         );
     }
 
-    /// Probe's text escapes a track's handler name, which is the file's
-    /// own `hdlr` text, and the file's and its companion's names, as it
-    /// does the camera's strings: the only control characters left are
-    /// the lines' own ends.
-    ///
-    /// Control: each planted text printed as it is holds control
-    /// characters.
-    #[test]
-    fn probe_text_escapes_the_handler_and_the_paths() {
-        use spherecut_testkit::control::must_fail;
+    /// The file names and handler that the escaping tests plant.
+    const PLANTED: (&str, &str, &str) = (
+        "VID_\u{1b}]0;x\u{7}_00_004.insv",
+        "LRV_\u{1b}]0;x\u{7}_01_004.lrv",
+        "INS\u{1b}[2J.HVC",
+    );
 
+    /// A report of a file with [`PLANTED`]'s names and handler.
+    fn planted_report() -> ProbeReport {
         use crate::camera::Companion;
 
-        let (name, lrv, handler) = (
-            "VID_\u{1b}]0;x\u{7}_00_004.insv",
-            "LRV_\u{1b}]0;x\u{7}_01_004.lrv",
-            "INS\u{1b}[2J.HVC",
-        );
+        let (name, lrv, handler) = PLANTED;
         let mut video = stream(StreamKind::Video);
         video.handler = Some(handler.into());
-        let report = ProbeReport {
+        ProbeReport {
             path: name.into(),
             file_size: 1,
             container: Container {
@@ -2209,9 +2208,27 @@ mod tests {
             damage: Vec::new(),
             warnings: Vec::new(),
             ffmpeg_log: Vec::new(),
-        };
-        let text = render_text(&report);
-        let clean = |s: &str| !s.chars().any(|c| c.is_control() && c != '\n');
+        }
+    }
+
+    /// Text with no control character but the newline.
+    fn clean(s: &str) -> bool {
+        !s.chars().any(|c| c.is_control() && c != '\n')
+    }
+
+    /// Probe's text escapes a track's handler name, which is the file's
+    /// own `hdlr` text, and the file's and its companion's names, as it
+    /// does the camera's strings: the only control characters left are
+    /// the lines' own ends.
+    ///
+    /// Control: each planted text printed as it is holds control
+    /// characters.
+    #[test]
+    fn probe_text_escapes_the_handler_and_the_paths() {
+        use spherecut_testkit::control::must_fail;
+
+        let (name, lrv, handler) = PLANTED;
+        let text = render_text(&planted_report());
         assert!(clean(&text), "{text:?}");
         for line in [
             "VID_\\x1b]0;x\\x07_00_004.insv\n".to_owned(),
@@ -2224,6 +2241,49 @@ mod tests {
             ("file's name", name),
             ("LRV's name", lrv),
             ("handler", handler),
+        ] {
+            must_fail(&format!("the {what}, printed as it is, clean"), clean(raw));
+        }
+    }
+
+    /// Probe's text escapes its warnings, its damage and FFmpeg's lines
+    /// too (F102): a warning or a damage line can quote the file's own
+    /// text, and FFmpeg's lines can quote a box's.
+    ///
+    /// Control: each planted text printed as it is holds control
+    /// characters.
+    #[test]
+    fn probe_text_escapes_warnings_damage_and_ffmpeg_lines() {
+        use spherecut_testkit::control::must_fail;
+
+        let (warning, damage, logged) = (
+            "stream 0: \u{1b}]52;c;AAAA\u{7}",
+            "box \u{1b}[2J",
+            "[mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] \u{1b}]0;x\u{7}",
+        );
+        let report = ProbeReport {
+            warnings: vec![Problem::new(codes::NO_DECODER, warning)],
+            damage: vec![Problem::new(codes::DAMAGED, damage)],
+            ffmpeg_log: vec![logged.into()],
+            ..planted_report()
+        };
+        let text = render_text(&report);
+        let lines = ffmpeg_lines(&report.ffmpeg_log);
+        assert!(clean(&text), "{text:?}");
+        assert!(clean(&lines), "{lines:?}");
+        let escaped = "  ffmpeg     [mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] \\x1b]0;x\\x07\n";
+        assert_eq!(lines, escaped);
+        for line in [
+            "  warning    stream 0: \\x1b]52;c;AAAA\\x07\n",
+            escaped,
+            "  DAMAGE     box \\x1b[2J\n",
+        ] {
+            assert!(text.contains(line), "{line:?} in {text}");
+        }
+        for (what, raw) in [
+            ("warning", warning),
+            ("damage", damage),
+            ("FFmpeg's line", logged),
         ] {
             must_fail(&format!("the {what}, printed as it is, clean"), clean(raw));
         }
