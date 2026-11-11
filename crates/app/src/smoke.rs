@@ -16,6 +16,21 @@
 //! [`PAN_DEG`] over the span for it to sample (amendment 2 item 22
 //! measures the heaviest export frames while the viewer plays).
 //!
+//! Three flags let a run see the UI while decode falls behind (D40).
+//! `--smoke-decoder` plays on the decoder named, over the settings'
+//! Automatic, as the run reads no stored settings. With
+//! `--smoke-decode-floor-ms`, each stream it opens hands out at most one
+//! frame a floor ([`with_decode_floor`]), so that decode falls behind a
+//! clip whose frames come faster. `--smoke-control-ui-waits` is the
+//! control of that run: while the clip plays, each pass of eframe's
+//! logic waits for the next decoded frame
+//! ([`wait_for_a_decoded_frame`]), as a UI that waited on decode would,
+//! so the UI's gates must fail. It breaks D34's rule that the UI thread
+//! never waits, on purpose and only under `--smoke`; each wait is a
+//! blocking call on the UI thread, which `blocked_on_ui_thread` counts,
+//! and in a debug build, whose UI thread panics on one, the control
+//! can't run. The document's `asked` says which of them the run had.
+//!
 //! The numbers are the overlay's ([`PerfStats`]), over the whole run: each
 //! pass gathers the samples every stage recorded since the last
 //! ([`PerfStats::samples_after`]), and counts as missed those a ring's
@@ -41,9 +56,16 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use spherecut_core::StopToken;
 use spherecut_core::fs::TempFile;
-use spherecut_media::backend::DecodePath;
-use spherecut_playback::{Counter, LockStatus, PlayState, Stage};
+use spherecut_media::MediaError;
+use spherecut_media::backend::{
+    AudioDecode, AudioRequest, DecodePath, DecodeStats, DecoderEvent, MediaBackend, NextFrame,
+    SeekMode, SeekOutcome, VideoDecode, VideoRequest, VideoStreamInfo,
+};
+use spherecut_media::mp4::TrackTiming;
+use spherecut_media::probe::{ProbeError, ProbeReport};
+use spherecut_playback::{Counter, LockStatus, PlayState, Player, Stage};
 
 use spherecut_core::project::{AnyKey, Ease, Edit, Key, KeyId, Orient};
 use spherecut_core::time::{Rational, Time};
@@ -96,6 +118,13 @@ pub const STALL: Duration = Duration::from_secs(15);
 /// How the watchdog ends the process: with this exit status.
 pub type ExitHook = Box<dyn FnOnce(i32) + Send>;
 
+/// The longest the control (`--smoke-control-ui-waits`) waits in a pass
+/// for the next decoded frame.
+pub const CONTROL_WAIT: Duration = Duration::from_millis(250);
+
+/// The longest a held frame sleeps at a time between looks at its stop.
+const FLOOR_STEP: Duration = Duration::from_millis(5);
+
 /// What `--smoke` and its flags ask for.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SmokeArgs {
@@ -109,6 +138,15 @@ pub struct SmokeArgs {
     /// An export of the clip's first [`EXPORT_SPAN`], made while it
     /// plays; none without it.
     pub export: Option<SmokeExport>,
+    /// The decoder to play on, over the settings' Automatic; none for
+    /// the default.
+    pub decoder: Option<crate::settings::DecoderSetting>,
+    /// Each stream's decode held to at most one frame in this long
+    /// ([`with_decode_floor`]); none without it.
+    pub decode_floor: Option<Duration>,
+    /// The control of a run with decode behind: the UI waits for each
+    /// decoded frame while the clip plays ([`wait_for_a_decoded_frame`]).
+    pub control_ui_waits: bool,
 }
 
 /// `--smoke-export`: where the export goes, and what the run sets first.
@@ -178,6 +216,160 @@ impl SmokeExport {
 /// and a message when it failed, or when the document couldn't be
 /// written.
 pub type Outcome = Result<(), (&'static str, String)>;
+
+/// `inner` with `--smoke-decode-floor-ms`'s floor: with one, each video
+/// stream it opens hands out at most one frame a floor, so that decode
+/// falls behind a clip whose frames come faster (D40). The frame is
+/// decoded, then held on the decode worker's thread until a floor has
+/// passed since the stream's last; a seek is never held, and the
+/// decoders' own numbers (`DecodeStats`) stay theirs. Without one,
+/// `inner` as it is.
+pub fn with_decode_floor(
+    inner: Arc<dyn MediaBackend>,
+    floor: Option<Duration>,
+) -> Arc<dyn MediaBackend> {
+    match floor {
+        None => inner,
+        Some(floor) => Arc::new(DecodeFloor { inner, floor }),
+    }
+}
+
+/// [`with_decode_floor`]'s backend: everything but the video decoders
+/// passed on, track timing too, since `Ok(None)` would refuse every
+/// lock.
+#[derive(Debug)]
+struct DecodeFloor {
+    inner: Arc<dyn MediaBackend>,
+    floor: Duration,
+}
+
+impl MediaBackend for DecodeFloor {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        Ok(Box::new(Floored {
+            inner: self.inner.open_video(path, req)?,
+            floor: self.floor,
+            last: None,
+        }))
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
+}
+
+/// A video decoder that hands out at most one frame a `floor`.
+#[derive(Debug)]
+struct Floored {
+    inner: Box<dyn VideoDecode>,
+    floor: Duration,
+    /// When it last handed out a frame, by a seek or the next.
+    last: Option<Instant>,
+}
+
+impl VideoDecode for Floored {
+    fn info(&self) -> &VideoStreamInfo {
+        self.inner.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.inner.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        let outcome = self.inner.seek(at, mode, stop)?;
+        if matches!(outcome, SeekOutcome::Frame { .. }) {
+            self.last = Some(Instant::now());
+        }
+        Ok(outcome)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        let next = self.inner.next_frame(stop)?;
+        if matches!(next, NextFrame::Frame(_)) {
+            if let Some(last) = self.last {
+                hold_until(last + self.floor, stop);
+            }
+            self.last = Some(Instant::now());
+        }
+        Ok(next)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.inner.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.inner.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        self.inner.stats()
+    }
+}
+
+/// Sleep until `until`, a step at a time, or until `stop` says to.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a decode worker's thread, never the UI's: --smoke-decode-floor-ms holds decode back \
+              on purpose (D40)"
+)]
+fn hold_until(until: Instant, stop: &StopToken) {
+    spherecut_core::may_block("--smoke-decode-floor-ms holding a decoded frame back");
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() || stop.is_stopped() {
+            return;
+        }
+        std::thread::sleep(left.min(FLOOR_STEP));
+    }
+}
+
+/// `--smoke-control-ui-waits`: wait, at most [`CONTROL_WAIT`], until
+/// `p` has decoded another frame, as a UI that waits on decode would
+/// (D40). The UI thread never waits but here, so this says so to
+/// [`may_block`](spherecut_core::may_block) first.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the smoke run's control (--smoke-control-ui-waits) waits on the UI thread on \
+              purpose (D40)"
+)]
+pub(crate) fn wait_for_a_decoded_frame(p: &Player) {
+    spherecut_core::may_block(
+        "the smoke run's control (--smoke-control-ui-waits): the UI waits for the next decoded \
+         frame",
+    );
+    let perf = p.perf();
+    let from = perf.count(Counter::FramesDecoded);
+    let start = Instant::now();
+    while perf.count(Counter::FramesDecoded) == from && start.elapsed() < CONTROL_WAIT {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
 
 /// The smoke run, driven by the app's passes.
 #[derive(Debug)]
@@ -909,6 +1101,8 @@ pub struct Report {
     pub seconds: f64,
     pub played_s: f64,
     pub ended: bool,
+    /// What it was asked to play with beside the clip (D40).
+    pub asked: Asked,
     pub adapter: Adapter,
     pub surface_format: String,
     /// Pixels a point, and the window's own scale factor.
@@ -947,6 +1141,34 @@ pub struct Report {
     pub screenshot_size: Option<[u32; 2]>,
     /// `--smoke-export`'s export, and the UI while it ran.
     pub export: Option<ExportReport>,
+}
+
+/// The flags a run with decode behind sets (D40): none of them for a
+/// plain run.
+#[derive(Debug, Serialize)]
+pub struct Asked {
+    /// `--smoke-decoder`: `auto`, `software`, `vaapi` or `vulkan`.
+    pub decoder: Option<&'static str>,
+    /// `--smoke-decode-floor-ms`.
+    pub decode_floor_ms: Option<f64>,
+    /// `--smoke-control-ui-waits`.
+    pub control_ui_waits: bool,
+}
+
+impl Asked {
+    fn of(args: &SmokeArgs) -> Asked {
+        use crate::settings::DecoderSetting;
+        Asked {
+            decoder: args.decoder.map(|d| match d {
+                DecoderSetting::Auto => "auto",
+                DecoderSetting::Software => "software",
+                DecoderSetting::VaApi => "vaapi",
+                DecoderSetting::Vulkan => "vulkan",
+            }),
+            decode_floor_ms: args.decode_floor.map(|f| f.as_secs_f64() * 1000.0),
+            control_ui_waits: args.control_ui_waits,
+        }
+    }
 }
 
 /// An export made while the clip played.
@@ -1342,6 +1564,7 @@ impl SmokeDriver {
             seconds: self.args.seconds,
             played_s,
             ended: snap.at_end,
+            asked: Asked::of(&self.args),
             adapter: Adapter::of(&s.gpu),
             surface_format: self.surface_format.clone(),
             scale: ppp,
@@ -1647,6 +1870,48 @@ mod tests {
              of the window (a locked or blanked screen, a minimized window, another virtual \
              terminal)"
         );
+    }
+
+    /// `--smoke-decode-floor-ms`'s wrapper holds each frame after the
+    /// first a floor behind the one before, and passes the track's
+    /// timing on; its control, the same ten frames without a floor,
+    /// come sooner.
+    #[test]
+    fn the_decode_floor_holds_each_frame_back() {
+        use spherecut_synth::fake::{SyntheticBackend, SyntheticClip};
+        use spherecut_testkit::control::{at_least, must_fail};
+
+        let floor = Duration::from_millis(20);
+        let path = Path::new("synthetic.mp4");
+        let inner: Arc<dyn MediaBackend> =
+            Arc::new(SyntheticBackend::new(SyntheticClip::default()));
+        // Ten frames handed out: nine held a floor each.
+        let ten = |backend: &Arc<dyn MediaBackend>| {
+            let mut dec = backend.open_video(path, &VideoRequest::default()).unwrap();
+            let stop = StopToken::never();
+            let start = Instant::now();
+            for _ in 0..10 {
+                assert!(matches!(
+                    dec.next_frame(&stop).unwrap(),
+                    NextFrame::Frame(_)
+                ));
+            }
+            start.elapsed()
+        };
+        let held = |took: Duration| at_least(took, 9 * floor);
+        let floored = with_decode_floor(inner.clone(), Some(floor));
+        let took = ten(&floored);
+        eprintln!("ten frames at a floor of {floor:?}: {took:?}");
+        assert_eq!(held(took).passes(), Some(true), "{took:?}");
+        assert_eq!(
+            floored.track_timing(path, 0).unwrap(),
+            inner.track_timing(path, 0).unwrap()
+        );
+        assert!(floored.track_timing(path, 0).unwrap().is_some());
+        // Without a floor, the backend as it was, and nothing held.
+        let plain = with_decode_floor(inner.clone(), None);
+        assert!(Arc::ptr_eq(&plain, &inner));
+        must_fail("ten frames without a floor", held(ten(&plain)));
     }
 
     #[test]
