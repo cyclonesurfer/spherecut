@@ -70,6 +70,17 @@
 //! [`FrameCache::try_insert`] says [`Insert::Full`] instead. A frame at
 //! or behind the playhead never waits: playback is waiting for it.
 //!
+//! **Locked pairs** (M3 plan section 9). With a group set
+//! ([`FrameCache::set_group`]), the rules above run for its members from
+//! the group base instead of the playhead: the newest time at or before
+//! the playhead at which every member holds a frame, so that each
+//! member's frame there is its current one and the faster lens decodes at
+//! most its window past it. A seek or a step holds the base at the
+//! playhead until every member has landed or failed it. When every
+//! member waits for room decoding ahead and no time past the base has a
+//! frame of each, the backstop holds the base at the trailing member's
+//! newest frame, which each member seeks to ([`Insert::Resync`]).
+//!
 //! **Frames alive.** The budget counts the frames the cache holds. Others
 //! are alive for a while beside them: the frame a worker decoded and
 //! waits to insert, and frames evicted while the upload thread or a
@@ -123,6 +134,12 @@ pub enum Insert {
     /// Its stop token said to stop while it waited, or the cache was
     /// closed.
     Stopped,
+    /// It isn't held: every member of a locked pair's group waited for
+    /// room with no time past the group base at which each holds a frame,
+    /// so the cache holds the base at `at`, the trailing member's newest
+    /// frame, and the worker seeks exactly there and puts that frame in
+    /// instead (the backstop, from [`FrameCache::insert_ahead`] only).
+    Resync { at: Time },
 }
 
 /// The frame cache. Share it in an `Arc` between the decode workers, the
@@ -169,6 +186,68 @@ struct State {
     evicted: u64,
     dropped: u64,
     waits: u64,
+    /// A locked pair's group, while one is set.
+    group: Option<Group>,
+    /// The streams whose inserts wait for room now, and how each waits.
+    waiting: BTreeMap<usize, Waiter>,
+    /// The newest request each stream has landed or failed.
+    landed: BTreeMap<usize, u64>,
+    resyncs: u64,
+}
+
+/// A locked pair's group (M3 plan section 9): its members' rules run
+/// from its base.
+#[derive(Debug)]
+struct Group {
+    members: [usize; 2],
+    /// The group base Tg.
+    base: Time,
+    hold: Option<Hold>,
+    /// The newest request a hold was made for: an older one's worker,
+    /// stopped on its way, makes none.
+    request: u64,
+}
+
+/// An insert waiting for room.
+#[derive(Debug)]
+struct Waiter {
+    /// The time of the frame it waits with.
+    time: Time,
+    /// Whether it decodes ahead ([`FrameCache::insert_ahead`]), which the
+    /// backstop counts.
+    ahead: bool,
+    /// Its stop token: one already stopped is on its way out, to a newer
+    /// request, and the backstop doesn't count it.
+    stop: StopToken,
+    /// Which wait it is, the count of waits when it began: a stopped
+    /// waiter of an earlier open that wakes late takes out its own entry,
+    /// not the one a newer worker of its stream put in since.
+    wait: u64,
+}
+
+/// What holds a group's base where it is for now, each member's flag
+/// set until it has done its part.
+#[derive(Debug, Clone, Copy)]
+enum Hold {
+    /// Request `id`, a seek or a step, is on its way: the base is the
+    /// playhead until every member has landed or failed it.
+    Request { id: u64, pending: [bool; 2] },
+    /// The backstop sought the members to `at`: the base stays there
+    /// until each has been told ([`Insert::Resync`]) and put its frame
+    /// there in, or failed.
+    Resync {
+        at: Time,
+        untold: [bool; 2],
+        pending: [bool; 2],
+    },
+}
+
+impl Hold {
+    fn pending(&mut self) -> &mut [bool; 2] {
+        match self {
+            Hold::Request { pending, .. } | Hold::Resync { pending, .. } => pending,
+        }
+    }
 }
 
 /// What the cache holds, for the overlay and the tests.
@@ -197,6 +276,15 @@ pub struct CacheStats {
     pub waits: u64,
     /// The frames holding a decoder's surface, of every stream.
     pub surfaces: usize,
+    /// The group base, while a locked pair's group is set
+    /// ([`FrameCache::group_base`]).
+    pub base: Option<Time>,
+    /// Inserts waiting for room now.
+    pub waiting: usize,
+    /// Times the backstop sought a group's members to the trailing
+    /// member's newest frame ([`Insert::Resync`]), since the cache was
+    /// made.
+    pub resyncs: u64,
 }
 
 impl State {
@@ -205,23 +293,32 @@ impl State {
             .range((Bound::Included((s, EARLIEST)), Bound::Included((s, LATEST))))
     }
 
+    /// Where stream `s`'s rules run from: the group base for a member of
+    /// a locked pair's group, else the playhead.
+    fn head(&self, s: usize) -> Time {
+        match &self.group {
+            Some(g) if g.members.contains(&s) => g.base,
+            _ => self.playhead,
+        }
+    }
+
     /// The time of stream `s`'s current frame: the latest at or before
-    /// the playhead.
+    /// its head.
     fn current(&self, s: usize) -> Option<Time> {
         self.frames
             .range((
                 Bound::Included((s, EARLIEST)),
-                Bound::Included((s, self.playhead)),
+                Bound::Included((s, self.head(s))),
             ))
             .next_back()
             .map(|(&(_, t), _)| t)
     }
 
-    /// Frames of stream `s` after the playhead, nearest first.
+    /// Frames of stream `s` after its head, nearest first.
     fn ahead_of(&self, s: usize) -> impl Iterator<Item = (Time, &Entry)> {
         self.frames
             .range((
-                Bound::Excluded((s, self.playhead)),
+                Bound::Excluded((s, self.head(s))),
                 Bound::Included((s, LATEST)),
             ))
             .map(|(&(_, t), e)| (t, e))
@@ -231,8 +328,180 @@ impl State {
         self.pins.get(&s) == Some(&t)
     }
 
-    fn limit(&self) -> Time {
-        self.playhead.checked_add(self.ahead).unwrap_or(LATEST)
+    /// How far stream `s`'s window may reach.
+    fn limit(&self, s: usize) -> Time {
+        self.head(s).checked_add(self.ahead).unwrap_or(LATEST)
+    }
+
+    /// The largest time at or before `at` at which each of `members`
+    /// holds a frame.
+    fn common_at_or_before(&self, members: [usize; 2], at: Time) -> Option<Time> {
+        let times = |s: usize| {
+            self.frames
+                .range((Bound::Included((s, EARLIEST)), Bound::Included((s, at))))
+                .rev()
+                .map(|(&(_, t), _)| t)
+        };
+        let (mut xs, mut ys) = (times(members[0]), times(members[1]));
+        let (mut x, mut y) = (xs.next()?, ys.next()?);
+        loop {
+            match x.cmp(&y) {
+                std::cmp::Ordering::Equal => return Some(x),
+                std::cmp::Ordering::Greater => x = xs.next()?,
+                std::cmp::Ordering::Less => y = ys.next()?,
+            }
+        }
+    }
+
+    /// Whether some time after `after` has a frame of each of `members`.
+    fn common_after(&self, members: [usize; 2], after: Time) -> bool {
+        let times = |s: usize| {
+            self.frames
+                .range((Bound::Excluded((s, after)), Bound::Included((s, LATEST))))
+                .map(|(&(_, t), _)| t)
+        };
+        let (mut xs, mut ys) = (times(members[0]), times(members[1]));
+        let (Some(mut x), Some(mut y)) = (xs.next(), ys.next()) else {
+            return false;
+        };
+        loop {
+            let next = match x.cmp(&y) {
+                std::cmp::Ordering::Equal => return true,
+                std::cmp::Ordering::Less => xs.next().map(|t| x = t),
+                std::cmp::Ordering::Greater => ys.next().map(|t| y = t),
+            };
+            if next.is_none() {
+                return false;
+            }
+        }
+    }
+
+    /// Work the group base out again: the backstop's time while its seek
+    /// is on its way, the playhead while a request is, and otherwise the
+    /// largest time at or before the playhead at which every member holds
+    /// a frame, or the playhead when there is none.
+    fn rebase(&mut self) {
+        let Some(g) = &self.group else {
+            return;
+        };
+        let base = match g.hold {
+            Some(Hold::Resync { at, .. }) => at,
+            Some(Hold::Request { .. }) => self.playhead,
+            None => self
+                .common_at_or_before(g.members, self.playhead)
+                .unwrap_or(self.playhead),
+        };
+        if let Some(g) = &mut self.group {
+            g.base = base;
+        }
+    }
+
+    /// Member `s` of the group has done its part of the hold: landed or
+    /// failed request `request`, or (`None`) put its frame at the
+    /// backstop's time in or failed to. The hold ends once every member
+    /// has; the caller works the base out again.
+    fn done(&mut self, s: usize, request: Option<u64>) {
+        let Some(g) = &mut self.group else {
+            return;
+        };
+        let Some(i) = g.members.iter().position(|&m| m == s) else {
+            return;
+        };
+        let Some(hold) = &mut g.hold else {
+            return;
+        };
+        let ours = match (*hold, request) {
+            (Hold::Request { id, .. }, Some(r)) => id == r,
+            (Hold::Resync { .. }, None) => true,
+            _ => false,
+        };
+        if !ours {
+            return;
+        }
+        hold.pending()[i] = false;
+        if hold.pending().iter().all(|&p| !p) {
+            g.hold = None;
+        }
+    }
+
+    /// Lock `members` together, or no longer with `None`; the same
+    /// members again keep the group as it is.
+    fn set_group(&mut self, members: Option<[usize; 2]>) {
+        if self.group.as_ref().map(|g| g.members) == members {
+            return;
+        }
+        self.group = members.map(|members| Group {
+            members,
+            base: self.playhead,
+            hold: None,
+            request: 0,
+        });
+        self.rebase();
+    }
+
+    /// The backstop's time, while it holds the group base.
+    fn resync_at(&self) -> Option<Time> {
+        match self.group.as_ref()?.hold {
+            Some(Hold::Resync { at, .. }) => Some(at),
+            _ => None,
+        }
+    }
+
+    /// The backstop's time for member `s`, the first time it asks after
+    /// the backstop held the base: it seeks there.
+    fn tell_resync(&mut self, s: usize) -> Option<Time> {
+        let g = self.group.as_mut()?;
+        let i = g.members.iter().position(|&m| m == s)?;
+        match &mut g.hold {
+            Some(Hold::Resync { at, untold, .. }) if untold[i] => {
+                untold[i] = false;
+                Some(*at)
+            }
+            _ => None,
+        }
+    }
+
+    /// The backstop (M3 plan section 9): when every member of the group
+    /// waits for room decoding ahead with its token unstopped, nothing
+    /// holds the base, and no time past it has a frame of each member,
+    /// nothing would ever move the base on. Hold it at the trailing
+    /// member's newest frame, the earliest of the frames they wait with,
+    /// for each to seek to. Whether it did.
+    fn backstop(&mut self) -> bool {
+        let Some(g) = &self.group else {
+            return false;
+        };
+        if g.hold.is_some() {
+            return false;
+        }
+        let (members, base) = (g.members, g.base);
+        let mut at: Option<Time> = None;
+        for m in members {
+            match self.waiting.get(&m) {
+                Some(w) if w.ahead && !w.stop.is_stopped() => {
+                    at = Some(at.map_or(w.time, |a| a.min(w.time)));
+                }
+                _ => return false,
+            }
+        }
+        let Some(at) = at else {
+            return false;
+        };
+        if self.common_after(members, base) {
+            return false;
+        }
+        tracing::warn!("a locked pair has no common frame ahead: both lenses seek to {at:?}");
+        if let Some(g) = &mut self.group {
+            g.hold = Some(Hold::Resync {
+                at,
+                untold: [true; 2],
+                pending: [true; 2],
+            });
+        }
+        self.resyncs += 1;
+        self.rebase();
+        self.generation += 1;
+        true
     }
 
     /// The bytes each stream's window may hold: half the budget, shared.
@@ -248,7 +517,7 @@ impl State {
 
     /// The time of the farthest frame in stream `s`'s window.
     fn window_end(&self, s: usize) -> Option<Time> {
-        let (limit, cap) = (self.limit(), self.cap());
+        let (limit, cap) = (self.limit(s), self.cap());
         let mut bytes = 0u64;
         let mut surfaces = 0usize;
         let mut end = None;
@@ -263,8 +532,8 @@ impl State {
         end
     }
 
-    /// Whether a frame of `bytes` at `t`, ahead of the playhead, would be
-    /// in stream `s`'s window; `surface` when it holds one.
+    /// Whether a frame of `bytes` at `t`, ahead of stream `s`'s head,
+    /// would be in its window; `surface` when it holds one.
     fn admits(&self, s: usize, t: Time, bytes: u64, surface: bool) -> bool {
         let mut before = 0u64;
         let mut nearer = 0usize;
@@ -278,7 +547,7 @@ impl State {
             surfaces += usize::from(e.surface);
         }
         nearer == 0
-            || (t <= self.limit()
+            || (t <= self.limit(s)
                 && before.saturating_add(bytes) <= self.cap()
                 && surfaces <= self.window_surfaces())
     }
@@ -392,7 +661,7 @@ impl State {
         let place = (frame.run, frame.seq);
         self.frame_bytes.insert(s, bytes);
         let held = self.frames.contains_key(&(s, t));
-        if !held && t > self.playhead && !self.pinned(s, t) && !self.admits(s, t, bytes, surface) {
+        if !held && t > self.head(s) && !self.pinned(s, t) && !self.admits(s, t, bytes, surface) {
             return None;
         }
         // A link to another time is a decoder that numbered its runs
@@ -445,6 +714,12 @@ impl State {
             }
         };
         self.links.insert((s, place.0, place.1), t);
+        // The base before the eviction, which keeps each member's frame
+        // at it as its current one.
+        if self.resync_at() == Some(t) {
+            self.done(s, None);
+        }
+        self.rebase();
         self.shrink();
         self.generation += 1;
         if self.frames.contains_key(&(s, t)) {
@@ -490,7 +765,7 @@ impl State {
                 ahead_bytes += e.bytes;
             }
             if let Some(end) = self.window_end(s) {
-                ahead_span = ahead_span.max(end.checked_sub(self.playhead).unwrap_or(LATEST));
+                ahead_span = ahead_span.max(end.checked_sub(self.head(s)).unwrap_or(LATEST));
             }
         }
         let frame_bytes = self.frame_bytes.values().sum::<u64>();
@@ -509,6 +784,9 @@ impl State {
             dropped: self.dropped,
             waits: self.waits,
             surfaces: self.surfaces.values().sum(),
+            base: self.group.as_ref().map(|g| g.base),
+            waiting: self.waiting.len(),
+            resyncs: self.resyncs,
         }
     }
 }
@@ -534,6 +812,10 @@ impl FrameCache {
                 evicted: 0,
                 dropped: 0,
                 waits: 0,
+                group: None,
+                waiting: BTreeMap::new(),
+                landed: BTreeMap::new(),
+                resyncs: 0,
             }),
             changed: Condvar::new(),
         }
@@ -576,28 +858,72 @@ impl FrameCache {
     /// on the UI thread.
     #[track_caller]
     pub fn insert(&self, stream: usize, frame: Arc<VideoFrame>, stop: &StopToken) -> Insert {
+        self.insert_with(stream, frame, stop, false)
+    }
+
+    /// [`insert`](Self::insert) for a frame decoded ahead, between
+    /// requests: a member of a locked pair's group waiting here counts
+    /// for the backstop, and when the backstop holds the group base it
+    /// gets [`Insert::Resync`] instead, with the time to seek to.
+    #[track_caller]
+    pub fn insert_ahead(&self, stream: usize, frame: Arc<VideoFrame>, stop: &StopToken) -> Insert {
+        self.insert_with(stream, frame, stop, true)
+    }
+
+    #[track_caller]
+    fn insert_with(
+        &self,
+        stream: usize,
+        frame: Arc<VideoFrame>,
+        stop: &StopToken,
+        ahead: bool,
+    ) -> Insert {
         may_block("waiting for room in the frame cache");
         let mut g = self.lock();
-        let mut waited = false;
-        loop {
+        let mut waited = None;
+        let r = loop {
             if g.closed || stop.is_stopped() {
-                return Insert::Stopped;
+                break Insert::Stopped;
+            }
+            if ahead && let Some(at) = g.tell_resync(stream) {
+                break Insert::Resync { at };
             }
             if let Some(r) = g.offer(stream, &frame) {
-                drop(g);
-                self.changed.notify_all();
-                return r;
+                break r;
             }
-            if !waited {
+            if waited.is_none() {
                 g.waits += 1;
-                waited = true;
+                let wait = g.waits;
+                g.waiting.insert(
+                    stream,
+                    Waiter {
+                        time: frame.time,
+                        ahead,
+                        stop: stop.clone(),
+                        wait,
+                    },
+                );
+                waited = Some(wait);
+            }
+            if g.backstop() {
+                // The other member hears of it as it wakes.
+                self.changed.notify_all();
+                continue;
             }
             g = self
                 .changed
                 .wait_timeout(g, WAIT_SLICE)
                 .unwrap_or_else(PoisonError::into_inner)
                 .0;
+        };
+        if let Some(wait) = waited
+            && g.waiting.get(&stream).is_some_and(|w| w.wait == wait)
+        {
+            g.waiting.remove(&stream);
         }
+        drop(g);
+        self.changed.notify_all();
+        r
     }
 
     /// [`insert`](Self::insert) without waiting for room:
@@ -683,7 +1009,10 @@ impl FrameCache {
     #[track_caller]
     pub fn set_playhead(&self, at: Time) {
         let g = self.lock();
-        self.changed(g, |s| s.playhead = at);
+        self.changed(g, |s| {
+            s.playhead = at;
+            s.rebase();
+        });
     }
 
     /// [`set_playhead`](Self::set_playhead) if the lock is free; false
@@ -692,16 +1021,107 @@ impl FrameCache {
     pub fn try_set_playhead(&self, at: Time) -> bool {
         match self.try_lock() {
             Some(g) => {
-                self.changed(g, |s| s.playhead = at);
+                self.changed(g, |s| {
+                    s.playhead = at;
+                    s.rebase();
+                });
                 true
             }
             None => false,
         }
     }
 
+    /// [`set_playhead`](Self::set_playhead) for request `request` (a seek
+    /// or a step) of stream `stream`, on its way. For a member of a
+    /// locked pair's group, the group base is the playhead from the
+    /// first such move of a request newer than any before until every
+    /// member has landed or failed it ([`landed`](Self::landed)), so that
+    /// each member's landing goes in without waiting for room.
+    #[track_caller]
+    pub fn seek_playhead(&self, stream: usize, request: u64, at: Time) {
+        let g = self.lock();
+        self.changed(g, |s| {
+            s.playhead = at;
+            if let Some(g) = &mut s.group
+                && g.members.contains(&stream)
+                && request > g.request
+            {
+                g.request = request;
+                // A member may have landed it before the group was set.
+                let pending = g
+                    .members
+                    .map(|m| s.landed.get(&m).is_none_or(|&l| l < request));
+                g.hold = Some(Hold::Request {
+                    id: request,
+                    pending,
+                });
+            }
+            s.rebase();
+        });
+    }
+
+    /// Stream `stream` landed or failed request `request`, or (`None`)
+    /// failed the backstop's seek: once every member of a locked pair's
+    /// group has, its base is worked out from the frames held again.
+    #[track_caller]
+    pub fn landed(&self, stream: usize, request: Option<u64>) {
+        let g = self.lock();
+        self.changed(g, |s| {
+            if let Some(r) = request {
+                let l = s.landed.entry(stream).or_default();
+                *l = (*l).max(r);
+            }
+            s.done(stream, request);
+            s.rebase();
+        });
+    }
+
+    /// The playhead the cache's rules run from: the
+    /// [group base](Self::group_base) while a group is set, else the time
+    /// the presenter or a request gave.
     #[track_caller]
     pub fn playhead(&self) -> Time {
-        self.lock().playhead
+        let g = self.lock();
+        g.group.as_ref().map_or(g.playhead, |gr| gr.base)
+    }
+
+    /// Lock streams `members` together from now on, or no longer with
+    /// `None`: a locked pair's group (M3 plan section 9), set at open.
+    /// The cache's rules for the members (each one's current frame, its
+    /// window, eviction and back-pressure) and [`playhead`](Self::playhead),
+    /// which the upload thread starts each wanted list from, then run
+    /// from the [group base](Self::group_base) instead of the time the
+    /// presenter gives, so that each member's frame there is never
+    /// evicted and the faster lens decodes at most its window past it.
+    /// The same members again keep the group as it is.
+    #[track_caller]
+    pub fn set_group(&self, members: Option<[usize; 2]>) {
+        let g = self.lock();
+        self.changed(g, |s| s.set_group(members));
+    }
+
+    /// [`set_group`](Self::set_group) if the lock is free; false when it
+    /// isn't and nothing changed. Never waits: for the UI thread.
+    pub fn try_set_group(&self, members: Option<[usize; 2]>) -> bool {
+        match self.try_lock() {
+            Some(g) => {
+                self.changed(g, |s| s.set_group(members));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The group base Tg, while a group is set: the largest time at or
+    /// before the presenter's playhead at which every member holds a
+    /// frame, worked out again whenever a frame goes in or the playhead
+    /// moves; the playhead itself from a seek or a step until every
+    /// member has landed or failed, and whenever no such time exists;
+    /// and the backstop's time while its seek is on its way
+    /// ([`Insert::Resync`]). `None` without a group.
+    #[track_caller]
+    pub fn group_base(&self) -> Option<Time> {
+        self.lock().group.as_ref().map(|g| g.base)
     }
 
     /// Hold at most `bytes` from now on, evicting down to it.

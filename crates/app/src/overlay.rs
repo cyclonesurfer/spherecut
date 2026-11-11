@@ -16,7 +16,8 @@ use spherecut_audio::OutputStats;
 use spherecut_core::video::{Matrix, Range};
 use spherecut_media::backend::VideoStreamInfo;
 use spherecut_playback::{
-    CacheStats, Counter, MemoryStats, PerfSnapshot, PerfStats, SlotStats, Stage, StageSummary,
+    CacheStats, Counter, LockStatus, MemoryStats, PerfSnapshot, PerfStats, SlotStats, Stage,
+    StageSummary,
 };
 use spherecut_render::Filter;
 
@@ -127,9 +128,23 @@ pub struct Readings {
     pub skipped: Option<(u64, u64)>,
     pub ui: StageSummary,
     pub hitches: u64,
+    /// Each stream's frames shown; those passed over while playing beyond
+    /// the presents' cadence, and up to it, which a display slower than
+    /// the clip passes over by design ([`Counter::Dropped`],
+    /// [`Counter::Skipped`]).
     pub shown: u64,
     pub dropped: u64,
+    pub frames_skipped: u64,
     pub decode_dropped: u64,
+    /// The streams are a locked pair: its drops and skips count once a
+    /// pair and its frames shown once a lens, so the share dropped is of
+    /// pairs.
+    pub locked: bool,
+    /// Presents at which the streams showed different clip times, and
+    /// how far a locked pair shown trailed the clock (M3 plan section 9):
+    /// on the video line with two streams or more.
+    pub unpaired: u64,
+    pub pair_wait: StageSummary,
     /// The A/V offset's median and p95 over the last second.
     pub av: Option<(f32, f32)>,
     pub cache: Option<CacheStats>,
@@ -184,7 +199,11 @@ impl Readings {
             hitches: p.counter(Counter::Hitches),
             shown: p.counter(Counter::FramesShown),
             dropped: p.counter(Counter::Dropped),
+            frames_skipped: p.counter(Counter::Skipped),
             decode_dropped: p.counter(Counter::DecodeDropped),
+            locked: snap.lock.is_some_and(|l| l.status == LockStatus::Locked),
+            unpaired: p.counter(Counter::UnpairedPresents),
+            pair_wait: *p.stage(Stage::PairWait),
             av,
             cache: snap.cache,
             slots: snap.slots,
@@ -238,7 +257,16 @@ impl Readings {
         let skipped = self
             .skipped
             .map_or_else(|| "-".into(), |(s, n)| format!("{s}/{n}"));
-        let drops = self.shown + self.dropped;
+        // A locked pair's drops count once a pair and its frames shown
+        // once a lens: one unit, pairs, as gui_smoke's gate has it.
+        let (shown, unit) = match self.streams {
+            n @ 2.. if self.locked => {
+                let pairs = self.shown / n as u64;
+                (format!("{} ({pairs} pairs)", self.shown), (pairs, " pairs"))
+            }
+            _ => (self.shown.to_string(), (self.shown, "")),
+        };
+        let drops = unit.0 + self.dropped;
         let pct = if drops > 0 {
             100.0 * self.dropped as f64 / drops as f64
         } else {
@@ -248,6 +276,19 @@ impl Readings {
             || "-".into(),
             |(m, p95)| format!("{m:+.0} ms (p95 {p95:.0})"),
         );
+        let pairing = if self.streams >= 2 {
+            let wait = match self.pair_wait.p50 {
+                Some(_) => format!(
+                    "{} (max {})",
+                    ms(self.pair_wait.p50),
+                    num(self.pair_wait.max)
+                ),
+                None => "-".into(),
+            };
+            format!("   unpaired {}   pair_wait {wait}", self.unpaired)
+        } else {
+            String::new()
+        };
         let cache = self.cache.as_ref().map_or_else(
             || "-".into(),
             |c| {
@@ -290,8 +331,9 @@ impl Readings {
                 self.hitches
             ),
             format!(
-                "video     shown {}   dropped {} ({pct:.2}%)   decode-dropped {}   A/V {av}",
-                self.shown, self.dropped, self.decode_dropped
+                "video     shown {shown}   dropped {}{} ({pct:.2}%)   skipped {}{pairing}   \
+                 decode-dropped {}   A/V {av}",
+                self.dropped, unit.1, self.frames_skipped, self.decode_dropped
             ),
             format!(
                 "cache     {cache}   slots {}/{} ready",
@@ -575,7 +617,11 @@ mod tests {
             hitches: 0,
             shown: 1798,
             dropped: 2,
+            frames_skipped: 0,
             decode_dropped: 0,
+            locked: false,
+            unpaired: 0,
+            pair_wait: StageSummary::default(),
             av: Some((4.0, 9.0)),
             cache: None,
             slots: SlotStats {
@@ -615,7 +661,7 @@ mod tests {
         assert_eq!(lines[4], "UI        16.7 ms p99 33.4   hitches 0");
         assert_eq!(
             lines[5],
-            "video     shown 1798   dropped 2 (0.11%)   decode-dropped 0   A/V +4 ms (p95 9)"
+            "video     shown 1798   dropped 2 (0.11%)   skipped 0   decode-dropped 0   A/V +4 ms (p95 9)"
         );
         assert_eq!(lines[6], "cache     -   slots 2/4 ready");
         assert_eq!(lines[7], "audio     none");
@@ -642,6 +688,59 @@ mod tests {
         assert_eq!(r.lines()[7], "audio     starting");
         r.memory = None;
         assert_eq!(r.lines()[8], "memory    -");
+    }
+
+    #[test]
+    fn two_streams_show_their_pairs_beside_the_drops() {
+        let mut r = readings();
+        r.unpaired = 3;
+        r.pair_wait = StageSummary {
+            recorded: 10,
+            p50: Some(12.0),
+            max: Some(40.0),
+            ..StageSummary::default()
+        };
+        // One stream has no pairs to show.
+        assert_eq!(
+            r.lines()[5],
+            "video     shown 1798   dropped 2 (0.11%)   skipped 0   decode-dropped 0   A/V +4 ms (p95 9)"
+        );
+        r.streams = 2;
+        assert_eq!(
+            r.lines()[5],
+            "video     shown 1798   dropped 2 (0.11%)   skipped 0   unpaired 3   pair_wait 12.0 ms (max 40.0)   decode-dropped 0   A/V +4 ms (p95 9)"
+        );
+        // An unlocked pair records no waits.
+        r.pair_wait = StageSummary::default();
+        assert!(
+            r.lines()[5].contains("unpaired 3   pair_wait -   decode"),
+            "{}",
+            r.lines()[5]
+        );
+    }
+
+    /// A locked pair's drops and skips count once a pair and its frames
+    /// shown once a lens: the share dropped is of pairs, the skips apart
+    /// from it. Unlocked, every count is once a stream.
+    #[test]
+    fn a_locked_pairs_drops_are_a_share_of_its_pairs() {
+        let mut r = readings();
+        r.streams = 2;
+        r.locked = true;
+        r.frames_skipped = 897;
+        let line = &r.lines()[5];
+        assert!(
+            line.starts_with(
+                "video     shown 1798 (899 pairs)   dropped 2 pairs (0.22%)   skipped 897   unpaired 0"
+            ),
+            "{line}"
+        );
+        r.locked = false;
+        let line = &r.lines()[5];
+        assert!(
+            line.starts_with("video     shown 1798   dropped 2 (0.11%)   skipped 897   unpaired 0"),
+            "{line}"
+        );
     }
 
     #[test]

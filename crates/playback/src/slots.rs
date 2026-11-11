@@ -39,12 +39,16 @@
 //!   Ready: no black flash.
 //! - A slot the GPU has no memory for is Dead (risk 11): the ring plays
 //!   on with one fewer.
+//! - A locked pair (M3 plan section 9) uses all [`MAX_SLOTS`], whatever
+//!   the setting (`SlotRing::set_pair`): its present shows both lenses'
+//!   slots or neither, so the pair on screen and each lens's next frame
+//!   take four, and a fifth and sixth let the frames after them come up.
 //!
 //! The UI thread only loads, compares and swaps, and `try_lock`s the
 //! mutex that holds a slot's `Arc<GpuFrame>`, which the upload thread
 //! locks only for a slot it is claiming or has claimed.
 
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering, fence};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, TryLockError};
 
 use spherecut_core::{Rational, Time, may_block};
@@ -54,6 +58,11 @@ use spherecut_render::GpuFrame;
 pub const MIN_SLOTS: u8 = 3;
 pub const DEFAULT_SLOTS: u8 = 4;
 pub const MAX_SLOTS: u8 = 6;
+
+/// The fewest live slots a locked pair's member needs (M3 plan section
+/// 9): its frame on screen and its next. Below twice it for a pair, the
+/// pair unlocks.
+pub const SLOT_FLOOR: usize = 2;
 
 /// Where a slot is in its cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +190,8 @@ impl Slot {
 /// How many slots are in each state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SlotStats {
-    /// Slots in use: the setting, less the dead ones.
+    /// Slots in use, less the dead ones: the setting, or all of them
+    /// while a locked pair is open ([`SlotRing::active`]).
     pub active: usize,
     pub free: usize,
     pub writing: usize,
@@ -199,6 +209,8 @@ pub struct SlotRing {
     slots: Vec<Slot>,
     /// The setting: how many slots, from the first, are used.
     active: AtomicUsize,
+    /// A locked pair is open: every slot is used.
+    pair: AtomicBool,
 }
 
 /// A slot the upload thread claimed: it alone writes it until it
@@ -217,6 +229,7 @@ impl SlotRing {
         SlotRing {
             slots: (0..MAX_SLOTS).map(|_| Slot::new()).collect(),
             active: AtomicUsize::new(usize::from(active.clamp(MIN_SLOTS, MAX_SLOTS))),
+            pair: AtomicBool::new(false),
         }
     }
 
@@ -224,18 +237,32 @@ impl SlotRing {
         self.slots.len()
     }
 
-    /// The setting, how many slots are used. Never waits.
+    /// How many slots are used: the setting, or every slot while a
+    /// locked pair is open (`set_pair`). Never waits.
     pub fn active(&self) -> usize {
-        self.active.load(Ordering::Acquire)
+        if self.pair.load(Ordering::Acquire) {
+            self.slots.len()
+        } else {
+            self.active.load(Ordering::Acquire)
+        }
     }
 
-    /// Use `n` slots from now on (clamped). One beyond the new count is
-    /// given up once it is free and nothing holds its frame.
+    /// Use `n` slots from now on (clamped), once no locked pair is open.
+    /// One beyond the new count is given up once it is free and nothing
+    /// holds its frame.
     pub fn set_active(&self, n: u8) {
         self.active.store(
             usize::from(n.clamp(MIN_SLOTS, MAX_SLOTS)),
             Ordering::Release,
         );
+    }
+
+    /// A locked pair is open (`true`), and uses every slot, [`MAX_SLOTS`],
+    /// whatever the setting; or none is, and the setting holds again. Its
+    /// open sets it once the lenses lock, and the next open or a close
+    /// clears it. Never waits.
+    pub(crate) fn set_pair(&self, pair: bool) {
+        self.pair.store(pair, Ordering::Release);
     }
 
     pub fn state(&self, index: usize) -> Option<SlotState> {

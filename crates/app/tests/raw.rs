@@ -21,9 +21,12 @@ use spherecut_app::SpherecutApp;
 use spherecut_app::notices::NoticeKind;
 use spherecut_app::viewer::{self, RawShown, ViewerResources};
 use spherecut_media::backend::FfmpegBackend;
+use spherecut_media::encode::MuxedAs;
+use spherecut_playback::LockStatus;
 use spherecut_render::{Pixels, StillOptions, ViewParams, render_still};
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// Each lens's picture: square, as a dual-fisheye camera's are.
 const LENS: (u32, u32) = (384, 384);
@@ -51,6 +54,41 @@ fn lenses_clip() -> &'static Path {
         let b = lens("lens-back", Pattern::Seam);
         spherecut_media::encode::mux_video_streams(&[&a, &b], &common::tmp().join("lenses.mkv"))
             .unwrap()
+    })
+}
+
+/// Two lenses of 64² in one MP4 file, as tests/agents.rs writes a
+/// camera's raw file: each track in its source's time base, so that the
+/// frame lock reads the tables it compares, which the Matroska file of
+/// [`lenses_clip`] has none of.
+fn lenses_mp4() -> &'static Path {
+    static CLIP: OnceLock<PathBuf> = OnceLock::new();
+    CLIP.get_or_init(|| {
+        let dir = common::tmp().join("lenses-mp4");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lens = |name: &str, pattern| {
+            media::write(
+                &Spec {
+                    name: name.into(),
+                    pattern,
+                    width: 64,
+                    height: 64,
+                    frames: 30,
+                    codec: Codec::H264Lossless,
+                    ..Spec::default()
+                },
+                &dir,
+            )
+            .unwrap()
+        };
+        let a = lens("lens-a", Pattern::Grid);
+        let b = lens("lens-b", Pattern::Seam);
+        spherecut_media::encode::mux_video_streams_as(
+            &[a.as_path(), b.as_path()],
+            &dir.join("lenses.insv"),
+            MuxedAs::Mp4,
+        )
+        .unwrap()
     })
 }
 
@@ -260,4 +298,43 @@ fn the_lenses_open_where_the_file_was() {
             assert!(!h.state().state.snapshot.playing);
         }
     }
+}
+
+/// A camera's raw MP4 opens its two lenses locked (m3-plan section 9):
+/// once both show, the snapshot's lock is `Locked` and both lenses show
+/// one frame time. Its control, the Matroska file, which has no tables
+/// to compare, is not.
+#[test]
+fn the_raw_view_locks_an_mp4_pair() {
+    let gpu = common::gpu();
+    // The lock's status once both lenses show a frame and the lock has
+    // settled, and the times they show.
+    let opened = |clip: &Path| {
+        let rs = common::render_state(&gpu);
+        let mut parts = common::parts(&gpu, Arc::new(FfmpegBackend::new()));
+        parts.open = vec![clip.to_path_buf()];
+        let mut h = common::harness(SpherecutApp::new(parts), &rs, [800.0, 600.0], 1.0);
+        common::step_until(&mut h, Duration::from_secs(20), "both lenses show", |a| {
+            let s = &a.state.snapshot;
+            s.streams.len() == 2
+                && s.shown.len() == 2
+                && s.shown.iter().all(Option::is_some)
+                && s.lock.is_some_and(|l| l.status != LockStatus::Pending)
+        });
+        assert!(h.state().state.raw_view());
+        let s = &h.state().state.snapshot;
+        let times: Vec<_> = s.shown.iter().flatten().map(|f| f.time).collect();
+        (s.lock.map(|l| l.status), times)
+    };
+    let (status, times) = opened(lenses_mp4());
+    assert_eq!(status, Some(LockStatus::Locked));
+    assert!(times.len() == 2 && times[0] == times[1], "{times:?}");
+
+    // Control: the Matroska file's lenses open, but not locked.
+    let (status, _) = opened(lenses_clip());
+    must_fail(
+        "the Matroska file is Locked",
+        status == Some(LockStatus::Locked),
+    );
+    assert_eq!(status, Some(LockStatus::Refused { field: "timing" }));
 }

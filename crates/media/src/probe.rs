@@ -378,7 +378,7 @@ pub(crate) fn fourcc_str(tag: u32) -> Option<String> {
 }
 
 /// Text a file holds, for a terminal: each control character (C0, DEL
-/// and C1, ESC and newline among them) as `\xNN`, as [`fourcc_str`]
+/// and C1, ESC and newline among them) as `\xNN`, as `fourcc_str`
 /// gives a fourcc's bytes, so that a camera's serial or a tag can't move
 /// the cursor or recolour what is printed after it.
 pub fn escape_controls(s: &str) -> Cow<'_, str> {

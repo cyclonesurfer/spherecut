@@ -416,6 +416,312 @@ corrected to match, hold the detail, and win where the two differ.*
      relies on its not refusing) and the coarse outputs' gap are M3.7's and M3.10's; whether the
      uncut readings' sliver reaches the strips is for the first slice that renders a truth under one
      (M3.6's `fit-matrix`, over all 21) to measure, or to change the truth so all 21 cut.
+6. **What M3.8 settled (2026-11-11).** These override the sections they name, which are not
+   rewritten. D67 and the new D77, with D25's, D31's, D34's and D40's notes of that date, hold the
+   detail; where a line of D67 or D77 says otherwise, this item holds, and the bullets name those
+   lines. odin's verification run at 04d15be (PR #34) is given in each line that waited for it.
+   - **P-LOCK's scoring (4.3, 19.4).** 4.3 counted the frames due as wall seconds × the rate, held a
+     locked pair's drops, which the engine counts once a pair, against the unlocked run's summed
+     over both lenses, and counted as drops the frames a display slower than the clip passes over.
+     PR #29's verdicts (4K120 Redirect at 49.74 % presented, 5.7K60 Redirect at 97.99 %, 8K30 Pass
+     at 99.92 %, 8K25 Pass) were scored by those rules. As built, a real-time present owes a new
+     frame when its clock ran into a later frame since the present before, short of the clip's end,
+     and a loop's first present after its seek back owes the play's first frame: a present owes at
+     most one, and none while the clock stands (the end, a loop's seek, landing and preroll). The
+     share presented is the new frames (new pairs, locked) put up after the first second over the
+     presents that owed one; a frame a present late still counts, and late presents are a row of
+     their own. Frames passed over between two shown while the clock runs are `Counter::Skipped` up
+     to the presents' cadence, ceil(median present interval / frame duration − 0.001) − 1 (1 for
+     119.88 fps at 60 Hz, 0 at or below the present rate), and `Counter::Dropped` beyond it, for
+     every player; both count once a pair locked and once a stream unlocked, so the share dropped a
+     lens divides the unlocked count by its streams, and skips are recorded beside, not judged. At
+     8K30, 5.7K60 and 4K120: Pass needs 0 unpaired, the lock held, no stall (a frame standing 5 s
+     while its clock runs, in either pass), ≥ 99 % presented and drops a lens at most 1 point over
+     the unlocked run's; Redirect (8 slots) when only those two numbers fall short; Kill when a pair
+     shows apart, the lock comes undone or is refused, a pass stalls, or no present owed a frame. At
+     8K25 on path B: Pass with 0 unpaired and the pacing rule, less its end clause, over the
+     real-time pass up to its first loop; Kill when a pair shows apart, the lock comes undone or is
+     refused, a pass stalls, the pass has no frame rate, or the pair trails by 5 s of frames or
+     more; Redirect when the rule fails otherwise; off path B, no verdict. `bench_playback_x5_raw`
+     fails on a stall or a Kill only; a Redirect is a note.
+     `p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens` holds the arithmetic: synthetic
+     4K120 at 60 Hz and a 5.7K60 master looping every 3.17 s pass. Its controls fail: a pair held
+     back at 1 present in 20 (4K120) or 40 (5.7K60) is Redirect on both clauses, under 99 %
+     presented and over the drops bound, since the present after passes the held frame over; a pair
+     standing still for each loop's last 4 frames is Redirect on the presented share alone; 1 drop
+     in 40 (1.5 points a lens over the baseline, which the summed count let pass) is Redirect on the
+     drops alone; a pass standing still while its clock runs is Kill. D67's line that its held-back
+     controls fail "by the presented share alone" is stale. A hand estimate from PR #29's counts at
+     9ab8091, not a verdict (nor is D67's "Pass, pending odin's rerun" for it): at 4K120 about 1133
+     new pairs over at most 1140 owing presents, its 1124 and 1123 frames passed over a lens being
+     the cadence's skips; 5.7K60's 24 missing presents fit, by the counts, the 4 standing presents
+     of each of its 6 loop restarts, which owe nothing (not observed: `SPHERECUT_PLAYBACK_TIMELINE`
+     writes the per-present rows that would show it). The cadence has a limit near whole multiples:
+     60.000 fps at 59.94 Hz sits on the rounding line, and 120.000 fps at 59.94 Hz gets 2, so a real
+     drop there can count as skipped (D67's "Revisit if"). The verdicts under these rules, odin at
+     04d15be (PR #34), path B, 6 slots locked against 4 unlocked: every mode Pass, 0 unpaired (2920,
+     1922, 2258 and 28280 unlocked) and 0 resyncs; 4K120 presented 100.09 % (100.35 % unlocked), 0
+     dropped, its passed-over frames skipped (99.29 % against 98.94 %); 5.7K60 100.00 %; 8K25 by the
+     pacing rule (`Paced {pairs: 70, handed_out: 70, trailed: 0}`), presented 99.78 %, 1 frame
+     dropped in 20 s; 8K30 100.00 %. 21's risk 4 is closed on P-LOCK for odin; huginn's VA-API rows
+     (4.3) are still to come.
+   - **P-LOCK's baseline and memory (4.3, 9).** Each X5 mode plays unlocked and then locked as the
+     app plays it (D25's path B where the device can be shared, else copied), both passes each, so
+     where the device can be shared the baseline is path B, not the copy path. The locked run takes
+     6 slots and the unlocked its default 4, which the verdict line gives; with them a locked loop
+     restart prerolls 2 frames a lens against 1, a likely part of any gap at the restarts (the
+     diagnosis's reading, not measured). A note beside every run's rows, locked or not, gives
+     `MemAvailable` as each pass began (PR #29's odin had MemFree 0 and 35 GB available beside
+     Firefox at 9 GB). 9's path B pool row is a lower bound, the distinct images of the frames shown
+     (94.92 MiB a lens at 4K120 in PR #29), not the decoder's pool against 9's 707 MB.
+   - **Catch-up when every member trails (9).** 9's `until`, "never past the newest frame that every
+     other member holds", left a pair that trails the clock together a frame further behind every
+     three ticks of `catchup.rs`, for good. As built, a member more than 2 frames behind the clock
+     raises the group's `until`: while the other is within 2 frames of the clock, to the clock's
+     time or the other member's newest frame in the cache, whichever is earlier; when every member
+     trails by more than 2 frames, to the clock's time. Each member whose newest frame is before
+     `until` catches up to it; it never goes down, and a seek or a step clears it. `catchup.rs`
+     holds a pair trailing by a third of a frame a tick to at most 3 frames behind, as unlocked
+     streams are; its control (`LockTest::old_until`) trails by 8 and more. The cost, the slide: at
+     8K, where a catch-up decodes every frame it passes over, a pair below real time lands each
+     catch-up about lag × cost / period behind where the clock was, so its freezes grow by the
+     slowest lens's cost over the frame period at each one (3× for 9 ms frames on a 3 ms clock:
+     freezes of about 8 to 19 frames, then 25 to 49, in the pacing test), as an unlocked lens's do,
+     and 9's "behind the clock by its lag" doesn't hold. Whether to cap the all-trailing `until`
+     (the clock less a window, or a fixed step) is Pat's call, on odin's 8K25 path-B row at 04d15be,
+     the one X5 mode on odin that drops frames unlocked (path B decodes 78 to 79 frames a second a
+     lens unthrottled, but its decode p95 of 35 to 49 ms straddles the 40 ms frame; unlocked it
+     dropped 0 and 19 in `bench_playback_x5_raw` at 9ab8091 and 04d15be, and 2 to 40 in
+     `bench_x5_8k30_zero_copy_vs_copy`): locked, it dropped 1 frame in 20 s (second 15, `pair_wait`
+     90 ms at most) and presented 99.78 %, so no slide showed there, and the evidence recommends no
+     cap. None is built until Pat answers. A mode that shows a slide (M3.10's stitched `gui_smoke`,
+     a slower part) goes to that decision; a cap is a playback change, and `Case::longest_freeze`
+     then tightens back.
+   - **A member that fails, seeks and the end (9).** 9's Fallback refused with `"open"` only while
+     the group was pending and otherwise ended the pair at the failed member's last frame, so a
+     locked member that failed before its first frame left the clock and the audio running over a
+     blank view. The rule turns on whether the member has handed out a frame of the open. Before it
+     (its open fails, or `DecodeFailed` after any fallback), the group is refused with
+     `LockRefused {field: "open"}`, pending or locked; the group's `until` and the cache's group are
+     let go under the same status lock, and the other lens plays on alone, unlocked. After it,
+     pending or locked, the pair ends at the member's last frame through the end `check_end` reads
+     (`DecodeFailed`, then `Ended` when the clock gets there), and a frame decoded past that end (a
+     seek past damage) puts back what was there. A seek or a step at or past that end counts the
+     failed member as landed on its last frame, so the pair lands there with the clock on it, as at
+     a short lens. Landings that differ: a keyframe seek, or an exact seek whose landings both lie
+     at or after its time, sends both lenses exactly to the later; a step, or an exact seek whose
+     earlier landing lies before its time, to the earlier (a lens that ran out). The re-seek isn't
+     counted in `Counter::Seeks`, and a locked pair's clock is set from the earliest landing. A
+     worker idle after its end or a failure now takes a seek or a step the cache answers as a place
+     to go on from, the end of its landing's run (its decoder sought there after a failure); one
+     whose run reaches the last frame stays ended and says `StreamEnded` once. Before, play from the
+     end froze at the end of the cached run, on one stream as on a pair (D34's note);
+     `Player::old_idle_rule(true)` is the control. Open, reported and neither tested nor fixed: a
+     locked member that fails a seek or a step before its end has no landing, so the pair from
+     before the seek can stay up with the clock at the new time until play moves on. Playback fixes
+     it, with a test and its control, before M3.10's or M3.11's checks rely on a landing after such
+     a failure.
+   - **The counters (9, 13.5; amendment 4's K2 line).** `pair_wait` is not "how far the pair shown
+     trails the clock": at each present while the clock runs and the pair is locked, it is how far
+     the clock's time that present is for (its latency ahead, without the A/V offset) is past the
+     end of the pair on screen, member 0's frame's time plus its duration; 0 while the pair's
+     interval holds it, never negative, nothing recorded paused or unlocked. PR #29's p50 of 15.11
+     ms at 5.7K60 under the old definition was the phase of 59.94 fps against 60 Hz presents, not a
+     wait. `unpaired_presents` is as 9 says, by time tags over every stream. `pair_resyncs` counts
+     the backstop's seeks, never a waiter whose request has stopped; the perf counter is copied from
+     the cache every 250 ms, so a check at a run's end reads `FrameCache::stats().resyncs`, which
+     counts since the player's cache was made, so a check after a reopen takes the difference from
+     the open. `PlayerSnapshot.lock` (`LockSnapshot`) gives `status` and `until`, and its `base` is
+     always `None` (D67's snapshot line, which says it gives the group base, is stale): the group
+     base is `CacheStats.base`. Skips and drops are above; `FramesShown` counts once a lens, so a
+     locked pair's share dropped is `dropped` over `shown` / 2 + `dropped`, as the overlay and
+     `gui_smoke` count it. The smoke document gains `frames.skipped`, `frames.unpaired`,
+     `frames.pair_resyncs` and `lock {status, field}`. `StreamStatus.decoded` now counts each
+     stream's decodes, as amendment 4's K2 note asked; K2's engine half still takes the mean over
+     the lenses, and M3.17 may judge it a lens at a time.
+   - **The open, the offset, slots and switches (9; 4.3's R1 and its pixel paragraph; item 3 above;
+     22.3).** The open checks `"timing"` first, then time base, start, rate and size (rate and size
+     from the opened decoders' `VideoStreamInfo`, not the tables), `stts` and `stss`; the names are
+     `playback::lock::field`. Any container but an unfragmented MP4 or MOV answers `track_timing`
+     with `Ok(None)` and is refused on `"timing"` (Matroska among them). `LockSpec.offset` is only
+     the difference the tracks' first pts must have, else `"start"`; nothing else reads it, since
+     each lens's clip time starts at its own first frame, so R1's "removed before the lock compares
+     times" and "kept in the X5's `Known` entry" don't hold, and the raw view passes
+     `LockSpec::default()`. An offset in the pictures at equal times can't be given: if M3.6's
+     `samples_lens_offset_is_zero` finds k ≠ 0, the lock needs a per-lens origin shift, which waits
+     for a design note. So item 3's "can still give the lock an offset" and 4.3's "otherwise the
+     lock gains an offset, as R1" don't hold: such an offset goes into that origin shift, not
+     `LockSpec.offset`, and M3.6's brief says so. A locked pair takes `MAX_SLOTS` (6) whatever
+     `gpu_slots` says, from the lock until the next open or a close, an unlock included.
+     `SLOT_FLOOR` is 2 live slots a member, checked when a slot dies, whatever open its frame was
+     for, and again as the lenses lock: a ring whose slots died earlier is refused with `"slots"`
+     there, and no `LensShort` is said. Dead slots stay dead for the player's life, and the app
+     keeps one `Player`, so once fewer than 4 live slots are left every later locked open in the
+     session is refused with `"slots"` at once; M3.10's notice says so, or M3.10 makes a fresh
+     `Player` after such a refusal. The 8-slot redirect isn't built. Per-lens fallback is as 9 says,
+     said once. Doc-hidden hooks for controls: `Player::fail_slot_allocations(n)` and
+     `LockSpec.test` (`LockTest`: `no_group_base`, `old_base_in_seeks`, `no_later_landing`,
+     `no_resync`, `no_floor`, `no_end_on_failure`, `old_until`, `no_failed_landing`, and
+     `publish_delay`, which makes the upload thread wait before it publishes each frame of a locked
+     pair). `pick_pair` returns `Option<[SlotView; 2]>`, from slots Ready or Shown at a time no
+     later than the clock's, preferring of a member's two slots at one time the Shown, then the
+     higher seq, then the lower slot. `PerStream` lives in
+     `crates/playback/tests/common/per_stream.rs`, not `engine.rs`. `Lens::cost_at_open(open, cost)`
+     there sets the frame cost of a file stream's nth decoder by the order of the opens; two members
+     over one stream open on their own threads, so which member is slowed is a race, and a fallback
+     reopen counts too. It doesn't yet give 22.3's per-member control, and no test uses it: M3.14
+     keys the cost by player stream (for example, a cost per `VideoRequest` the worker tags) before
+     it plants 15's slow member. `LockSpec` has no `columns` yet.
+   - **The pacing rule and the Tier 1 gates (9's Tests).** `a_locked_pair_paces_to_its_slowest_lens`
+     plays four cases: three on 9's 90-frame clip at a frame every 3 ms with a 64-frame cache (lens
+     1 at 7.5 to 9 ms; both lenses at 4.5 and 9 ms; the first with the budget halved past the
+     middle), and a fourth on a 60-frame clip at 6 ms with a 24-frame cache and lens 1 at 4.5 ms,
+     within the clock. After 30 frames: the new pairs past the slowest lens's newest frame are at
+     least 80 % of the frames it hands out, pooled over the four cases on 20 hand-outs or more
+     (fewer is `Unjudged`, a failure; the fourth case gives most of them); the time presented trails
+     that lens's newest frame, as the present before saw it and never past the clock's frame then,
+     by at most 2 frames; play reaches the end; no freeze runs longer than max(ceil(slowest cost ×
+     (lag + 1) / period), budget / 4) + 4 frames plus the frames its decoder waited for a CPU
+     (schedstat); presents late (a pair not up within 4 ms plus the engine threads' CPU wait, at
+     most 75 ms) number at most 1, or a quarter of the hand-outs; and `pair_resyncs` is 0 but in the
+     halved case, which in practice never resyncs, so only `base.rs`'s budget cut to a quarter holds
+     the backstop. Its controls fail: the group base and `until` off, a run a frame short of 20,
+     every third pair passed over, freezes that double, catch-ups of five times the lag, and each
+     slot published 4 ms late. The mixed test's locked plays must also follow their clock (it starts
+     within 0.5 s; paused, the pair reaches the clock's frame with progress every 0.5 s), with two
+     held-back controls. `gui_smoke`'s X5 raw view fails unless the pair locked with 0 unpaired and
+     0 resyncs, its drops counted as pairs.
+   - **The zero-copy pair check (9, 19.4).** odin's wrong frames (PR #29, #30 and #32) are not the
+     lock's or path B's, and the zero-copy diagnosis's path B hypothesis is refuted.
+     `zero_copy_pair_matches_copy` judges every slot of a copied and a kept pass, each twice,
+     against a software decode of each lens (FFmpeg's own Vulkan decode of clip 9 equals software,
+     PR #31), not against the copy, since copied frames were wrong too. In PR #32's three runs it
+     found 141 wrong frames on every path (path B kept 118, path A kept 16, copied 7: 3.3 % of kept
+     frames, 0.17 % of copied), all in a slot's R8 luma plane, never its Rg8 chroma, at x mod 8 in
+     4..7 and y mod 4 in 2..3 of aligned 8×4 cells: 134 a 4×2 block, 3 the cell's right 4×4, 1 the
+     whole cell and 3 two 4×2 blocks in distant cells, all on the signature; the cache right, on
+     clip 9 alone; the unlocked, one-lens, read-while-quiet and pool-watched variants failed alike.
+     Under `RADV_DEBUG=nodcc` two runs were clean, with a plain run failing 45 between them (PR
+     #33): RADV's DCC, or something only `nodcc` changes, is necessary, and a RADV/GFX11 driver
+     fault or erratum (RX 7600, Mesa 26.2.5) is the likeliest, neither write side nor read side
+     known. D77's workaround makes a slot's R8 and Rg8 planes without `RENDER_ATTACHMENT` (Vulkan
+     `TRANSFER_SRC`, `TRANSFER_DST` and `SAMPLED`), on a Mesa rule recalled, not read: RADV gives
+     DCC only to images that can be colour attachments. Their mips come from a compute pass,
+     `shaders/mips8.wgsl`, byte for byte the render passes' at every level. The check stays strict,
+     byte for byte on every slot, path and variant, with no tolerance, retry, skip or list of frames
+     let off; a kept pass with any frame refused or downloaded fails, and only one with no frame on
+     the GPU skips; its report labels each wrong line on or off the GFX11 R8 signature. Stale, where
+     they describe the check: D67's Tier 1 line ("the slot hashes"), its Tier 2h line ("hashed
+     against the same decoder's copy", "or has one refused, skips") and D77's "against the copy
+     path". Settled when three plain runs in a row pass and a `RADV_DEBUG=img` run shows no DCC on
+     the slots' R8 3840² 6-level and RG8 1920² 5-level surfaces. Settled on odin at 04d15be (PR #34)
+     by the plain runs, the `img` half met only vacuously (below): five runs (three plain, one under
+     `RADV_DEBUG=img`, one in hw-test), 0 wrong frames on
+     every path and variant, against 141 in PR #32's three runs and 45 in PR #33's plain one. RADV
+     printed no DCC block for any image of the `img` run, so the print can't tell D77's slots from
+     earlier ones (theirs carry flags 0x22410301, whose bit 22 is RADEON_SURF_DISABLE_DCC as recalled
+     from Mesa's `ac_surface.h`, not read); the clean runs are the evidence. Both of D77's changes
+     landed together, so which of them ended the fault isn't known. With D77 holding, zero copy
+     stays D25's default on RADV/GFX11. If the check fails again, D77's "Revisit if" applies (the
+     analysis's next runs: `RADV_DEBUG=nobinning`, the
+     wrong bytes against the slot's previous occupant, a reproducer without the decoder under sync
+     validation). D77 keeps two fallbacks it didn't build: `radv_disable_dcc_mips` or
+     `RADV_DEBUG=nodcc` set at start-up, and a slot image of our own with
+     `VK_EXT_image_compression_control` set to disabled (odin's vulkaninfo lists the extension).
+     Without a fix that holds, zero copy shows wrong luma blocks in about 3.3 % of kept frames on
+     RADV/GFX11, against 0.17 % copied, and whether it stays the default there is Pat's call. A
+     slice may merge with that run red only under a written waiver in its PR and DECISIONS.md, linked
+     to an issue with an owner and expiring at the next milestone, on all of: every wrong line on
+     the signature; the signature reproduced without M3.8 (the pre-slice commit with the test
+     backported, or that reproducer, not built); three clean full runs under `RADV_DEBUG=nodcc` or
+     `radv_disable_dcc_mips` (PR #33 has two); and everything else green (the perf pair, the
+     one-stream checks, path A's and path B's kept rates alike). The run stays red, named as a known
+     external fault. Never waived: a chroma error, damage off the cells or in rows, a second read
+     that differs, a wrong cache lookup, a resync, an unpaired or twice-shown frame, any failure on
+     the perf pair, any failure in a run under `nodcc` or `radv_disable_dcc_mips`, a path B kept
+     rate clearly above path A's, a changed signature, or a higher copy-pass rate. Filing D77's
+     drafted Mesa report is Pat's call.
+   - **A slot's 8-bit planes for later slices (10.1 to 10.4, 10.6, 13.2, 15, 18.1, 18.2; 22.1's M3.7
+     row).** Nothing renders into a slot's R8 or Rg8 plane. The planes have no `RENDER_ATTACHMENT`,
+     so wgpu is expected to refuse a render pass into one (checked by usage flags, not by a render
+     pass). Level 0 is written only by copies (`write_texture` or the belt, path A's texture copy in
+     `upload_imported`, path B's buffer copy in `upload_from_buffer`), and levels 1 on by
+     `Uploader::record_mips`, which every path that fills level 0 calls. Every `GpuFrame` is made
+     so, `StillRenderer`'s too. M3.7's stitch pass and its strips, M3.10's viewer and overview and
+     M3.11's export only sample slots; a new writer of slot planes (M3.14's `Columns` and
+     `Columns::buffer_planes`, M3.11b's `PlaneSource::Buffer` and `Imported`, any test that fills a
+     slot on the GPU) keeps to copies or compute. Targets of their own may still be rendered to.
+     Deep planes (R16F, Rg16F: P010 and other 10-bit sources) keep `RENDER_ATTACHMENT` and so DCC,
+     and whether 10-bit content shows the fault is untested (PR #32's frames were all 8-bit), one of
+     D77's revisit triggers. The MAX 2's 10-bit mode (gopro.md) and every DJI Osmo 360 pair (HEVC
+     Main10 in every mode, dji.md) decode as P010, so M3.18's lock tests on a MAX 2 10-bit sample
+     and M3.19's DJI pairs are the first 10-bit runs on these slots: where they play a pair zero
+     copy on RADV/GFX11 they judge its slots by the pair check's rules, and the signature there is
+     D77's revisit trigger. Each `Uploader` holds one mip scratch buffer a plane index, remade on a
+     shape change: about 5.3 MB for a 3840² luma plane (its level 1 3.9 MB) and 2.6 MB for its
+     chroma, every row padded to 256 bytes (D77's 4.9 MB and 3.7 MB are the unpadded sizes). M3.7's
+     RADV goldens and `zero_copy_pair_frame_matches_the_copy` and M3.14's
+     `zero_copy_lrv_matches_copy` run on these slots, and the two checks copy the pair check's rules
+     (a software truth, strict, the signature's label). 10.6's 0.20 and 0.74 ms, and the expected
+     cost behind P-SHADE's gate, were measured on slots RADV could compress: M3.7 takes its baseline
+     from `bench_upload_5k7`'s project rows at 04d15be or later, and uncompressed sampling that
+     costs real-time play is one of D77's revisit triggers. The compute mips' cost on the RX 7600 is
+     read against the render-pass mips odin measured from 43abcda to 0663e05, before D77 (0.62 to
+     0.63 ms for a 5.7K NV12 frame's mips; 1.00 to 1.01 ms for its ingest and mips by
+     `write_texture` and 1.01 to 1.03 by the belt; 0.88 to 0.89 ms a frame for a 3840² pair's ingest
+     and mips; D31's 1.01 ms for the mips alone was 918d031's one run and didn't recur); on lavapipe
+     the compute pass was no slower (D77). The goldens on the RX 7600, the compute mips' cost, the
+     project rows and the real-time rows on these slots, odin at 04d15be (PR #34): the goldens and
+     yuv on the RX 7600 pass; the compute mips take 0.70 ms for a 5.7K NV12 frame, its ingest and
+     mips 1.10 ms by `write_texture` and 1.11 by the belt, and a 3840² NV12 pair's ingest and mips
+     0.95 ms a frame, 0.06 to 0.10 ms more than the render passes (P010's rows, which D77 didn't
+     touch, came out about 4 % faster in the same run); the project rows, M3.7's baseline, 0.22 ms
+     and 0.77 ms for 5.7K NV12 to 1920×1080 and 3840×2160 rectilinear, within the 0.19 to 0.22 and
+     0.73 to 0.81 odin measured from 43abcda to 0663e05 on slots RADV could compress (10.6's 0.20
+     and 0.74 among them); the real-time rows pass. `goldens_on_host_llvmpipe` hasn't run on odin
+     since D77.
+   - **Path A's acquire and path B's hand-over (4.3's K2; m1-5b.md).** The path A mismatch K2 cites
+     (one in about a dozen runs on odin; "19 of 2764800 values differ", D77) is probably the slot
+     fault above. About 30 runs of `zero_copy_matches_copy_path` on odin with D77 in would tell
+     whether it is (optional; one has run with D77 in, passing in hw-test at 04d15be, which at about one
+     failure in a dozen can't tell). K2's path A rule stays as 4.3 writes it, on huginn,
+     whose Radeon 8060S is RDNA 3.5 under the same Mesa 26.2.5 RADV, so huginn's
+     `zero_copy_matches_copy_path` run, and any pair check M3.17's huginn prompt runs, also test
+     D77's slots on a second GFX11-class part, which D77 lists as untested. Each DMA-BUF import is
+     now acquired from `VK_QUEUE_FAMILY_FOREIGN_EXT` into wgpu's family, `GENERAL` to `GENERAL` (the
+     layout wgpu tracks), on the devices `vkshare` opens, which enable `VK_EXT_queue_family_foreign`
+     where listed; a device wgpu opened itself (`Gpu::headless`, `for_window`, which path A alone
+     uses) acquires from `VK_QUEUE_FAMILY_EXTERNAL`, since asking for the extension there needs a
+     hook in `gpu.rs`. No validation layer has run the barrier (VUID 01197 wants `UNDEFINED` or the
+     current layout); one path A run on odin under the Khronos layer settles it. Path B refuses a
+     frame `VkPicture::with_locked` can't lock (it now returns `bool`), enables
+     `VK_KHR_video_maintenance1` only with its feature chained, hands FFmpeg the device's real
+     feature chain (`VkDeviceHandles::device_features`, checked against wgpu's, else empty), and
+     names the Copier's real source stage and access in its barrier. When another submit takes the
+     Copier's staged wait, the upload's order rests on RADV honouring wgpu-hal's chained semaphores,
+     recalled, not read. M3.11b's path A and path B decodes on the export's device inherit all of
+     this.
+   - **The lock's budget and the slices to come (19.6; 22.1's M3.7, M3.10, M3.11, M3.14, M3.18 and
+     M3.21 rows; 23).** The lock's 32 tests in `crates/playback/tests/lock` take 5.3 to 5.9 s alone
+     and 6.7 to 7.4 s beside four busy loops (5.5 s alone after D77's compute mips; none measured
+     under load since), against 19.6's 10 s, and `pick_pair`'s property 0.57 s at 100 000 cases;
+     D77's mip test adds 3.3 to 4.5 s to render's `tests/upload.rs`. M3.10 gives `LockRefused` (by
+     its field) and `LensShort` the notices the app now passes over, and its stitched `gui_smoke`
+     run takes the raw view's pair gates and counts drops as pairs. It waited for P-LOCK's verdict
+     under these rules and D77 on odin, both now in (every mode Pass, D77 holding), and still waits
+     for Pat's answer on the cap above (odin's 8K25 path-B row showed no slide); a Kill in huginn's
+     VA-API rows would still mean 4.3's design note on the upload
+     schedule first. M3.11's export ends where the player ends a pair: at the earlier of the lenses'
+     ends (each lens's last frame's time plus its duration, the container's duration until decoding
+     reaches it), `VideoStreamInfo::frame_count`'s difference serving only `LensShort`, which is
+     said only when both counts are known; the player also ends a pair at the last frame of a lens
+     that can't decode on, which the export must match or refuse by name; its lag test can't reach
+     `PerStream`, and `SyntheticBackend` can't hold one lens back. M3.14 adds `LockSpec.columns` and
+     is the first to open two members over one stream, which no test does yet. M3.18's `.360` tracks
+     lock only if their MP4 tables pass the open's checks; no GoPro file has been tried (there are
+     no samples), and any lock run it makes is scored as above. 19.4's M3.8 row, 19.6's lock line,
+     22.1's M3.7, M3.10, M3.14 and M3.21 rows and section 23's D67 row say so in place, and section
+     23 gains D77's row.
 
 ## 1. Summary
 
@@ -2436,7 +2742,7 @@ estimator (16); the LRV frame map and `Columns` (15).
 | `samples_insv_trailer_parses`, `samples_calib_print_is_identity` | the 14 files as in 5.5 | 2c, cloud | M3.2 |
 | `rig_fit_clip8_10_provisional`, `samples_thumbnail_orientation` (if Pat agrees), `samples_lens_offset_is_zero` | recorded with σ (8.4) and the directions stage F leaves undetermined; k = 0 by 5σ, with 4.3's σ | 2c, cloud | M3.6 |
 | goldens on RADV; P-SHADE | D32; ≤ 0.8 and 2.0 ms | 2h, odin | M3.7 |
-| `samples_lens_pairs_frame_locked`; `bench_playback_x5_raw` locked | 0 unpaired by tag, and by corner code on every frame of the perf clip; P-LOCK, 8K25 and the pacing rule included | 2h, odin | M3.8 |
+| `samples_lens_pairs_frame_locked`; `bench_playback_x5_raw` locked; `zero_copy_pair_matches_copy`; `gui_smoke` raw | 0 unpaired by tag, and by corner code on every frame of the perf clip; P-LOCK as amendment 6 scores it (8K25 on path B by the pacing rule less its end clause), with each run's slot count and `MemAvailable` beside its rows; `zero_copy_pair_matches_copy` byte for byte against a software decode on every slot, path and variant, three plain runs in a row, and one `RADV_DEBUG=img` run with no DCC on the slots' 8-bit planes (D77); `gui_smoke`'s X5 raw view locked with 0 unpaired and 0 resyncs, its drops counted as pairs | 2h, odin | M3.8 |
 | `project_create_x5` | a schema 2 source with the trailer's hash | 2c, cloud | M3.9 |
 | `gui_smoke` stitched; `bench_playback_x5_stitched` | ≥ 99 % presented, UI p99 within refresh; 1080p and 4K on the synthetic 2×2880² `.insv` at 29.97 (7.2): 0 dropped at ≥ 1.2× unthrottled; 8K30 and 5.7K60 recorded | 2h, odin | M3.10 |
 | `stitched_export_matches_preview`; `bench_export_4k30_from_insv` | M2's VA-API floors (47.7 / 50.1 dB) with the frame-late and planted-gain controls; ≥ 30 fps over the whole export from 5.7K30 (600 frames) and 8K30 (all of clip 8); huginn's rows pending until it answers | 2h, odin, huginn | M3.11 |
@@ -2462,7 +2768,7 @@ The stitch shader's cost is P-SHADE's (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K on 
 Each new suite prints its time against its budget: camera ≤ 1 s, its 100k run apart (M3.2);
 sphere's properties and rung 0 ≤ 30 s in release (M3.3); metrics, seam self-tests, the
 attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
-recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8); schema, edits
+recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8, measured: its 32 tests 5.3 to 5.9 s alone and 6.7 to 7.4 s beside four busy loops, 5.5 s alone after D77's compute mips, none measured under load since: amendment 6); schema, edits
 and agents ≤ 3 s (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
 (M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s to `cargo xtask
 check`; each slice note records the growth.
@@ -2532,22 +2838,22 @@ one reviewer each.
 | **M3.4** The instrument | (a) weighted metrics (8.1); (b) `reference::render_rig` with debug modes 4 to 7; (c) strips, shifts, signature and self-tests (8.2); (d) the attribution matrix (8.3); rung 1 with every control | M3.3 | each control fails and is attributed to the term 8.3's step 1 predicts (prediction within 0.05 px rms, crosstalk under its bound); the common-mode control passes every seam check and fails the comparison with the ideal (4.2); rung 1 within 4.2's thresholds; 3.4's budget matches the images; within 19.6's budget (≤ 15 s) | none | none | nothing |
 | **M3.5** The file | (a) `write_insv` (N-track `Mp4Writer`, LRV, faults); (b) `to_calibration`, `known` with the placeholder entry, probe's geometry blocks; (c) `Still::open_pair` and `frame <insv>` on the CPU reference; rung 3's CPU half | M3.2, M3.4 | rung 3's planes hash equal and its render equals rung 1's; each trailer `InsvFault` (`TruncatedTrailer` to `VarintOverflow`) a clear error naming the record (5.5); ≤ 3 s; `frame` of clip 8 renders in Tier 2c | none | 8 | nothing new (placeholder geometry) |
 | **M3.6** The fit, provisional | (a) `render::seam::fit` (8.4); (b) `rig-fit`, `xtask fit-matrix` (from then on part of 4.1 rule 6's push rule for any slice that touches `render::seam`, `sphere::rig` or `synth::lens`); (c) `fit_recovers_planted_geometry` (8.5); (d) the run on clips 8 to 10: `known`'s provisional X5 entry, `samples_lens_offset_is_zero`, `samples_thumbnail_orientation` (Pat agreed, 2026-11-01), P-GAIN's first numbers | M3.5 | 8.5's expected verdicts met in Tier 1 and in `fit-matrix`, the redirect and out-of-family truths included; `docs/research/m3/fit-clip{8,9,10}.md` with σ, the ranking, each question settled or open, the directions stage F leaves undetermined, and the fine class open on clips 8 to 10; the X5 entry written from the run whatever the rules decide (the decisive value, the redirect's, or the best candidate as "best of N, not decisive", 8.6), the placeholder kept, with `stitchable: false`, only if clips 8 and 10 fail the gross rule; k = 0 by 5σ or the offset recorded; D64 and D65's fit half drafted (D65's instrument half is M3.4's: amendment 5) | none | 8, 9, 10 | **the first stitched stills of clip 8** (`spherecut frame`), with the provisional numbers; if the gross rule fails, a note that says so and what the design note will look at |
-| **M3.7** Stitch on the GPU | (a) `fs_rig` and its structs (10.3, as amendment 5 corrects it: the weights where no feather weighs, the mask's θ in angle, an output on the strips' grid); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
+| **M3.7** Stitch on the GPU | (a) `fs_rig` and its structs (10.3, as amendment 5 corrects it: the weights where no feather weighs, the mask's θ in angle, an output on the strips' grid); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B), against a software decode, strict, with the pair check's signature label; nothing renders into a slot's 8-bit planes (D77; amendment 6) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
 | **M3.8** Frame lock | section 9: (a) `MediaBackend::track_timing` (`FfmpegBackend` from P-TRK's MP4 tables, `None` otherwise), the open checks, `LockRefused` and `LensShort`; (b) `pick_pair`, `unpaired_presents` over every stream, `pair_wait`, `pair_resyncs`; (c) the group base in `FrameCache` (`set_group`, Tg as the members' playhead), the group `until`, group seeks and the end, the resync backstop; (d) slots and their floor of 2 per member, per-lens fallback; the `PerStream` test backend and the readback tests | M3.0 (`track_timing`); M3.1 (`mux_video_streams`' MP4 output, the corner codes, the two-track MP4 perf clips and the 2×64² test files) | `pick_pair`'s property at 100k; `a_locked_pair_never_shows_mismatched_frames` at 0 unpaired by tag and by content, its lock-off control above 0 on both; `a_locked_pair_paces_to_its_slowest_lens` meets the pacing rule in every case and its control fails; each planted fault refused by name, and the one-frame-short lens locked and ended at the shorter lens with one `LensShort`; the slot floor unlocks within `WAIT` and its no-floor control times out; the fallback test keeps lens 0 on hardware with one notice; old two-stream tests pass; on odin 0 unpaired by tag and by corner code, `zero_copy_pair_matches_copy` (9), and P-LOCK's verdict (8K25 on path B included) with the slot count | odin | 1, 2, 3, 4 (P-LOCK's 8K30, 8K25, 5.7K60 and 4K120) and 9 (real-time play), and M3.1's MP4 perf clips | the raw view never shows the lenses at different frames, and a lagging lens slows the pair instead of freezing it; `unpaired` and `pair_wait` in the overlay |
 | **M3.9** Schema 2 | section 11: (a) the model, migration and `validate`; (b) the three ops, their inverses, examples and core's per-op samples (`core/tests/project_edits.rs:1095`); the reference project's optional camera media 11, a synthetic `.insv` the agent test writes and probes; agent `edit()`'s server-side expansion of `set_source`'s camera form and `wired()`'s filter for it (11.3); 11.4's comparison in `check`, `render` and the summary; (c) `project_media`, 11.5's export and viewer fixture, agent `project create`, the `not_yet` refusals | M3.5 | both fixtures; the edit property at 100k; `validate` at each bound; the missing-`source` refusal; `project_create_x5` (Tier 2c) gives the trailer's hash; D57's example test with 24 ops, the three new ones applied to media 11 and undone exactly (`set_stitch`'s example setting both a tune and gains), `set_source`'s camera form read from the file (11.3); an old project renders the same bytes under a newer (fake) table entry | none | 8 | agents' projects of `.insv` files record camera, calibration and geometry; agents tag a file as equirect with `set_source` |
-| **M3.10** Stitched in the app | 13.2, 13.3 without profiles, 13.5, 11.4's notice: (a) open flow, `Doc.rig`, `DrawKey`, "Stitch it" and "Treat as equirect" (`set_source`, 18.2), and a `Known` entry with `stitchable: false` shown as lenses with a notice (5.3); (b) viewer, overview, Raw lenses, the lock's notices (`LensShort`, the slot-floor unlock); (c) the Stitch pane; (d) kittests and smoke, with the perf clips as `.insv` files (synth's trailer appended, 7.2) | M3.7, M3.8, M3.9, M3.1 (the 2×2880² perf clip `bench_playback_x5_stitched` gates on, 19.4); what Pat sees waits for M3.6 | rung 5 within 1 LSB on 11.5's fixture, its `Tune::default()` control missing; 13.5's kittests, among them "Treat as equirect" in one undo step and the `stitchable: false` notice; on odin `gui_smoke` on clip 8 at 8K30 ≥ 99 % presented with UI p99 within refresh, and `bench_playback_x5_stitched` (19.4); seam screenshots in the note, under M3.6's provisional entry (if M3.6 hasn't merged, the note says "placeholder geometry" and the screenshots wait for it) | odin | 1, 3, 8, and M3.1's 2×2880² perf clip | once M3.6 has merged, **clip 8 plays stitched** under its provisional geometry; per-lens numbers in the Stitch pane |
+| **M3.10** Stitched in the app | 13.2, 13.3 without profiles, 13.5, 11.4's notice: (a) open flow, `Doc.rig`, `DrawKey`, "Stitch it" and "Treat as equirect" (`set_source`, 18.2), and a `Known` entry with `stitchable: false` shown as lenses with a notice (5.3); (b) viewer, overview, Raw lenses, the lock's notices (`LensShort`, and `LockRefused` by its field, the slot-floor unlock's `"slots"` and a failed member's `"open"` among them, which the app now passes over: amendment 6); (c) the Stitch pane; (d) kittests and smoke, with the perf clips as `.insv` files (synth's trailer appended, 7.2) | M3.7, M3.8 (with P-LOCK's verdict as amendment 6 scores it, a Kill meaning 4.3's design note on the upload schedule first; Pat's answer on capping the all-trailing `until`; and, if D77 doesn't hold on odin, Pat's call on zero copy's default on RADV/GFX11), M3.9, M3.1 (the 2×2880² perf clip `bench_playback_x5_stitched` gates on, 19.4); what Pat sees waits for M3.6 | rung 5 within 1 LSB on 11.5's fixture, its `Tune::default()` control missing; 13.5's kittests, among them "Treat as equirect" in one undo step and the `stitchable: false` notice; on odin `gui_smoke` on clip 8 at 8K30 ≥ 99 % presented with UI p99 within refresh, its stitched run under the raw view's pair gates (locked, 0 unpaired, 0 resyncs, drops counted as pairs: amendment 6), and `bench_playback_x5_stitched` (19.4); seam screenshots in the note, under M3.6's provisional entry (if M3.6 hasn't merged, the note says "placeholder geometry" and the screenshots wait for it) | odin | 1, 3, 8, and M3.1's 2×2880² perf clip | once M3.6 has merged, **clip 8 plays stitched** under its provisional geometry; per-lens numbers in the Stitch pane |
 | **M3.11** Export from the pair | section 12: (a) decode, `Held`, the zip and `pairs_ahead` (D56's lead counted in pairs); (b) every project renderer takes the pair, `not_yet` gone; (c) parity, controls and benches; (d) the end-to-end note | M3.7, M3.9, M3.1's K1 verdict; merges after M3.10; its note (d) waits for M3.6 | rung 4 flat (on a side seam) and 360 on 11.5's fixture with its four controls (lens 1 late, both late, the tune dropped, gains off on the Auto twin); an export of an `InsvFault::LensOneFrameShort` file ends at the shorter lens with the viewer's warning ("lens B has N fewer frames"), on the frame the player ends on; the app's `the_export_yields_while_a_locked_pairs_lens_lags` with its per-slot control; on odin `stitched_export_matches_preview` at M2's VA-API floors (47.7 / 50.1 dB) with the frame-late and planted-gain controls, and `bench_export_4k30_from_insv` over the whole export from 5.7K30 (600 frames) and 8K30 (all of clip 8), where a miss goes to Pat as a decision card with stage times; huginn's rows read "pending huginn"; **the note to Pat**, under M3.6's provisional entry: commands, what to look at, the geometry's status, limits | odin; huginn when it answers | 1, 8 | once M3.6 has merged, **clip 8 exported stitched**, flat and 360, from the window, the CLI and agents |
 | **M3.11b** (only if K1 fails, or K4 or K2's export half when huginn answers) | the export decodes onto its own device through path B or A (4.3), each lens's planes reaching `render_yuv`'s `Pair` as `PlaneSource::Buffer` or `Imported` (10.4) | M3.11 | section 12's done-when with the decode stage under 25 ms a pair at 8K30 on odin; where K4 or K2's export half failed, huginn's path A row at ≥ 30 fps, reading "pending huginn" until its paste returns | odin; huginn in that case | 1, 8 | the 8K30 export at real time |
 | **M3.12** Geometry settled | `rig-fit` on takes 14 and 15 under 8.6's rules (clip 12, once Pat exports it, compared where the fit leaves a question open, as Pat agreed on 2026-11-01); `known` settled or redirected (8.7); `screen_side_track`; seam rows gated; insta360.md updated | M3.6; takes 14 and 15. Nothing waits for it: until they come, PROGRESS lists it as waiting on them, the X5 entry keeps M3.6's provisional numbers and the `seam_quality_*` rows stay recorded | each row of 8.6 settled by its rule or written up as open with its numbers; `seam_quality_take14` and `_clip8` gated at the floor + 3σ, σ as 8.4 defines it; `samples_binding_take15`; D64 final; a short review of its own, since it may come after M3.21 | none | 14, 15 | the badge reads "measured"; lenses named front and back; one notice on older projects |
 | **M3.13** Fine-tune | 13.4: (a) Alt-drag and the q drag; (b) Measure seam and Estimate distance as jobs; (c) `look mode: "seam"`, the agents' recipe, `docs/agents.md` | M3.10 | the drag is one undo step, keeps its point within 0.5 px and shrinks the signature; Measure seam and `look seam` report a planted 0.5° roll as 0.5° ± 0.05°; Estimate distance finds q within 0.05 m⁻¹ at R = 1.5 m; the recipe replays within budget; `estimate_distance_stands_aside_while_playing`: no frame decoded while the viewer plays, Cancel ends it at once (13.4); odin's `gui_smoke` with a seam drag | odin | none | **a seam number with its dominant term and a hint**; drags the seam |
-| **M3.14** LRV proxies | section 15: (a) `render::upload::Columns`, `Columns::buffer_planes` and `upload_from_buffer`'s end check at wgpu's own rule; (b) the proxy's lock group: `LockSpec.columns`, the upload pass's per-member columns, VA-API's download for a member with columns, and `a_packed_proxy_never_shows_its_halves_apart`; (c) companions in the app, the time map, the `proxies` setting and toggle, rung 6 through the viewer, `lrv_packed_vs_pair`; (d) the Tier 2 rows (`lrv_matches_master` recorded, `zero_copy_lrv_matches_copy`, the seek and drop benches on path B) | M3.10 | rung 6 through the app's viewer with its control; `lrv_packed_vs_pair`; the frame-map and `Columns` properties at 100k; the `Columns` upload test and `shared_vulkan.rs`'s packed case byte for byte, each with its control; `a_packed_proxy_never_shows_its_halves_apart` at 0 unpaired and its lock-off control above 0; `never_blocks` with an `.insv` beside its LRV and the proxy toggled on and off, backend gated and harness thread marked, with its `read_trailer` control (13.5); an export with proxies on reads the master; `lrv_matches_master`'s median SSIM and σ per pair recorded with both controls, then the row gated at the lowest median less 3σ in a reviewed change; on odin, on path B (D42), `zero_copy_lrv_matches_copy`, the stitched LRV seek p95 < 150 ms and 0 dropped | odin | the 7 LRVs | 8K clips scrub on the LRV; a proxy toggle |
+| **M3.14** LRV proxies | section 15: (a) `render::upload::Columns`, `Columns::buffer_planes` and `upload_from_buffer`'s end check at wgpu's own rule; (b) the proxy's lock group: `LockSpec.columns` (M3.8 built `LockSpec` without it, and no test yet opens two members over one stream: amendment 6), the upload pass's per-member columns, VA-API's download for a member with columns, and `a_packed_proxy_never_shows_its_halves_apart`; (c) companions in the app, the time map, the `proxies` setting and toggle, rung 6 through the viewer, `lrv_packed_vs_pair`; (d) the Tier 2 rows (`lrv_matches_master` recorded, `zero_copy_lrv_matches_copy`, the seek and drop benches on path B) | M3.10 | rung 6 through the app's viewer with its control; `lrv_packed_vs_pair`; the frame-map and `Columns` properties at 100k; the `Columns` upload test and `shared_vulkan.rs`'s packed case byte for byte, each with its control; `a_packed_proxy_never_shows_its_halves_apart` at 0 unpaired and its lock-off control above 0; `never_blocks` with an `.insv` beside its LRV and the proxy toggled on and off, backend gated and harness thread marked, with its `read_trailer` control (13.5); an export with proxies on reads the master; `lrv_matches_master`'s median SSIM and σ per pair recorded with both controls, then the row gated at the lowest median less 3σ in a reviewed change; on odin, on path B (D42), `zero_copy_lrv_matches_copy` (against a software decode, strict, with the pair check's signature label: amendment 6), the stitched LRV seek p95 < 150 ms and 0 dropped | odin | the 7 LRVs | 8K clips scrub on the LRV; a proxy toggle |
 | **M3.15** Exposure match | section 16 | M3.10, M3.11 | the estimator's properties at 100k, the ramp against the truth through the same filter with its causal-filter control (16); `dfish_exposure_match`; export parity with Auto and its causal-filter control; the stale-basis test; `analysis_stands_aside_while_playing` (13.5); an agent's Auto analysis runs as a D58 job that ends in one "Exposure match" edit, never inside `edit`; `exposure_step_after_match` recorded on clip 9 (gated on take 17 if it comes); P-GAIN's default | none | 9 (17 if it comes) | no colour step at the seam, in preview and export; the slice note gives P-GAIN's numbers on each take and the exposure default they set (Off or Auto) |
 | **M3.16** Profiles | section 17 and agents' `apply_profile` | M3.10 | section 17's tests; `skill.rs` on `core::dirs` with its tests unchanged | none | none | saves the tune for Pat's X5; new clips open with it |
 | **M3.17** X5 hardware pass | the full hw-test on odin; huginn's prompt; take 16's rows; `gui_smoke` on clip 8 stitched with an Auto analysis pending (13.5), at ≥ 99 % presented and no more frames dropped than the run without it; perf.md; 19.5 filled; Pat's eye-check list; PLAN's X5 ticks | M3.10 to M3.16 except M3.12 | every Tier 2h row on odin passes or is reported with its number and stage; huginn's rows are in perf.md with K2's and K4's rules applied, or read "pending huginn" with the date its prompt went out; neither blocks M3.21. Without take 16 the 5.7K30 row is gated on the synthetic 2×2880² clip alone, and without take 17 the exposure gate stays recorded on clip 9 (question 1) | odin; huginn by prompt | 16 and 17 if they come (optional) | the performance table and an eye-check list |
 | **M3.18** GoPro MAX | 18.1 | M3.7, M3.8, M3.9, M3.10, M3.11 (rung 4 is the export; the app shows `.360` files) | synthetic EAC rungs 1 to 4; `eac_*` rows with controls; with samples, max2sphere's floor and the lock tests; else "done pending samples" | odin (goldens) | GoPro set (optional) | `.360` files stitched, given samples |
 | **M3.19** DJI Osmo 360 | 18.2 | M3.6, M3.7, M3.9 | with samples, `camera::dji` (OpenOSV's field numbers, `known` starting on `native_refine`), a provisional entry and the fit on an open-field take; without, dji.md's M3 state and the stitched-export test (probe's tag, then `set_source {"kind": "equirect"}` through agent `edit`) | none | DJI set (optional) | DJI raw stitched (in the app once M3.10 is in), or its stitched export tagged ("Treat as equirect", M3.10) |
 | **M3.20** Nadir and zenith | 18.3, with each media's four `layouts::sampler_caps` groups made when its PNG loads and passed through `SourceRef` (10.2) | M3.7, M3.9, M3.10, M3.11 (parity with a patch is an export) | `nadir_fill`, `nadir_patch` (its glyph at both poles, with the mirrored control) and `zenith_fill`, with controls; parity with a patch; `set_caps`'s example and inverse | odin (goldens) | none | the tripod hidden by a fill or a logo |
-| **M3.21** Docs and review | D60 to D76 and the updates (23); ARCHITECTURE, PROGRESS, README, `cli-json.md`, agents.md, the format notes; a fresh review in four areas (camera and maths; render and the instrument; playback and export; app and agents) that reads the slice notes as well as the code; the fixes; the note to Pat | all but M3.12 | the review's findings fixed or listed as known; PLAN's ticks, with the X5 geometry listed in PLAN and PROGRESS as waiting on takes 14 and 15 if M3.12 hasn't run | none | none | M3 done, or done pending samples (takes 14 and 15 for the X5's geometry; GoPro's and DJI's sets) |
+| **M3.21** Docs and review | D60 to D77 and the updates (23); ARCHITECTURE, PROGRESS, README, `cli-json.md`, agents.md, the format notes; a fresh review in four areas (camera and maths; render and the instrument; playback and export; app and agents) that reads the slice notes as well as the code; the fixes; the note to Pat | all but M3.12 | the review's findings fixed or listed as known; PLAN's ticks, with the X5 geometry listed in PLAN and PROGRESS as waiting on takes 14 and 15 if M3.12 hasn't run | none | none | M3 done, or done pending samples (takes 14 and 15 for the X5's geometry; GoPro's and DJI's sets) |
 
 ### 22.2 Order
 
@@ -2612,7 +2918,7 @@ whose diff passes about 3,000 lines gets a fresh review before it merges.
 | **D64** | **Geometry is data**: `Geometry`'s fields with status and evidence; a generic Euler space of 1152 values with no direction field; twins (6.2) reported as one class, `upright` a quarter turn about −Z set by the up-and-down rule, and stage G keeping only values that put block 0's lens within 5° of −Z; a generic V6 space of 21 values; synth composes the extrinsics with its own code (4.1 rule 2); `Known` by model and firmware, provisional for unlisted firmware; M3.6 always replaces the placeholder with what clips 8 to 10 show (8.6), and keeps it, with `stitchable: false`, only if they fail the gross rule; projects store theirs, and only an edit changes it | Seven things are unknown and the readings in the wild conflict. Our own spaces keep provenance clean, and two compositions written from 6.2's text check each other. Storing keeps old projects' bytes. A placeholder that outlived the fit could show Pat a lens upside down | M3.5, M3.6, M3.12 |
 | **D65** | **The seam signature and the fit**: strips through the CPU reference; NCC then Lucas–Kanade per 5° bin with its information; the harmonic terms; the attribution matrix; stages G, F and J with equivalence classes and the decisiveness rule; stage F on frames at rest with its information matrix, the undetermined directions reported and judged on nothing; take 14's ground model; σ as the larger of the frame-set spread and the information matrix's standard error; 8.5's expected verdicts as `must_fail` controls, and `fit-matrix` in the push rule; 8.6's rules fixed before the takes; the redirect to an own calibration; a Studio export never fitted to. One implementation serves the tests, `rig-fit`, Measure seam and `look seam` | Each term maps to parameters and Tier 1 proves the mapping. The numbers Pat and agents see are the tests' numbers | M3.4, M3.6 |
 | **D66** | **Stitching in the projection pass**: an entry point per source kind (`fs_rig`, `fs_eac`, `fs_project_caps`), not an override; the rig uniform in a second group-0 bind group (`layouts::view_rig`: the view uniform at 0, the rig at 1) that each `LinearTarget` owns beside `view_group`; the cap texture and the caps uniform in group 2 beside the sampler (`layouts::sampler_caps`), in four bind groups the media's caps own, with `Projector`'s caps-off defaults; lens B in group 3; `StillRenderer`'s `render_from`, `render_blurred` and `render_yuv` take each lens's frame and upload path (`SourceFrames`), and `render`, `render_imported` and `render_copied` stay one-frame wrappers; per-lens LOD from projected rays; a mask margin that grows with LOD and a frame term that keeps every footprint inside its slot; a θ feather with h = 5°, at most min(θ_max, θ_frame) − 90°; q stored and metres shown; gains in linear light; no intermediate equirect. Updates D31, D32 | PROMPT.md:65. wgpu-core 30.0.1 builds an entry point's interface before overrides exist (10.1), so an override would make every equirect pipeline bind the rig. A bind group fits only pipelines whose layout matches it, and a cap belongs to the media, not to the targets that draw it. The X5's square frame cuts its image circle at 99° to 103° on Pat's numbers [C], inside the reach of the strips and a wide feather. An 8K RGBA16F intermediate is 225 MiB a frame. q is linear in disparity and 0 is ∞ | M3.7, M3.20 |
-| **D67** | **Frame-locked pairs**: timing through `MediaBackend::track_timing` (MP4 tables; a track without them refuses the lock); open checks on time base, start, rate, size, and `stts` and `stss` over the common prefix, not the count (the pair ends at the shorter lens with one notice); `pick_pair`, all or none; the group base Tg as the members' cache playhead; one group `until`, never past what the other members hold; the `pair_resync` backstop; 6 slots (8 after P-LOCK) with a floor of 2 live slots per member, below which the group unlocks; per-lens fallback; `unpaired_presents` over every stream, `pair_wait`, `pair_resyncs`. A group may hold two members over one stream, each with its columns (`LockSpec.columns`: the packed LRV proxy, D71); the open checks then agree trivially. Updates D34, D40 | Today's per-stream pick tears the seam unseen, and an all-or-none present on per-stream upload freezes it when a lens lags; the group base makes a common time always exist. At 8K every frame is a reference frame, so a slow lens can't catch up and the pair must pace to it. Two opens already read nothing twice | M3.8, M3.14 |
+| **D67** | **Frame-locked pairs**: timing through `MediaBackend::track_timing` (MP4 tables; a track without them refuses the lock); open checks on time base, start, rate, size, and `stts` and `stss` over the common prefix, not the count (the pair ends at the shorter lens with one notice); `pick_pair`, all or none; the group base Tg as the members' cache playhead; one group `until`, raised by a member more than 2 frames behind the clock to the clock or the other member's newest frame, whichever is earlier, and to the clock when every member trails (amendment 6); the `pair_resync` backstop; 6 slots (`MAX_SLOTS`; 8 only on a P-LOCK Redirect, not built) with a floor of 2 live slots per member, below which the group unlocks; per-lens fallback; a member that fails before its first frame refuses the group (`"open"`), after it ends the pair at its last frame (amendment 6); `unpaired_presents` over every stream, `pair_wait` (how far the clock is past the end of the pair on screen, amendment 6), `pair_resyncs`. A group may hold two members over one stream, each with its columns (`LockSpec.columns`: the packed LRV proxy, D71); the open checks then agree trivially. Updates D34, D40 | Today's per-stream pick tears the seam unseen, and an all-or-none present on per-stream upload freezes it when a lens lags; the group base makes a common time always exist. At 8K every frame is a reference frame, so a slow lens can't catch up and the pair must pace to it. Two opens already read nothing twice | M3.8, M3.14 |
 | **D68** | **Schema 2**: `Media.source` (equirect, dual fisheye, EAC pair) with `#[serde(default)]`; `caps`; the calibration snapshot, raw and parsed, with its hash; geometry, the tune, and the gains beside it (Auto's track stored; `Gains` and `AnalysisInput` are core's, since sphere cannot name core); every hash as 16 hex digits from core's FNV-1a; `set_stitch` replaces the tune, the gains or both; no proxy field; one schema for all of M3; `set_source`, `set_stitch`, `set_caps`. Updates D47, D48, D57 | Every render reads only the project, so the CLI and agents match the window with no trailer reader and D57 holds. One migration instead of three | M3.9 |
 | **D69** | **Export from the pair**: two decoders on K1's path (K4's on huginn); a held pair whose times must match; the end at the shorter lens; memory held to K3's one-lens baseline, with its levers in order; D56's viewer-first pace counted in pairs (`pairs_ahead`); the master only; 5.7K30 and 8K30 both gated over the whole export (8K30 on all of clip 8); M3.11b if K1 fails, or for huginn if K4 or K2's export half does. Updates D52, D56 | Parity with the viewer and PROMPT.md:77's "always export from originals". Decode is the measured bottleneck, so it is measured first. One lens can fill a per-slot lead alone, so the lead counts pairs | M3.1, M3.11 |
 | **D70** | **The viewer and the Stitch pane**: stitched by default with Raw lenses one toggle away, and shown as lenses, with a notice, when the `Known` entry has `stitchable: false`; "Stitch it" and "Treat as equirect" as one-click `set_source` edits; the stitched overview with its band; geometry read-only with Swap lenses, the conventions behind Advanced; per-lens numbers, seam width and distance; Alt-drag; Measure seam and Estimate distance as jobs, Estimate distance standing aside while the viewer plays (D56); the dropped-project fix. Updates D40, D54, D55 | Tuning by eye alone is guesswork, and the conventions are for take 14 to settle, not Pat. The same number the tests use, with no wait on the UI thread. PROMPT.md:47 asks to tag a file as equirect | M3.0, M3.10, M3.13 |
@@ -2622,6 +2928,7 @@ whose diff passes about 3,000 lines gets a fresh review before it merges.
 | **D74** | **GoPro MAX EAC**: `fs_eac`; `camera::gopro` reads `PRJT` and `PMOD` from the `udta` GPMF header blob only, with the (W, H) table as fallback; max2sphere out of tree as a reference; the `gpmd` track stays M4's; camera converts gopro.md's left-handed table to D33 by negating z, asserting det[r d f] = +1; `synth::eac` is written from D33 and FFmpeg `v360`'s YouTube EAC layout, never from gopro.md's table | gopro.md derives the layout from `PMOD` (§2.2), and its MAX 3K row doesn't fit the table. A rotation would mirror every face, and a writer built from the same table would not see it | M3.18 |
 | **D75** | **DJI Osmo 360**: raw from dji.md §10's finding with a `Kb` lens on the equidistant base, OpenOSV's field numbers, `known` starting on `native_refine` (slots 1 and 2) and provisional conventions, or the written finding and the stitched-export path, tagged as equirect through `set_source` ("Treat as equirect" in the app); no stitcher constants, DJI's default `far_11` among them | PLAN's criterion; dji.md §11.2 | M3.19 |
 | **D76** | **Nadir and zenith**: a polar equidistant cap in rig space, fill or patch; the cap's orientation as 18.3 defines it (forward at the nadir PNG's top and at the zenith PNG's bottom, +X right, `rotation_deg` > 0 clockwise as seen), tested with a glyph and a mirrored control; `fs_project_caps` for equirect; `set_caps`; a world anchor waits for M4 | nadir-patcher's radial mapping; its orientation flips both ways, so ours follows sphere's `Down` and `Up` faces; a cap that follows the tripod, turned by M4 with the picture | M3.20 |
+| **D77** | **A slot's 8-bit planes aren't render targets**: a slot's R8 and Rg8 planes are made without `RENDER_ATTACHMENT` (Vulkan `TRANSFER_SRC`, `TRANSFER_DST`, `SAMPLED`); level 0 is written only by copies, levels 1 on by a compute pass (`shaders/mips8.wgsl`) and a copy, byte for byte D31's means; deep planes keep `RENDER_ATTACHMENT`; nothing renders into a slot's 8-bit plane; `zero_copy_pair_matches_copy` stays strict against a software decode, waived only as amendment 6 sets out. Updates D25, D31 | odin's wrong luma blocks (PR #32: 3.3 % of the frames kept on the GPU, 0.17 % of those copied, all on the GFX11 R8 signature) went away under `RADV_DEBUG=nodcc` (PR #33), and RADV gives DCC only to images that can be colour attachments (recalled, not read). The guards on odin in amendment 6 settle it | M3.8; M3.7, M3.10, M3.11, M3.14 keep to it |
 | D9, D15, D22, D25, D28, D31, D32, D34, D40, D45, D47, D48, D52, D54, D55, D56, D57, D58 | Updated in the slice that changes each: the stitched viewer and Raw lenses (D54) and the stitched overview with its band (D55), by D70 in M3.10; Tier 2c, gated on `testkit::tier2::require_samples_cpu` with only `SPHERECUT_SAMPLES` (D9); camera's limits (D15); crate rows (D22); zero copy with pairs (each lens imported or copied out by itself and drawn through `StillRenderer`'s per-lens `PlaneSource`, 10.4) and with the proxy's halves (path B through `Columns::buffer_planes`, no exception), and huginn's path by D25's own revisit rule: K2 makes path A the default where Vulkan Video can't decode if huginn's numbers favour it over the copy and `zero_copy_matches_copy_path` passes there (D25); layout (D28); entry points, group 3, `Columns` (the crop of a packed proxy's half on the copy path and path B) and `upload_from_buffer`'s end check at wgpu's rule (D31); `dfish_*` rows, weighted metrics, `must_fail`, the manifest (D32); the lock (D34); overlay, raw view, proxy setting (D40); profiles under a read root (D45); schema 2 (D47, D48); pair decode (D52); the viewer-first pace counted in pairs for the export and extended to the exposure analysis and Estimate distance (D56); the three ops' examples and the reference project's camera media 11 (D57); an agent's Auto analysis as a job (D58) | | as listed |
 
 ## 24. Questions for Pat

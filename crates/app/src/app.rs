@@ -15,8 +15,8 @@ use spherecut_core::project::Orientation;
 use spherecut_media::backend::{MediaBackend, SeekMode, VideoStreamInfo};
 use spherecut_media::doctor::{DoctorReport, Issue, Severity};
 use spherecut_playback::{
-    AudioOutputFactory, HwPromise, HwSupport, PlayState, Player, PlayerConfig, PlayerEvent,
-    PlayerParts, PlayerSnapshot, Presented, Repaint,
+    AudioOutputFactory, HwPromise, HwSupport, LockSpec, PlayState, Player, PlayerConfig,
+    PlayerEvent, PlayerParts, PlayerSnapshot, Presented, Repaint,
 };
 use spherecut_render::{Filter, Framing, Gpu, ViewParams};
 use spherecut_sphere::grab::{GrabFit, GrabStart};
@@ -191,7 +191,7 @@ pub enum DoctorState {
     Lost,
 }
 
-/// Everything but the tiles, which [`Behavior`] borrows while the tree
+/// Everything but the tiles, which `Behavior` borrows while the tree
 /// draws.
 #[derive(Debug)]
 pub struct AppState {
@@ -468,7 +468,7 @@ impl SpherecutApp {
         self.state.overview_frame = None;
     }
 
-    /// The player's threads are told to stop; [`crate::run`] joins them
+    /// The player's threads are told to stop; [`crate::run`](fn@crate::run) joins them
     /// after the event loop, never here.
     pub fn begin_shutdown(&self) {
         if let Some(p) = &self.state.player {
@@ -477,7 +477,7 @@ impl SpherecutApp {
     }
 
     /// The threads of the jobs still running (the doctor's checks, a
-    /// listing, a probe), given up, for [`crate::run`] to join after the
+    /// listing, a probe), given up, for [`crate::run`](fn@crate::run) to join after the
     /// event loop.
     pub fn take_threads(&mut self) -> Vec<JoinHandle<()>> {
         let s = &mut self.state;
@@ -605,8 +605,11 @@ impl AppState {
 
     /// The open file again, with each of its lenses' streams: a camera's
     /// raw file, which the probe found after the file opened on its best
-    /// stream alone. It goes on where it was, playing or not, and its
-    /// notices stay. A project file whose video it is stays open, the
+    /// stream alone. Two lenses open as a frame-locked pair (M3 plan
+    /// section 9), which shows them only at one frame time, or as raw
+    /// lenses if their tracks don't agree; any other count opens each
+    /// lens's stream unlocked. It goes on where it was, playing or not,
+    /// and its notices stay. A project file whose video it is stays open, the
     /// lenses in its raw view (m3-plan 13.1); an untitled project made of
     /// the file is let go, since a raw view makes none. Once M3.10
     /// stitches a locked pair with a calibration, which isn't a raw view,
@@ -641,7 +644,10 @@ impl AppState {
             .impact("stitching arrives in M3"),
         );
         self.streams.clear();
-        player.open_streams(path, lenses.into_iter().map(Some).collect());
+        match lenses[..] {
+            [l0, l1] => player.open_locked(path, [l0, l1], LockSpec::default()),
+            _ => player.open_streams(path, lenses.into_iter().map(Some).collect()),
+        }
         self.reframe.span_reset();
         if at > Time::ZERO {
             player.seek(at, SeekMode::Exact);
@@ -768,10 +774,15 @@ impl AppState {
                 ))
                 .fix("Set a larger cache: SPHERECUT_FRAME_CACHE_MIB=4096 spherecut"),
             ),
+            // The lock's notices are M3.10's (13.2): until then a refused
+            // lock shows the raw view as before, and a short lens ends the
+            // pair unannounced.
             PlayerEvent::AudioLate
             | PlayerEvent::Decoder { .. }
             | PlayerEvent::StreamEnded { .. }
-            | PlayerEvent::Ended => {}
+            | PlayerEvent::Ended
+            | PlayerEvent::LockRefused { .. }
+            | PlayerEvent::LensShort { .. } => {}
         }
     }
 

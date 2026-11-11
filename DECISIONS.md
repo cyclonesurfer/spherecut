@@ -1342,7 +1342,7 @@ rest, with the versions in `Cargo.lock`:
 | image 0.25.10 (png only) | render; app, agent (dev) | `Image::to_png` and `from_png`: 8- and 16-bit RGB PNGs for `spherecut frame`, look's PNGs and the goldens; agent's tests decode look's PNGs with it. Its default features are off, so it brings no other codec and no rayon, and a `[[bans.features]]` allow list in `deny.toml` keeps it that way. It pulls `png`, `fdeflate`, `flate2`, `miniz_oxide`, `crc32fast`, `simd-adler32` and `adler2` for PNG, and, unconditionally, `moxcms` and `pxfm` (its colour-management code and the maths under it, BSD-3-Clause OR Apache-2.0), `num-traits` and `byteorder-lite` |
 | libc 0.2.191 | cli, media | `sigaction(2)` for `spherecut frame`'s SIGINT handler, in `cli::interrupt`, one of the binary's two FFI modules (D28): the handler only stores to an atomic. `_exit(2)` in `cli::exit`, the other, for `spherecut mcp` when a call is stuck (D44). In media's `ffi`, `mmap`, `madvise` and `munmap` for the download pool's buffers on huge pages (D30). It was already in the tree through ffmpeg-sys-next, ffmpeg-next, wgpu-hal and parking_lot_core, so it adds no crate |
 | pollster 1.0.1 | render | Blocks on wgpu's few futures (enumerating adapters, the device, error scopes) in headless code, without an async runtime |
-| rustix 1.1.5 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate |
+| rustix 1.1.6 (std, fs, stdio) | agent, cli, core | `openat2` below a root, a directory read through its descriptor (A1's roots, D43), and `spherecut mcp`'s stdout guard: the protocol's copy of fd 1 (`fcntl_dupfd_cloexec`) and fd 1 pointed at stderr (`dup2_stdout`); in core (M2.4), the temporary-file sweep's `O_NOFOLLOW` and `O_NONBLOCK` and `statvfs` for an export's free space (D16), all without `unsafe`. Pinned with `=` to the version already in the tree through tempfile and the Wayland crates, so it adds no crate; 1.1.6 since 2026-11-11 (from 1.1.5), for RUSTSEC-2026-0486 in rustix's xattr functions, which nothing here calls |
 | serde 1.0.229 (derive) | core, sphere, media, cli, agent | Serializable time types, `Projection`, the probe and doctor reports, the CLI's JSON envelope (D27), and the agent's requests |
 | serde_json 1.0.154 (float_roundtrip) | cli, agent, core; render (dev) | `--json` output, through the `contract` module (D27), the MCP server's messages, schemas and results (D43, D44), and the project file (D47), whose floats `float_roundtrip` reads back bit for bit. core's tests round-trip `ColorInfo` through JSON as the CLI will write it, and render's goldens read and write their manifest (D32). xtask reads cargo's JSON with a small field reader instead |
 | thiserror 2.0.21 | core, media, synth, render, playback, audio, agent, camera | Typed library errors without hand-written `Display` impls |
@@ -1867,6 +1867,14 @@ B. The belt and path B were level on the X5 pair; on the 5.7K clips the
 belt was at 86 % and 81 %, path B at 96 % and 94 %, the frames'
 download and upload being the traffic the belt leaves on the one queue
 the window presents from (`docs/perf.md`, odin's seventh run).
+
+*Noted 2026-11-11 (M3.8, D77).* On odin's RX 7600, D67's pair check
+found a kept frame's luma wrong in 3.3 % of frames on both paths, and
+0.17 % of copied ones, in 4×2 blocks of the slot's R8 plane, and none
+under `RADV_DEBUG=nodcc`. RADV's DCC on the slots' 8-bit planes is the
+likely mechanism, so those planes can no longer be rendered to, which
+keeps DCC off them (D77). Path A's old "19 of 2764800" flake is probably
+the same fault.
 
 Revisit if: path B fails or is refused on a GPU that doctor said could
 share its device (the copy path takes over, said once a file); huginn's
@@ -3338,17 +3346,19 @@ What:
   encode pass returns its target's nearest code, and into an f16 target
   the nearest half (both below, after odin's third run).
 - **Mips**: one area-weighted shader for all four formats, a render pass
-  per level, reading the level above with `textureLoad` and weighting
-  each texel by its overlap in integer arithmetic, so odd sizes come out
-  exact. At 8 bits the mean of the codes is an integer division too,
-  rounded to the nearest code with ties to even (amended 2026-10-28,
+  per level (for the 8-bit ones a compute pass and a copy since D77, on
+  the same means), reading the level above with `textureLoad` and
+  weighting each texel by its overlap in integer arithmetic, so odd sizes
+  come out exact. At 8 bits the mean of the codes is an integer division
+  too, rounded to the nearest code with ties to even (amended 2026-10-28,
   below). Levels per plane are clamp(1 + ⌊log2(max / 64)⌋, 1, 8).
 - **Slots**: `GpuFrame` holds a frame's planes with their mips, its
   `Source` uniform and its bind group, for a `SlotShape` (plane formats
   and sizes; the depth may differ, since the ingest normalises it). Level
   0 of each plane is an ordinary texture that a buffer copy, a texture
-  copy or a render pass can fill, so a frame already on the GPU (slice
-  5b) fills a slot without `VideoPlanes`: it writes level 0 of
+  copy or a render pass can fill (a render pass only a deep plane's,
+  since D77), so a frame already on the GPU (slice 5b) fills a slot
+  without `VideoPlanes`: it writes level 0 of
   `GpuFrame::plane_texture`, records the mips with
   `Uploader::record_mips` and sets the uniform with
   `GpuFrame::set_source`, as an upload does (a Tier 1 test fills a slot
@@ -3824,6 +3834,15 @@ frame's mips take 1.01 ms of GPU time, against 0.62 ms at be38fa4 when
 the stores were the driver's, and a 3840² pair's ingest and mips 0.89
 ms a frame, against 0.59. P010's mips, on the f16 path, take 0.51 ms
 either way.
+
+*Amended 2026-11-11 (M3.8): 8-bit mips by a compute pass (D77).* A
+slot's R8 and Rg8 planes can no longer be rendered to, which keeps
+RADV's DCC off them after odin's wrong luma blocks, so their levels come
+from `shaders/mips8.wgsl`'s compute pass into a buffer, and a copy into
+each level. It takes this amendment's means from the same function
+(`mean_codes`, shared with `fs_mip`), and a Tier 1 test holds it to the
+render passes byte for byte at every level, down to 1×1; the stored
+goldens didn't change. Deep planes keep the render pass.
 
 ## D32. Golden images
 
@@ -5833,6 +5852,47 @@ the last frame before the end or loops to the start, and a play at or
 past the end starts at the start. Opening a file clears it, and
 `Player::close` empties the player.
 
+*Updated 2026-11-11 by D67 (M3.8):* `Player::open_locked` opens a
+camera's two lenses as a frame-locked pair, which changes five things
+above for that pair alone:
+
+- **Slots.** The ring uses all six slots from the lock until the next
+  open or a close, an unlock included, whatever `gpu_slots` says.
+  Fewer than two live slots a lens unlock the pair (`LockRefused` with
+  `"slots"`), whether a slot dies or the lenses lock on a ring whose
+  slots died before. "Two streams on few slots" then applies, as it
+  does to unlocked streams.
+- **The present.** It shows both lenses' slots at one clip time or
+  neither (`lock::pick_pair`), never a lens's frame as it arrives.
+- **The cache and catch-up.** The cache runs from the group base, the
+  newest time both lenses hold at or before the playhead, and the
+  group has one catch-up time.
+- **The end and fallback.** The pair ends at its shorter lens, or at
+  the last frame of a lens that can't decode on. A hardware failure
+  falls back to software on its own lens alone.
+- **The counters.** `PerfStats` gains `unpaired_presents` (over every
+  stream, locked or not), `pair_resyncs` and the `pair_wait` stage.
+
+Two of the lock's review fixes reach every player, locked or not:
+
+- **Skipped.** The frames passed over while the clock runs count as
+  `Skipped` (`Counter::Skipped`, `"skipped"`) up to the presents'
+  cadence, one fewer than the clip's frames in the median present
+  interval, rounded up, and as `Dropped` only beyond it. A 120 fps clip
+  at 60 Hz skips one frame a present and drops none, where before it
+  dropped half its frames. A locked pair counts both once a pair, other
+  streams once a stream (D67).
+- **After the end or a failure.** A worker that reached its stream's
+  end or failed is idle until a request comes, as before; a seek or a
+  step the cache answers now takes it on from the end of the run its
+  landing is in, unless that run reaches the last frame, when it stays
+  ended and says `StreamEnded` no second time. After a failure its
+  decoder is sought there first. Under the old rule (`is_idle`) a
+  request the cache answered left the worker idle, so play froze at the
+  end of that run, on one stream as on a pair.
+  `Player::old_idle_rule(true)`, doc-hidden, puts it back for the
+  tests' controls.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
@@ -6802,6 +6862,33 @@ raw view's reopen then doesn't fire); M3's stitcher replaces the raw
 view; or winit stops reporting the refresh rate on a compositor Pat
 uses.
 
+*Updated 2026-11-11 by D67 (M3.8):* the raw view's reopen opens
+exactly two lenses as a frame-locked pair (`Player::open_locked`), so
+its two columns show one clip time. Any other count opens with
+`open_streams`, as before. A pair whose tables differ, or a file
+without them (Matroska), is refused and plays unlocked as before.
+
+- `raw.rs`'s `the_raw_view_locks_an_mp4_pair` checks it on a two-lens
+  64² MP4. Its control is the Matroska file, refused with `"timing"`.
+- With two streams or more, the overlay's video line shows `unpaired`
+  and `pair_wait`. Its share dropped is of pairs for a locked pair,
+  whose drops count once a pair and frames shown once a lens ("shown
+  1798 (899 pairs)   dropped 2 pairs (0.22%)"), and it shows the frames
+  the presents' cadence skips apart from drops ("skipped").
+- The smoke document's frames gain `unpaired`, `pair_resyncs` and
+  `skipped`, and its result a `lock` (`status` and a refused lock's
+  `field`; `docs/cli-json.md`).
+- The Tier 1 smoke run of a camera pair muxes it as MP4, so that it
+  locks: locked, 0 unpaired, 0 resyncs and `pair_wait` recorded. Its
+  control is the Matroska pair, refused with `"timing"`, with no
+  `pair_wait`.
+- `gui_smoke` judges a locked pair's drops as a share of pairs, and the
+  X5 raw view's run fails when its lenses didn't lock, or any present
+  showed them apart or the pair resynced. `the_gates_fail_what_they_say`
+  plants a document for each.
+- The app passes `LockRefused` and `LensShort` over until M3.10 gives
+  them notices.
+
 ## D41. The submit gate
 
 *2026-10-30, M1 slice 9, from odin's GUI runs with zero copy the
@@ -6961,11 +7048,11 @@ What:
   server sends. Tests hold each to its Rust request type: every
   property in the schema deserializes, nothing else does, and the
   required ones are required.
-- **rustix** (`=1.1.5`, the version the lock already has through
-  tempfile and Wayland; features `std`, `fs` and `stdio`) for `openat2`,
-  for reading a directory through its descriptor, and for the stdout
-  guard; its `net` feature gives `SO_PEERCRED` in A3. The agent crate
-  has no `unsafe`.
+- **rustix** (`=1.1.5`, now `=1.1.6` (D22), the version the lock
+  already has through tempfile and Wayland; features `std`, `fs` and
+  `stdio`) for `openat2`, for reading a directory through its
+  descriptor, and for the stdout guard; its `net` feature gives
+  `SO_PEERCRED` in A3. The agent crate has no `unsafe`.
 
 Why, from the prototypes (scratch crates in the cloud workspace,
 kernel 6.18, 2026-10-30):
@@ -9977,6 +10064,656 @@ the feather passes ±5°, so that the band leaves its 48 columns (the test
 fails and says so); the ideal's sampling changes, which moves `Grid`'s
 floors by a dB or more; footage shows a floor of the estimator wrong
 either way; or M3.6's fit needs a term the eight don't hold.
+
+## D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
+
+*2026-11-11, M3 slice M3.8. The M3 plan, `docs/design/m3-plan.md`
+section 9 and D67 in its section 23, has the detail; this is the lock
+as its four units built it and the review round left it. Updates D34
+and D40.*
+
+What:
+
+- **The open.** `Player::open_locked(path, [s0, s1], LockSpec)` opens
+  two video streams of a file as a lock group, player streams 0 and 1,
+  beside `open_streams`. The open worker reads both tracks' timing
+  through `MediaBackend::track_timing` before it chooses decoders,
+  whatever the preference. The trait method has no default body, so
+  every backend answers it and every wrapper passes it on.
+  `FfmpegBackend` answers from P-TRK's `media::mp4::track_timing` for
+  an MP4 or MOV track, and `None` for any other container and for a
+  fragmented MP4.
+  - The worker that opens second compares the lenses under the status
+    lock, in this order: tables at all (`"timing"`), time base, start
+    (after `LockSpec.offset`, 0 for the X5: a known offset between the
+    lenses' first frames, taken off the second lens's start before the
+    compare), constant rate, size, and `stts` and `stss` over the common
+    prefix. The first field that differs refuses the group, said once
+    (`PlayerEvent::LockRefused {field}`, the names in
+    `playback::lock::field`).
+  - The frame count is not compared. Once locked, a lens with fewer
+    frames is said once (`LensShort {stream, frames}`) and ends the
+    pair. The slot floor is checked before `LensShort` is said.
+  - Nothing of the pair shows while the group is pending. Refused,
+    the lenses show as `open_streams` shows them.
+  - The snapshot's `lock` (`LockSnapshot`) gives the status
+    (`Pending`, `Locked` or `Refused {field}`), the group base and the
+    group's `until`. A close lets go of the pair and the group under the
+    status lock.
+- **A member that fails.** The rule turns on whether the member has
+  handed out a frame of the open, not on whether the group is pending
+  or locked.
+  - A member that can't open, or fails before it has handed out a
+    frame, refuses the group with `"open"`, pending or locked. Under the
+    same status lock the group's `until` and the cache's group are let
+    go, and the other lens plays on alone. Locked, a member whose first
+    frame failed had nothing to pair with, and the pair would have stood
+    still for good.
+  - A member that fails once it has handed out a frame, after any
+    fallback (`DecodeFailed`), ends the pair at its last frame, pending
+    or locked: its end is set for the presenter's check of the end, as a
+    shorter lens's is. A frame decoded past it (a seek past damage) puts
+    back what was there.
+  - A seek or a step at or past that end counts the failed member as
+    landed on its last frame, so the pair lands there.
+- **The present.** `lock::pick_pair` takes the largest clip time at
+  or before the clock's at which both members have a Ready or Shown
+  slot of the open's epoch at exactly that time. Of a member's two
+  slots at that time, it takes the Shown one, else the higher place in
+  its run, else the lower slot.
+  - `show_pair_over` shows both slots or neither, and gives the first
+    back when the second can't go up. A pair that can't go up leaves
+    the pair on screen up.
+  - A seek's landings show together before the clock is set to them,
+    and an instant step's frames show only at one time.
+  - The branch that shows each stream's frame as it arrives stays, for
+    unlocked streams and refused groups.
+- **Drops and skips.** The frames passed over between two shown while
+  the clock runs are skipped up to the presents' cadence and dropped
+  beyond it (`Counter::Skipped`, `"skipped"`, beside
+  `Counter::Dropped`), for every player.
+  - The cadence is one fewer than the clip's frames in the median
+    present interval, rounded up after a thousandth of a frame is taken
+    off: 1 for 119.88 fps at 60 Hz, 0 at or below the present rate, and
+    0 with no interval or no frame duration. A 120 fps clip at 60 Hz
+    counts 60 skipped and 0 dropped for its 120 frames a second.
+  - Its limit: a clip just faster than a whole multiple of the present
+    rate sits on the rounding line. 60.000 fps on a 59.94 Hz panel is a
+    ratio of 1.001, on the line itself; 120.000 fps on 59.94 Hz gets a
+    cadence of 2 where one present in about 500 passes two over, so a
+    present that drops a frame there counts it skipped. The X5's own
+    rates on a 60 Hz panel come out right.
+  - A locked pair's skips and drops count once a pair, by member 0's;
+    an unlocked player's once a stream. `FramesShown` counts every
+    stream's frame, a locked pair's twice a pair. So a locked pair's
+    share dropped is of pairs, `dropped` over `shown` / 2 + `dropped`,
+    as the overlay and `gui_smoke` count it.
+- **The other counters.**
+  - `unpaired_presents` counts presents that show the player's
+    streams at different clip times, over every stream, locked or not.
+  - The `pair_wait` stage, at each present while the clock runs and
+    the pair is locked, is how far the clock's time the present is for
+    (its latency ahead, without the A/V offset) is past the end of the
+    pair on screen (member 0's frame's time plus its duration): 0 while
+    the pair's interval holds it, never negative. Nothing is recorded
+    while paused or for an open that isn't locked.
+  - `pair_resyncs` counts the backstop's seeks (below).
+- **The group base.** Once the pair locks, the cache learns the group
+  (`FrameCache::set_group`). It runs its rules from Tg instead of from
+  the presenter's playhead: each stream's current frame, its window,
+  eviction, back-pressure and `playhead()`, which the upload thread
+  starts its wanted list from. Tg is the newest time at or before the
+  playhead at which both members hold a frame, worked out again as
+  frames go in and the playhead moves.
+  - From a seek or a step until every member has landed or failed, Tg
+    is held at the playhead.
+- **Catch-up.** The group has one `until`, which a member more than 2
+  frames behind the clock raises, and a seek or a step clears. Each
+  member whose newest frame is before it catches up to it, so both skip
+  to the same frame.
+  - While one member leads, `until` rises to the clock's time or the
+    newest frame the other member holds, whichever is earlier: the
+    member behind catches up to the one that leads and no further.
+  - When every member trails the clock by more than 2 frames, `until`
+    rises to the clock's time, so the pair trails together and catches
+    up together, as each unlocked stream does. Capped at the other's
+    newest frame there, as first built, neither lens ever moved the cap
+    on, and a pair trailing together fell a frame further behind every
+    three ticks of `catchup.rs`.
+- **Seeks and the end.**
+  - Keyframe landings that differ send both lenses exactly to the
+    later one. The re-seek isn't counted as a second seek.
+  - After an exact seek or a step, landings at different times send
+    both to the earlier (a lens that ran out), unless both lie at or
+    after the seek's time: then to the later.
+  - A locked pair's clock is set from the earliest landing.
+  - `check_end` ends the pair at the member that ends first.
+- **After the end.** A worker that reached its stream's end, or
+  failed, is idle until a request comes. A seek or a step the cache
+  answers now gives it a place to go on from, the end of the run its
+  landing is in, and it decodes on from there; one whose run reaches
+  the stream's last frame stays ended and says `StreamEnded` no second
+  time. After a failure its decoder is sought to that place, not taken
+  to be at its last frame. This was an older fault of D34's idle rule,
+  on one stream as on a pair: a request the cache answered after the end
+  left the worker idle, so play froze at the end of the run it landed
+  in. The mixed test's seed 44 found it on the lock.
+- **The backstop.** When every member waits for room decoding ahead
+  and no common time lies past Tg, the cache holds Tg at the trailing
+  member's newest frame. It tells each member to seek there
+  (`Insert::Resync`), leaving the clock where it is, and counts a
+  `pair_resync`.
+  - A waiter whose token has stopped isn't counted.
+  - Each waiter carries the count of waits at which it began, so a
+    late stopped waiter of an earlier open takes out only its own
+    entry.
+- **Slots.** A locked pair uses all of `MAX_SLOTS`, 6, whatever
+  `gpu_slots` says (`SlotRing::set_pair`). That holds from the moment
+  its lenses lock until the next open or a close, and through an
+  unlock.
+  - `SLOT_FLOOR` is 2 live slots a member, 4 for the pair. A slot
+    dying below it, whatever open its frame was for, unlocks the pair
+    with `LockRefused {field: "slots"}` and lets the cache's group go
+    (`set_group(None)`) under the same status lock. Each lens's frame
+    then shows as it comes, as D34's "two streams on few slots" says.
+  - Dead slots stay dead for the player's life, so the floor is
+    checked as the lenses lock too, under the status lock that locks
+    them: a pair opened again after an unlock, or locking after slots
+    died while its lenses opened, is refused with `"slots"` there, and
+    the cache never learns its group. Locked below the floor, it would
+    wait for good for a slot death that never comes.
+  - `Player::fail_slot_allocations(n)`, doc-hidden, plants the GPU
+    running out of memory for the next `n` slot allocations.
+  - The 8 slots of P-LOCK's redirect aren't built.
+- **Fallback.** A hardware failure on one lens moves only that lens to
+  software, in place, through media's fallback wrapper (D14). The other
+  lens stays on hardware, the lock holds, and the fallback is said once.
+- **The app.** The raw view opens exactly two lenses with
+  `open_locked(…, LockSpec::default())`, and any other count with
+  `open_streams`. It passes `LockRefused` and `LensShort` over until
+  M3.10 gives them notices. The overlay and the smoke run count a
+  locked pair's drops of pairs and show skips apart (D40's note).
+- **The controls' switches.** `LockSpec.test` (`LockTest`,
+  doc-hidden) turns rules off for the tests' controls: `no_group_base`,
+  `old_base_in_seeks`, `no_later_landing`, `no_resync`, `no_floor`,
+  `no_end_on_failure`, `old_until` (the cap while both trail),
+  `no_failed_landing` (a seek past a failed member's end), and
+  `publish_delay`, which makes the upload thread wait that long before
+  it publishes each frame of a locked pair. All are off by default.
+  `Player::old_idle_rule(true)`, doc-hidden, puts the old idle rule
+  back, for every open.
+- `LockSpec.columns`, for the LRV proxy's two members over one stream
+  (D71), waits for M3.14.
+
+Why: picking each stream's frame on its own tears the seam unseen. An
+all-or-none present on per-stream upload freezes the view whenever a
+lens lags, since the lagging lens's partner frame is freed or evicted
+before it arrives. The group base makes a common time always exist, and
+the group `until` makes both lenses skip to the same frame. At 8K every
+frame but the IDRs is a reference frame, so a slow lens can't catch up
+by skipping decodes, and the pair must pace to it.
+
+The slots: with 3, the pair on screen holds 2 Shown slots, one lens's
+next frame takes the third, and the other lens's never gets one, since
+the lock never shows a lens alone. That is M1's two-stream deadlock.
+The plan says nothing of the ring after an unlock: it keeps its six,
+the dead slots out of the live count, until the next open or a close
+sets it from the setting again.
+
+The fallback: reopening both lenses would gain nothing. Every X5
+sample decodes bit for bit the same on VA-API, Vulkan Video and
+software. Two software 8K decoders together run at 0.42× real time, and
+the healthy lens would pay a software exact seek.
+
+A failed member's end: without it, `check_end` never fires, and
+`pick_pair` holds the last pair while the clock and the audio run on.
+A member with no frame can't end the pair at a frame, so it unlocks it
+instead.
+
+Skips: a display slower than the clip passes frames over by design.
+Counted as dropped, 4K120 at 60 Hz dropped half its frames on both
+sides of P-LOCK's comparison, and the overlay and `gui_smoke` called
+every 120 fps clip broken.
+
+Tested:
+
+- `crates/playback/tests/lock` holds the lock's suite: 32 tests on
+  `PerStream` (one `SyntheticBackend` a stream, each with its own frame
+  count, keyframe interval, start, cost and planted tables), on `Held`
+  over it (lenses that hand each frame out only for a permit, skip a
+  catch-up's frames for free, land an exact seek in a planted gap, and
+  can fail a seek) and on lavapipe. Each check has a control that must
+  fail.
+  - `open.rs`: each planted fault is refused by its field's name, and
+    the GOP fault file through `FfmpegBackend`. A member that can't
+    open refuses with `"open"`; one whose first frame fails, gated so
+    that the pair has locked first and ungated, refuses with `"open"`
+    and lens 0 plays alone (control: a lens that decodes in its place
+    stays locked); one that fails after its first frame while the group
+    is pending ends the pair at [19, 19] (control `no_end_on_failure`
+    plays on). A lens a frame short locks and says so once.
+  - `pick.rs`: `pick_pair`'s property, at 100 000 cases apart, with
+    three controls: each member's newest slot alone (a mixed pair), a
+    first slot never given back (shown alone), and every first slot
+    given back (the frame on screen taken down). Then all or none;
+    `unpaired_presents` over every stream; `pair_wait` (below); drops
+    once a pair, its control unlocked; and the pacing rule's own checks
+    (below), each part failed by a run of its own.
+  - `wait.rs` and `pick.rs`: `pair_wait` is 0 on time, 66.7 ms for a
+    pair 2 frames late, and nothing is recorded while paused or
+    unlocked; each check is the other's control.
+  - `base.rs`: a seek past the windows lands both lenses; the group's
+    `until` stays within the other lens; differing keyframe landings go
+    exact to the later; a pair ends at its shorter lens; a shrinking
+    budget resyncs the pair.
+  - `catchup.rs`: a pair trailing the clock together, by a third of a
+    frame a tick, never trails further than the unlocked streams (at
+    most 3 frames); its control, `old_until`, trails by 8 frames and
+    more.
+  - `resume.rs`: a pair plays on from a seek the cache answers after
+    the end (control `old_idle_rule`); a member that failed a seek
+    decodes on from the cache; a seek and a step past a failed member's
+    end land on its last frame (control `no_failed_landing`); an exact
+    seek whose landings both lie late lands on the later (control
+    `no_later_landing`).
+  - `play.rs`, read back from the GPU:
+    - The mixed run plays 64 seeds of seeks, steps, plays at three
+      rates and pauses, with lens 1 at 2.5 to 3 times lens 0's cost,
+      its own jittered. No pair is shown apart, by tag or by content,
+      and its `open_streams` control counts both. Every locked play
+      must follow its clock: its clock must start within 0.5 s, and
+      once paused, the pair must come to the clock's frame (the last at
+      the end), with a frame handed out, uploaded or shown at least
+      every 0.5 s until it does. Its controls hold lens 1 back as a play
+      begins: at the frame a seek lands on, the preroll waits and the
+      clock never starts; `PREROLL_FRAMES` on, the clock starts and the
+      pair stands at [2, 2]. With `old_idle_rule` on the locked runs,
+      the check fails at seed 44, its clock never starting (2 runs of
+      2).
+    - The pacing test (below), and its controls.
+    - Six slots are used on a setting of three.
+    - Slots killed to 3, mid-play and mid-seek, unlock the pair with
+      `"slots"`, and the pair opened again on the 3 left is refused
+      with `"slots"` as it locks, and plays. Without the floor, both
+      stick.
+    - A read error on lens 1 mid-play ends the pair at its last frame;
+      without the rule nothing ends.
+- **The pacing rule** (`tests/common/pacing.rs`), over what a run
+  showed at each present after its first 30 frames: the pairs presented
+  are at least 80 % of the frames the slowest lens handed out
+  meanwhile, counted alike; the time presented trails that lens's newest
+  frame, as the present before saw it and never past the clock's frame
+  then, by at most 2 frames; and play reaches the end. Several runs'
+  share may be judged pooled, over 20 frames handed out or more, and
+  fewer is too few to judge (`Unjudged`).
+  - `a_locked_pair_paces_to_its_slowest_lens` plays four cases: on a
+    90-frame clip whose clock moves a frame every 3 ms, lens 1 at 2.5
+    to 3 times the frame period, both lenses slower than the clock, and
+    lens 1 slow with the budget halved mid-play; and on a 60-frame clip
+    at a frame every 6 ms, lens 1 slower than lens 0 but within the
+    clock. The rule holds in each, the share pooled over the four.
+  - No pair stands still longer than its slowest lens takes to catch
+    up to where the clock was as it went up (`Case::longest_freeze`:
+    that lens's cost a frame times the lag plus one, over the frame
+    period, or the leading lens's window where that is longer, then 2
+    frames and the 2 a held-up present moves the clock), plus the frames
+    its decoder waited for a CPU (`Case::waited`, from schedstat).
+  - A present gives its pair its own 4 ms to go up, and as long again
+    as the engine's threads waited for a CPU since it (from schedstat,
+    75 ms at most); a pair not up by then counts the present late, and
+    the present waits 25 ms more before it gives up. Late presents
+    number at most one, or a quarter of the frames handed out, over the
+    three slow cases and in the fourth (`settled`).
+  - No pair resyncs but where the budget was halved.
+  - Controls, each must fail: the group base and `until` off, by
+    trailing and late presents; a run a frame short of 20 handed out,
+    `Unjudged`; the fourth case with every third pair passed over, too
+    few pairs; at a slow case's own length, a pair whose freezes double
+    at the clock and one whose catch-ups take five times its lag, the
+    freeze bound, though both keep to the rule; and the fourth case with
+    each slot published 4 ms late (`publish_delay`), too many presents
+    late (10 late of 24 to 25 handed out, in 3 runs).
+- `engine.rs`: `a_fallback_on_one_lens_keeps_the_pair_locked`
+  (`FaultBackend` with a plan on lens 1 alone; its control puts the
+  fault on both); one stream and two play on from a seek the cache
+  answers after the end, and a seek and a step it answers there play
+  past their run (each with the old idle rule as its control);
+  `frames_a_slower_display_passes_over_are_skipped_not_dropped` (60
+  skipped and 0 dropped for 120 fps at 60 Hz, a stall dropping beyond
+  its one skip; control: presents at 120 Hz drop what they pass over).
+- App: `raw.rs`'s `the_raw_view_locks_an_mp4_pair` (the Matroska
+  control refused with `"timing"`); the smoke run of a camera pair
+  muxed as MP4, locked, 0 unpaired, 0 resyncs and `pair_wait` recorded
+  (control: the Matroska pair refused, no `pair_wait`).
+- `tier2_playback`'s Tier 1 `the_bench_harness_plays_a_locked_pair`
+  reads pair64's corner codes back from both slots, on lavapipe:
+  - on every frame shown unthrottled, and at 100 seek landings;
+  - in real time, by the tags.
+  Its controls, planted, must fail: the run unlocked, which the slot
+  hashes of `zero_copy_pair_matches_copy` call broken; lens 0's slot
+  read for both; lens 1 a frame late; lens 1 from another landing.
+- Tier 2h, pending odin:
+  - `samples_lens_pairs_frame_locked`: 100 exact seeks land both lenses
+    on one frame by pts. Real-time play of clip 9's master and of the
+    2×3840² perf pair shows 0 unpaired. On the perf pair, both slots'
+    corner codes are read on every frame and must equal each other and
+    the tags.
+  - `zero_copy_pair_matches_copy`: path B's slots, and path A's where
+    the GPU imports DMA-BUFs, hashed against the same decoder's copy,
+    locked. A zero-copy run that fails, stalls or doesn't hold the
+    lock fails the test; only one that keeps no frame on the GPU, or
+    has one refused, skips.
+  - `gui_smoke`'s X5 raw view fails when its lenses didn't lock, or any
+    present showed them apart or the pair resynced, and its share
+    dropped is of pairs; `the_gates_fail_what_they_say` plants a
+    document for each.
+- **P-LOCK** in `bench_playback_x5_raw`: each X5 mode played as the app
+  plays it, unlocked then locked, with the locked rows beside the
+  unlocked and a verdict.
+  - A real-time present owes a new frame when its clock ran into a
+    later frame since the present before, short of the clip's end, and
+    the first present after a loop's seek back owes the play's first
+    frame (unless at the end). So a present owes at most one, however
+    many frames its clock passed, and none while the clock stands: at
+    the end, and through a loop's seek, landing and preroll.
+  - The share presented is the new frames put up (new pairs, locked),
+    after the first second, over the presents that owed one. The share
+    dropped is the frames dropped a lens after the first second over
+    those presents: the locked count as it is, the unlocked divided by
+    its streams. Skips are recorded beside, not judged.
+  - Pass at 8K30, 5.7K60 and 4K120: 0 unpaired, the lock held, no
+    stall, at least 99 % presented, and drops at most 1 point over the
+    unlocked run's. Redirect (8 slots) when only those numbers fall
+    short. Kill when a pair shows apart, the lock comes undone or is
+    refused, a pass stalls (its frame standing 5 s while its clock
+    runs), or no present owed a frame.
+  - At 8K25 on path B: Pass with 0 unpaired and the pacing rule met
+    over the real-time pass up to its first loop, with the pairs,
+    drops and `pair_wait` of every second that dropped; Kill when the
+    pair trailed by 5 s of frames or more (froze), or as above;
+    Redirect when the rule fails otherwise.
+  - `p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens`
+    scores synthetic passes: 4K120 at 60 Hz (each present owing one
+    and skipping one, both sides; dropped only the frame each loop's
+    restart passes over, equal on both sides) and a 5.7K60 master
+    looping every 3.17 s Pass. Their controls, a pair held back at one
+    present in 20 (4K120) or 40 (5.7K60), and a 5.7K60 pass standing
+    still for each loop's last 4 frames, Redirect by the presented
+    share alone; drops 1 in 40 over the unlocked run Redirect by drops
+    alone; a pass standing still while its clock runs is Kill.
+  - Odin's first run of the 4K120 row, scored as first built (wall
+    seconds × the rate for presented, the unlocked drops not divided,
+    no skips): 1193 pairs in a 20 s pass, 49.74 % presented, dropped
+    49.35 % a lens locked against 98.61 % unlocked (1124 and 2246
+    frames). By hand under these rules: about 1133 new pairs after the
+    first second over at most 1140 presents owing one (60 a second for
+    19 s, the loops' standing presents owing none), so about 99.4 %
+    (1133 of at most 1140) or more presented; the 1124 frames passed
+    over locked and the 1123 a lens unlocked are one a pair shown, the
+    cadence of 119.88 fps at 60 Hz, so skipped, and dropped about 0 on
+    both sides: Pass, pending odin's rerun.
+- The suite's time on the cloud box (4 Xeon cores, lavapipe): 5.3 to
+  5.7 s alone (3 runs), within the plan's 10 s, and 6.7 to 7.1 s beside
+  4 busy loops (10 runs, none failed).
+  - By file, alone, the tests' own times summed (they overlap, so the
+    sums pass the suite's): `play.rs` 5.9 to 6.1 s, `base.rs` 2.1 to
+    2.2, `open.rs` 0.9 to 1.2, `resume.rs` 0.8 to 0.9, `pick.rs` 0.8,
+    `catchup.rs` 0.3 to 0.4, `wait.rs` and `main.rs` under 0.1. Beside
+    the busy loops: 7.1 to 7.5, 2.5 to 3.0, 1.5 to 2.2, 1.2 to 1.7, 1.1
+    to 1.5, 0.4 to 0.5, and under 0.15.
+  - The longest tests: the pacing test, 2.7 to 2.8 s alone and 3.0 to
+    3.6 s loaded; the mixed run, 1.6 to 1.8 s alone and 2.0 to 2.6 s
+    loaded; the shrinking budget 0.9 to 1.0; the slot floor 0.8 to 1.0;
+    the seek forward while lens 0 leads 0.7 to 1.0; the failure mid-play
+    0.7 to 1.1; the GOP fault file through FFmpeg 0.4 to 1.1.
+  - `play.rs` alone, 20 runs beside the busy loops: 5.3 to 5.8 s, none
+    failed. Over all 33 runs a pacing case counted 1 late present 3
+    times in 132, and 0 otherwise, and the publish-delay control counted
+    8 to 10 late against 24 or 25 handed out every time.
+  - Every control whose freeze is for good calls the player stuck after
+    0.5 s of nothing moving (`Wait::StuckFor`): `base.rs`'s seek forward
+    with the old base in seeks and its resync without the backstop, and
+    `play.rs`'s floor and failure controls, where the slots die before
+    the freeze. `STUCK`'s 1.5 s is left to the floor test's own checks,
+    which give up there rather than wait out `WAIT`. Beside the busy
+    loops the floor's mid-seek case once found the seek's frames up
+    before its failures were planted; the failures go in first, once the
+    open's frames are up.
+
+Revisit if: P-LOCK redirects (8 slots for a pair) or kills (a design
+note on the upload schedule before M3.10); odin shows a pair apart by
+corner code that the tags missed; path B's two-lens pool passes the
+plan's 707 MB; a camera's lenses start apart (`LockSpec.offset`) or
+come in a container without tables; a display rate near a whole
+multiple of a clip's counts its drops as skips; or M3.14's LRV proxy
+needs the group's members over one stream.
+
+## D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
+
+*2026-11-11, M3 slice M3.8's fix round. Updates D25 and D31. What it
+says of Mesa's code is recalled, not read: the cloud box's proxy turns
+away gitlab.freedesktop.org and GitHub's Mesa mirror, so each such
+statement is marked, and the guards below check it on odin.*
+
+The fault:
+
+- **Where.** odin: an AMD Radeon RX 7600 (Navi 33, GFX11), Fedora 44,
+  kernel 7.2.9, Mesa 26.2.5 (RADV), FFmpeg 8.1.3, wgpu 30.0.1.
+- **The rates** (PR #32, three runs of `zero_copy_pair_matches_copy`,
+  D67's check of every slot byte for byte against the copy path): 141
+  wrong frames, 118 of them kept on the GPU by path B, 16 kept by path
+  A, 6 copied on path B's runs and 1 on path A's. That is 3.3 % of the
+  frames kept on the GPU, paths A and B alike, and 0.17 % of the frames
+  copied through memory.
+- **The signature.** Luma only, an `R8Unorm` plane (3840×3840, 6
+  levels), never chroma (`Rg8Unorm`, 1920×1920, 5 levels), though both
+  are written in the same submissions. Almost always one 4×2 block, at
+  x mod 8 in 4..7 and y mod 4 in 2..3 of an aligned 8×4 cell; now and
+  then its right half (4×4) or the whole cell. Read again, the same
+  wrong bytes; the frame in the cache is right; never on a slot's first
+  write; no position twice. The unlocked, lens-alone, read-while-quiet
+  and pool-watched variants fail alike.
+- **PR #33.** Under `RADV_DEBUG=nodcc` the test passed both runs; a
+  plain run between them failed with 45 wrong frames, about the 47 a run
+  the old rates give.
+- **The analysis** (the fix round's, made from PR #32's logs before
+  PR #33 ran). The damage is after the source bytes, in the slot: in
+  the GPU's write of level 0 (a buffer-to-image copy from the staging
+  belt or path B's buffer, an image copy from path A's import), or in
+  every read of it alike. The verdict is about 95 % sure of that, and
+  about 75 % that it is the write, since the rate follows the copy's
+  source memory (about 3 % from device-local sources, 0.17 % from the
+  host-visible belt), which a misread on readback doesn't predict. It
+  gives DCC as the mechanism about even odds (50 %): DCC alone explains
+  luma only, failure only on a slot's reuse and the content gating
+  together, but no known DCC mechanism explains an error unit of 8, 16
+  or 32 bytes at the tail of a 32-byte cell inside a 256-byte
+  compressed block, why the Rg8 chroma plane, which DCC can compress
+  too, never fails, or the rows' profile (most blocks in the first 32
+  rows of every 128). It ranks a RADV or GFX11 fault (a driver bug or a
+  hardware erratum) first: the decoded bytes, the cache, the belt and
+  the copies' sources are right, and frames copied through memory,
+  which take no import and no `Copier`, fail too, a twentieth as often.
+- **PR #33 against the analysis.** The analysis's own reading of a
+  clean `nodcc` run: DCC being on, or something only `nodcc` changes,
+  is necessary, but that doesn't show that the slot's DCC is the cause,
+  nor which mechanism it is, nor that the fault is the driver's. Not
+  known: write side or read side, and driver or hardware. No sync
+  validation run has cleared our side yet; the round's other unit
+  tightens path A's and path B's hand-over to wgpu anyway.
+- **The M1 flake.** Path A's "19 of 2764800 values differ"
+  (`zero_copy_matches_copy_path`, odin's H3 run at 0d491ae and M2's at
+  0663e05), never explained, is probably this fault.
+- A third odin run is queued: `radv_disable_dcc_mips`, `RADV_DEBUG=img`
+  and vulkaninfo.
+
+The workaround:
+
+- **No `RENDER_ATTACHMENT` on 8-bit planes.** `GpuFrame::new` makes a
+  slot's R8 and Rg8 planes `TEXTURE_BINDING | COPY_DST | COPY_SRC`;
+  deep planes (R16F, Rg16F) keep `RENDER_ATTACHMENT`, which the ingest
+  pass and their mips draw into. Read in wgpu 30.0.1: wgpu-core adds
+  `COLOR_TARGET` of its own only to a texture without `COPY_DST`
+  (`conv::map_texture_usage_for_texture`), so none comes back, and a
+  plane's lazy clear is a buffer copy now, not a render pass; wgpu-hal
+  (`vulkan::conv::map_texture_usage`) then asks Vulkan for
+  `TRANSFER_SRC | TRANSFER_DST | SAMPLED` for an 8-bit plane, where it
+  asked for `COLOR_ATTACHMENT` too, and for all four for a deep one. Both
+  with flags 0, optimal tiling, exclusive sharing and no `pNext`.
+- **The RADV rule relied on, recalled, not read.** RADV gives DCC, and
+  fast clears, only to images with `VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT`:
+  for a single-sample image without a DRM modifier,
+  `radv_image_use_fast_clear_for_image_early` is false without that bit
+  (unless `RADV_DEBUG=forcecompress`), and `radv_use_dcc_for_image_early`
+  gives no DCC where it is false. A later Mesa could compress such
+  images; `RADV_DEBUG=img` (below) would show it.
+- **What writes a slot's planes now.** Level 0 of an 8-bit plane only
+  by copies: the upload's `write_texture` or the belt's
+  buffer-to-texture copy, path A's texture copy from the DMA-BUF import
+  (`upload_imported`), path B's buffer copy (`upload_from_buffer`), and
+  in tests a frame filled on the GPU. Level 0 of a deep plane by the
+  ingest render pass, from a scratch texture of integers. Levels 1 and
+  on: an 8-bit plane's by the compute pass and a copy (next), a deep
+  one's by the render pass as before. What reads them: the projection,
+  through the slot's bind group (the viewer, overview frames,
+  `StillRenderer` and `render_still`, the export, and the YUV pass after
+  it), the mip passes' `textureLoad` of the level above, and readback
+  (tests, and Tier 2's checks). Nothing renders into an 8-bit plane.
+- **The mips by compute.** `shaders/mips8.wgsl`'s `cs_mip8` reads level
+  n − 1 with `textureLoad` and takes each texel's mean with
+  `mean_codes`, D31's integer area mean to the nearest code, ties to
+  even, now shared with `fs_mip` in `shaders/mips.wgsl`. It packs four
+  R8 or two Rg8 codes into a u32, the first in the low byte as a copy
+  reads them, into level n's region of a storage buffer, each row padded
+  to 256 bytes (`COPY_BYTES_PER_ROW_ALIGNMENT`); a copy then puts the
+  region into level n, which the next level's pass reads. The uploader
+  keeps one buffer a plane index, a region a level, and makes it again
+  when a plane's format or size changes (4.9 MB for a 3840² luma plane,
+  whose level 1 is 3.7 MB). `Uploader::record_mips` keeps its signature
+  and its place inside the upload's GPU timer span.
+
+Tested on lavapipe (Mesa 25.2.8, LLVM 20.1.2), in `tests/upload.rs`:
+
+- `the_eight_bit_mip_pass_is_the_render_passes_byte_for_byte` makes
+  every level of noise NV24 frames (R8 luma and Rg8 chroma at full
+  size) at 3840×3840, 1920×1920, 3840×1920, 1001×777, 15×15, 2×1 and
+  1×1, each down to 1×1, through the compute pass and through the render
+  passes it replaced, into slots made as before (`GpuFrame::renderable`
+  and `EightBitMips::RenderPass`, hidden and for tests only: this one,
+  the next one's control and `the_bench_sees_a_steps_own_blocks`):
+  every byte of every level agrees. Its control, the compute pass with
+  each mean truncated, must fail, and is 12776841 bytes off (1381789 of
+  them at level 1 of the 3840² luma). 3.3 to 4.5 s.
+- `eight_bit_slot_planes_cant_be_rendered_to` checks a slot of NV12,
+  NV24, I420, grey, GBRP, P010, 10-bit 4:2:2 and 16-bit grey, before and
+  after an upload: 8-bit planes without `RENDER_ATTACHMENT`, deep ones
+  with it. Its control, an NV12 slot made as before, must fail at plane
+  0 (R8).
+- D31's mip tests pass on the compute pass unchanged:
+  `eight_bit_mips_are_the_references_code_for_code`,
+  `eight_bit_mips_are_exact_at_the_largest_sizes` (16383×2051,
+  16384×2049 and 2051×16383, past a u32's sum) and
+  `mips_are_area_means_at_odd_sizes`. The goldens pass three runs in a
+  row with nothing blessed, so the stored images, and the levels they
+  read, didn't move.
+- `the_bench_sees_a_steps_own_blocks` now runs on slots and mips made as
+  before: on lavapipe, whose one memory type holds both, the mip pass's
+  buffer lands in the first step's 128 MiB staging block and keeps it,
+  so no later step makes a block and the test would have nothing to see.
+- The cost on lavapipe (`upload_bench_smoke`, three runs before and
+  after, median GPU ms): 640×320 NV12 ingest and mips 2.76 to 2.20 with
+  `write_texture` and 2.27 to 2.10 with the belt; the 320² NV12 pair
+  1.26 to 1.01 and 1.25 to 1.08 a frame; mips alone 2.19 to 2.08; P010,
+  whose path didn't change, 2.65 to 2.41 and 1.33 to 1.36. No slower,
+  within lavapipe's noise; odin's rows (below) are the ones that count.
+
+The guards, on odin:
+
+- `zero_copy_pair_matches_copy` stays strict: byte for byte on every
+  slot, path and variant, with no tolerance, retry, skip or allowlist.
+  Three plain runs in a row must pass.
+- One run under `RADV_DEBUG=img` must show the slots' R8 3840×3840
+  6-level and RG8 1920×1920 5-level surfaces with no DCC (the form of
+  RADV's print is recalled: an `Image:` block with `width=`, `height=`
+  and `levels=`, and a `DCC:` line under a surface that has it).
+- The goldens on the RX 7600 (`goldens_on_gpu_match_reference`) and on
+  odin's llvmpipe (`goldens_on_host_llvmpipe`) as before.
+- `bench_upload_5k7`'s 8-bit rows (at 918d031, D31: the 5.7K NV12
+  frame's mips 1.01 ms, the 3840² pair's ingest and mips 0.89 ms a
+  frame), its 10-bit rows, which shouldn't move, and its project rows,
+  which now sample planes without DCC; and the real-time rows
+  (`bench_playback_realtime_5k7_8bit`,
+  `bench_playback_realtime_8k_8bit`, `bench_playback_x5_raw`'s P-LOCK
+  rows, `bench_x5_8k30_zero_copy_vs_copy`).
+
+Not done, and why:
+
+- `RADV_DEBUG=nodcc` or `radv_disable_dcc_mips` set at start-up: an
+  environment stopgap that reaches every image and every Mesa only by
+  name, kept for if this doesn't hold.
+- An image of our own with compression control set to disabled
+  (`VK_EXT_image_compression_control`): outside wgpu.
+- RADV may still write a copy into an 8-bit plane through a graphics
+  blit, since (as recalled) it picks the engine by whether the format
+  can be rendered, not by the image's usage, so this doesn't by itself
+  change what writes level 0; it takes DCC off the image, which is what
+  `nodcc` changed.
+
+Upstream: a Mesa report is drafted, for Pat to file or not. Its title:
+"radv/gfx11 (Navi 33): sporadic wrong 4x2 texel blocks in a mipmapped
+R8_UNORM color image after transfer copies". It gives the hardware and
+versions above; the image (R8_UNORM, 3840×3840, 6 levels, optimal,
+`TRANSFER_SRC | TRANSFER_DST | SAMPLED | COLOR_ATTACHMENT`, exclusive,
+six reused in turn); a frame's submission (a barrier, a buffer-to-image
+or image copy of all of level 0, then for levels 1 to 5 a barrier and a
+render pass that draws level n from n − 1 with `texelFetch`); the
+readback; the signature and rates above; what was tried (`syncshaders`
+no change, `nodcc` clean from PR #33, `radv_disable_dcc_mips`, `img`
+and sync validation to fill in from odin's third run); and a reproducer
+without video decode (six such images, a natural 8-bit luma sequence
+copied in turn from a device-local buffer, the mips drawn, level 0 read
+back and compared, about 10,000 frames with and without `nodcc`). Not
+tested: other GFX11 parts, RDNA2, GFX12, Mesa 26.3 or main.
+
+Revisit if: `zero_copy_pair_matches_copy` fails on odin with this in
+(DCC was not the mechanism, or not the only one: the analysis's next
+experiments, from `RADV_DEBUG=nobinning` to a reproducer without
+FFmpeg under sync validation); `RADV_DEBUG=img` shows DCC on a slot's
+8-bit plane (a Mesa that compresses images that can't be rendered to);
+a deep plane, which keeps `COLOR_ATTACHMENT` and so DCC, shows the
+signature (PR #32's wrong frames were all R8, and its perf pair is
+8-bit); odin's rows show the compute mips or uncompressed sampling
+costing real-time play; or a Mesa with the fault fixed ships.
+
+*Measured on odin at 04d15be (PR #34, 2026-11-11).*
+`zero_copy_pair_matches_copy` passed five runs of five (three plain,
+one under `RADV_DEBUG=img`, one in hw-test) with 0 wrong frames on
+every slot, path and variant, where every default-environment run
+before had failed (141 wrong frames over PR #32's three runs, 45 in PR
+#33's plain one). Both changes landed together, so whether dropping
+`RENDER_ATTACHMENT` (which, by the Mesa rule recalled, takes DCC off)
+or the compute mips ended it isn't known. Of the third run queued
+above, `RADV_DEBUG=img` and vulkaninfo ran; `radv_disable_dcc_mips`
+didn't. RADV's `img` print shows the recalled `Image:` blocks with
+`width=`, `height=` and `levels=`, but no DCC line for any image of
+that run, not only the slots, so the form of a DCC line is
+unconfirmed, the print can't tell these slots from earlier ones, and
+the upstream report's `img` blank can't be filled from it. The slots'
+surfaces (216 R8 3840² at 6 levels and 216 RG8 1920² at 5) carry flags
+0x22410301, whose bit 22 is, as recalled, `RADEON_SURF_DISABLE_DCC`.
+odin's vulkaninfo lists `VK_EXT_image_compression_control`. The
+goldens and yuv on the RX 7600 pass; `goldens_on_host_llvmpipe` didn't
+run. On the RX 7600 the compute mips cost more, where lavapipe found
+them no slower: the 5.7K NV12 frame's mips 0.70 ms against 0.62 to
+0.63 by render passes (odin's runs from 43abcda to 0663e05; 918d031's
+1.01, above, was that one run's and didn't recur), its ingest and mips
+1.10 against 1.00 to 1.01 (by `write_texture`), a 3840² pair's 0.95 a
+frame against 0.88 to 0.89, 0.06 to 0.10 ms more in all, while P010's
+rows, which this didn't touch, came out about 4 % faster in the same
+run. The project rows, sampling planes made without
+`RENDER_ATTACHMENT`, read 0.22 and 0.77 ms at 1920×1080 and 3840×2160
+rectilinear, within the 0.19 to 0.22 and 0.73 to 0.81 odin measured
+from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
 
 ## Open
 

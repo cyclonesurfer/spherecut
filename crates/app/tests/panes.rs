@@ -329,6 +329,14 @@ impl MediaBackend for FaultBackend {
     ) -> Result<Box<dyn AudioDecode>, MediaError> {
         self.0.open_audio(path, req)
     }
+
+    fn track_timing(
+        &self,
+        path: &Path,
+        stream: usize,
+    ) -> Result<Option<spherecut_media::mp4::TrackTiming>, MediaError> {
+        self.0.track_timing(path, stream)
+    }
 }
 
 #[test]

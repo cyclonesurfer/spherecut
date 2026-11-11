@@ -1086,6 +1086,59 @@ no verdict. Alone, the 3840 pair's slower lens on VA-API serially ran
 too the pair now matches the X5's file; a thread a lens it ran 18.0
 against clip 9's 12.8.
 
+M3.8's runs, the frame lock:
+[`hw-reports/odin-9ab8091-m38.md`](../hw-reports/odin-9ab8091-m38.md)
+at 9ab8091 (PR #29) and
+[`hw-reports/odin-04d15be-m38b.md`](../hw-reports/odin-04d15be-m38b.md)
+at 04d15be (PR #34), 2026-11-10 and 11, over Remote Control, with PR
+#30 to #33's reruns and diagnostics between them (PROGRESS, "M3.8").
+PR #29's P-LOCK verdicts were scored by a rule M3.8's fix round
+replaced (plan amendment 6). At 04d15be, under Firefox load
+(MemAvailable 33,504 to 35,267 MiB as P-LOCK's path-B passes began),
+P-LOCK on path B, 6 slots locked and 4 unlocked, every X5 mode passes:
+
+| X5 mode | Presented after 1 s, locked (unlocked) | Unpaired presents, unlocked → locked | Pairs shown | `pair_wait` p50 / p95 |
+|---|---:|---:|---:|---:|
+| 2×1920² at 119.88 (60 Hz tick) | 100.09 % (100.35 %) | 2920 → 0 | 1193 | 0.00 / 7.14 ms |
+| 2×2880² at 59.94 | 100.00 % (100.00 %) | 1922 → 0 | 1176 | 0.00 / 0.00 ms |
+| 2×3840² at 25, by the pacing rule (70 pairs of 70) | 99.78 % (96.93 %) | 2258 → 0 | 472 | 0.00 / 0.00 ms |
+| 2×3840² at 29.97 | 100.00 % (100.00 %) | 28280 → 0 | 599 | 0.00 / 0.00 ms |
+
+The three perf pairs locked show 0 unpaired presents (10264, 5755 and
+7181 unlocked), with 0 resyncs anywhere.
+
+Upload (`bench_upload_5k7`), GPU ms, `write_texture`, with D77's
+8-bit slot planes (no `RENDER_ATTACHMENT`, mips by a compute pass)
+against odin's runs from 43abcda to 0663e05:
+
+| Row | Before D77 | 04d15be |
+|---|---:|---:|
+| 5760×2880 NV12, ingest and mips | 1.00 to 1.01 | 1.10 |
+| 5760×2880 NV12, mips alone | 0.62 to 0.63 | 0.70 |
+| 3840² NV12 pair, ingest and mips a frame | 0.88 to 0.89 | 0.95 |
+| 5760×2880 P010, ingest and mips (unchanged path) | 1.23 to 1.24 | 1.18 |
+| 5760×2880 NV12 to 1920×1080 / 3840×2160 rectilinear | 0.19 to 0.22 / 0.73 to 0.81 | 0.22 / 0.77 |
+
+So the compute mips cost 0.06 to 0.10 ms a frame on the RX 7600, where
+lavapipe found them no slower, within its noise (D77). The project
+rows sit within their spread before D77. 918d031's 1.01 ms for the
+mips alone, in the fourth run above, didn't recur.
+
+`bench_x5_8k30_zero_copy_vs_copy`'s 8K25 zero-copy rows dropped 40
+frames (37 in decode) on path B and 25 (24) on path A at 04d15be. Over
+odin's runs path B has dropped 2 (a13ee07), 26 (c9a4a55), 16
+(0d491ae), 32 (0663e05) and 40, path A 19 to 43, with unthrottled
+decode at 78 to 79 frames a second a lens on path B and 75 to 76 on
+path A throughout: the row's baseline is 16 to 40 on path B, not the
+first run's 2. Path B's decode p95 is 35 to 49 ms, and path A's
+download p95 was near 49 ms at 04d15be, against a 40 ms frame at 8K25
+only, so small timing shifts move them. Only zero copy decodes through
+the whole 20 s there, since its cache is capped by the decoder's
+images; the Vulkan copy row decodes 116 frames a lens and replays from
+the cache, so it is no control, and the VA-API copy row decoded 232 a
+lens and dropped 54, all in decode. A rerun with Firefox closed and
+`SPHERECUT_PLAYBACK_TIMELINE` set, beside a2a0de8, is still to do.
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.

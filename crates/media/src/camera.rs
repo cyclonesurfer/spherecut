@@ -316,7 +316,7 @@ pub fn companion_path(report: &ProbeReport) -> Option<PathBuf> {
 /// records ([`spherecut_camera::insta360::verify_companion`]): verified
 /// when they are byte for byte the same, and otherwise paired by name
 /// only, with why, which a trailer of either that can't be read is too,
-/// and records over [`MAX_EXPOSURE`] are, uncompared. The why names the
+/// and records over `MAX_EXPOSURE` are, uncompared. The why names the
 /// file at fault, master or LRV.
 ///
 /// It reads both files, so it runs where probe does, never on the UI

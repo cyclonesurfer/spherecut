@@ -13,15 +13,17 @@ use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodePath, Exactness, FallbackReason, HwKind, SeekMode, VideoFrame, VideoStreamInfo,
 };
+use spherecut_media::mp4::TrackTiming;
 use spherecut_render::vkshare::SharedVideo;
 
 use crate::audio::AudioOutput;
 use crate::budget::{AutoBudget, CacheBudget};
 use crate::cache::FrameCache;
 use crate::decoder::{HwPromise, HwSupport};
+use crate::lock::{LockSpec, LockStatus, field};
 use crate::perf::{MemoryStats, PerfStats};
 use crate::player::{PlayerError, PlayerEvent};
-use crate::slots::SlotRing;
+use crate::slots::{SLOT_FLOOR, SlotRing};
 
 /// The GUI's repaint request: called when a frame is ready to show or
 /// the snapshot changed.
@@ -110,6 +112,17 @@ pub struct StreamStatus {
     pub last: Option<Time>,
     pub landed: Option<Landed>,
     pub seeks: SeekCounts,
+    /// Frames the worker handed out, from seeks, steps and decoding on,
+    /// and the clip time of the last of them.
+    pub handed_out: u64,
+    pub newest: Option<Time>,
+    /// Frames its decoder decoded, handed out or passed over (catching
+    /// up), as [`DecodeStats::frames_decoded`] counts them: the decodes
+    /// the stream cost, which a lens that passes frames over still pays
+    /// (M3 plan amendment 4, K2).
+    ///
+    /// [`DecodeStats::frames_decoded`]: spherecut_media::backend::DecodeStats::frames_decoded
+    pub decoded: u64,
 }
 
 /// The budget in force, and what it was worked out from.
@@ -140,6 +153,244 @@ pub(crate) struct Status {
     pub(crate) import_refused: Option<String>,
     /// The upload thread's last reading of the memory, once a second.
     pub(crate) memory: Option<MemoryStats>,
+    /// The open's lock group, when it opened a locked pair.
+    pub(crate) lock: Option<LockGroup>,
+}
+
+/// A locked pair's group (M3 plan section 9): what it was asked for, its
+/// members, where it is, and the one time its members catch up to.
+#[derive(Debug, Clone)]
+pub(crate) struct LockGroup {
+    pub(crate) spec: LockSpec,
+    /// The player streams locked together, by their place in what was
+    /// opened: the frame cache's keys for them.
+    pub(crate) members: [usize; 2],
+    pub(crate) status: LockStatus,
+    /// The group's catch-up time, raised when a member falls more than 2
+    /// frames behind the clock: to the clock's time when every member
+    /// has, else to the clock's time or the newest frame every other
+    /// member holds, whichever is earlier. Cleared by a seek or a step.
+    /// No member catches up on its own.
+    pub(crate) until: Option<Time>,
+    /// Each member's timing tables, as the open read them through the
+    /// backend before it chose the decoders: `None` for a track with no
+    /// tables, or whose tables couldn't be read.
+    pub(crate) timing: [Option<TrackTiming>; 2],
+}
+
+impl LockGroup {
+    /// The group of a pair opened locked, player streams 0 and 1, with
+    /// their `timing` tables: pending until both members' decoders have
+    /// opened.
+    pub(crate) fn pending(spec: LockSpec, timing: [Option<TrackTiming>; 2]) -> LockGroup {
+        LockGroup {
+            spec,
+            members: [0, 1],
+            status: LockStatus::Pending,
+            until: None,
+            timing,
+        }
+    }
+
+    /// The first [`field`] in which the members differ, given each one's
+    /// decoder's `info`, or `Ok` when they agree (M3 plan section 9): the
+    /// tables (`"timing"` when a member has none); their time base;
+    /// their first frames' times, lens 1's less lens 0's, which must be
+    /// the spec's offset exactly; each decoder's frame rate, which must
+    /// be constant and the same; the pictures' size; and `stts` and
+    /// `stss` over the samples both have from the first each shows. The
+    /// frame count isn't compared: a lens with fewer frames ends the
+    /// pair.
+    fn differs(&self, info: [&VideoStreamInfo; 2]) -> Result<(), &'static str> {
+        let [Some(t0), Some(t1)] = &self.timing else {
+            return Err(field::TIMING);
+        };
+        if t0.timescale != t1.timescale {
+            return Err(field::TIME_BASE);
+        }
+        let start = |t: &TrackTiming| {
+            Rational::new(1, i64::from(t.timescale)).and_then(|tb| Time::from_pts(t.first_pts, tb))
+        };
+        let apart = start(t1).and_then(|s1| s1.checked_sub(start(t0)?));
+        if !apart.is_ok_and(|d| d == self.spec.offset) {
+            return Err(field::START);
+        }
+        match (info[0].frame_rate(), info[1].frame_rate()) {
+            (Some(r0), Some(r1)) if r0 == r1 => {}
+            _ => return Err(field::RATE),
+        }
+        if info[0].size != info[1].size {
+            return Err(field::SIZE);
+        }
+        if t0.stts_mismatch(t1).is_some() {
+            return Err(field::STTS);
+        }
+        if t0.stss_mismatch(t1).is_some() {
+            return Err(field::STSS);
+        }
+        Ok(())
+    }
+
+    /// Refused by `field`: the members play unlocked. What the player
+    /// says of it.
+    fn refuse(&mut self, field: &'static str) -> PlayerEvent {
+        match field {
+            field::OPEN => tracing::warn!(
+                "the lenses don't lock: a lens couldn't open or decode, so the other shows unlocked"
+            ),
+            field::TIMING => tracing::warn!(
+                "the lenses don't lock: a lens has no timing tables, or they couldn't be read, \
+                 so they show unlocked"
+            ),
+            field::SLOTS => tracing::warn!(
+                "the GPU has too few slots for a locked pair, two a lens: the lenses show unlocked"
+            ),
+            field::TIME_BASE
+            | field::START
+            | field::RATE
+            | field::SIZE
+            | field::STTS
+            | field::STSS => {
+                tracing::warn!(
+                    "the lenses don't lock: their {field} differs, so they show unlocked"
+                )
+            }
+            _ => tracing::warn!("the lenses don't lock ({field}), so they show unlocked"),
+        }
+        self.status = LockStatus::Refused { field };
+        PlayerEvent::LockRefused { field }
+    }
+}
+
+impl Status {
+    /// Lock the open's pending group, or refuse it by the field that
+    /// differs ([`LockGroup::differs`]), once both members' decoders have
+    /// opened; what the player says of it. Locked, a lens with fewer
+    /// frames than the other, as each decoder counts the frames it shows,
+    /// is said once, since the pair ends at its last frame. Nothing while
+    /// a member is opening, or once the group has formed or been refused.
+    pub(crate) fn settle_lock(&mut self) -> Vec<PlayerEvent> {
+        let Some(g) = self.lock.as_mut() else {
+            return Vec::new();
+        };
+        if g.status != LockStatus::Pending {
+            return Vec::new();
+        }
+        let info = g
+            .members
+            .map(|m| self.streams.get(m).and_then(|s| s.info.as_ref()));
+        let [Some(i0), Some(i1)] = info else {
+            return Vec::new();
+        };
+        if let Err(field) = g.differs([i0, i1]) {
+            return vec![g.refuse(field)];
+        }
+        tracing::info!("the lenses agree: they show as pairs");
+        g.status = LockStatus::Locked;
+        let short = match (i0.frame_count, i1.frame_count) {
+            (Some(n0), Some(n1)) if n0 > n1 => Some((g.members[1], n0 - n1)),
+            (Some(n0), Some(n1)) if n1 > n0 => Some((g.members[0], n1 - n0)),
+            _ => None,
+        };
+        short
+            .map(|(stream, frames)| {
+                tracing::warn!(
+                    stream,
+                    "a lens has {frames} fewer frames: the pair ends at its last"
+                );
+                PlayerEvent::LensShort { stream, frames }
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// The members of the open's lock group while it is locked with its
+    /// group base on, whose cache rules run from the base and who catch
+    /// up to the group's `until`: `None` for an open not locked, and
+    /// under the test switch that turns the base off.
+    pub(crate) fn grouped(&self) -> Option<[usize; 2]> {
+        let g = self.lock.as_ref()?;
+        (g.status == LockStatus::Locked && !g.spec.test.no_group_base).then_some(g.members)
+    }
+
+    /// Player stream `stream` couldn't open, or decode after any
+    /// fallback, before it handed out a frame of the open (`handed_out`
+    /// false): a group it is a member of, pending or locked, is refused
+    /// with `"open"`, since the pair has no last frame of it to end at
+    /// (M3 plan section 9), and the group's `until` goes with it. Which
+    /// of the member's first decode and its partner's open came first
+    /// doesn't change it. A member that handed out a frame ends the pair
+    /// instead ([`end_member`](Self::end_member)). What the player says
+    /// of it, for the caller to tell once the lock is let go; the caller
+    /// lets the cache's group go too.
+    pub(crate) fn member_failed(&mut self, stream: usize, handed_out: bool) -> Option<PlayerEvent> {
+        let g = self.lock.as_mut()?;
+        let formed = matches!(g.status, LockStatus::Pending | LockStatus::Locked);
+        (formed && !handed_out && g.members.contains(&stream)).then(|| {
+            g.until = None;
+            g.refuse(field::OPEN)
+        })
+    }
+
+    /// Player stream `stream`, a member of the open's lock group, locked
+    /// or still pending, can't decode on after any fallback, its last
+    /// frame of the open ending at `end` and starting at `last`: the pair
+    /// ends there, as at a shorter lens (M3 plan section 9), its end set
+    /// for the presenter's check of the end unless an earlier end is set
+    /// already. Without this, nothing ends the pair and `pick_pair` holds
+    /// its last while the clock runs on. Pending, the end is set for the
+    /// pair the group may become, so that which of the failure and the
+    /// partner's open came first doesn't change it. The end and last
+    /// frame it replaced, to put back if the member decodes past `end`
+    /// after all (a seek past damage); `None` when nothing changed: not a
+    /// member of a group that is pending or locked, or the test switch
+    /// that keeps the pair going.
+    pub(crate) fn end_member(
+        &mut self,
+        stream: usize,
+        end: Time,
+        last: Time,
+    ) -> Option<(Option<Time>, Option<Time>)> {
+        let g = self.lock.as_ref()?;
+        if matches!(g.status, LockStatus::Refused { .. })
+            || g.spec.test.no_end_on_failure
+            || !g.members.contains(&stream)
+        {
+            return None;
+        }
+        let s = self.streams.get_mut(stream)?;
+        if s.end.is_some_and(|e| e <= end) {
+            return None;
+        }
+        tracing::warn!(
+            stream,
+            "a lens can't decode on: the pair ends at its last frame"
+        );
+        let before = (s.end, s.last);
+        s.end = Some(end);
+        s.last = Some(last);
+        Some(before)
+    }
+
+    /// `live` slots are left, as a slot dies or as the lenses lock on a
+    /// ring some of whose slots died before: a locked group with fewer
+    /// than [`SLOT_FLOOR`] live slots a member unlocks, refused with
+    /// `"slots"`, and its streams show unlocked as each one's frame
+    /// comes (M3 plan section 9), unless the test switch keeps it locked.
+    /// What the player says of it, for the caller to tell once the lock
+    /// is let go; the caller lets the cache's group go too, or never
+    /// sets it.
+    pub(crate) fn below_floor(&mut self, live: usize) -> Option<PlayerEvent> {
+        let g = self.lock.as_mut()?;
+        if g.status != LockStatus::Locked
+            || g.spec.test.no_floor
+            || live >= SLOT_FLOOR * g.members.len()
+        {
+            return None;
+        }
+        g.until = None;
+        Some(g.refuse(field::SLOTS))
+    }
 }
 
 /// Shared by every thread of a player.
@@ -160,6 +411,17 @@ pub(crate) struct Shared {
     /// the open before left, so that the upload thread never takes an
     /// old file's frame for the new one's.
     pub(crate) live: AtomicU64,
+    /// The slot allocations still to fail as the GPU having no memory
+    /// for them: a test's hook ([`Player::fail_slot_allocations`]).
+    ///
+    /// [`Player::fail_slot_allocations`]: crate::Player::fail_slot_allocations
+    pub(crate) slot_faults: AtomicU64,
+    /// A test's hook ([`Player::old_idle_rule`]): the decode workers keep
+    /// the idle rules from before a request the cache answered could take
+    /// them on from the end or a failure.
+    ///
+    /// [`Player::old_idle_rule`]: crate::Player::old_idle_rule
+    pub(crate) old_idle: AtomicBool,
     /// The request the presenter waits for (0 for none), and whether
     /// playback is wanted: the upload thread's guide to what to upload.
     pub(crate) target: AtomicU64,
@@ -255,8 +517,37 @@ impl Shared {
         }
     }
 
+    /// Change stream `stream`'s status by `f`, as [`stream`](Self::stream)
+    /// does, and under the same lock the open's lock group by `group`
+    /// ([`Status::settle_lock`] or [`Status::member_failed`]): what came
+    /// of the group, for the caller to tell once the lock is let go.
+    pub(crate) fn stream_and_group<E: IntoIterator<Item = PlayerEvent>>(
+        &self,
+        epoch: u64,
+        stream: usize,
+        f: impl FnOnce(&mut StreamStatus),
+        group: impl FnOnce(&mut Status) -> E,
+    ) -> Vec<PlayerEvent> {
+        let mut st = self.status();
+        if st.epoch != epoch {
+            return Vec::new();
+        }
+        if let Some(s) = st.streams.get_mut(stream) {
+            f(s);
+        }
+        group(&mut st).into_iter().collect()
+    }
+
     pub(crate) fn is_shut_down(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// Whether the slot allocation now is one a test planted to fail
+    /// ([`slot_faults`](Self::slot_faults)), counting it if so.
+    pub(crate) fn slot_fault(&self) -> bool {
+        self.slot_faults
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     /// Whether open `epoch` is the latest, and the player runs.

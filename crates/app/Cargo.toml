@@ -39,6 +39,8 @@ egui_kittest.workspace = true
 # An agent's calls beside the window, on the same project (tests/agents.rs).
 spherecut-agent.workspace = true
 spherecut-synth.workspace = true
+# Every check's control (DECISIONS D32).
+spherecut-testkit.workspace = true
 # The fallback notice's test fails a frame "as hardware" (tests/panes.rs);
 # only here, so only test builds have fault injection (DECISIONS D30).
 spherecut-media = { workspace = true, features = ["fault-injection"] }

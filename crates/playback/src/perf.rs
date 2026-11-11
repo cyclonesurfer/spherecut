@@ -42,10 +42,16 @@ pub enum Stage {
     /// it, positive when the frame is late, negative when early
     /// (presenter).
     AvOffset,
+    /// How far the clock's time a present is for, without the A/V
+    /// offset, is past the end of the pair a locked group shows: 0 while
+    /// the pair's interval holds it, never negative. Recorded at each
+    /// present while the clock runs and the pair is locked, and at no
+    /// other (presenter, M3 plan section 9).
+    PairWait,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 10] = [
+    pub const ALL: [Stage; 11] = [
         Stage::Decode,
         Stage::Download,
         Stage::Convert,
@@ -56,6 +62,7 @@ impl Stage {
         Stage::UiFrame,
         Stage::ShownInterval,
         Stage::AvOffset,
+        Stage::PairWait,
     ];
 
     /// Its name in the smoke run's JSON and the benchmark reports.
@@ -71,6 +78,7 @@ impl Stage {
             Stage::UiFrame => "ui_frame",
             Stage::ShownInterval => "shown_interval",
             Stage::AvOffset => "av_offset",
+            Stage::PairWait => "pair_wait",
         }
     }
 }
@@ -85,8 +93,18 @@ pub enum Counter {
     /// Video frames shown.
     FramesShown,
     /// Frames passed over between two shown ones while playing (from run
-    /// links, else from gaps in pts).
+    /// links, else from gaps in pts), beyond those [`Counter::Skipped`]
+    /// counts: a locked pair's once a pair, by its member 0, and an
+    /// unlocked player's once a stream.
     Dropped,
+    /// Of the frames passed over between two shown ones while playing,
+    /// those the presents' cadence passes over because the display
+    /// presents slower than the clip: up to one fewer than the clip's
+    /// frames in the median present interval, rounded up, at each present
+    /// (none at or below the present rate, one for a 120 fps clip at
+    /// 60 Hz). Counted as [`Counter::Dropped`] is, once a pair or once a
+    /// stream.
+    Skipped,
     /// Frames catch-up skipped in the decoder.
     DecodeDropped,
     /// UI frames over 1.5 times the median interval.
@@ -111,14 +129,24 @@ pub enum Counter {
     /// 7.3).
     Projected,
     EncodedOnly,
+    /// Presents at which the player's streams show frames of different
+    /// clip times, over every stream it shows, locked or not (presenter,
+    /// M3 plan section 9). It compares the slots' time tags, not their
+    /// pictures.
+    UnpairedPresents,
+    /// Times a locked group sought both lenses to the trailing lens's
+    /// newest frame because no time both held lay ahead (the backstop of
+    /// section 9).
+    PairResyncs,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 15] = [
+    pub const ALL: [Counter; 18] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
         Counter::Dropped,
+        Counter::Skipped,
         Counter::DecodeDropped,
         Counter::Hitches,
         Counter::Seeks,
@@ -130,6 +158,8 @@ impl Counter {
         Counter::ImportsRefused,
         Counter::Projected,
         Counter::EncodedOnly,
+        Counter::UnpairedPresents,
+        Counter::PairResyncs,
     ];
 
     pub fn name(self) -> &'static str {
@@ -138,6 +168,7 @@ impl Counter {
             Counter::FramesUploaded => "frames_uploaded",
             Counter::FramesShown => "frames_shown",
             Counter::Dropped => "dropped",
+            Counter::Skipped => "skipped",
             Counter::DecodeDropped => "decode_dropped",
             Counter::Hitches => "hitches",
             Counter::Seeks => "seeks",
@@ -149,6 +180,8 @@ impl Counter {
             Counter::ImportsRefused => "imports_refused",
             Counter::Projected => "projected",
             Counter::EncodedOnly => "encoded_only",
+            Counter::UnpairedPresents => "unpaired_presents",
+            Counter::PairResyncs => "pair_resyncs",
         }
     }
 }

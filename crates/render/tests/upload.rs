@@ -2,12 +2,14 @@
 //! Level 0 holds each plane's codes, deep ones through the ingest pass
 //! with P010's shift; each mip level is the area-weighted mean of the one
 //! above at odd sizes, an 8-bit one rounded to the nearest code, ties to
-//! even, the reference's code for code up to 16384 texels a side; both
-//! upload paths fill a slot alike; bad frames and wrong slots are
-//! refused; a frame already on the GPU fills a slot as an upload does,
-//! and planes already there (slice 5b's imports, made here by wgpu) fill
-//! one byte for byte as their bytes do; and the upload bench runs, small (its Tier 2 form, `bench_upload_5k7`,
-//! is here too).
+//! even, the reference's code for code up to 16384 texels a side; an
+//! 8-bit plane's levels, made by a compute pass and copies, are the
+//! render passes' they replaced byte for byte, and no 8-bit plane can be
+//! rendered to (D77); both upload paths fill a slot alike; bad frames
+//! and wrong slots are refused; a frame already on the GPU fills a slot
+//! as an upload does, and planes already there (slice 5b's imports, made
+//! here by wgpu) fill one byte for byte as their bytes do; and the upload
+//! bench runs, small (its Tier 2 form, `bench_upload_5k7`, is here too).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -15,7 +17,9 @@ mod common;
 
 use common::{Frame, Kind, Rng, gpu, lavapipe_unorm8, radv_unorm8, unrounded_mip_mean};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
+use spherecut_render::plane::full_chain;
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
+use spherecut_render::upload::EightBitMips;
 use spherecut_render::{
     AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
     PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, dmabuf, reference, upload,
@@ -24,6 +28,7 @@ use spherecut_render::{
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::{Pattern, render_equirect};
 use spherecut_testkit::bench;
+use spherecut_testkit::control::must_fail;
 
 /// A `kind` frame of `size` with every sample random, and `pad` bytes
 /// after each row. Deep samples get random bits below their depth too
@@ -591,6 +596,153 @@ fn eight_bit_mips_are_the_references_code_for_code() {
     }
 }
 
+/// `Ok` when every level of `got` is `want`'s, texel for texel; else the
+/// first level that differs, how many of its texels do, and the first.
+fn same_levels(got: &[Codes], want: &[Codes]) -> Result<(), String> {
+    if got.len() != want.len() {
+        return Err(format!("{} levels for {}", got.len(), want.len()));
+    }
+    for (l, (g, w)) in got.iter().zip(want).enumerate() {
+        if (g.0, g.1) != (w.0, w.1) {
+            return Err(format!("level {l} is {}x{} for {}x{}", g.0, g.1, w.0, w.1));
+        }
+        let mut off =
+            g.2.iter()
+                .zip(&w.2)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b);
+        if let Some((n, (a, b))) = off.next() {
+            return Err(format!(
+                "level {l} ({}x{}): {} bytes off, the first at {n}, {a} for {b}",
+                g.0,
+                g.1,
+                off.count() + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn the_eight_bit_mip_pass_is_the_render_passes_byte_for_byte() {
+    // D77: an 8-bit plane's levels come from a compute pass into a
+    // buffer, then a copy, so that nothing renders to the plane. Every
+    // level of R8 and Rg8 (NV24's luma and its full-size chroma) is the
+    // one the render passes it replaced made, byte for byte, at even, odd
+    // and tiny sizes, each down to 1×1. Those passes run only here, into
+    // slots made as before D77, renderable. The control truncates each
+    // mean in the compute pass, one code off wherever it rounds up.
+    let started = std::time::Instant::now();
+    let gpu = gpu();
+    let mut compute = Uploader::new(gpu);
+    let mut render =
+        Uploader::with_eight_bit_mips(gpu, UploadPath::WriteTexture, EightBitMips::RenderPass);
+    let mut truncated =
+        Uploader::with_eight_bit_mips(gpu, UploadPath::WriteTexture, EightBitMips::Truncated);
+    let mut planted = Ok(());
+    let mut planted_off = 0;
+    for (n, size) in [
+        (3840, 3840),
+        (1920, 1920),
+        (3840, 1920),
+        (1001, 777),
+        (15, 15),
+        (2, 1),
+        (1, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let frame = noise(Kind::Nv24, size, 0, 40 + n as u64);
+        let shape = SlotShape::of(&frame.layout, frame.size)
+            .unwrap()
+            .with_levels(32);
+        let new = GpuFrame::new(gpu, &shape).unwrap();
+        let old = GpuFrame::renderable(gpu, &shape).unwrap();
+        let wrong = GpuFrame::new(gpu, &shape).unwrap();
+        compute.upload(gpu, &frame, &new).unwrap();
+        render.upload(gpu, &frame, &old).unwrap();
+        truncated.upload(gpu, &frame, &wrong).unwrap();
+        for (i, p) in shape.planes.iter().enumerate() {
+            let at = format!("{}x{} plane {i} ({:?})", size.0, size.1, p.format);
+            let want = level_codes(&old, i);
+            assert_eq!(want.len() as u32, p.levels, "{at}");
+            assert_eq!(p.levels, full_chain(size.0, size.1), "{at}");
+            if let Err(e) = same_levels(&level_codes(&new, i), &want) {
+                panic!("{at}: the compute pass's levels are off the render passes': {e}");
+            }
+            let bad = level_codes(&wrong, i);
+            planted_off += bad
+                .iter()
+                .zip(&want)
+                .map(|(b, w)| b.2.iter().zip(&w.2).filter(|(x, y)| x != y).count())
+                .sum::<usize>();
+            planted = planted.and(same_levels(&bad, &want).map_err(|e| format!("{at}: {e}")));
+        }
+    }
+    let why = must_fail("the 8-bit mip pass with each mean truncated", planted);
+    eprintln!(
+        "the truncated pass: {planted_off} bytes off over every size ({why}); {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+}
+
+/// `Ok` when `slot`'s planes are made as D77 has them: an 8-bit one
+/// without `RENDER_ATTACHMENT` (only copies write it), a deep one with it
+/// (the ingest pass and its mips), each sampled and copied to and from.
+fn planes_as_d77(slot: &GpuFrame) -> Result<(), String> {
+    let copies = wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::COPY_SRC;
+    for (i, p) in slot.shape().planes.iter().enumerate() {
+        let usage = slot.plane_texture(i).unwrap().usage();
+        let want = if p.format.is_deep() {
+            copies | wgpu::TextureUsages::RENDER_ATTACHMENT
+        } else {
+            copies
+        };
+        if usage != want {
+            return Err(format!(
+                "plane {i} ({:?}) is {usage:?}, where {want:?} is wanted",
+                p.format
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn eight_bit_slot_planes_cant_be_rendered_to() {
+    // On odin's RX 7600, RADV's DCC left blocks of an 8-bit slot's luma
+    // wrong, and RADV gives DCC only to images that can be rendered to
+    // (D77, Mesa's rule as recalled): so no 8-bit plane of a slot has
+    // RENDER_ATTACHMENT, while a deep one keeps it. Every layout's slot,
+    // and one made of each through an upload. The control is an NV12 slot
+    // made as before D77.
+    let gpu = gpu();
+    let mut uploader = Uploader::new(gpu);
+    for kind in [
+        Kind::Nv12,
+        Kind::Nv24,
+        Kind::I420,
+        Kind::Gray,
+        Kind::Gbrp,
+        Kind::P010,
+        Kind::I422p10,
+        Kind::Gray16,
+    ] {
+        let frame = noise(kind, (64, 32), 0, 5);
+        let slot = slot_for(&frame, 2);
+        planes_as_d77(&slot).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
+        uploader.upload(gpu, &frame, &slot).unwrap();
+        planes_as_d77(&slot).unwrap_or_else(|e| panic!("{kind:?} uploaded: {e}"));
+    }
+    let nv12 = noise(Kind::Nv12, (64, 32), 0, 5);
+    let old = GpuFrame::renderable(gpu, &SlotShape::of(&nv12.layout, nv12.size).unwrap()).unwrap();
+    let why = must_fail("an NV12 slot made as before D77", planes_as_d77(&old));
+    assert!(why.contains("plane 0 (R8)"), "{why}");
+}
+
 #[test]
 fn both_upload_paths_fill_a_slot_alike() {
     let gpu = gpu();
@@ -900,20 +1052,30 @@ fn the_gpu_time_covers_the_ingest() {
     let mut runs = Vec::new();
     for _ in 0..5 {
         let start = std::time::Instant::now();
-        uploader.upload(gpu, &frame, &slot).unwrap();
+        let stats = uploader.upload(gpu, &frame, &slot).unwrap();
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         let wall = start.elapsed().as_secs_f64() * 1e3;
-        // The other tests poll the same device, and the one whose poll
-        // finds the read-back done runs its callback after letting the
-        // device go, so the reading can come a moment after this wait.
-        let timed = (0..1000)
-            .find_map(|_| {
-                uploader.poll(gpu).or_else(|| {
+        // Each reading comes once, from whichever collects it first: the
+        // upload's own stats when another test's poll ran the read-back's
+        // callback before the upload returned, else a later poll. Another
+        // test's poll can also take the callback and run it a moment after
+        // this wait, so the wait for it is a deadline, not a count.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let timed = stats
+            .gpu_ms
+            .or_else(|| {
+                loop {
+                    if let Some(ms) = uploader.poll(gpu) {
+                        break Some(ms);
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    let _ = gpu.device.poll(wgpu::PollType::Poll);
                     std::thread::sleep(std::time::Duration::from_millis(1));
-                    None
-                })
+                }
             })
-            .expect("a GPU time once idle");
+            .expect("a GPU time within 10 s of the upload's work being done");
         let timed = f64::from(timed);
         eprintln!("GPU {timed:.3} ms of {wall:.3} ms");
         runs.push(timed / wall);
@@ -1416,7 +1578,11 @@ fn the_bench_sees_a_steps_own_blocks() {
     // MiB block, and every step makes a 128 MiB block for its staging and
     // frees it once done: reported only once settled, no step changed
     // anything. A device of its own, so that no other test's memory is
-    // in its allocator's reports.
+    // in its allocator's reports. Its slots and mips are made as before
+    // D77: the 8-bit mip pass's buffer, made in the first step, lands in
+    // that step's staging block on lavapipe, whose one memory type holds
+    // both, and keeps it, so that no later step makes a block (on a GPU
+    // with device-local memory the two are apart).
     let gpu = &Gpu::headless(&AdapterChoice::Cpu).unwrap();
     let input: Vec<Frame> = (0..2)
         .map(|i| pooled(noise(Kind::Nv12, (3840, 3840), 0, 20 + i)))
@@ -1427,14 +1593,15 @@ fn the_bench_sees_a_steps_own_blocks() {
         .map(|p| p.0.len() as u64)
         .sum::<u64>();
     let slot_of =
-        |f: &Frame| GpuFrame::new(gpu, &SlotShape::of(&f.layout, f.size).unwrap()).unwrap();
+        |f: &Frame| GpuFrame::renderable(gpu, &SlotShape::of(&f.layout, f.size).unwrap()).unwrap();
     let steps = 4;
     for pace in [Pace::Waited, Pace::InFlight(IN_FLIGHT)] {
         let depth = if pace == Pace::Waited { 1 } else { IN_FLIGHT };
         let slots: Vec<Vec<GpuFrame>> = (0..depth)
             .map(|_| input.iter().map(slot_of).collect())
             .collect();
-        let mut uploader = Uploader::with_path(gpu, UploadPath::WriteTexture);
+        let mut uploader =
+            Uploader::with_eight_bit_mips(gpu, UploadPath::WriteTexture, EightBitMips::RenderPass);
         let run = upload_run(gpu, &mut uploader, &input, &slots, steps, pace);
         eprintln!("{pace:?}: {run:?}");
         // In flight, a step's staging is there to see: a frame's worth,

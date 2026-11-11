@@ -841,7 +841,7 @@ static CAPTURES: Mutex<usize> = Mutex::new(0);
 /// current one. FFmpeg's log level is process-wide, so while any capture
 /// runs it is at least "warning" (other threads' warnings then get
 /// formatted and dropped), and afterwards it follows the subscriber again.
-/// Lines read like "[hevc] Device does not support decoding hevc!", with
+/// Lines read like "`[hevc] Device does not support decoding hevc!`", with
 /// FFmpeg's context address left out.
 ///
 /// Only FFmpeg's work on this thread is caught: a decoder with frame

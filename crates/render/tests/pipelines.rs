@@ -9,13 +9,16 @@ mod common;
 use std::mem::{offset_of, size_of};
 
 use common::gpu;
-use spherecut_render::layouts::{ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, PROJECT_WGSL, YUV_WGSL};
+use spherecut_render::layouts::{
+    ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, MIPS8_WGSL, PROJECT_WGSL, YUV_WGSL,
+};
 use spherecut_render::readback::{read_region, read_region_in_bands, read_texture};
+use spherecut_render::upload::EightBitMips;
 use spherecut_render::yuv::YuvUniform;
 use spherecut_render::{
     DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform, Projector,
-    RenderError, SlotShape, SourceUniform, StillOptions, Uploader, ViewParams, ViewUniform,
-    render_still,
+    RenderError, SlotShape, SourceUniform, StillOptions, UploadPath, Uploader, ViewParams,
+    ViewUniform, render_still,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 
@@ -43,8 +46,13 @@ fn every_pipeline_builds() {
             }
         }
     });
-    // Ingest for both deep formats, and mips for all four.
+    // Ingest for both deep formats, the mip render pass for them and the
+    // mip compute pass for both 8-bit ones (D77); and the render pass for
+    // all four, as the test that holds the compute pass to it builds them.
     validated("uploader", || Uploader::new(gpu));
+    validated("uploader with the 8-bit mips as render passes", || {
+        Uploader::with_eight_bit_mips(gpu, UploadPath::default(), EightBitMips::RenderPass)
+    });
     // Encode into every format whose codes it rounds to, and the f16 one
     // it rounds to halves.
     for format in [
@@ -60,6 +68,7 @@ fn every_pipeline_builds() {
     for (name, src) in [
         ("project", PROJECT_WGSL),
         ("mips", MIPS_WGSL),
+        ("mips8", MIPS8_WGSL),
         ("ingest", INGEST_WGSL),
         ("encode", ENCODE_WGSL),
         ("yuv", YUV_WGSL),

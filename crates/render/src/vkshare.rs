@@ -92,9 +92,11 @@ pub fn open_shared(
     // SAFETY: the extensions are the device's (`plan_extensions` took them
     // from its list), and the queues are of families it has, in counts it
     // has, none of them family 0.
-    let (device, queue) = unsafe { open_with(adapter, desc, &add, &plan.queue_counts()) }?;
+    let (device, queue, features) =
+        unsafe { open_with(adapter, desc, &add, &plan.queue_counts()) }?;
     let shared = share(
         &device,
+        features,
         plan.grants(),
         plan.copy_queue(),
         [0, plan.compute],
@@ -104,9 +106,10 @@ pub fn open_shared(
 }
 
 /// A device for tests on a GPU with one queue, as lavapipe has: wgpu's
-/// device with synchronization2 on, FFmpeg given family 0's queue 0
-/// (compute and transfer) and the copier the same queue. Blocks on the
-/// driver.
+/// device with synchronization2 on (and `VK_EXT_queue_family_foreign`
+/// where the device has it, as on every device [`open_with`] makes),
+/// FFmpeg given family 0's queue 0 (compute and transfer) and the copier
+/// the same queue. Blocks on the driver.
 ///
 /// # Safety
 ///
@@ -123,14 +126,14 @@ pub unsafe fn open_single_queue(
 ) -> Result<(wgpu::Device, wgpu::Queue, SharedVideo), String> {
     spherecut_core::may_block("opening a GPU device for a one-queue test");
     // SAFETY: no extensions or queues are added.
-    let (device, queue) = unsafe { open_with(adapter, desc, &[], &[]) }?;
+    let (device, queue, features) = unsafe { open_with(adapter, desc, &[], &[]) }?;
     let grants = vec![VkQueueGrant {
         family: 0,
         count: 1,
         flags: (vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER).as_raw(),
         video_ops: 0,
     }];
-    let shared = share(&device, grants, (0, 0), [0, 0], None)?;
+    let shared = share(&device, features, grants, (0, 0), [0, 0], None)?;
     Ok((device, queue, shared))
 }
 
@@ -152,7 +155,13 @@ pub unsafe fn single_queue_gpu(choice: &crate::AdapterChoice) -> Result<crate::G
 
 /// `adapter`'s device with `desc`'s features and limits, plus `add`'s
 /// extensions, `queues` (family, count) besides wgpu's, and
-/// synchronization2.
+/// synchronization2; with `VK_EXT_queue_family_foreign` too where the
+/// device has it, for path A's acquire of an import
+/// ([`crate::dmabuf`]); and with video maintenance 1's feature on where
+/// `add` has its extension, which is dropped where the device lacks the
+/// feature ([`added_extensions`]). Also the features it was made with,
+/// for FFmpeg ([`EnabledFeatures`]), or `None` where wgpu-hal made it
+/// with others than those worked out here.
 ///
 /// # Safety
 ///
@@ -163,12 +172,39 @@ unsafe fn open_with(
     desc: &wgpu::DeviceDescriptor<'_>,
     add: &[&'static CStr],
     queues: &[(u32, u32)],
-) -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let open = {
+) -> Result<(wgpu::Device, wgpu::Queue, Option<Box<EnabledFeatures>>), String> {
+    let mut same_features = false;
+    let (open, features) = {
         // SAFETY: the guard is dropped at the end of this block, before the
         // device is wrapped, and nothing destroys the adapter meanwhile.
         let hal = unsafe { adapter.as_hal::<Vulkan>() }
             .ok_or_else(|| "the adapter isn't a Vulkan one".to_owned())?;
+        let caps = hal.physical_device_capabilities();
+        let foreign = caps.supports_extension(ash::ext::queue_family_foreign::NAME);
+        let video_maintenance1 = add.contains(&ash::khr::video_maintenance1::NAME) && {
+            let mut vm1 = vk::PhysicalDeviceVideoMaintenance1FeaturesKHR::default();
+            {
+                let mut all = vk::PhysicalDeviceFeatures2::default().push_next(&mut vm1);
+                // SAFETY: the adapter's own physical device, and a valid
+                // chain of a struct its listed extension defines.
+                unsafe {
+                    hal.shared_instance()
+                        .raw_instance()
+                        .get_physical_device_features2(hal.raw_physical_device(), &mut all)
+                };
+            }
+            vm1.video_maintenance1 == vk::TRUE
+        };
+        let add = added_extensions(add, foreign, video_maintenance1);
+        // What wgpu-hal enables for `desc`'s features, worked out as
+        // `open_with_callback` works it out before it calls the callback,
+        // which checks that the two agree.
+        let wgpu_features = hal.physical_device_features(
+            &hal.required_device_extensions(desc.required_features),
+            desc.required_features,
+        );
+        let expected = format!("{wgpu_features:?}");
+        let features = EnabledFeatures::new(wgpu_features, video_maintenance1);
         static PRIORITIES: [f32; 2] = [1.0, 1.0];
         let infos: Vec<vk::DeviceQueueCreateInfo<'static>> = queues
             .iter()
@@ -181,7 +217,10 @@ unsafe fn open_with(
         let mut sync2 =
             vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
         let sync2 = &mut sync2;
-        let add = add.to_vec();
+        let mut vm1 =
+            vk::PhysicalDeviceVideoMaintenance1FeaturesKHR::default().video_maintenance1(true);
+        let vm1 = &mut vm1;
+        let same = &mut same_features;
         let callback: Box<wgpu::hal::vulkan::CreateDeviceCallback<'_>> = Box::new(move |args| {
             for name in add {
                 if !args.extensions.contains(&name) {
@@ -189,15 +228,23 @@ unsafe fn open_with(
                 }
             }
             args.queue_create_infos.extend(infos);
+            *same = format!("{:?}", args.device_features) == expected;
             // wgpu chains its feature structs one by one, and never
-            // synchronization2's, so the chain has no two of a kind.
-            let info = std::mem::take(args.create_info);
-            *args.create_info = info.push_next(sync2);
+            // synchronization2's or video maintenance 1's, so the chain has
+            // no two of a kind.
+            let info = std::mem::take(args.create_info).push_next(sync2);
+            *args.create_info = if video_maintenance1 {
+                info.push_next(vm1)
+            } else {
+                info
+            };
         });
         // SAFETY: the callback only adds: extensions and queues the caller
-        // vouches for, and synchronization2, which every Vulkan 1.3 device
-        // has (wgpu-hal asks for 1.3, and FFmpeg needs it).
-        unsafe {
+        // vouches for, the foreign queue family's extension, which the
+        // device lists, video maintenance 1's feature, which the device
+        // has with its extension, and synchronization2, which every Vulkan
+        // 1.3 device has (wgpu-hal asks for 1.3, and FFmpeg needs it).
+        let open = unsafe {
             hal.open_with_callback(
                 desc.required_features,
                 &desc.required_limits,
@@ -205,12 +252,114 @@ unsafe fn open_with(
                 Some(callback),
             )
         }
-        .map_err(|e| format!("the driver refused the shared device: {e}"))?
+        .map_err(|e| format!("the driver refused the shared device: {e}"))?;
+        (open, features)
     };
     // SAFETY: `open` was made from this adapter with `desc`'s features and
     // limits.
-    unsafe { adapter.create_device_from_hal::<Vulkan>(open, desc) }
-        .map_err(|e| format!("wgpu refused the shared device: {e}"))
+    let (device, queue) = unsafe { adapter.create_device_from_hal::<Vulkan>(open, desc) }
+        .map_err(|e| format!("wgpu refused the shared device: {e}"))?;
+    if !same_features {
+        tracing::warn!(
+            "wgpu-hal made the shared device with other features than vkshare worked out; \
+             FFmpeg is told none"
+        );
+    }
+    Ok((device, queue, same_features.then_some(features)))
+}
+
+/// The extensions [`open_with`] adds: `add`, without
+/// `VK_KHR_video_maintenance1` when the device lacks its feature
+/// (`video_maintenance1`), since FFmpeg goes by the names it is handed;
+/// and `VK_EXT_queue_family_foreign` when the device has it (`foreign`).
+fn added_extensions(
+    add: &[&'static CStr],
+    foreign: bool,
+    video_maintenance1: bool,
+) -> Vec<&'static CStr> {
+    let mut out: Vec<&'static CStr> = add
+        .iter()
+        .copied()
+        .filter(|&n| video_maintenance1 || n != ash::khr::video_maintenance1::NAME)
+        .collect();
+    let name = ash::ext::queue_family_foreign::NAME;
+    if foreign && !out.contains(&name) {
+        out.push(name);
+    }
+    out
+}
+
+/// The features a device [`open_with`] made was created with, as the
+/// `VkPhysicalDeviceFeatures2` chain FFmpeg is handed
+/// (`AVVulkanDeviceContext.device_features`, which FFmpeg's header says
+/// should hold the features enabled at creation): wgpu-hal's for wgpu's
+/// features, synchronization2, and video maintenance 1 where it is on.
+/// The chain points from `head` into the other fields, so it lives in a
+/// box, and nothing moves it out; it is kept with the device
+/// (`VkDeviceHandles::keepalive`).
+pub(crate) struct EnabledFeatures {
+    head: vk::PhysicalDeviceFeatures2<'static>,
+    wgpu: wgpu::hal::vulkan::PhysicalDeviceFeatures,
+    sync2: vk::PhysicalDeviceSynchronization2Features<'static>,
+    video_maintenance1: vk::PhysicalDeviceVideoMaintenance1FeaturesKHR<'static>,
+}
+
+impl EnabledFeatures {
+    /// `wgpu`'s features, synchronization2's, and video maintenance 1's
+    /// when `video_maintenance1`, chained from the head.
+    fn new(
+        wgpu: wgpu::hal::vulkan::PhysicalDeviceFeatures,
+        video_maintenance1: bool,
+    ) -> Box<EnabledFeatures> {
+        let mut f = Box::new(EnabledFeatures {
+            head: vk::PhysicalDeviceFeatures2::default(),
+            wgpu,
+            sync2: vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true),
+            video_maintenance1: vk::PhysicalDeviceVideoMaintenance1FeaturesKHR::default()
+                .video_maintenance1(true),
+        });
+        let f_mut = &mut *f;
+        // wgpu-hal chains its structs as it does into the device's create
+        // info, each into the next, all in `wgpu`; the chain's start is
+        // taken from there.
+        let wgpu_chain = f_mut
+            .wgpu
+            .add_to_device_create(vk::DeviceCreateInfo::default())
+            .p_next;
+        f_mut.head.features = f_mut.wgpu.get_core();
+        f_mut.sync2.p_next = wgpu_chain.cast_mut();
+        let mut next: *mut std::ffi::c_void = (&raw mut f_mut.sync2).cast();
+        if video_maintenance1 {
+            f_mut.video_maintenance1.p_next = next;
+            next = (&raw mut f_mut.video_maintenance1).cast();
+        }
+        f_mut.head.p_next = next;
+        f
+    }
+
+    /// The chain's head, whose address FFmpeg is handed.
+    fn head(&self) -> &vk::PhysicalDeviceFeatures2<'static> {
+        &self.head
+    }
+
+    /// The structure type of each struct in the chain, from the head.
+    #[cfg(test)]
+    fn chain(&self) -> Vec<vk::StructureType> {
+        let mut out = vec![self.head.s_type];
+        let mut at = self
+            .head
+            .p_next
+            .cast_const()
+            .cast::<vk::BaseInStructure<'_>>();
+        // SAFETY: the chain links only this box's own structs, each of
+        // which starts as `BaseInStructure` does (its type, then the next
+        // one), and ends in null.
+        while let Some(s) = unsafe { at.as_ref() } {
+            out.push(s.s_type);
+            at = s.p_next;
+        }
+        out
+    }
 }
 
 /// The queue families of `physical`, with their video operations when
@@ -249,11 +398,12 @@ fn families(instance: &ash::Instance, physical: vk::PhysicalDevice, video: bool)
         .collect()
 }
 
-/// The handles FFmpeg is made from (given `grants`), and a copier on
-/// `copy` (family, index) whose buffers are shared between `sharing`'s
-/// families.
+/// The handles FFmpeg is made from (given `grants`, and the device's
+/// `features`, which the handles keep), and a copier on `copy` (family,
+/// index) whose buffers are shared between `sharing`'s families.
 fn share(
     device: &wgpu::Device,
+    features: Option<Box<EnabledFeatures>>,
     grants: Vec<VkQueueGrant>,
     copy: (u32, u32),
     sharing: [u32; 2],
@@ -283,7 +433,10 @@ fn share(
             instance_extensions: names(shared.extensions()),
             device_extensions: names(hal.enabled_device_extensions()),
             queues: grants,
-            keepalive: Arc::new(device.clone()),
+            device_features: features
+                .as_ref()
+                .map_or(0, |f| std::ptr::from_ref(f.head()).expose_provenance()),
+            keepalive: Arc::new((device.clone(), features)),
             gate: Arc::new(SubmitGate::default()),
         };
         (handles, hal.raw_device().clone(), memory)
@@ -571,9 +724,14 @@ impl Copier {
     /// writes before wgpu's reads of the buffer only so: [`wait`]'s host
     /// wait shows the copy is done, but doesn't make its writes visible
     /// to a later submission. The copy is done by then, so the wait costs
-    /// nothing, and whichever submission takes it (another thread's, if
-    /// it submits first), wgpu chains its submissions one after another,
-    /// so the one that reads the buffer is ordered after it.
+    /// nothing. Called right before the upload that reads the buffer,
+    /// whose submission normally takes it. If another thread's takes it
+    /// first, wgpu-hal still orders the upload's after that one (it
+    /// chains each submission on a queue to the one before, waited at
+    /// the top of the pipe), but by the spec the wait then holds only
+    /// that one's transfer work, so the upload's reads rest on the driver
+    /// holding whole submissions for their waits, as RADV does
+    /// (`docs/design/m1-5b.md`).
     ///
     /// [`wait`]: Self::wait
     pub fn order_before(&self, queue: &wgpu::Queue, copied: &Copied) {
@@ -680,7 +838,8 @@ impl Inner {
 
     /// Records the copy of `picture` into `buffer` (laid out as `layout`)
     /// and submits it under the frame's lock; the copier's semaphore
-    /// value it signals.
+    /// value it signals. `Import` when the frame can't be locked, with
+    /// nothing submitted and the copier's count where it was.
     fn record_and_submit(
         &mut self,
         picture: &dyn VkPicture,
@@ -700,7 +859,7 @@ impl Inner {
         let planes = picture.planes().to_vec();
         let value = self.last + 1;
         let mut outcome: Result<(), RenderError> = Ok(());
-        picture.with_locked(&mut |states: &mut [VkImageState]| {
+        let locked = picture.with_locked(&mut |states: &mut [VkImageState]| {
             outcome = self.record_locked(cmd, states, &planes, layout, buffer, value);
             if outcome.is_ok() {
                 for s in states.iter_mut() {
@@ -710,6 +869,11 @@ impl Inner {
                 }
             }
         });
+        if !locked {
+            return Err(RenderError::Import(
+                "the decoder's frame could not be locked".into(),
+            ));
+        }
         outcome?;
         self.last = value;
         self.ring[self.next].1 = value;
@@ -754,9 +918,12 @@ impl Inner {
             .map_err(vk_err("recording a copy"))?;
         // Each image into TRANSFER_SRC_OPTIMAL, its planes' aspects at once.
         // The semaphore wait orders this after FFmpeg's work on it and makes
-        // that work's writes available, so nothing needs to be named as the
-        // barrier's source. The image is CONCURRENT over the copier's
-        // family (or this family's alone), so no ownership changes.
+        // that work's writes available and visible; the barrier names that
+        // work as its source too, as FFmpeg's own barriers do
+        // (`ff_vk_frame_barrier`): the access the frame records, at every
+        // stage, which is where the wait is. The image is CONCURRENT over
+        // the copier's family (or this family's alone), so no ownership
+        // changes.
         let barriers: Vec<vk::ImageMemoryBarrier2> = states
             .iter()
             .enumerate()
@@ -769,7 +936,7 @@ impl Inner {
                     });
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .src_access_mask(vk::AccessFlags2::NONE)
+                    .src_access_mask(vk::AccessFlags2::from_raw(s.access))
                     .dst_stage_mask(vk::PipelineStageFlags2::COPY)
                     .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
                     .old_layout(vk::ImageLayout::from_raw(s.layout))
@@ -1084,6 +1251,9 @@ mod tests {
         planes: Vec<spherecut_core::video::VkPlane>,
         states: Mutex<Vec<VkImageState>>,
         made: Vec<(vk::Image, vk::DeviceMemory, vk::Semaphore)>,
+        /// Whether its lock can be taken, as a frame whose frames context
+        /// has no lock can't be.
+        locks: std::sync::atomic::AtomicBool,
     }
 
     impl std::fmt::Debug for Picture {
@@ -1098,8 +1268,12 @@ mod tests {
         fn planes(&self) -> &[spherecut_core::video::VkPlane] {
             &self.planes
         }
-        fn with_locked(&self, f: &mut dyn FnMut(&mut [VkImageState])) {
+        fn with_locked(&self, f: &mut dyn FnMut(&mut [VkImageState])) -> bool {
+            if !self.locks.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
             f(&mut lock(&self.states));
+            true
         }
     }
 
@@ -1364,6 +1538,7 @@ mod tests {
                 .collect(),
             states: Mutex::new(states),
             made,
+            locks: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -1527,6 +1702,181 @@ mod tests {
         let again = copier.copy(&pic, &good).unwrap();
         assert_eq!(again.buffer, first);
         copier.wait(&again).unwrap();
+    }
+
+    #[test]
+    fn a_frame_that_cant_be_locked_isnt_copied() {
+        // SAFETY: one thing at a time on the device, from this thread.
+        let gpu = unsafe { single_queue_gpu(&crate::AdapterChoice::Cpu) }.unwrap();
+        let shared = gpu.shared_video().unwrap().clone();
+        let copier = &shared.copier;
+        let size = (64, 32);
+        let pic = picture(
+            &gpu,
+            &[(vk::Format::R8_UNORM, size)],
+            &[(0, vk::ImageAspectFlags::COLOR, size, 1)],
+            &[vec![3u8; 64 * 32]],
+        );
+        let regions = [PlaneRegion {
+            bytes_per_texel: 1,
+            size,
+        }];
+        let first = copier.copy(&pic, &regions).unwrap();
+        copier.wait(&first).unwrap();
+        // The check: the copy is refused as an import that failed, saying
+        // why, and the frame's state is left as it was.
+        let refused = |pic: &Picture| -> Result<(), String> {
+            let before = lock(&pic.states).clone();
+            match copier.copy(pic, &regions) {
+                Ok(copied) => {
+                    copier.wait(&copied).map_err(|e| e.to_string())?;
+                    Err(format!("copied, signalling {}", copied.value))
+                }
+                Err(e)
+                    if e.code() == "import_failed"
+                        && e.to_string().contains("could not be locked")
+                        && *lock(&pic.states) == before =>
+                {
+                    Ok(())
+                }
+                Err(e) => Err(format!("refused otherwise: {e}")),
+            }
+        };
+        pic.locks.store(false, std::sync::atomic::Ordering::Relaxed);
+        refused(&pic).unwrap();
+        // Nothing was counted: the next copy signals the value after the
+        // first's, which FFmpeg's semaphore protocol relies on.
+        pic.locks.store(true, std::sync::atomic::Ordering::Relaxed);
+        let next = copier.copy(&pic, &regions).unwrap();
+        assert_eq!(next.value, first.value + 1);
+        copier.wait(&next).unwrap();
+        // Its control: a frame that locks is copied, and the check fails.
+        let why = spherecut_testkit::control::must_fail("a frame that locks", refused(&pic));
+        assert!(why.starts_with("copied"), "{why}");
+    }
+
+    #[test]
+    fn the_extensions_added_agree_with_the_features_on() {
+        use ash::{ext, khr};
+        let planned = [
+            khr::video_queue::NAME,
+            khr::video_decode_queue::NAME,
+            khr::video_decode_h265::NAME,
+            khr::video_maintenance1::NAME,
+        ];
+        // The check: video maintenance 1's extension only with its
+        // feature on, since FFmpeg takes the one for the other.
+        let agrees = |exts: &[&CStr], feature: bool| -> Result<(), String> {
+            if exts.contains(&khr::video_maintenance1::NAME) && !feature {
+                Err("VK_KHR_video_maintenance1 without its feature".into())
+            } else {
+                Ok(())
+            }
+        };
+        let without = added_extensions(&planned, false, false);
+        assert_eq!(without, planned[..3]);
+        agrees(&without, false).unwrap();
+        spherecut_testkit::control::must_fail(
+            "the plan as it was, without the feature",
+            agrees(&planned, false),
+        );
+        let with = added_extensions(&planned, true, true);
+        assert_eq!(
+            with,
+            [&planned[..], &[ext::queue_family_foreign::NAME]].concat()
+        );
+        agrees(&with, true).unwrap();
+        // Each is added once.
+        assert_eq!(added_extensions(&with, true, true), with);
+        assert_eq!(
+            added_extensions(&[], true, false),
+            vec![ext::queue_family_foreign::NAME]
+        );
+    }
+
+    /// Why `chain` (structure types, from the head) isn't a features chain
+    /// to hand FFmpeg for a device made with synchronization2 and wgpu's
+    /// features: the head first, synchronization2's and timeline
+    /// semaphores' in it (wgpu-hal enables those on every 1.2 device), no
+    /// type twice.
+    fn chain_fault(chain: &[vk::StructureType]) -> Result<(), String> {
+        if chain.first() != Some(&vk::StructureType::PHYSICAL_DEVICE_FEATURES_2) {
+            return Err(format!("{chain:?} doesn't start at its head"));
+        }
+        for want in [
+            vk::StructureType::PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES,
+            vk::StructureType::PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES,
+        ] {
+            if !chain.contains(&want) {
+                return Err(format!("{chain:?} lacks {want:?}"));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        if let Some(twice) = chain.iter().find(|t| !seen.insert(**t)) {
+            return Err(format!("{chain:?} has {twice:?} twice"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ffmpeg_is_handed_the_features_the_device_was_made_with() {
+        let (_, adapter, desc) =
+            crate::Gpu::single_queue_parts(&crate::AdapterChoice::Cpu).unwrap();
+        // SAFETY: nothing is submitted here.
+        let (_device, _queue, shared) = unsafe { open_single_queue(&adapter, &desc) }.unwrap();
+        let handles = &shared.handles;
+        // lavapipe lists the foreign queue family's extension, so the
+        // device is made with it, and FFmpeg is told so.
+        assert!(
+            handles
+                .device_extensions
+                .iter()
+                .any(|e| e == "VK_EXT_queue_family_foreign"),
+            "{:?}",
+            handles.device_extensions
+        );
+        // wgpu-hal made the device with the features worked out for it
+        // (else FFmpeg would be told none, at 0), and FFmpeg is handed the
+        // kept chain's head.
+        let kept = handles
+            .keepalive
+            .downcast_ref::<(wgpu::Device, Option<Box<EnabledFeatures>>)>()
+            .unwrap();
+        let features = kept.1.as_deref().expect("the features worked out");
+        assert_eq!(
+            handles.device_features,
+            std::ptr::from_ref(features.head()).expose_provenance()
+        );
+        let chain = features.chain();
+        chain_fault(&chain).unwrap();
+        // Its controls: synchronization2's struct left out, and one in
+        // twice.
+        let without: Vec<_> = chain
+            .iter()
+            .copied()
+            .filter(|&t| t != vk::StructureType::PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES)
+            .collect();
+        spherecut_testkit::control::must_fail("synchronization2 left out", chain_fault(&without));
+        let twice = [&chain[..], &chain[1..2]].concat();
+        spherecut_testkit::control::must_fail("a struct in twice", chain_fault(&twice));
+        // What the agreement is judged by tells feature sets apart: no
+        // features at all aren't what wgpu-hal works out for lavapipe.
+        // SAFETY: the guard is dropped at the end of this statement.
+        let worked_out = unsafe { adapter.as_hal::<Vulkan>() }.map(|hal| {
+            format!(
+                "{:?}",
+                hal.physical_device_features(
+                    &hal.required_device_extensions(desc.required_features),
+                    desc.required_features,
+                )
+            )
+        });
+        let worked_out = worked_out.unwrap();
+        let none = format!("{:?}", wgpu::hal::vulkan::PhysicalDeviceFeatures::default());
+        spherecut_testkit::control::must_fail(
+            "no features taken for lavapipe's",
+            none == worked_out,
+        );
     }
 
     #[test]

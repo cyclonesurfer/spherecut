@@ -9,6 +9,16 @@
 //! `decode-v{i}` worker per stream. Each worker opens its own decoder,
 //! with the player's shutdown flag as its interrupt.
 //!
+//! A pair opened locked ([`crate::Player::open_locked`]) has both
+//! streams' timing tables read through the backend first, whatever the
+//! decoder preference, and its lock group pending in the status. The
+//! worker that opens second compares the lenses, under the status lock
+//! as it adds its stream's info, and locks the group or refuses it by
+//! the field that differs. A member that can't open, or fails before it
+//! has handed out a frame of the open, refuses the group with `"open"`,
+//! pending or locked, and the other lens plays on alone (M3 plan
+//! section 9).
+//!
 //! **Requests.** A worker takes one request at a time, the latest
 //! winning: the UI stops the ones before with a new [`StopToken`]
 //! generation before it sends the next, so a seek or a wait for room in
@@ -29,11 +39,40 @@
 //! ([`VideoDecode::catch_up`]): it skips frames nothing refers to and
 //! never hands out (so never downloads) a frame before the clock's time;
 //! the frames it passed over count as decode-dropped. Once a frame at or
-//! after that time is out, catching up ends.
+//! after that time is out, catching up ends. A worker that reached its
+//! stream's end, or failed, is idle until a request comes. A seek or a
+//! step the cache answers gives it a place to go on from, the end of the
+//! run its landing is in, and it decodes on from there, so that playback
+//! goes on past the run; one whose run reaches the stream's last frame
+//! stays ended, and says so no second time. After a failure the decoder
+//! is sought to that place, not taken to be at its last frame.
+//!
+//! **A locked pair** (M3 plan section 9). Once the group locks, the cache
+//! runs both members from the group base ([`FrameCache::set_group`]), and
+//! a request's playhead holds the base until both have landed it. The
+//! members catch up to one time, the group's `until`, which a member more
+//! than two frames behind the clock raises. When every member is that
+//! far behind, it rises to the clock's time, so that the pair trails
+//! together and catches up together, as an unlocked stream does;
+//! otherwise to the clock's time or the newest frame the other holds,
+//! whichever is earlier, so that the member behind catches up to the one
+//! that leads and no further. Each member whose newest frame is before
+//! it catches up to it, so that both skip to the same frame. A seek or a
+//! step clears it. Decoding ahead, a member waiting for room may be told
+//! by the cache's backstop to seek exactly to the trailing member's
+//! newest frame instead ([`Insert::Resync`]). A member that can't decode
+//! on once it has handed out a frame of the open, the group pending or
+//! locked, ends the pair at its last frame, as a shorter lens does: the
+//! stream's end is set there for the presenter, until a frame decoded
+//! past it (a seek past the damage) puts back what was there. A seek or
+//! a step at or past that end lands the pair on that last frame. Locked,
+//! the pair takes every GPU slot.
 //!
 //! **Fallback.** A decoder that goes on in software says so with an
 //! event, which the worker puts in the stream's status and the player's
 //! events, so that the snapshot and the GUI's notice show it.
+//!
+//! [`FrameCache::set_group`]: crate::FrameCache::set_group
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,16 +86,18 @@ use spherecut_media::backend::{
     SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::hw::GpuIds;
+use spherecut_media::mp4::TrackTiming;
 use spherecut_media::{HwDevice, MediaError};
 use spherecut_render::vkshare::SharedVideo;
 
 use crate::audio::{AudioOutputFactory, PlayerThreads};
 use crate::cache::Insert;
 use crate::decoder::{self, DecoderChoice, DecoderPreference, HwSupport, StreamFormat};
+use crate::lock::{LockSpec, LockStatus};
 use crate::perf::{Counter, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{
-    Command, Landed, Place, Request, Shared, StreamStatus, Want, frames_between, lock,
+    Command, Landed, LockGroup, Place, Request, Shared, StreamStatus, Want, frames_between, lock,
 };
 
 /// How long an idle worker waits for a command before it looks at the
@@ -95,6 +136,9 @@ pub(crate) struct OpenJob {
     /// Vulkan Video streams decode on the renderer's device, shared so
     /// (path B): zero copy is on and the device was made shared.
     pub(crate) shared_video: Option<Arc<SharedVideo>>,
+    /// How the two streams are locked, for a pair opened with
+    /// [`Player::open_locked`](crate::Player::open_locked).
+    pub(crate) lock: Option<LockSpec>,
 }
 
 impl OpenJob {
@@ -103,6 +147,12 @@ impl OpenJob {
     }
 
     pub(crate) fn run(self) {
+        // A locked pair's tables, read through the backend before the
+        // decoders are chosen, whatever the preference: `choose` probes
+        // the file only under Auto.
+        let group = self
+            .lock
+            .map(|spec| LockGroup::pending(spec, [0, 1].map(|m| self.timing(m))));
         let choices = self.choose();
         if self.stale() {
             return;
@@ -159,6 +209,13 @@ impl OpenJob {
                     ..StreamStatus::default()
                 })
                 .collect();
+            // A locked pair's group, pending until both members open; none
+            // for an unlocked open. The cache's group and the slots' pair
+            // go under the same lock, so that a worker of the open before,
+            // settling its group as this runs, never leaves them set.
+            st.lock = group;
+            shared.cache.set_group(None);
+            shared.slots.set_pair(false);
             std::mem::replace(&mut st.audio, audio)
         };
         // The last open's audio, if this holds it last, outside the lock.
@@ -210,16 +267,45 @@ impl OpenJob {
                 at_end: false,
                 failed: false,
                 reported: false,
+                failed_end: None,
+                frame_length: None,
                 catching_up: None,
                 seen: DecodeStats::default(),
+                spec: self.lock,
             };
             if let Err(e) = shared.spawn(format!("decode-v{stream}"), move || worker.run()) {
                 let error = PlayerError::new("thread_failed", format!("starting a decoder: {e}"));
-                shared.stream(self.epoch, stream, |s| s.error = Some(error.clone()));
+                let group = shared.stream_and_group(
+                    self.epoch,
+                    stream,
+                    |s| s.error = Some(error.clone()),
+                    |st| st.member_failed(stream, false),
+                );
                 shared.event(PlayerEvent::OpenFailed { stream, error });
+                for e in group {
+                    shared.event(e);
+                }
             }
         }
         shared.repaint();
+    }
+
+    /// Player stream `stream`'s timing tables, for its lock group: `None`
+    /// for a track with no tables, or whose tables couldn't be read,
+    /// which refuses the lock with `"timing"`.
+    fn timing(&self, stream: usize) -> Option<TrackTiming> {
+        let index = self.streams.get(stream).and_then(|(asked, _)| *asked)?;
+        match self.backend.track_timing(&self.path, index) {
+            Ok(Some(t)) => Some(t),
+            Ok(None) => {
+                tracing::info!(stream, "stream {index} has no timing tables to compare");
+                None
+            }
+            Err(e) => {
+                tracing::warn!(stream, "can't read stream {index}'s timing tables: {e}");
+                None
+            }
+        }
     }
 
     /// Each stream's decoder, by the preference.
@@ -311,6 +397,9 @@ enum Halt {
     Stopped,
     /// The decoder failed: the stream's status says why.
     Failed,
+    /// Decoding ahead, a locked pair's member was told to seek exactly to
+    /// this time by the cache's backstop ([`Insert::Resync`]).
+    Resync(Time),
 }
 
 /// A decode worker.
@@ -345,10 +434,21 @@ struct Worker {
     /// Whether the stream's status holds a failure, which a frame decoded
     /// after it (a seek past it) clears.
     reported: bool,
+    /// The end a failure set for a locked pair's member, and the end and
+    /// last frame it replaced, which a frame decoded at or past it puts
+    /// back ([`Status::end_member`]).
+    ///
+    /// [`Status::end_member`]: crate::shared::Status::end_member
+    failed_end: Option<(Time, Option<Time>, Option<Time>)>,
+    /// A frame's length at the stream's rate, once open, for a frame that
+    /// gives none.
+    frame_length: Option<Time>,
     /// The clock time the decoder is catching up to.
     catching_up: Option<Time>,
     /// The decoder's numbers when last read.
     seen: DecodeStats,
+    /// How the pair is locked, for a pair opened locked.
+    spec: Option<LockSpec>,
 }
 
 impl Worker {
@@ -371,10 +471,24 @@ impl Worker {
     }
 
     /// Nothing to decode until a request comes: the end or a failure was
-    /// reached, or the latest request was stopped (the next is on its
-    /// way).
+    /// reached, unless a request the cache answered since says where to
+    /// go on from (decoding goes on from the end of the run it found,
+    /// which may lie before the end, or past the failure), or the latest
+    /// request was stopped (the next is on its way). Under the test's
+    /// hook ([`Player::old_idle_rule`]), the end or a failure keeps the
+    /// worker idle whatever the cache answered since.
+    ///
+    /// [`Player::old_idle_rule`]: crate::Player::old_idle_rule
     fn is_idle(&self) -> bool {
-        self.at_end || self.failed || self.last.is_none() || self.token.is_stopped()
+        let stuck = self.at_end || self.failed;
+        let resumes = self.resume.is_some() && !self.old_idle();
+        (stuck && !resumes) || self.last.is_none() || self.token.is_stopped()
+    }
+
+    /// Whether the test's hook keeps the rules from before a request the
+    /// cache answered could take a worker on from the end or a failure.
+    fn old_idle(&self) -> bool {
+        self.shared.old_idle.load(Ordering::Acquire)
     }
 
     fn open(&mut self) -> Option<Box<dyn VideoDecode>> {
@@ -389,30 +503,76 @@ impl Worker {
             Ok(mut dec) => {
                 let info = dec.info().clone();
                 let path = dec.decode_path().clone();
-                self.shared.stream(self.epoch, self.stream, |s| {
-                    s.opened = true;
-                    s.info = Some(info.clone());
-                    s.decode = Some(path);
-                });
+                self.frame_length = info.frame_rate().map(|r| r.frame_duration());
+                // With the other member's open, a locked pair's lenses are
+                // compared under the same lock.
+                let group = self.shared.stream_and_group(
+                    self.epoch,
+                    self.stream,
+                    |s| {
+                        s.opened = true;
+                        s.info = Some(info.clone());
+                        s.decode = Some(path);
+                    },
+                    |st| {
+                        let mut events = st.settle_lock();
+                        let current = self.shared.is_current(self.epoch);
+                        // Locked, the pair takes every slot, and the cache
+                        // runs the members from the group base from now
+                        // on. Slots that died before the lock, an earlier
+                        // open's or this one's while its lenses opened,
+                        // stay dead and count against the floor too: a
+                        // pair locked below it would wait for good for a
+                        // slot death that never comes.
+                        if current
+                            && st
+                                .lock
+                                .as_ref()
+                                .is_some_and(|g| g.status == LockStatus::Locked)
+                        {
+                            self.shared.slots.set_pair(true);
+                            // Unlocked at once, the pair never ends at its
+                            // shorter lens: that isn't said.
+                            if let Some(refused) = st.below_floor(self.shared.slots.stats().active)
+                            {
+                                events.retain(|e| !matches!(e, PlayerEvent::LensShort { .. }));
+                                events.push(refused);
+                            }
+                        }
+                        if let Some(members) = st.grouped()
+                            && current
+                        {
+                            self.shared.cache.set_group(Some(members));
+                        }
+                        events
+                    },
+                );
                 self.start_audio(info.origin().ok());
                 self.take_events(dec.as_mut());
                 self.tell(PlayerEvent::Opened {
                     stream: self.stream,
                     info: Box::new(info),
                 });
+                for e in group {
+                    self.tell(e);
+                }
                 Some(dec)
             }
             Err(e) => {
                 if !self.shared.is_shut_down() {
                     let error = PlayerError::from(&e);
                     tracing::warn!(stream = self.stream, "can't open: {e}");
-                    self.shared.stream(self.epoch, self.stream, |s| {
-                        s.error = Some(error.clone());
-                    });
-                    self.tell(PlayerEvent::OpenFailed {
-                        stream: self.stream,
-                        error,
-                    });
+                    let stream = self.stream;
+                    let group = self.shared.stream_and_group(
+                        self.epoch,
+                        stream,
+                        |s| s.error = Some(error.clone()),
+                        |st| st.member_failed(stream, false),
+                    );
+                    self.tell(PlayerEvent::OpenFailed { stream, error });
+                    for e in group {
+                        self.tell(e);
+                    }
                     self.start_audio(None);
                 }
                 None
@@ -477,6 +637,7 @@ impl Worker {
         }
         self.count(|s| s.started += 1);
         self.working = Some(req.id);
+        self.clear_until();
         let done = match req.want {
             Want::Seek { at, mode } => self.seek(dec, req.id, at, mode, &req.token),
             Want::Step { frames, from, mode } => {
@@ -500,7 +661,7 @@ impl Worker {
         let cache = self.shared.cache.clone();
         // The frame the seek lands on is at or behind the playhead then,
         // so it never waits for room.
-        cache.set_playhead(at);
+        self.playhead_for(id, at);
         if let Some(f) = cache.frame_at(self.stream, at) {
             self.count(|s| s.from_cache += 1);
             self.land(id, &f, None, token)?;
@@ -538,7 +699,7 @@ impl Worker {
         // the way never wait for room: the presenter leaves a step's
         // playhead to the worker, and the playhead a seek superseded
         // before it started gave may never have reached the cache.
-        cache.set_playhead(from);
+        self.playhead_for(id, from);
         let start = match mode {
             SeekMode::Exact => cache.get(self.stream, from),
             // Where `seek` would land: the frame shown there if the
@@ -567,7 +728,7 @@ impl Worker {
                 break;
             };
             cur = next;
-            cache.set_playhead(cur.time);
+            self.playhead_for(id, cur.time);
         }
         self.land(id, &cur, None, token)?;
         self.resume = Some(cur.time);
@@ -575,7 +736,9 @@ impl Worker {
     }
 
     /// The decoder at the frame a seek to `at` by `mode` lands on: where
-    /// it is, or sought there.
+    /// it is, or sought there. After a failure the decoder is wherever
+    /// the failed call left it, not at the last frame it handed out, so
+    /// it is sought.
     fn position(
         &mut self,
         dec: &mut dyn VideoDecode,
@@ -584,6 +747,7 @@ impl Worker {
         token: &StopToken,
     ) -> Result<Arc<VideoFrame>, Halt> {
         if mode == SeekMode::Exact
+            && (!self.failed || self.old_idle())
             && let Some(last) = &self.last
             && last.time == at
         {
@@ -680,6 +844,15 @@ impl Worker {
 
     fn decode_ahead(&mut self, dec: &mut dyn VideoDecode) {
         let token = self.token.clone();
+        let mut went = self.go_ahead(dec, &token);
+        while let Err(Halt::Resync(at)) = went {
+            went = self.resync(dec, at, &token);
+        }
+    }
+
+    /// Decode the next frame ahead into the cache, going on first from
+    /// where a request left off.
+    fn go_ahead(&mut self, dec: &mut dyn VideoDecode, token: &StopToken) -> Result<(), Halt> {
         let cache = self.shared.cache.clone();
         if let Some(t) = self.resume.take() {
             // A frame the cache had no room for is passed over unless it
@@ -687,28 +860,55 @@ impl Worker {
             if self.unsaved
                 && let Some(last) = self.last.clone()
             {
-                if cache.try_insert_until(self.stream, last, &token) == Insert::Stopped {
+                if cache.try_insert_until(self.stream, last, token) == Insert::Stopped {
                     self.resume = Some(t);
-                    return;
+                    return Err(Halt::Stopped);
                 }
                 self.unsaved = false;
             }
             if let Some(end) = cache.run_end(self.stream, t) {
-                match self.position(dec, end.time, SeekMode::Exact, &token) {
+                match self.position(dec, end.time, SeekMode::Exact, token) {
                     Ok(_) => {}
                     Err(Halt::Stopped) => {
                         self.resume = Some(t);
-                        return;
+                        return Err(Halt::Stopped);
                     }
-                    Err(Halt::Failed) => return,
+                    Err(e) => return Err(e),
                 }
             }
         }
-        if self.save(&token).is_err() || self.is_idle() {
-            return;
+        self.save(token)?;
+        if self.is_idle() {
+            return Ok(());
         }
         self.catch_up(dec);
-        let _ = self.next(dec, &token);
+        self.next(dec, token).map(|_| ())
+    }
+
+    /// The cache's backstop held a locked pair's base at `at`, the
+    /// trailing member's newest frame: put this member's frame there in,
+    /// seeking exactly to it unless it is the frame that waited for room
+    /// (which is passed over otherwise), and decode on from it. The
+    /// clock stays where it is.
+    fn resync(
+        &mut self,
+        dec: &mut dyn VideoDecode,
+        at: Time,
+        token: &StopToken,
+    ) -> Result<(), Halt> {
+        self.resume = None;
+        let went = if self.last.as_ref().is_some_and(|l| l.time == at) {
+            self.save(token)
+        } else {
+            self.unsaved = false;
+            self.position(dec, at, SeekMode::Exact, token).map(|_| ())
+        };
+        // Done or failed, the backstop no longer waits for this member; a
+        // newer request that stopped it holds the base instead.
+        if !matches!(went, Err(Halt::Stopped)) {
+            self.shared.cache.landed(self.stream, None);
+        }
+        went
     }
 
     /// Start or go on catching up when the newest frame is more than two
@@ -721,6 +921,7 @@ impl Worker {
         let Some(last) = &self.last else {
             return;
         };
+        let newest = last.time;
         let Some(frame) = last
             .duration
             .or_else(|| dec.info().frame_rate().map(|r| r.frame_duration()))
@@ -729,16 +930,101 @@ impl Worker {
         };
         let now = self.clock.time_at(Instant::now());
         let behind = now
-            .checked_sub(last.time)
+            .checked_sub(newest)
             .ok()
             .zip(frame.checked_add(frame).ok())
             .is_some_and(|(lag, two)| lag > two);
-        if behind && self.catching_up.is_none_or(|until| now > until) {
-            dec.catch_up(Some(now));
-            if self.catching_up.replace(now).is_none() {
+        let until = match self.group_until(now, frame, behind) {
+            // A locked pair's member catches up only to the group's time,
+            // whichever member raised it, so that both skip to one frame.
+            Some(until) => until.filter(|&u| newest < u && self.catching_up != Some(u)),
+            None => (behind && self.catching_up.is_none_or(|until| now > until)).then_some(now),
+        };
+        if let Some(until) = until {
+            dec.catch_up(Some(until));
+            if self.catching_up.replace(until).is_none() {
                 self.shared
                     .stream(self.epoch, self.stream, |s| s.catching_up = true);
             }
+        }
+    }
+
+    /// A locked pair's catch-up time, given the clock's time `now`, a
+    /// frame's length `frame`, and whether this member's newest frame is
+    /// more than two frames behind `now`: the group's `until`, which a
+    /// member behind raises to `now` when every other member's newest is
+    /// behind too, so that a pair trailing the clock together catches up
+    /// to it; else to `now` or the newest frame every other member holds,
+    /// whichever is earlier, so that the member behind catches up to the
+    /// one that leads and no further. `None` unless the pair is locked
+    /// with its group base on: the stream then catches up on its own.
+    /// Under the test switch `old_until`, every rise is capped at the
+    /// newest frame the others hold.
+    fn group_until(&self, now: Time, frame: Time, behind: bool) -> Option<Option<Time>> {
+        let spec = self.spec.filter(|s| !s.test.no_group_base)?;
+        let two = frame.checked_add(frame).ok()?;
+        let cache = &self.shared.cache;
+        let mut st = self.shared.status();
+        if st.epoch != self.epoch {
+            return None;
+        }
+        let members = st.grouped().filter(|m| m.contains(&self.stream))?;
+        let others = || members.iter().filter(|&&m| m != self.stream);
+        // Each other member's newest frame in the cache, at or before
+        // the newest it handed out (frames a seek back left ahead lie
+        // past it).
+        let held = others()
+            .map(|&m| {
+                let newest = st.streams.get(m)?.newest?;
+                Some(cache.at_or_before(m, newest)?.time)
+            })
+            .collect::<Option<Vec<Time>>>()
+            .and_then(|h| h.into_iter().min());
+        // Whether every other member's newest frame handed out is more
+        // than two frames behind `now` too.
+        let all_behind = others().all(|&m| {
+            st.streams
+                .get(m)
+                .and_then(|s| s.newest)
+                .and_then(|n| now.checked_sub(n).ok())
+                .is_some_and(|lag| lag > two)
+        });
+        let g = st.lock.as_mut()?;
+        if behind && let Some(held) = held {
+            let to = if all_behind && !spec.test.old_until {
+                now
+            } else {
+                now.min(held)
+            };
+            if g.until.is_none_or(|u| u < to) {
+                g.until = Some(to);
+            }
+        }
+        Some(g.until)
+    }
+
+    /// A seek or a step clears a locked pair's catch-up time.
+    fn clear_until(&self) {
+        if !self.spec.is_some_and(|s| !s.test.no_group_base) {
+            return;
+        }
+        let mut st = self.shared.status();
+        if st.epoch == self.epoch
+            && let Some(g) = st.lock.as_mut()
+        {
+            g.until = None;
+        }
+    }
+
+    /// Move the cache's playhead to `at` for request `id`: as a seek's,
+    /// which a locked pair's group base follows until every member has
+    /// landed it, unless the test's switch keeps the old common time.
+    fn playhead_for(&self, id: u64, at: Time) {
+        let cache = &self.shared.cache;
+        if self.spec.is_some_and(|s| s.test.old_base_in_seeks) {
+            cache.set_playhead(at);
+        } else {
+            cache.seek_playhead(self.stream, id, at);
         }
     }
 
@@ -750,20 +1036,21 @@ impl Worker {
         }
     }
 
-    /// The decoder handed out `f`.
+    /// The decoder handed out `f`: counted in the stream's status, with
+    /// the frames decoded since the last, which clears a failure it
+    /// reported.
     fn took(&mut self, dec: &mut dyn VideoDecode, f: Arc<VideoFrame>) {
+        let time = f.time;
         self.last = Some(f);
         self.unsaved = true;
         self.at_end = false;
         self.failed = false;
         let stats = dec.stats();
         let perf = &self.shared.perf;
-        perf.add(
-            Counter::FramesDecoded,
-            stats
-                .frames_decoded
-                .saturating_sub(self.seen.frames_decoded),
-        );
+        let decoded = stats
+            .frames_decoded
+            .saturating_sub(self.seen.frames_decoded);
+        perf.add(Counter::FramesDecoded, decoded);
         perf.record(Stage::Decode, stats.last_decode_ms as f32);
         if stats.last_download_ms > 0.0 {
             perf.record(Stage::Download, stats.last_download_ms as f32);
@@ -772,22 +1059,45 @@ impl Worker {
             perf.record(Stage::Convert, stats.last_convert_ms as f32);
         }
         self.seen = stats;
-        if std::mem::take(&mut self.reported) {
-            self.shared.stream(self.epoch, self.stream, |s| {
+        let cleared = std::mem::take(&mut self.reported);
+        // Decoding went on past the end a failure set: it wasn't the end.
+        let unended = self.failed_end.filter(|&(end, ..)| time >= end);
+        if unended.is_some() {
+            self.failed_end = None;
+        }
+        self.shared.stream(self.epoch, self.stream, |s| {
+            s.handed_out += 1;
+            s.newest = Some(time);
+            s.decoded += decoded;
+            if cleared {
                 s.error = None;
                 s.failed_request = None;
-            });
-        }
+            }
+            if let Some((end, before_end, before_last)) = unended
+                && s.end == Some(end)
+            {
+                s.end = before_end;
+                s.last = before_last;
+            }
+        });
     }
 
     /// Put the frame last handed out in the cache, waiting for room;
-    /// stopped, it stays to put in later.
+    /// stopped, it stays to put in later. Decoding ahead, a locked pair's
+    /// member may be told to seek to the backstop's time instead.
     fn save(&mut self, token: &StopToken) -> Result<(), Halt> {
         let Some(f) = self.last.clone().filter(|_| self.unsaved) else {
             return Ok(());
         };
-        match self.shared.cache.insert(self.stream, f, token) {
+        let cache = &self.shared.cache;
+        let got = if self.working.is_none() && !self.spec.is_some_and(|s| s.test.no_resync) {
+            cache.insert_ahead(self.stream, f, token)
+        } else {
+            cache.insert(self.stream, f, token)
+        };
+        match got {
             Insert::Stopped => Err(Halt::Stopped),
+            Insert::Resync { at } => Err(Halt::Resync(at)),
             _ => {
                 self.unsaved = false;
                 Ok(())
@@ -810,6 +1120,7 @@ impl Worker {
         if self.shared.cache.pin(self.stream, f.clone(), token) == Insert::Stopped {
             return Err(Halt::Stopped);
         }
+        self.shared.cache.landed(self.stream, Some(id));
         let landed = Landed {
             id,
             time: f.time,
@@ -824,7 +1135,16 @@ impl Worker {
         Ok(())
     }
 
-    /// The decoder failed with `e`: say so, unless it was shut down.
+    /// The decoder failed with `e`, after any fallback to software: say
+    /// so, unless it was shut down. A lock group, pending or locked, of
+    /// a member that failed before it handed out a frame of the open is
+    /// refused with `"open"` ([`Status::member_failed`]), its cache group
+    /// let go under the same lock, so that the other lens plays on alone;
+    /// the pair of one that handed out a frame ends at its last
+    /// ([`Status::end_member`]).
+    ///
+    /// [`Status::member_failed`]: crate::shared::Status::member_failed
+    /// [`Status::end_member`]: crate::shared::Status::end_member
     fn fail(&mut self, e: MediaError) -> Halt {
         self.failed = true;
         if self.shared.is_shut_down() {
@@ -834,14 +1154,48 @@ impl Worker {
         self.reported = true;
         let error = PlayerError::from(&e);
         let working = self.working;
-        self.shared.stream(self.epoch, self.stream, |s| {
-            s.error = Some(error.clone());
-            s.failed_request = working;
+        let stream = self.stream;
+        // Where this member's last frame starts and ends, if it handed one
+        // out: a frame without a duration lasts a frame of the stream's
+        // rate.
+        let last = self.last.as_ref().and_then(|l| {
+            let length = l.duration.or(self.frame_length)?;
+            Some((l.time.checked_add(length).ok()?, l.time))
         });
-        self.tell(PlayerEvent::DecodeFailed {
-            stream: self.stream,
-            error,
-        });
+        let handed_out = self.last.is_some();
+        let cache = &self.shared.cache;
+        let mut ended = None;
+        let group = self.shared.stream_and_group(
+            self.epoch,
+            stream,
+            |s| {
+                s.error = Some(error.clone());
+                s.failed_request = working;
+            },
+            |st| {
+                if let Some((end, at)) = last
+                    && let Some(before) = st.end_member(stream, end, at)
+                {
+                    ended = Some((end, before.0, before.1));
+                }
+                let refused = st.member_failed(stream, handed_out);
+                if refused.is_some() {
+                    cache.set_group(None);
+                }
+                refused
+            },
+        );
+        if ended.is_some() {
+            self.failed_end = ended;
+        }
+        // A locked pair's base no longer waits for this member's landing.
+        if let Some(id) = working {
+            self.shared.cache.landed(stream, Some(id));
+        }
+        self.tell(PlayerEvent::DecodeFailed { stream, error });
+        for e in group {
+            self.tell(e);
+        }
         Halt::Failed
     }
 

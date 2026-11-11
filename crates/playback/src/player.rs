@@ -23,10 +23,22 @@
 //! fewer live (a small setting, or slots out of memory), each stream's
 //! new frame goes up as soon as it is Ready, which gives its old slot
 //! back for the next stream's.
+//! A locked pair ([`Player::open_locked`], M3 plan section 9) shows only
+//! as a pair: at the clock's time, the newest time both lenses hold at
+//! or before it ([`pick_pair`]); after a seek or a step, both landings
+//! together once they are at one time; both slots or neither
+//! ([`show_pair_over`]), never a lens's frame as it arrives, and the
+//! pair on screen stays up until another can go up whole.
 //! It counts what the overlay shows: UI frame times and hitches (an
 //! interval over 1.5 times the median of the last ones), frames shown,
-//! dropped (passed over while playing, by run places, else by the time
-//! between), the interval between frames shown and the A/V offset.
+//! the frames passed over while playing (by run places, else by the time
+//! between), as skipped up to the presents' cadence, the frames a
+//! display slower than the clip passes over, and as dropped beyond it
+//! (once a pair for a locked pair, once a stream otherwise), the interval
+//! between frames shown, the A/V offset, the presents at which the
+//! streams shown are at different clip times (`unpaired_presents`,
+//! locked or not), and how far the running clock is past the end of a
+//! locked pair on screen (`pair_wait`).
 //!
 //! **Steps** of one frame either way are instant when the slots hold the
 //! frame next to the one shown in its run (which the upload thread sees
@@ -59,6 +71,7 @@ use crate::audio::{AudioOutput, AudioOutputFactory, PREROLL_AUDIO, PREROLL_LIMIT
 use crate::budget::{AUTO_MIN, AutoBudget, CacheBudget, read_auto_budget};
 use crate::cache::{CacheStats, FrameCache};
 use crate::decoder::{DecoderPreference, HwPromise, HwSupport};
+use crate::lock::{LockSnapshot, LockSpec, LockStatus, LockTest, pick_pair, show_pair_over};
 use crate::perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage};
 use crate::shared::{
     BudgetStatus, Command, Place, Repaint, Request, Shared, Status, StreamStatus, Want, av_offset,
@@ -171,6 +184,20 @@ pub enum PlayerEvent {
         budget: u64,
         frame_bytes: u64,
     },
+    /// A pair opened with [`Player::open_locked`] isn't locked, by the
+    /// [`field`](crate::lock::field) that differs between its lenses
+    /// (`"timing"` for a track with no tables, `"open"` for a member that
+    /// couldn't open), or unlocked (`"slots"`, the GPU's memory below two
+    /// live slots a member): its streams show unlocked, as raw lenses.
+    LockRefused {
+        field: &'static str,
+    },
+    /// Stream `stream` of a locked pair has `frames` fewer frames than
+    /// the other, so the pair ends at its last; said once, at open.
+    LensShort {
+        stream: usize,
+        frames: u64,
+    },
 }
 
 /// The player's settings.
@@ -181,7 +208,8 @@ pub struct PlayerConfig {
     pub cache: CacheBudget,
     /// How far ahead of the playhead to decode.
     pub ahead: Duration,
-    /// GPU slots, 3 to 6.
+    /// GPU slots, 3 to 6. A locked pair uses 6 whatever this says
+    /// ([`Player::open_locked`]).
     pub gpu_slots: u8,
     /// For the files opened after it is set.
     pub decoder: DecoderPreference,
@@ -353,6 +381,9 @@ pub struct PlayerSnapshot {
     pub import_refused: Option<String>,
     /// The process's memory and the GPU's, read once a second.
     pub memory: Option<MemoryStats>,
+    /// The open's lock group, for a pair opened with
+    /// [`Player::open_locked`].
+    pub lock: Option<LockSnapshot>,
     /// Whether what the threads report was read now; false when its lock
     /// was taken, and it is the copy from before.
     pub fresh: bool,
@@ -378,6 +409,7 @@ impl Default for PlayerSnapshot {
             gpu_error: None,
             import_refused: None,
             memory: None,
+            lock: None,
             fresh: false,
         }
     }
@@ -488,6 +520,11 @@ struct Ui {
     /// The status as last read: its open, and each stream's part.
     view_epoch: u64,
     view: Vec<StreamView>,
+    /// The open's lock group's status as last read, for a pair opened
+    /// locked, its members and its test switches.
+    lock: Option<LockStatus>,
+    members: [usize; 2],
+    lock_test: LockTest,
     last_present: Option<Instant>,
     intervals: VecDeque<f32>,
     /// Whether what is presented is painted: frames passed over while
@@ -505,6 +542,9 @@ struct Ui {
     snapshot: PlayerSnapshot,
     /// The open the snapshot's streams are about.
     snapshot_epoch: u64,
+    /// A close still has the slots' pair and the cache's group to let go
+    /// of, under the status lock, which was busy ([`Player::unpair`]).
+    unpair: bool,
 }
 
 impl Ui {
@@ -518,6 +558,33 @@ impl Ui {
         let mut v: Vec<f32> = self.intervals.iter().copied().collect();
         v.sort_by(f32::total_cmp);
         v.get(v.len() / 2).map(|m| m.max(0.0))
+    }
+
+    /// The frames each present passes over because the UI presents
+    /// slower than the clip shows frames lasting `duration`: one fewer
+    /// than the frames in the median present interval, rounded up, so 0
+    /// at or below the present rate, and 1 for a 120 fps clip at 60 Hz.
+    /// Rounding up from a hair over a whole number of frames (a thousandth
+    /// of a frame) is the numbers' error, not a frame. A clip just faster
+    /// than a whole multiple of the present rate (60 fps on a 59.94 Hz
+    /// panel, a ratio of 1.001) sits on that line, and past it takes the
+    /// next whole frame a present, though the display passes one over
+    /// only every thousand or so presents: a drop a present there counts
+    /// as skipped. The X5's own rates on a 60 Hz panel come out right.
+    fn cadence(&self, duration: Option<Time>) -> u64 {
+        let (Some(interval), Some(d)) = (self.median_interval(), duration) else {
+            return 0;
+        };
+        let frame = f64::from(ms(d));
+        if frame <= 0.0 {
+            return 0;
+        }
+        let frames = (f64::from(interval) / frame - 1e-3).ceil();
+        if frames.is_finite() && frames >= 1.0 {
+            frames as u64 - 1
+        } else {
+            0
+        }
     }
 
     /// The median UI frame interval, at most [`MAX_LATENCY`]: how long
@@ -550,6 +617,18 @@ impl Ui {
             self.ahead = None;
         }
         ahead
+    }
+
+    /// The members of the open's lock group, while it is locked: they
+    /// show only as pairs.
+    fn locked(&self) -> Option<[usize; 2]> {
+        (self.lock == Some(LockStatus::Locked)).then_some(self.members)
+    }
+
+    /// Stream `i`'s frame for the viewer, if it shows slot `v` already.
+    fn on_screen(&self, i: usize, v: &SlotView) -> Option<Arc<GpuFrame>> {
+        let s = self.shown.get(i)?.as_ref()?;
+        (s.view.index == v.index && s.view.frame == v.frame).then(|| s.gpu.clone())
     }
 }
 
@@ -615,6 +694,8 @@ impl Player {
             opens: StopSource::new(),
             epoch: AtomicU64::new(0),
             live: AtomicU64::new(0),
+            slot_faults: AtomicU64::new(0),
+            old_idle: AtomicBool::new(false),
             target: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -690,6 +771,10 @@ impl Player {
                 shown: Vec::new(),
                 view_epoch: 0,
                 view: Vec::new(),
+                lock: None,
+                members: [0, 1],
+                lock_test: LockTest::default(),
+                unpair: false,
                 last_present: None,
                 intervals: VecDeque::with_capacity(INTERVALS),
                 painted: true,
@@ -711,6 +796,30 @@ impl Player {
     /// Open these video streams of `path`, by their indices in the file
     /// (`None` for the best), paused at their first frames.
     pub fn open_streams(&self, path: PathBuf, streams: Vec<Option<usize>>) {
+        self.open_with(path, streams, None);
+    }
+
+    /// Open video streams `streams` of `path`, by their indices in the
+    /// file, as a frame-locked pair (M3 plan section 9), paused at their
+    /// first frames: player streams 0 and 1, the group's members. Each
+    /// stream's timing is read through the backend whatever the decoder,
+    /// and nothing of the pair shows until the lenses agree and the group
+    /// forms, or the lock is refused ([`PlayerEvent::LockRefused`]) and
+    /// they show unlocked, as [`open_streams`](Self::open_streams) shows
+    /// them. Locked, they show only as pairs of one clip time, on all six
+    /// GPU slots whatever [`PlayerConfig::gpu_slots`] says (until the
+    /// next open or a close), and end at the shorter lens
+    /// ([`PlayerEvent::LensShort`]), or at the last frame of a lens that
+    /// can't decode on. A hardware failure moves only its own lens to
+    /// software. Should the GPU's memory leave fewer than two live slots
+    /// a lens, the pair unlocks (`LockRefused` with `"slots"`) and shows
+    /// as unlocked streams do, each lens's frame as it comes.
+    pub fn open_locked(&self, path: PathBuf, streams: [usize; 2], lock: LockSpec) {
+        self.open_with(path, streams.map(Some).to_vec(), Some(lock));
+    }
+
+    /// Open `streams` of `path`, locked as a pair by `lock` if given.
+    fn open_with(&self, path: PathBuf, streams: Vec<Option<usize>>, lock: Option<LockSpec>) {
         let now = Instant::now();
         let Ok(mut ui) = self.ui.try_borrow_mut() else {
             return;
@@ -719,6 +828,9 @@ impl Player {
             return;
         }
         let (epoch, token) = self.end_open(&mut ui, now);
+        // The open's job lets the pair and the group go under the status
+        // lock, as a close does.
+        ui.unpair = false;
         ui.shown = vec![None; streams.len()];
         ui.path = Some(path.clone());
         let id = ui.next_id();
@@ -763,6 +875,7 @@ impl Player {
                 .shared_video
                 .clone()
                 .filter(|_| ui.config.zero_copy.vulkan()),
+            lock,
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {
             self.shared.event(PlayerEvent::OpenFailed {
@@ -783,9 +896,31 @@ impl Player {
             return;
         }
         self.end_open(&mut ui, now);
+        // No group without a pair, and the slots go back to the setting.
+        ui.unpair = true;
+        self.unpair(&mut ui);
         ui.path = None;
         ui.target = None;
         self.shared.playing.store(false, Ordering::Release);
+    }
+
+    /// After a close, let go of the slots' pair and the cache's group,
+    /// under the status lock, if it and the cache's lock are free: a
+    /// worker of the open the close ended sets them under that lock only
+    /// while its open is current, so once the close has bumped the epoch
+    /// none sets them again after this. Busy, the next
+    /// [`present`](Self::present) tries again. Never waits.
+    fn unpair(&self, ui: &mut Ui) {
+        if !ui.unpair {
+            return;
+        }
+        let Some(_status) = self.shared.try_status() else {
+            return;
+        };
+        if self.shared.cache.try_set_group(None) {
+            self.shared.slots.set_pair(false);
+            ui.unpair = false;
+        }
     }
 
     /// The open file's threads told to stop, its frames unshown and the
@@ -815,6 +950,8 @@ impl Player {
         ui.preroll = false;
         ui.view_epoch = 0;
         ui.view.clear();
+        ui.lock = None;
+        ui.lock_test = LockTest::default();
         ui.playhead = None;
         ui.last_new = None;
         ui.span = None;
@@ -888,13 +1025,21 @@ impl Player {
     }
 
     fn seek_with(&self, ui: &mut Ui, at: Time, mode: SeekMode, now: Instant) {
+        self.shared.perf.add(Counter::Seeks, 1);
+        if ui.target.is_some() {
+            self.shared.perf.add(Counter::SeeksSuperseded, 1);
+        }
+        self.start_seek(ui, at, mode, now);
+    }
+
+    /// [`seek_with`](Self::seek_with) without counting it: for a locked
+    /// pair's exact seek to one of its landings
+    /// ([`relanding`](Self::relanding)), part of the seek counted
+    /// already.
+    fn start_seek(&self, ui: &mut Ui, at: Time, mode: SeekMode, now: Instant) {
         let shared = &self.shared;
         let token = shared.stop.next();
         let id = ui.next_id();
-        shared.perf.add(Counter::Seeks, 1);
-        if ui.target.is_some() {
-            shared.perf.add(Counter::SeeksSuperseded, 1);
-        }
         ui.target = Some(Target {
             id,
             at,
@@ -940,9 +1085,7 @@ impl Player {
         {
             // Shown now, so that the next step goes on from it though no
             // present came between.
-            for (i, v) in next.iter().enumerate() {
-                ui.unpresented |= self.show(ui, i, v, now, false);
-            }
+            ui.unpresented |= self.show_each(ui, &next, now);
             if let Some(t) = next.first().map(|v| v.frame.time) {
                 ui.clock.set(t, now);
                 Self::give_playhead(&self.shared, ui, t);
@@ -1057,8 +1200,14 @@ impl Player {
             }
             ui.intervals.push_back(interval);
         }
+        self.unpair(ui);
         self.read_status(ui);
         if ui.view_epoch != ui.epoch || ui.path.is_none() {
+            return None;
+        }
+        // Nothing of a locked pair shows until its lenses agree, or the
+        // lock is refused and they show unlocked (M3 plan section 9).
+        if ui.lock == Some(LockStatus::Pending) {
             return None;
         }
         let offset =
@@ -1081,18 +1230,37 @@ impl Player {
         if let Some(target) = ui.target {
             if let Some(found) = self.target_slots(ui, target) {
                 if found.iter().all(|f| !matches!(f, TargetSlot::Waiting)) {
-                    let picked = found
+                    let mut picked: Vec<Option<SlotView>> = found
                         .iter()
                         .map(|f| match f {
                             TargetSlot::Ready(v) => Some(*v),
                             _ => None,
                         })
                         .collect();
-                    changed |= self.show_target(ui, target, picked, now);
-                } else if shared.slots.stats().active < 2 * ui.shown.len() {
+                    match ui.locked() {
+                        None => changed |= self.show_target(ui, target, picked, now),
+                        Some(members) => {
+                            // A locked pair whose landings differ seeks
+                            // both lenses exactly to one of them first;
+                            // landings at one time go up together before
+                            // the clock is set to them, or not yet.
+                            if let Some(again) = Self::relanding(ui, target) {
+                                ui.target = None;
+                                self.start_seek(ui, again, SeekMode::Exact, now);
+                            } else if let Some(up) = self.land_locked(ui, members, &mut picked, now)
+                            {
+                                changed |= up;
+                                changed |= self.show_target(ui, target, picked, now);
+                            }
+                        }
+                    }
+                } else if ui.locked().is_none() && shared.slots.stats().active < 2 * ui.shown.len()
+                {
                     // Too few slots for every stream's frame on screen and
                     // its new one at once: each stream's goes up as it
                     // comes, which gives its old slot back for the next.
+                    // Never a locked pair's, whose slot floor keeps it
+                    // from needing this.
                     for (i, f) in found.iter().enumerate() {
                         if let TargetSlot::Ready(v) = f {
                             changed |= self.show(ui, i, v, now, false);
@@ -1131,6 +1299,19 @@ impl Player {
         {
             perf.record(Stage::AvOffset, ms(d));
         }
+        // How far the clock's time, without the A/V offset, is past the
+        // end of a locked pair on screen, while it runs: 0 while the
+        // pair's interval holds it, never less.
+        if running
+            && let Some(members) = ui.locked()
+            && let Some(Some(s)) = ui.shown.get(members[0])
+        {
+            let frame = s.view.frame;
+            let clock = ui.clock_time(now);
+            if let Some(d) = av_offset(clock, frame.time, frame.duration) {
+                perf.record(Stage::PairWait, ms(d.max(Time::ZERO)));
+            }
+        }
         // The playhead: the clock's time, or a seek's while it is on its
         // way. A step's moves with the worker, frame by frame.
         let playhead = match ui.target {
@@ -1157,6 +1338,10 @@ impl Player {
                 })
             })
             .collect();
+        // By the slots' time tags, over every stream shown, locked or not.
+        if frames.iter().any(|f| f.frame.time != frames[0].frame.time) {
+            perf.add(Counter::UnpairedPresents, 1);
+        }
         (!frames.is_empty()).then_some(Presented {
             frames,
             changed,
@@ -1187,6 +1372,11 @@ impl Player {
             return;
         }
         ui.view_epoch = st.epoch;
+        ui.lock = st.lock.as_ref().map(|g| g.status);
+        if let Some(g) = &st.lock {
+            ui.members = g.members;
+            ui.lock_test = g.spec.test;
+        }
         ui.view.resize(st.streams.len(), StreamView::default());
         for (v, s) in ui.view.iter_mut().zip(&st.streams) {
             *v = StreamView {
@@ -1255,25 +1445,7 @@ impl Player {
                 changed |= self.show(ui, i, v, now, false);
             }
         }
-        let landed = ui
-            .view
-            .iter()
-            .find_map(|s| s.landed.filter(|l| l.id == target.id));
-        if let Some(l) = landed {
-            let t = if target.step.is_some()
-                || l.time > target.at
-                || matches!(
-                    l.exactness,
-                    Some(
-                        Exactness::AfterLast
-                            | Exactness::Truncated { .. }
-                            | Exactness::KeyframeOnly
-                    )
-                ) {
-                l.time
-            } else {
-                target.at
-            };
+        if let Some(t) = Self::landing_time(ui, target) {
             ui.clock.set(t, now);
         }
         ui.target = None;
@@ -1341,12 +1513,19 @@ impl Player {
         })
     }
 
-    /// Show each stream's latest Ready frame at or before `t`. Whether a
-    /// frame changed.
+    /// Show each stream's latest Ready frame at or before `t`, or a
+    /// locked group's pair at the largest time at or before it that both
+    /// members hold ([`pick_pair`]), both frames or neither: a pair that
+    /// can't show leaves the one on screen up. Whether a frame changed.
     fn pick(&self, ui: &mut Ui, t: Time, now: Instant) -> bool {
         let views = self.shared.slots.views();
-        let mut changed = false;
         let count = ui.painted;
+        if let Some(members) = ui.locked() {
+            return pick_pair(&views, members, ui.epoch, t)
+                .and_then(|pair| self.show_locked(ui, members, &pair, now, count))
+                .unwrap_or(false);
+        }
+        let mut changed = false;
         for i in 0..ui.shown.len() {
             let best = views
                 .iter()
@@ -1360,19 +1539,36 @@ impl Player {
     }
 
     /// Show slot `v` for stream `i`, giving back the one shown before.
-    /// `count`: whether frames passed over count as dropped.
+    /// `count`: whether frames passed over count as skipped or dropped.
     fn show(&self, ui: &mut Ui, i: usize, v: &SlotView, now: Instant, count: bool) -> bool {
+        if ui.on_screen(i, v).is_some() {
+            return false;
+        }
+        let Some(gpu) = self.shared.slots.try_show(v) else {
+            return false;
+        };
+        self.put_up(ui, i, *v, gpu, now, count);
+        true
+    }
+
+    /// Stream `i` shows `view`, read before its slot was shown as `gpu`:
+    /// the slot shown before is given back, and the frame and those
+    /// passed over (with `count`, while playing) are counted: as skipped
+    /// up to the presents' cadence ([`Ui::cadence`]), the frames a display
+    /// slower than the clip passes over, and as dropped beyond it.
+    fn put_up(
+        &self,
+        ui: &mut Ui,
+        i: usize,
+        view: SlotView,
+        gpu: Arc<GpuFrame>,
+        now: Instant,
+        count: bool,
+    ) {
         let slots = &self.shared.slots;
         let perf = &self.shared.perf;
         let before = ui.shown.get(i).and_then(|s| s.as_ref()).map(|s| s.view);
-        if before.is_some_and(|b| b.index == v.index && b.frame == v.frame) {
-            return false;
-        }
-        let Some(gpu) = slots.try_show(v) else {
-            return false;
-        };
         // Kept as read: giving it back compares against its version.
-        let view = *v;
         if let Some(b) = before {
             slots.unshow(b.index, b.word);
         }
@@ -1380,12 +1576,12 @@ impl Player {
         if count
             && running
             && let Some(b) = before
-            && v.frame.time > b.frame.time
+            && view.frame.time > b.frame.time
         {
-            perf.add(
-                Counter::Dropped,
-                frames_between(&Place::of_slot(&b.frame), &Place::of_slot(&v.frame)),
-            );
+            let passed = frames_between(&Place::of_slot(&b.frame), &Place::of_slot(&view.frame));
+            let skipped = passed.min(ui.cadence(b.frame.duration.or(view.frame.duration)));
+            perf.add(Counter::Skipped, skipped);
+            perf.add(Counter::Dropped, passed - skipped);
         }
         perf.add(Counter::FramesShown, 1);
         if i == 0 {
@@ -1400,7 +1596,95 @@ impl Player {
         if let Some(s) = ui.shown.get_mut(i) {
             *s = Some(Shown { view, gpu });
         }
-        true
+    }
+
+    /// Show a locked group's `pair`, `members`' slots at one clip time,
+    /// both or neither ([`show_pair_over`]): `None` when neither went up (a
+    /// slot moved on, or its lock was busy), else whether a frame
+    /// changed. Frames passed over count once for the pair, by member
+    /// 0's, as skipped or dropped ([`put_up`](Self::put_up)).
+    fn show_locked(
+        &self,
+        ui: &mut Ui,
+        members: [usize; 2],
+        pair: &[SlotView; 2],
+        now: Instant,
+        count: bool,
+    ) -> Option<bool> {
+        let slots = &self.shared.slots;
+        let up = [0, 1].map(|k| ui.on_screen(members[k], &pair[k]));
+        if up.iter().all(Option::is_some) {
+            return Some(false);
+        }
+        // A member's frame on screen is shown already; the other's slot
+        // goes from Ready to Shown, and back if its partner's can't.
+        let gpus = show_pair_over(
+            pair,
+            up.clone(),
+            |v| slots.try_show(v),
+            |v| slots.unshow(v.index, v.word),
+        )?;
+        for (k, gpu) in gpus.into_iter().enumerate() {
+            if up[k].is_none() {
+                self.put_up(ui, members[k], pair[k], gpu, now, count && k == 0);
+            }
+        }
+        Some(true)
+    }
+
+    /// A locked group's landings for the request the presenter waits for,
+    /// each stream's in `picked`: put up as a pair, before the clock is
+    /// set to them. `None` while they can't go up yet (a slot moved on).
+    /// Landings of different times that no exact seek of both mends
+    /// ([`relanding`](Self::relanding)) are left in `picked` to go up as
+    /// they came under the test switch that keeps keyframe landings, its
+    /// control. Otherwise, or with a member that failed the request
+    /// (`None` in `picked`), the pair on screen stays up: `picked` loses
+    /// both members' landings, and the request ends with nothing of the
+    /// pair shown.
+    fn land_locked(
+        &self,
+        ui: &mut Ui,
+        members: [usize; 2],
+        picked: &mut [Option<SlotView>],
+        now: Instant,
+    ) -> Option<bool> {
+        match members.map(|m| picked.get(m).copied().flatten()) {
+            [Some(a), Some(b)] if a.frame.time == b.frame.time => {
+                self.show_locked(ui, members, &[a, b], now, false)
+            }
+            [Some(_), Some(_)] if ui.lock_test.no_later_landing => Some(false),
+            _ => {
+                for m in members {
+                    if let Some(p) = picked.get_mut(m) {
+                        *p = None;
+                    }
+                }
+                Some(false)
+            }
+        }
+    }
+
+    /// Show each stream's `views[i]` at once (an instant step's frames),
+    /// a locked group's members as a pair, both or neither, and only at
+    /// one clip time. Whether a frame changed.
+    fn show_each(&self, ui: &mut Ui, views: &[SlotView], now: Instant) -> bool {
+        let locked = ui.locked().filter(|m| m.iter().all(|&i| i < views.len()));
+        let mut changed = false;
+        for (i, v) in views.iter().enumerate() {
+            if !locked.is_some_and(|m| m.contains(&i)) {
+                changed |= self.show(ui, i, v, now, false);
+            }
+        }
+        if let Some(members) = locked {
+            let pair = members.map(|i| views[i]);
+            if pair[0].frame.time == pair[1].frame.time {
+                changed |= self
+                    .show_locked(ui, members, &pair, now, false)
+                    .unwrap_or(false);
+            }
+        }
+        changed
     }
 
     /// Keep playback to the span: once a play crosses its end, pause on
@@ -1465,19 +1749,17 @@ impl Player {
         }
     }
 
-    /// Pause at the end, once the clock passes the first stream's, on its
-    /// last frame: one whose upload came too late for its time comes up
-    /// once it is uploaded. Before decoding reached the end (the end is the
-    /// container's duration), a frame's length before it, as the frame on
-    /// screen lasts.
+    /// Pause at the end, once the clock passes the first stream's, or for
+    /// a locked pair the end of the member that ends first
+    /// ([`end_of`](Self::end_of)), on its last frame: one whose upload
+    /// came too late for its time comes up once it is uploaded. Before
+    /// decoding reached the end (the end is the container's duration), a
+    /// frame's length before it, as the frame on screen lasts.
     fn check_end(&self, ui: &mut Ui, t: Time, now: Instant) {
         if !ui.clock.is_running() {
             return;
         }
-        let Some(first) = ui.view.first() else {
-            return;
-        };
-        let (Some(end), last) = (first.end, first.last) else {
+        let Some((stream, end, last)) = Self::end_of(ui) else {
             return;
         };
         if t >= end {
@@ -1486,7 +1768,7 @@ impl Player {
                 return;
             }
             Self::pause_ui(&self.shared, ui, now);
-            let shown = ui.shown.first().and_then(|s| s.as_ref());
+            let shown = ui.shown.get(stream).and_then(|s| s.as_ref());
             let at = last.or_else(|| {
                 let f = shown?.view.frame;
                 let before = f.duration.and_then(|d| end.checked_sub(d).ok());
@@ -1497,6 +1779,115 @@ impl Player {
             }
             ui.at_end = true;
             self.shared.event(PlayerEvent::Ended);
+        }
+    }
+
+    /// The stream whose end ends playback, with that end and its last
+    /// frame's time once decoding reached it: the first stream, or for a
+    /// locked pair the member that ends first, so that a lens with fewer
+    /// frames ends the pair on its last (M3 plan section 9).
+    fn end_of(ui: &Ui) -> Option<(usize, Time, Option<Time>)> {
+        if ui.lock == Some(LockStatus::Locked) {
+            ui.view
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| Some((i, v.end?, v.last)))
+                .min_by_key(|&(_, end, _)| end)
+        } else {
+            let v = ui.view.first()?;
+            Some((0, v.end?, v.last))
+        }
+    }
+
+    /// The clock's time once `target`'s frames are up: a landing's own
+    /// time for a step, a landing after the time asked for, or one that
+    /// says it isn't the frame shown there (past the end, short of
+    /// damage, a keyframe); else the time asked for. Of the first stream
+    /// that landed, or for a locked pair the earliest of its members'
+    /// (M3 plan section 9), so that a lens that landed short sets it,
+    /// a member that failed the request past its end
+    /// ([`failed_landings`](Self::failed_landings)) on its last frame.
+    fn landing_time(ui: &Ui, target: Target) -> Option<Time> {
+        let failed = Self::failed_landings(ui, target);
+        let mut times = ui
+            .view
+            .iter()
+            .filter_map(|s| s.landed.filter(|l| l.id == target.id))
+            .map(|l| {
+                if target.step.is_some()
+                    || l.time > target.at
+                    || matches!(
+                        l.exactness,
+                        Some(
+                            Exactness::AfterLast
+                                | Exactness::Truncated { .. }
+                                | Exactness::KeyframeOnly
+                        )
+                    )
+                {
+                    l.time
+                } else {
+                    target.at
+                }
+            });
+        if ui.lock == Some(LockStatus::Locked) {
+            times.chain(failed).min()
+        } else {
+            times.next()
+        }
+    }
+
+    /// A locked pair's members that failed `target` at or past the end
+    /// their failure set (the time asked for, or a time another member
+    /// landed on, lies at or past it), each taken as landed on its last
+    /// frame: the pair then lands where a lens that is short does, not
+    /// where the live member landed (M3 plan section 9). None under the
+    /// test switch `no_failed_landing`.
+    fn failed_landings(ui: &Ui, target: Target) -> Vec<Time> {
+        let Some(members) = ui.locked().filter(|_| !ui.lock_test.no_failed_landing) else {
+            return Vec::new();
+        };
+        let views = || members.iter().filter_map(|&m| ui.view.get(m));
+        let reach = views()
+            .filter_map(|v| v.landed.filter(|l| l.id == target.id))
+            .map(|l| l.time)
+            .fold(target.at, Time::max);
+        views()
+            .filter(|v| v.failed_request == Some(target.id))
+            .filter_map(|v| v.last.zip(v.end))
+            .filter(|&(_, end)| end <= reach)
+            .map(|(last, _)| last)
+            .collect()
+    }
+
+    /// For a locked pair whose members landed `target` on frames of
+    /// different times, a member that failed it past its end counted as
+    /// landed on its last frame ([`failed_landings`](Self::failed_landings)),
+    /// the time both seek to exactly first (M3 plan section 9): after a
+    /// step, or an exact seek whose earlier landing lies before its time,
+    /// the earlier, where a lens with fewer frames ran out or a member's
+    /// failure ended the pair (a seek to it then lands both on one frame,
+    /// or one lens earlier still, so the seeks end); after a keyframe
+    /// seek, or an exact seek whose landings both lie at or after its
+    /// time, the later, unless the test switch `no_later_landing` keeps
+    /// such landings (each such seek goes later than the last, so they
+    /// end too). `None` otherwise: landings at one time, or none to mend.
+    fn relanding(ui: &Ui, target: Target) -> Option<Time> {
+        let members = ui.locked()?;
+        let mut times: Vec<Time> = members
+            .iter()
+            .filter_map(|&m| ui.view.get(m)?.landed.filter(|l| l.id == target.id))
+            .map(|l| l.time)
+            .collect();
+        times.extend(Self::failed_landings(ui, target));
+        let (&first, &later) = (times.iter().min()?, times.iter().max()?);
+        if first == later {
+            return None;
+        }
+        let later = (!ui.lock_test.no_later_landing).then_some(later);
+        match target.mode {
+            SeekMode::Exact if target.step.is_some() || first < target.at => Some(first),
+            SeekMode::Exact | SeekMode::Keyframe => later,
         }
     }
 
@@ -1540,6 +1931,11 @@ impl Player {
             s.memory = st.memory;
             s.streams = st.streams.clone();
             s.has_audio = st.audio.is_some();
+            s.lock = st.lock.as_ref().map(|g| LockSnapshot {
+                status: g.status,
+                base: None,
+                until: g.until,
+            });
             ui.snapshot_epoch = st.epoch;
         }
         s.epoch = ui.epoch;
@@ -1547,6 +1943,7 @@ impl Player {
         if !current {
             s.streams.clear();
             s.has_audio = false;
+            s.lock = None;
         }
         s.path = ui.path.clone();
         s.playing = ui.clock.is_running();
@@ -1560,6 +1957,10 @@ impl Player {
             .collect();
         if let Some(c) = shared.cache.try_stats() {
             s.cache = Some(c);
+        }
+        // The group base, as the cache last told it.
+        if let Some(lock) = s.lock.as_mut() {
+            lock.base = s.cache.and_then(|c| c.base);
         }
         s.slots = shared.slots.stats();
         s.perf = shared.perf.snapshot();
@@ -1613,6 +2014,28 @@ impl Player {
             .try_borrow()
             .map(|ui| ui.config.clone())
             .unwrap_or_default()
+    }
+
+    /// A test's hook: the next `n` slot allocations fail as the GPU having
+    /// no memory for them (`RenderError::OutOfMemory`), each slot then
+    /// dropped for good, as [`PlayerEvent::SlotDropped`] says. While a
+    /// failure is planted, a slot the upload thread claims has its GPU
+    /// frame made again rather than reused, so that slots die mid-play
+    /// too. Never waits.
+    #[doc(hidden)]
+    pub fn fail_slot_allocations(&self, n: u64) {
+        self.shared.slot_faults.store(n, Ordering::Release);
+        self.shared.cache.notify();
+    }
+
+    /// A test's hook, its controls' switch: with `on`, a decode worker
+    /// that reached its stream's end or failed stays idle after a seek or
+    /// a step the frame cache answers, and after a failure takes its
+    /// decoder to be at the last frame it handed out, as before a request
+    /// the cache answered could take it on from there. Never waits.
+    #[doc(hidden)]
+    pub fn old_idle_rule(&self, on: bool) {
+        self.shared.old_idle.store(on, Ordering::Release);
     }
 
     /// The GPU slots, for the viewer's paint callbacks and the tests.

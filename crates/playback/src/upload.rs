@@ -44,6 +44,10 @@
 //! its shape goes in, inside the out-of-memory error scope
 //! [`GpuFrame::new`] pushes. A slot the GPU has no memory for is dropped
 //! for good (Dead), and playback goes on with one fewer, with an event.
+//! A locked pair left with fewer than two live slots a lens unlocks (M3
+//! plan section 9): it shows only as pairs, so with three its pair on
+//! screen and one lens's next frame would hold every slot, and the other
+//! lens's next frame would never get one.
 //!
 //! **The budget**: set when the thread starts, and rechecked every 5 s
 //! against the memory available, with the cache's own bytes counted as
@@ -70,10 +74,11 @@ use spherecut_render::{
 
 use crate::budget::{self, CacheBudget};
 use crate::cache::WAIT_SLICE;
+use crate::lock::LockStatus;
 use crate::perf::{self, Counter, MemoryStats, Stage};
 use crate::player::{PlayerError, PlayerEvent};
 use crate::shared::{BudgetStatus, Landed, Place, Shared, frames_between, time_of};
-use crate::slots::{SlotFrame, SlotState};
+use crate::slots::{Claim, SlotFrame, SlotState};
 
 /// How often the budget is rechecked against the memory available.
 pub const BUDGET_RECHECK: Duration = Duration::from_secs(5);
@@ -111,6 +116,12 @@ struct StreamPass {
     /// It failed the target's request, or can't open: it shows no new
     /// frame for it.
     out: bool,
+    /// How long to wait before each of its frames is published, as a
+    /// locked pair's member under the test switch
+    /// [`LockTest::publish_delay`]: `None` without it.
+    ///
+    /// [`LockTest::publish_delay`]: crate::LockTest::publish_delay
+    delay: Option<Duration>,
 }
 
 /// The upload thread's own state.
@@ -124,6 +135,7 @@ struct State {
     /// Per stream, the request whose landing was last unpinned.
     unpinned: Vec<u64>,
     waits: u64,
+    resyncs: u64,
     budget_at: Instant,
     stats_at: Instant,
     memory_at: Instant,
@@ -146,6 +158,7 @@ impl UploadThread {
             too_small: 0,
             unpinned: Vec::new(),
             waits: 0,
+            resyncs: 0,
             budget_at: Instant::now(),
             stats_at: Instant::now(),
             memory_at: Instant::now(),
@@ -223,17 +236,22 @@ impl UploadThread {
         });
     }
 
-    /// The cache's numbers: its waits for the counter, and the notice
-    /// when the budget holds too few frames. And the GPU memory of slots
-    /// the setting no longer uses, once nothing holds them.
+    /// The cache's numbers: its waits and a locked pair's resyncs for the
+    /// counters, and the notice when the budget holds too few frames. And
+    /// the GPU memory of slots the setting no longer uses, once nothing
+    /// holds them.
     fn cache_stats(&self, st: &mut State) {
         st.stats_at = Instant::now();
         self.shared.slots.trim();
         let stats = self.shared.cache.stats();
-        self.shared
-            .perf
-            .add(Counter::CacheWaits, stats.waits.saturating_sub(st.waits));
+        let perf = &self.shared.perf;
+        perf.add(Counter::CacheWaits, stats.waits.saturating_sub(st.waits));
+        perf.add(
+            Counter::PairResyncs,
+            stats.resyncs.saturating_sub(st.resyncs),
+        );
         st.waits = stats.waits;
+        st.resyncs = stats.resyncs;
         let live = self.shared.live.load(Ordering::Acquire);
         if stats.too_small && st.too_small != live && self.shared.is_current(live) {
             st.too_small = live;
@@ -281,15 +299,22 @@ impl UploadThread {
             if status.epoch != epoch {
                 return false;
             }
+            let delay = status
+                .lock
+                .as_ref()
+                .filter(|g| g.status == LockStatus::Locked)
+                .and_then(|g| Some((g.members, g.spec.test.publish_delay?)));
             status
                 .streams
                 .iter()
-                .map(|s| {
+                .enumerate()
+                .map(|(i, s)| {
                     let pass = StreamPass {
                         landed: s.landed,
                         out: target != 0
                             && (s.failed_request == Some(target)
                                 || (!s.opened && s.error.is_some())),
+                        delay: delay.filter(|(m, _)| m.contains(&i)).map(|(_, d)| d),
                     };
                     (pass, placement_of(s.info.as_ref()))
                 })
@@ -342,6 +367,8 @@ impl UploadThread {
         // while the clock waited (paused, or for that frame) nothing
         // freed it.
         let active = slots.stats().active;
+        // A locked pair's group base, so that both members' frames from
+        // the newest time both hold stay wanted.
         let playhead = shared.cache.playhead();
         let waiting = if target != 0 {
             streams.iter().enumerate().any(|(i, s)| {
@@ -388,7 +415,8 @@ impl UploadThread {
                     continue;
                 }
                 let placement = placements.get(i).copied().unwrap_or(Placement::FULL);
-                return self.upload(st, epoch, i, f, &placement) || did;
+                let delay = streams.get(i).and_then(|s| s.delay);
+                return self.upload(st, epoch, i, f, &placement, delay) || did;
             }
         }
         did
@@ -460,8 +488,9 @@ impl UploadThread {
             .or_else(|| cache.following(i, playhead).map(|(f, _)| f))
     }
 
-    /// Upload frame `f` of stream `i` into a free slot: whether it did
-    /// anything (false when no slot is free).
+    /// Upload frame `f` of stream `i` into a free slot, waiting `delay`
+    /// before it is published (a test's switch): whether it did anything
+    /// (false when no slot is free).
     fn upload(
         &self,
         st: &mut State,
@@ -469,6 +498,7 @@ impl UploadThread {
         i: usize,
         f: &Arc<VideoFrame>,
         placement: &Placement,
+        delay: Option<Duration>,
     ) -> bool {
         let shared = &self.shared;
         let slots = &shared.slots;
@@ -482,23 +512,25 @@ impl UploadThread {
         let Some(claim) = slots.claim() else {
             return false;
         };
+        // A test's planted failure makes the slot's frame again, and fails.
+        let fault = shared.slot_fault();
+        let made = || {
+            if fault {
+                Err(RenderError::OutOfMemory("a GPU slot (a planted failure)"))
+            } else {
+                GpuFrame::new(&self.gpu, &shape)
+            }
+        };
         let gpu_frame = match slots.frame_of(&claim) {
-            Some(g) if g.shape().fits(&shape) => g,
-            _ => match GpuFrame::new(&self.gpu, &shape) {
+            Some(g) if !fault && g.shape().fits(&shape) => g,
+            _ => match made() {
                 Ok(g) => {
                     let g = Arc::new(g);
                     slots.replace(&claim, g.clone());
                     g
                 }
                 Err(e @ RenderError::OutOfMemory(_)) => {
-                    let slot = claim.index;
-                    slots.kill(claim);
-                    tracing::warn!("GPU slot {slot} dropped: {e}");
-                    shared.event(PlayerEvent::SlotDropped {
-                        slot,
-                        error: PlayerError::from(&e),
-                        live: slots.stats().active,
-                    });
+                    self.slot_died(claim, &e);
                     return true;
                 }
                 Err(e) => {
@@ -517,6 +549,10 @@ impl UploadThread {
         match uploaded {
             Ok(stats) => {
                 drop(gpu_frame);
+                if let Some(delay) = delay {
+                    may_block("a test's delay before a locked pair's frame is published");
+                    std::thread::sleep(delay);
+                }
                 slots.publish(
                     claim,
                     &SlotFrame {
@@ -538,14 +574,7 @@ impl UploadThread {
             }
             Err(e @ RenderError::OutOfMemory(_)) => {
                 drop(gpu_frame);
-                let slot = claim.index;
-                slots.kill(claim);
-                tracing::warn!("GPU slot {slot} dropped: {e}");
-                shared.event(PlayerEvent::SlotDropped {
-                    slot,
-                    error: PlayerError::from(&e),
-                    live: slots.stats().active,
-                });
+                self.slot_died(claim, &e);
             }
             Err(e) => {
                 drop(gpu_frame);
@@ -554,6 +583,39 @@ impl UploadThread {
             }
         }
         true
+    }
+
+    /// The GPU had no memory for the slot `claim` holds (`e`): it is
+    /// dropped for good, which the player says, and a locked pair left
+    /// below its floor of live slots unlocks (M3 plan section 9), its
+    /// frame cache's group let go under the same status lock. The slots
+    /// serve every open, so the pair checked is the status's, whatever
+    /// open the dying slot's frame was for; the player says so only while
+    /// that pair's open is the latest.
+    fn slot_died(&self, claim: Claim, e: &RenderError) {
+        let shared = &self.shared;
+        let slot = claim.index;
+        shared.slots.kill(claim);
+        let live = shared.slots.stats().active;
+        tracing::warn!("GPU slot {slot} dropped, {live} live: {e}");
+        shared.event(PlayerEvent::SlotDropped {
+            slot,
+            error: PlayerError::from(e),
+            live,
+        });
+        let unlocked = {
+            let mut st = shared.status();
+            let unlocked = st.below_floor(live).map(|e| (st.epoch, e));
+            if unlocked.is_some() {
+                shared.cache.set_group(None);
+            }
+            unlocked
+        };
+        if let Some((open, e)) = unlocked
+            && shared.is_current(open)
+        {
+            shared.event(e);
+        }
     }
 
     /// Uploads `f`, left on its decoder's device, into `slot`: imported

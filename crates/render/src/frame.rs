@@ -6,7 +6,7 @@ use crate::color::{Placement, SourceUniform, source_uniform};
 use crate::error::RenderError;
 use crate::gpu::Gpu;
 use crate::layouts;
-use crate::plane::SlotShape;
+use crate::plane::{PlaneFormat, SlotShape};
 
 /// One plane's canonical texture and its views.
 #[derive(Debug)]
@@ -14,10 +14,31 @@ pub(crate) struct PlaneTexture {
     pub(crate) texture: wgpu::Texture,
     /// Every level, for sampling.
     pub(crate) sampled: wgpu::TextureView,
-    /// One view per level, for the passes that write it.
+    /// One view per level: a deep plane's for the passes that write it,
+    /// and each plane's for the mip pass to read.
     pub(crate) levels: Vec<wgpu::TextureView>,
     /// Level n − 1 for level n's mip pass, from n = 1.
     pub(crate) mip_inputs: Vec<wgpu::BindGroup>,
+}
+
+/// What a slot plane of `format` is made for. An 8-bit plane is written
+/// only by copies, level 0 by the upload's and each mip level by the
+/// compute pass's (`Uploader::record_mips`), so it has no
+/// `RENDER_ATTACHMENT`: RADV gives delta colour compression (DCC) only to
+/// images that can be rendered to (Mesa's rule as recalled, not read), and
+/// on odin's RX 7600 the 8-bit luma slots came back with blocks of texels
+/// wrong under DCC (DECISIONS D77). A deep plane keeps it for the ingest
+/// pass and its mips. `renderable` gives every plane `RENDER_ATTACHMENT`,
+/// as slots had before D77.
+pub(crate) fn plane_usage(format: PlaneFormat, renderable: bool) -> wgpu::TextureUsages {
+    let copies = wgpu::TextureUsages::TEXTURE_BINDING
+        | wgpu::TextureUsages::COPY_DST
+        | wgpu::TextureUsages::COPY_SRC;
+    if format.is_deep() || renderable {
+        copies | wgpu::TextureUsages::RENDER_ATTACHMENT
+    } else {
+        copies
+    }
 }
 
 /// A GPU slot: the canonical textures of one frame with their mip chains,
@@ -27,11 +48,12 @@ pub(crate) struct PlaneTexture {
 /// [`SlotShape`] and reused for every frame of that shape (slice 5 keeps
 /// four, and reuses one only when nothing holds it).
 ///
-/// Level 0 of each plane is an ordinary texture that a buffer copy, a
-/// texture copy or a render pass can fill, so a frame that is already on
-/// the GPU (slice 5b's DMA-BUF import or Vulkan Video decode) can fill a
-/// slot without going through [`spherecut_core::video::VideoPlanes`]:
-/// it writes [`GpuFrame::plane_texture`]'s level 0, records the mips with
+/// Level 0 of each plane is an ordinary texture that a buffer copy or a
+/// texture copy can fill (and a render pass, for a deep plane: 8-bit
+/// planes can't be rendered to, D77), so a frame that is already on the
+/// GPU (slice 5b's DMA-BUF import or Vulkan Video decode) can fill a slot
+/// without going through [`spherecut_core::video::VideoPlanes`]: it
+/// writes [`GpuFrame::plane_texture`]'s level 0, records the mips with
 /// [`crate::Uploader::record_mips`] and sets the uniform with
 /// [`GpuFrame::set_source`], as an upload does. A slot holds the part of
 /// a frame that is shown ([`crate::Placement::shown`]): of a stereo
@@ -52,6 +74,22 @@ impl GpuFrame {
     /// the device; `OutOfMemory` when the GPU can't hold it, so that a
     /// caller can make do with fewer slots.
     pub fn new(gpu: &Gpu, shape: &SlotShape) -> Result<GpuFrame, RenderError> {
+        Self::make(gpu, shape, false)
+    }
+
+    /// A slot whose every plane can be rendered to, 8-bit ones too, as
+    /// slots were made before D77. Only tests make one: the test that
+    /// holds the 8-bit mip pass to the render passes it replaced
+    /// ([`EightBitMips::RenderPass`](crate::upload::EightBitMips)), the
+    /// control of the test that 8-bit planes can't be rendered to, and
+    /// the upload bench's test of a step's own blocks, which needs the
+    /// old layout on lavapipe.
+    #[doc(hidden)]
+    pub fn renderable(gpu: &Gpu, shape: &SlotShape) -> Result<GpuFrame, RenderError> {
+        Self::make(gpu, shape, true)
+    }
+
+    fn make(gpu: &Gpu, shape: &SlotShape, renderable: bool) -> Result<GpuFrame, RenderError> {
         gpu.check()?;
         gpu.check_size(shape.size)?;
         let device = &gpu.device;
@@ -73,10 +111,7 @@ impl GpuFrame {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: p.format.texture(),
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | wgpu::TextureUsages::COPY_DST
-                        | wgpu::TextureUsages::COPY_SRC,
+                    usage: plane_usage(p.format, renderable),
                     view_formats: &[],
                 });
                 let sampled = texture.create_view(&wgpu::TextureViewDescriptor::default());

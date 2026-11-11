@@ -657,7 +657,7 @@ impl TimelineProto {
     /// the last pass drew things. Each [`CYCLE_S`]:
     ///
     /// - 0 to 4 s: zoom about the middle, from where it was to the whole
-    ///   timeline, to [`MIN_SPAN_S`] on screen, and to [`WORK_ZOOM`]
+    ///   timeline, to [`MIN_SPAN_S`] on screen, and to `WORK_ZOOM`
     ///   times the whole;
     /// - 4 to 7.2 s: drag the clip on the second track nearest a quarter
     ///   of the way across to the right edge, then to the left;

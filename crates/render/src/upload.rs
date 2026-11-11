@@ -2,19 +2,23 @@
 //! deep planes through the ingest pass, then the mip chain, in one
 //! submission per frame that never waits on the GPU. Planes already on
 //! the GPU (slice 5b's DMA-BUF imports) take the same way, copied there,
-//! and so do planes a copier put in a GPU buffer (path B).
+//! and so do planes a copier put in a GPU buffer (path B). An 8-bit
+//! plane's mips are a compute pass a level into a buffer and a copy, so
+//! that nothing renders to it (DECISIONS D77); a deep plane's are a
+//! render pass a level.
 
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use spherecut_core::video::{PlaneData, VideoPlanes};
 
 use crate::color::Placement;
 use crate::error::RenderError;
-use crate::frame::GpuFrame;
+use crate::frame::{GpuFrame, PlaneTexture};
 use crate::gpu::Gpu;
 use crate::layouts;
-use crate::plane::{PlaneFormat, SlotShape};
+use crate::plane::{PlaneFormat, PlaneShape, SlotShape};
 use crate::timers::GpuTimers;
 use crate::vkshare::{BufferPlane, PlaneRegion};
 
@@ -52,9 +56,35 @@ pub struct UploadStats {
     /// The GPU time of the latest upload whose timestamps are back (not
     /// necessarily this one's): its ingest passes and mips, on either
     /// path (the belt's copies come before the span, as `write_texture`'s
-    /// do). `None` without timestamps, or before any is back.
+    /// do). `None` without timestamps, or before any is back. Each
+    /// reading is given once, here or by a later [`Uploader::poll`],
+    /// never both: another thread's poll of the device can bring this
+    /// upload's own back before the upload returns.
     pub gpu_ms: Option<f32>,
 }
+
+/// How [`Uploader::record_mips`] makes an 8-bit plane's levels. Only
+/// tests ask for anything but `Compute`.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EightBitMips {
+    /// A compute pass a level into a buffer, then a copy into the level
+    /// (DECISIONS D77).
+    #[default]
+    Compute,
+    /// A render pass a level, as before D77, into a slot made by
+    /// [`GpuFrame::renderable`]: the reference the compute pass is held
+    /// to, and the old layout the upload bench's test of a step's own
+    /// blocks runs on.
+    RenderPass,
+    /// The compute pass with each mean truncated, one code off wherever it
+    /// rounds up: the control that holding it to the reference fails.
+    Truncated,
+}
+
+/// The work-group size of `shaders/mips8.wgsl`'s `cs_mip8`: words of a
+/// row across, rows down.
+const MIP8_GROUP: (u32, u32) = (64, 4);
 
 /// An integer texture a deep plane is uploaded into, with the ingest
 /// pass's bind group for it.
@@ -64,6 +94,27 @@ struct Scratch {
     size: (u32, u32),
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
+}
+
+/// The buffer the 8-bit mip pass writes a plane's levels into, one region
+/// a level from level 1, each copied into its level once written.
+#[derive(Debug)]
+struct MipScratch {
+    format: PlaneFormat,
+    size: (u32, u32),
+    buffer: wgpu::Buffer,
+    regions: Vec<MipRegion>,
+}
+
+/// Where one level sits in a [`MipScratch`]: its rows, each padded to
+/// `COPY_BYTES_PER_ROW_ALIGNMENT`, and the pass's bind group for exactly
+/// them, from which the shader takes the row pitch.
+#[derive(Debug)]
+struct MipRegion {
+    offset: u64,
+    bytes_per_row: u32,
+    size: (u32, u32),
+    output: wgpu::BindGroup,
 }
 
 /// The pipelines and buffers that fill slots. One per upload thread.
@@ -76,7 +127,18 @@ pub struct Uploader {
     ingest_uniform: wgpu::Buffer,
     ingest_layout: wgpu::BindGroupLayout,
     ingest: HashMap<PlaneFormat, wgpu::RenderPipeline>,
+    /// The render pass a level: deep formats, and 8-bit ones only under
+    /// [`EightBitMips::RenderPass`].
     mips: HashMap<PlaneFormat, wgpu::RenderPipeline>,
+    /// The compute pass a level, for 8-bit formats.
+    mips8: HashMap<PlaneFormat, wgpu::ComputePipeline>,
+    mip_output: wgpu::BindGroupLayout,
+    /// For the buffers of `mip_scratch`.
+    device: wgpu::Device,
+    /// One per plane index, made or remade to fit when the mips are
+    /// recorded, which takes `&self`.
+    mip_scratch: Mutex<Vec<Option<MipScratch>>>,
+    eight_bit: EightBitMips,
     belt: Option<wgpu::util::StagingBelt>,
     timers: Option<GpuTimers>,
 }
@@ -87,11 +149,22 @@ impl Uploader {
     }
 
     pub fn with_path(gpu: &Gpu, path: UploadPath) -> Uploader {
+        Self::with_eight_bit_mips(gpu, path, EightBitMips::default())
+    }
+
+    /// An uploader on `path` whose 8-bit mips are made as `eight_bit`
+    /// says, for tests only: the one that holds the compute pass to the
+    /// render passes it replaced, and the upload bench's test of a step's
+    /// own blocks.
+    #[doc(hidden)]
+    pub fn with_eight_bit_mips(gpu: &Gpu, path: UploadPath, eight_bit: EightBitMips) -> Uploader {
         let device = &gpu.device;
         let ingest_layout = layouts::ingest_input(device);
         let mip_layout = layouts::mip_input(device);
+        let mip_output = layouts::mip_output(device);
         let ingest_module = layouts::module(device, "ingest", layouts::INGEST_WGSL);
         let mips_module = layouts::module(device, "mips", layouts::MIPS_WGSL);
+        let mips8_module = layouts::module(device, "mips8", layouts::MIPS8_WGSL);
         let ingest = [PlaneFormat::R16F, PlaneFormat::Rg16F]
             .into_iter()
             .map(|f| {
@@ -109,6 +182,7 @@ impl Uploader {
             .collect();
         let mips = PlaneFormat::ALL
             .into_iter()
+            .filter(|f| f.is_deep() || eight_bit == EightBitMips::RenderPass)
             .map(|f| {
                 let f16 = if f.is_deep() { 1.0 } else { 0.0 };
                 let p = layouts::fullscreen_pipeline(
@@ -120,6 +194,37 @@ impl Uploader {
                     &[&mip_layout],
                     f.texture(),
                 );
+                (f, p)
+            })
+            .collect();
+        let mips8_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mips8"),
+            bind_group_layouts: &[Some(&mip_layout), Some(&mip_output)],
+            immediate_size: 0,
+        });
+        let truncate = if eight_bit == EightBitMips::Truncated {
+            1.0
+        } else {
+            0.0
+        };
+        let mips8 = [PlaneFormat::R8, PlaneFormat::Rg8]
+            .into_iter()
+            .map(|f| {
+                let constants = [
+                    ("COMPONENTS", f64::from(f.components())),
+                    ("TRUNCATE", truncate),
+                ];
+                let p = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("mips8"),
+                    layout: Some(&mips8_layout),
+                    module: &mips8_module,
+                    entry_point: Some("cs_mip8"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                    cache: None,
+                });
                 (f, p)
             })
             .collect();
@@ -139,6 +244,11 @@ impl Uploader {
             ingest_layout,
             ingest,
             mips,
+            mips8,
+            mip_output,
+            device: device.clone(),
+            mip_scratch: Mutex::new(Vec::new()),
+            eight_bit,
             belt,
             timers: GpuTimers::new(gpu, "upload"),
         }
@@ -424,7 +534,8 @@ impl Uploader {
 
     /// Runs map callbacks (the timers' read-backs, the belt's chunks)
     /// without waiting, and gives the GPU time read since the last call,
-    /// if any. On a lost device it reads nothing more.
+    /// if any. On a lost device it reads nothing more. A reading an
+    /// upload's [`UploadStats::gpu_ms`] gave is not given again here.
     pub fn poll(&mut self, gpu: &Gpu) -> Option<f32> {
         if gpu.is_lost() {
             return None;
@@ -434,9 +545,15 @@ impl Uploader {
 
     /// Records the mip chain of every plane of `slot` from its level 0:
     /// what an upload ends with, and what a frame that filled level 0 on
-    /// the GPU needs (see [`GpuFrame`]).
+    /// the GPU needs (see [`GpuFrame`]). A deep plane's levels are a render
+    /// pass each; an 8-bit plane's a compute pass each, into a buffer of
+    /// this uploader's, and a copy from it into the level (D77).
     pub fn record_mips(&self, enc: &mut wgpu::CommandEncoder, slot: &GpuFrame) {
-        for (p, shape) in slot.planes.iter().zip(&slot.shape().planes) {
+        for (i, (p, shape)) in slot.planes.iter().zip(&slot.shape().planes).enumerate() {
+            if !shape.format.is_deep() && self.eight_bit != EightBitMips::RenderPass {
+                self.record_mips8(enc, i, p, shape);
+                continue;
+            }
             let Some(pipeline) = self.mips.get(&shape.format) else {
                 continue;
             };
@@ -446,6 +563,128 @@ impl Uploader {
                 pass.set_bind_group(0, input, &[]);
                 pass.draw(0..3, 0..1);
             }
+        }
+    }
+
+    /// Levels 1 and on of 8-bit plane `i`, `plane`, each from the one
+    /// above: the compute pass into the level's region of the plane's
+    /// [`MipScratch`], then the region copied into the level, which the
+    /// next level's pass reads.
+    fn record_mips8(
+        &self,
+        enc: &mut wgpu::CommandEncoder,
+        i: usize,
+        plane: &PlaneTexture,
+        shape: &PlaneShape,
+    ) {
+        if shape.levels < 2 {
+            return;
+        }
+        let Some(pipeline) = self.mips8.get(&shape.format) else {
+            return;
+        };
+        let mut all = self
+            .mip_scratch
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if all.len() <= i {
+            all.resize_with(i + 1, || None);
+        }
+        let fits = matches!(&all[i], Some(s) if s.format == shape.format
+            && s.size == shape.size
+            && s.regions.len() + 1 >= shape.levels as usize);
+        if !fits {
+            all[i] = Some(self.mip_scratch(shape));
+        }
+        let Some(scratch) = &all[i] else {
+            unreachable!("made just above");
+        };
+        for (l, (region, input)) in scratch.regions.iter().zip(&plane.mip_inputs).enumerate() {
+            let (w, h) = region.size;
+            let words = (w * shape.format.components()).div_ceil(4);
+            {
+                let mut pass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("mip"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, input, &[]);
+                pass.set_bind_group(1, &region.output, &[]);
+                pass.dispatch_workgroups(words.div_ceil(MIP8_GROUP.0), h.div_ceil(MIP8_GROUP.1), 1);
+            }
+            enc.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &scratch.buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: region.offset,
+                        bytes_per_row: Some(region.bytes_per_row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &plane.texture,
+                    mip_level: l as u32 + 1,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    /// A [`MipScratch`] for an 8-bit plane of `shape`: a region for each
+    /// of its levels from 1, one after another, every offset a multiple
+    /// of 256 bytes, as both a copy and a storage binding take it.
+    fn mip_scratch(&self, shape: &PlaneShape) -> MipScratch {
+        let device = &self.device;
+        let bpt = shape.format.bytes_per_texel();
+        let mut offset = 0u64;
+        let mut layout = Vec::new();
+        for l in 1..shape.levels {
+            let size = ((shape.size.0 >> l).max(1), (shape.size.1 >> l).max(1));
+            let bytes_per_row = (size.0 * bpt).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+            layout.push((offset, bytes_per_row, size));
+            offset += u64::from(bytes_per_row) * u64::from(size.1);
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mip scratch"),
+            size: offset.max(4),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let regions = layout
+            .into_iter()
+            .map(|(offset, bytes_per_row, size)| {
+                let bytes = u64::from(bytes_per_row) * u64::from(size.1);
+                let output = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("mip output"),
+                    layout: &self.mip_output,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &buffer,
+                            offset,
+                            size: wgpu::BufferSize::new(bytes),
+                        }),
+                    }],
+                });
+                MipRegion {
+                    offset,
+                    bytes_per_row,
+                    size,
+                    output,
+                }
+            })
+            .collect();
+        MipScratch {
+            format: shape.format,
+            size: shape.size,
+            buffer,
+            regions,
         }
     }
 
