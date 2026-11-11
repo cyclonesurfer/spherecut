@@ -919,7 +919,9 @@ impl VideoFrame {
 
     /// A frame still on its device, copied into system memory: what a
     /// caller that can't import it reads (`None` for one that isn't on a
-    /// device). Blocks while the device copies.
+    /// device). Blocks while the device copies. A frame doesn't know its
+    /// file, so its error names none: the caller names it
+    /// ([`MediaError::or_path`]).
     pub fn to_system(&self) -> Option<Result<VideoFrame, MediaError>> {
         let device = match &self.storage {
             FrameStorage::DrmPrime { device, .. } => device,

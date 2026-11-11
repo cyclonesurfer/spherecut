@@ -6009,6 +6009,15 @@ Two of the lock's review fixes reach every player, locked or not:
   `Player::old_idle_rule(true)`, doc-hidden, puts it back for the
   tests' controls.
 
+*Updated 2026-11-11 (review-fix slice):* "out of memory, making or
+writing a slot, kills that slot" now means the slot's own memory (F118).
+Path B's copier allocates a buffer of its own for each copy out of
+FFmpeg's image; when that fails, the frame alone is downloaded and
+uploaded as bytes, with a warning, and neither the slot nor zero copy
+for later opens is given up (`upload::fallback_for`). The copier's other
+failures are told apart too (F117): a timeout or a lost device is the
+GPU's failure (`GpuFailed`), not a refused frame.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to

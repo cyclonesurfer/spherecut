@@ -2566,6 +2566,8 @@ pub fn frame_address(
 /// Frame `n` of `dec`'s stream, by [`frame_address`]: a seek for a
 /// constant rate, or the first frame and `n` more for a variable one.
 /// `None` on a stop, and `Err` past the end of a variable-rate stream.
+/// A decoder doesn't know its file, so the errors made here name none:
+/// the caller names it ([`MediaError::or_path`]).
 pub fn seek_frame(
     dec: &mut dyn VideoDecode,
     n: u64,

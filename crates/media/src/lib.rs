@@ -209,6 +209,34 @@ impl MediaError {
         )
     }
 
+    /// This error, naming `path` where it names no file: one made where
+    /// the file isn't known ([`backend::VideoFrame::to_system`],
+    /// [`seek::seek_frame`]), which the caller, who knows it, completes.
+    /// An error that names a file keeps its own.
+    pub fn or_path(mut self, path: &Path) -> Self {
+        let named = match &mut self {
+            MediaError::Io { path, .. }
+            | MediaError::NotAFile(path)
+            | MediaError::Open { path, .. }
+            | MediaError::NestedOpenRefused { path, .. }
+            | MediaError::UnsupportedContainer { path, .. }
+            | MediaError::Decode { path, .. }
+            | MediaError::NoDecoder { path, .. }
+            | MediaError::PictureTooLarge { path, .. }
+            | MediaError::HwUnsupported { path, .. }
+            | MediaError::HwFailed { path, .. }
+            | MediaError::UnsupportedFormat { path, .. }
+            | MediaError::NoStream { path, .. } => Some(path),
+            MediaError::Hardware { .. } | MediaError::NotYet { .. } => None,
+        };
+        if let Some(named) = named
+            && named.as_os_str().is_empty()
+        {
+            *named = path.to_path_buf();
+        }
+        self
+    }
+
     /// The error for `path`, which [`ffi::open_input`] could not open as
     /// `e` says. `ffmpeg` words FFmpeg's own errors.
     pub(crate) fn opening(
@@ -266,6 +294,40 @@ mod tests {
     use std::io;
 
     use super::*;
+
+    #[test]
+    fn an_error_made_without_its_file_is_completed_by_the_caller() {
+        let file = Path::new("/v/a.mp4");
+        let made = || MediaError::Decode {
+            path: PathBuf::new(),
+            reason: "copying a frame from its device: I/O error".into(),
+        };
+        // The check: the message names the file.
+        let names = |e: &MediaError| -> Result<(), String> {
+            let m = e.to_string();
+            if m == "cannot decode /v/a.mp4: copying a frame from its device: I/O error" {
+                Ok(())
+            } else {
+                Err(m)
+            }
+        };
+        names(&made().or_path(file)).unwrap();
+        // One that names a file keeps it.
+        let own = MediaError::NoStream {
+            path: PathBuf::from("/v/b.mp4"),
+            kind: "audio",
+        };
+        assert_eq!(
+            own.or_path(file).to_string(),
+            "/v/b.mp4 has no audio stream"
+        );
+        // Its control: the error as made, which names no file.
+        let why = spherecut_testkit::control::must_fail("the error as made", names(&made()));
+        assert_eq!(
+            why,
+            "cannot decode : copying a frame from its device: I/O error"
+        );
+    }
 
     #[test]
     fn every_error_has_a_listed_code() {

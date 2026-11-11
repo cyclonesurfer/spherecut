@@ -38,7 +38,8 @@
 //! which goes back to the copier once the GPU has read it. When the
 //! import or the copy is refused, the frame is downloaded here and
 //! uploaded as bytes, and the reason, kept in the status, turns zero copy
-//! off for the opens after.
+//! off for the opens after. When the copier has no memory for its
+//! buffer, that frame alone is downloaded ([`fallback_for`]).
 //!
 //! **GPU memory** (risk 11): a slot is made the first time a frame of
 //! its shape goes in, inside the out-of-memory error scope
@@ -620,8 +621,9 @@ impl UploadThread {
 
     /// Uploads `f`, left on its decoder's device, into `slot`: imported
     /// (DMA-BUFs) or copied out on the GPU (a Vulkan image), or
-    /// downloaded when the GPU refuses it (whose reason the status keeps,
-    /// the first time).
+    /// downloaded when that fails as [`fallback_for`] says: for good when
+    /// the GPU refuses it (whose reason the status keeps, the first time),
+    /// or for this frame when the copier had no memory.
     fn upload_on_device(
         &self,
         st: &mut State,
@@ -632,26 +634,37 @@ impl UploadThread {
         let taken = if f.vulkan().is_some() {
             self.copy_out(st, f, placement, slot)
         } else {
-            self.import(st, f, placement, slot)
+            self.import(st, f, placement, slot).map_err(|e| (e, false))
         };
-        let why = match taken {
-            Err(RenderError::Import(why)) => why,
-            other => return other,
+        let (e, from_copier) = match taken {
+            Ok(stats) => return Ok(stats),
+            Err(failed) => failed,
         };
-        self.shared.perf.add(Counter::ImportsRefused, 1);
-        {
-            let mut status = self.shared.status();
-            if status.import_refused.is_none() {
-                tracing::warn!("the GPU can't take the decoder's frames ({why}): downloading them");
-                status.import_refused = Some(why);
+        match (fallback_for(&e, from_copier), e) {
+            (Fallback::Sticky, RenderError::Import(why)) => {
+                self.shared.perf.add(Counter::ImportsRefused, 1);
+                let mut status = self.shared.status();
+                if status.import_refused.is_none() {
+                    tracing::warn!(
+                        "the GPU can't take the decoder's frames ({why}): downloading them"
+                    );
+                    status.import_refused = Some(why);
+                }
             }
+            (Fallback::ThisFrame, e) => {
+                tracing::warn!("downloading a frame the copier had no memory for: {e}");
+            }
+            (_, e) => return Err(e),
         }
         let start = Instant::now();
         let down = match f.to_system() {
             Some(Ok(d)) => d,
             Some(Err(e)) => {
+                // The frame doesn't know its file; the open does.
+                let path = self.shared.status().path.clone().unwrap_or_default();
                 return Err(RenderError::Invalid(format!(
-                    "downloading a frame the GPU can't import: {e}"
+                    "downloading a frame the GPU can't import: {}",
+                    e.or_path(&path)
                 )));
             }
             None => return Err(RenderError::Invalid("a frame without planes".into())),
@@ -692,30 +705,44 @@ impl UploadThread {
     /// and into `slot`. The copy is waited for, so that `f` can go back to
     /// its decoder; the buffer is held until the GPU has read it. `Import`
     /// when the device isn't shared or the copier can't take the frame.
+    /// An error comes with whether the copier gave it (`true`), which
+    /// [`fallback_for`] tells apart from the slot's.
     fn copy_out(
         &self,
         st: &mut State,
         f: &Arc<VideoFrame>,
         placement: &Placement,
         slot: &GpuFrame,
-    ) -> Result<UploadStats, RenderError> {
+    ) -> Result<UploadStats, (RenderError, bool)> {
         let start = Instant::now();
-        let shared = self.gpu.shared_video().map_err(RenderError::Import)?;
-        let picture = f
-            .vulkan()
-            .ok_or_else(|| RenderError::Invalid("a frame without a Vulkan image".into()))?;
-        let regions = upload::shown_regions(f.as_ref(), placement)?;
-        let copied = shared.copier.copy(picture, &regions)?;
-        shared.copier.wait(&copied)?;
+        let shared = self
+            .gpu
+            .shared_video()
+            .map_err(|why| (RenderError::Import(why), false))?;
+        let picture = f.vulkan().ok_or_else(|| {
+            (
+                RenderError::Invalid("a frame without a Vulkan image".into()),
+                false,
+            )
+        })?;
+        let regions = upload::shown_regions(f.as_ref(), placement).map_err(|e| (e, false))?;
+        let copied = shared
+            .copier
+            .copy(picture, &regions)
+            .map_err(|e| (e, true))?;
+        shared.copier.wait(&copied).map_err(|e| (e, true))?;
         shared.copier.order_before(&self.gpu.queue, &copied);
-        let mut stats = st.uploader.upload_from_buffer(
-            &self.gpu,
-            f.as_ref(),
-            &copied.buffer,
-            &copied.planes,
-            placement,
-            slot,
-        )?;
+        let mut stats = st
+            .uploader
+            .upload_from_buffer(
+                &self.gpu,
+                f.as_ref(),
+                &copied.buffer,
+                &copied.planes,
+                placement,
+                slot,
+            )
+            .map_err(|e| (e, false))?;
         self.gpu.queue.on_submitted_work_done(move || drop(copied));
         stats.cpu_ms = start.elapsed().as_secs_f32() * 1e3;
         self.shared.perf.add(Counter::VulkanCopies, 1);
@@ -769,5 +796,86 @@ pub(crate) fn placement_of(info: Option<&VideoStreamInfo>) -> Placement {
         right: 1.0 - u1,
         bottom: 1.0 - v1,
         stereo,
+    }
+}
+
+/// What becomes of a frame on its decoder's device that failed to go
+/// into a slot there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fallback {
+    /// Downloaded, and zero copy off for the opens after: the GPU
+    /// refuses the decoder's frames.
+    Sticky,
+    /// Downloaded, this frame alone: the copier had no memory for its
+    /// buffer, which says nothing of the slot or of the next frame.
+    ThisFrame,
+    /// The upload fails as any other does: a slot without memory dies,
+    /// a lost device stops uploads, and anything else drops the frame.
+    Fail,
+}
+
+/// The fallback for `e`, from the copier (`from_copier`) or not. Out of
+/// memory kills the slot only when the slot ran out (D34); the copier's
+/// buffer is its own.
+fn fallback_for(e: &RenderError, from_copier: bool) -> Fallback {
+    match e {
+        RenderError::Import(_) => Fallback::Sticky,
+        RenderError::OutOfMemory(_) if from_copier => Fallback::ThisFrame,
+        _ => Fallback::Fail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_slots_own_lack_of_memory_kills_it() {
+        let oom = || RenderError::OutOfMemory("a copy out of the decoder");
+        // The check: each failure, from the copier and from elsewhere.
+        let rule = |fallback: fn(&RenderError, bool) -> Fallback| -> Result<(), String> {
+            let want = [
+                (
+                    RenderError::Import("refused".into()),
+                    true,
+                    Fallback::Sticky,
+                ),
+                (
+                    RenderError::Import("refused".into()),
+                    false,
+                    Fallback::Sticky,
+                ),
+                (oom(), true, Fallback::ThisFrame),
+                (oom(), false, Fallback::Fail),
+                (RenderError::Device("lost".into()), true, Fallback::Fail),
+                (RenderError::Invalid("odd".into()), false, Fallback::Fail),
+            ];
+            for (e, from_copier, wanted) in want {
+                let got = fallback(&e, from_copier);
+                if got != wanted {
+                    return Err(format!(
+                        "{e} (copier: {from_copier}) is {got:?}, not {wanted:?}"
+                    ));
+                }
+            }
+            Ok(())
+        };
+        rule(fallback_for).unwrap();
+        // Its control: the old rule, under which any lack of memory killed
+        // the slot.
+        fn old(e: &RenderError, _from_copier: bool) -> Fallback {
+            match e {
+                RenderError::Import(_) => Fallback::Sticky,
+                _ => Fallback::Fail,
+            }
+        }
+        let why =
+            spherecut_testkit::control::must_fail("every lack of memory the slot's", rule(old));
+        assert!(
+            why.starts_with(
+                "the GPU ran out of memory for a copy out of the decoder (copier: true) is Fail"
+            ),
+            "{why}"
+        );
     }
 }
