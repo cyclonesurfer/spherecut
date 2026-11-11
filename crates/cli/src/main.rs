@@ -201,7 +201,9 @@ enum Cmd {
     /// same roots and limits, and print its result as one JSON document
     /// (docs/agents.md).
     Call {
-        /// The tool: probe, look, analyze, check or doctor.
+        /// The tool: probe, look, analyze, check, doctor, project, edit,
+        /// undo or compare (docs/agents.md). render and job run only under
+        /// `spherecut mcp`.
         tool: String,
         /// Its arguments, a JSON object, as an agent sends them, such as
         /// '{"files": ["a.mp4"]}'.

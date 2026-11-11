@@ -1,10 +1,15 @@
 //! Spherecut for agents (PLAN track A, D23, D43): the MCP server behind
 //! `spherecut mcp`, and the tools it and `spherecut call` share.
 //!
-//! An agent reads footage through five tools (probe, look, analyze,
-//! check, doctor), read-only but for look's `output`, and reads, makes
-//! and edits projects through three more (project, edit, undo; A2,
-//! [`mod@reference`] for the ops); docs/agents.md has them all. Each is a
+//! An agent reads footage through five tools (`probe`, `look`,
+//! `analyze`, `check`, `doctor`), read-only but for look's `output`;
+//! reads, makes and edits projects through three more (`project`,
+//! `edit`, `undo`; A2, [`mod@reference`] for the ops); renders a project
+//! and follows the render through two (`render`, `job`); and holds a
+//! video to a file or a project's render with `compare`: eleven, and
+//! docs/agents.md has them all. [`call`], which `spherecut call` runs,
+//! takes every tool but `render` and `job` ([`CALL_REFUSES`]), whose
+//! render would end with the call. Each is a
 //! schema in `docs/agents/schemas/` and an op in [`ops`]. [`rpc`] is the
 //! protocol, [`tools`] the table between the two. Nothing here touches
 //! the network: what a tool returns goes to the agent, and from there to
@@ -46,9 +51,9 @@ look with mode sheet or sphere to see a whole clip or sphere; analyze for timing
 over time; then look with a view or views at the moments that matter. check says whether a file's \
 metadata fits its picture and a target such as youtube_360; doctor what this machine decodes. Where \
 the server allows writing, make a video: project create; project part edits once for the ops; edit, \
-all or none, one undo step; undo takes back the last step only if an agent made it. Edit times are \
-the media file's; look and compare with a project take the render's (0 is its first frame), and \
-compare's from the file's. render \
+all or none, one undo step; undo takes back the last step only if an agent made it. Edit times and \
+render's range are the media file's; look and compare with a project take the render's (0 is its \
+first frame), and compare's from the file's. render \
 answers at once with a job: job with wait follows it, then check its file or compare it with the \
 project. Images are 768 px long by default, up to 1568 inline. Times are strings (\"12.5\", \
 \"1:02.5\", \"30000/1001\", \"120f\" for frame 120) or [num, den], never bare numbers. Angles are \

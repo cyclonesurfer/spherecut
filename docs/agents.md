@@ -394,10 +394,14 @@ true, `idempotentHint` false).
   (seconds, up to 45) returns when it ends or the time passes, sending
   progress if the call asked for it; one call waits at a time, and
   another answers at once with a `note`. opencode's calls end after
-  30 s, so wait less there. `cancel` stops it and its file, within 2 s.
-  The last 16 finished jobs are kept; an id this server didn't give
-  (one from a server that has ended, or another that is running) is
-  `job_lost`. When the server ends, its renders are cancelled;
+  30 s, so wait less there. `cancel` stops it and its file, within 2 s,
+  unless the export is wedged (a driver or FFmpeg that hangs): then
+  `cancel` answers with the job still `running` (or `finishing`) after
+  2 s, and later renders wait behind it until the server is restarted.
+  The last 16 finished jobs are kept. An id from another server (one
+  that has ended, or another that is running) is `job_lost`; one of
+  this server's that it no longer keeps, or never gave, is
+  `not_found`. When the server ends, its renders are cancelled;
   a file a killed server left is removed by the next render in that
   folder.
 - **`compare`**: how alike `file` is to `against_file` (a video of the
@@ -517,7 +521,7 @@ FFmpeg's own. The codes:
 | `bad_argument` | Wrong type, unknown or missing, or a time as a bare number |
 | `out_of_range` | Outside its range: a time past the end, too many files or tiles |
 | `outside_roots` | Outside every read root (or the write root, for `output`), or leading out of one |
-| `not_found` | Nothing there, a dangling link, or not readable |
+| `not_found` | Nothing there, a dangling link, or not readable; or a job id of this server's that it no longer keeps or never gave |
 | `not_a_file` | Not a regular file (a folder, a pipe, a device) |
 | `not_a_folder` | Not a folder |
 | `unsupported_container` | Empty, or not MP4, MOV, Matroska or WebM |
@@ -550,7 +554,7 @@ FFmpeg's own. The codes:
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
-| `job_lost` | A job this server didn't give (one that has ended, or another running); render again |
+| `job_lost` | A job of another server (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |
 | `no_encoder` | No encoder here for the project's codec |
 | `hw_unavailable`, `hw_unsupported`, `hw_failed` | A render's hardware encoder isn't there, turned the job down, or failed, with nothing to fall back to |
@@ -578,9 +582,44 @@ How the codes of media and render (the CLI's `--json`, D27, and
 
 JSON-RPC errors are only for requests that are malformed or unknown:
 -32700 for JSON that doesn't parse (with a null id; the next line is
-read), -32600 for a request before `initialize`, a batch, or a line over
-1 MiB, -32601 for an unknown method, -32602 for an unknown tool, and
--32022 for 2026-07-28's form.
+read); -32600 for a request other than `ping` before `initialize`
+(`ping` is answered at any time, as MCP allows), a second `initialize`,
+a call whose id a call still running has, a batch, a message that isn't
+a JSON object, one without `"jsonrpc": "2.0"` or a string `method`, an
+`id` that isn't a string or an integer, `params` that aren't an object,
+or a line over 1 MiB; -32601 for an unknown method, -32602 for an
+unknown tool, and -32022 for 2026-07-28's form.
+
+## Warnings
+
+A result's `warnings` don't fail the call: the tool did what it could,
+and says what it left out or doubts. The tools' own codes:
+
+| Code | Tool | Meaning |
+|---|---|---|
+| `deadline` | `probe` | A folder's page stopped when the call's time ran out; `next_cursor` goes on from there |
+| `result_full` | `probe` | A folder's page stopped when the result was full; `next_cursor` goes on from there |
+| `entries_left_out` | `probe` | The folder has more entries than the 10,000 probe reads (`FOLDER_ENTRIES`); move clips to subfolders to see them all |
+| `report_cut` | `probe` | Reports marked `report_cut` were shortened to fit the result (lists, tags and strings cut, ending in `…`; a null report didn't fit at all); probe fewer files for more |
+| `streams_left_out` | `look` | `raw` shows the first 4 of the file's video streams (`RAW_STREAMS`) |
+| `damaged` | `analyze` | The stream or its audio can't be read past the time the message gives; what comes after isn't measured |
+| `untimed_packets` | `analyze` | `timing`: packets without a timestamp, which aren't counted |
+| `result_cut` | `check` | Passed rules' messages, then advice, left out to fit 2 KiB (`CHECK_BYTES`) |
+| `not_equirect` | `project` | `create` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
+| `history_not_saved` | `edit`, `undo` | The project was saved but its history wasn't: `undo` can't take the step back |
+| `outside_trim` | `edit` | Keys or markers the edits left outside the clip's trim, which no render shows |
+| `sheet_left_out` | `compare` | `sheet` was asked for, but the video's shape leaves its tiles too small to label |
+
+The others are the CLI's, with the meanings `docs/cli-json.md` gives
+them: a frame's (`stereo_left_eye`, `stereo_unknown`, `crop_applied`,
+`pose_not_applied`, `anisotropy_unavailable`, and damage after the
+frame, `truncated`, `damaged` or `io_error`) in `look`, `compare` and a
+project's frames; a file's report warnings and damage in `probe`'s
+`problems` and `doctor`'s `file`; and an export's in `render`'s answer
+(`free_space_unknown`) and a finished `job`'s `report` (`h264_level_6`,
+`no_audio`, `audio_encoded`, `ambix_not_turned`, `audio_ends_early`).
+A hardware decode or encode that fell back to software isn't a
+warning: it is the result's `fallback`.
 
 ## Images and output limits
 

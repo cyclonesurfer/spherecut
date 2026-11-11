@@ -394,7 +394,10 @@ mod tests {
                 assert!(list.len() <= MAX_TOOLS, "{} tools", list.len());
                 let all = bytes(&list);
                 let a1 = bytes(&list[..A1_TOOLS]);
-                eprintln!("tools/list on {version}: {count} tools, {all} bytes, A1's {a1}");
+                println!(
+                    "tools/list on {version}, {count} tools: {all} of {MAX_LIST_BYTES} bytes; \
+                     A1's tools {a1} of {A1_LIST_BYTES}"
+                );
                 assert!(all <= MAX_LIST_BYTES, "{all} bytes");
                 assert!(a1 <= A1_LIST_BYTES, "{a1} bytes, past A1's share");
                 for t in &list {

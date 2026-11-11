@@ -440,7 +440,9 @@ D51); each flag changes one for this run only, and isn't saved:
   `--eight-bit` for 8-bit from a 10-bit source.
 - `--encoder`: `auto` encodes on the GPU's VA-API encoder and goes on in
   software, saying why, when it can't open or fails in its first second;
-  `vaapi` fails instead (exit 3), and `software` never tries the GPU.
+  `vaapi` fails instead (exit 3), as `auto` does when VA-API is the only
+  encoder for the codec (H.264 with stock Fedora's ffmpeg-free, which
+  has no libx264), and `software` never tries the GPU.
 - `--range IN..OUT`: the part of the sequence, in sequence time, each
   end as frame's `--time` takes it and either left out (`2..7.5`,
   `1:00..90f`, `5..`, `..10`).
