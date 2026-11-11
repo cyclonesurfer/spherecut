@@ -5837,11 +5837,12 @@ past the end starts at the start. Opening a file clears it, and
 camera's two lenses as a frame-locked pair, which changes five things
 above for that pair alone:
 
-- **Slots.** The ring uses all six slots while the pair is locked,
-  whatever `gpu_slots` says, until the next open or a close. A slot
-  dying below two live slots a lens unlocks the pair
-  (`LockRefused` with `"slots"`). "Two streams on few slots" then
-  applies, as it does to unlocked streams.
+- **Slots.** The ring uses all six slots from the lock until the next
+  open or a close, an unlock included, whatever `gpu_slots` says.
+  Fewer than two live slots a lens unlock the pair (`LockRefused` with
+  `"slots"`), whether a slot dies or the lenses lock on a ring whose
+  slots died before. "Two streams on few slots" then applies, as it
+  does to unlocked streams.
 - **The present.** It shows both lenses' slots at one clip time or
   neither (`lock::pick_pair`), never a lens's frame as it arrives.
 - **The cache and catch-up.** The cache runs from the group base, the
@@ -10106,6 +10107,12 @@ What:
     and lets the cache's group go (`set_group(None)`) under the same
     status lock. Each lens's frame then shows as it comes, as D34's
     "two streams on few slots" says.
+  - Dead slots stay dead for the player's life, so the floor is
+    checked as the lenses lock too, under the status lock that locks
+    them: a pair opened again after an unlock, or locking after slots
+    died while its lenses opened, is refused with `"slots"` there, and
+    the cache never learns its group. Locked below the floor, it would
+    wait for good for a slot death that never comes.
   - `Player::fail_slot_allocations(n)`, doc-hidden, plants the GPU
     running out of memory for the next `n` slot allocations.
   - The 8 slots of P-LOCK's redirect aren't built.
@@ -10173,38 +10180,50 @@ Tested:
     budget resyncs the pair.
   - `play.rs`, read back from the GPU:
     - The mixed run plays 64 seeds of seeks, steps, plays at three
-      rates and pauses, with lens 1 2.5 to 3 times lens 0's cost. No
-      pair is shown apart, by tag or by content, and its
-      `open_streams` control counts both.
+      rates and pauses, with lens 1 at 2.5 to 3 times lens 0's cost,
+      its own jittered. No pair is shown apart, by tag or by content,
+      and its `open_streams` control counts both.
     - The pacing test's three cases meet the rule, and its control,
       without the group base, freezes. Its clock moves a frame every
       3 ms of wall time, and it presents every 4 ms or so. A present
       whose pair isn't up yet waits for it, 25 ms at most. Without
       that wait, 2 runs of the suite in about 50 failed: after lens 1
       caught up several frames, lavapipe took one present too long to
-      put both lenses' frames up.
+      put both lenses' frames up. Such a present is counted late, and
+      more than 3 after the warm-up fail the case, so pairs slow to go
+      up throughout still fail; the frozen control fails that too. In
+      52 runs of the suite, 12 of them beside 4 busy loops, a case
+      counted 1 late twice, and 0 otherwise.
     - Six slots are used on a setting of three.
     - Slots killed to 3, mid-play and mid-seek, unlock the pair with
-      `"slots"`; without the floor it sticks.
+      `"slots"`, and the pair opened again on the 3 left is refused
+      with `"slots"` as it locks, and plays. Without the floor, both
+      stick.
     - A read error on lens 1 mid-play ends the pair at its last frame;
       without the rule nothing ends.
-  - The suite takes 3.6 to 4.2 s on the cloud box (4 Xeon cores,
-    lavapipe), within the plan's 10 s; 35 runs in a row passed, 15 of
-    them beside 4 busy loops (5.1 to 7.1 s). `play.rs`'s five tests
-    sum to 6.1 to 6.5 s, over their 5.5 s share. Two waits dominate:
-    the floor's and the failure's controls wait 1.5 s each for nothing
-    to happen. Beside the busy loops the floor's mid-seek case once
-    found the seek's frames up before its failures were planted; the
-    failures now go in first, once the open's frames are up.
+  - The suite takes 3.7 to 4.3 s on the cloud box (4 Xeon cores,
+    lavapipe), within the plan's 10 s, and 5.2 to 9.4 s beside 4 busy
+    loops. `play.rs`'s five tests sum to 4.4 to 4.9 s, within their
+    5.5 s share, with outliers: the mixed run's second half now and
+    then takes two to four times its presents (1 run in about 50
+    alone, 4 in 20 beside the busy loops), up to 3.3 s alone and 6.0 s
+    loaded. The floor's and the failure's controls call the player
+    stuck after 0.5 s of nothing moving, not the 1.5 s of `STUCK` the
+    other controls wait: each control's freeze is for good, and the
+    slots die before it. Beside the busy loops the floor's mid-seek
+    case once found the seek's frames up before its failures were
+    planted; the failures now go in first, once the open's frames are
+    up.
 - `engine.rs`'s `a_fallback_on_one_lens_keeps_the_pair_locked`
   (`FaultBackend` with a plan on lens 1 alone) and app's
   `raw.rs` `the_raw_view_locks_an_mp4_pair` (the Matroska control
   refused with `"timing"`).
 - `tier2_playback`'s Tier 1 `the_bench_harness_plays_a_locked_pair`
   reads pair64's corner codes back from both slots, on lavapipe:
-  - on every frame shown unthrottled and in real time;
-  - at 100 seek landings.
-  Its controls, planted, must fail: the run unlocked; lens 0's slot
+  - on every frame shown unthrottled, and at 100 seek landings;
+  - in real time, by the tags.
+  Its controls, planted, must fail: the run unlocked, which the slot
+  hashes of `zero_copy_pair_matches_copy` call broken; lens 0's slot
   read for both; lens 1 a frame late; lens 1 from another landing.
 - Tier 2h, pending odin:
   - `samples_lens_pairs_frame_locked`: 100 exact seeks land both lenses
@@ -10214,7 +10233,9 @@ Tested:
     the tags.
   - `zero_copy_pair_matches_copy`: path B's slots, and path A's where
     the GPU imports DMA-BUFs, hashed against the same decoder's copy,
-    locked.
+    locked. A zero-copy run that fails, stalls or doesn't hold the
+    lock fails the test; only one that keeps no frame on the GPU, or
+    has one refused, skips.
   - P-LOCK in `bench_playback_x5_raw`: each X5 mode played as the app
     plays it, unlocked then locked, with the locked rows beside the
     unlocked and a verdict:
