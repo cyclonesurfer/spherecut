@@ -23,6 +23,7 @@ use spherecut_core::video::{
 use spherecut_core::{FrameRate, Rational, StopSource, StopToken, Time};
 use spherecut_media::backend::{self, VideoFrame};
 use spherecut_playback::{FrameCache, Insert, MIN_FRAMES};
+use spherecut_testkit::control::must_fail;
 
 const RATE: FrameRate = FrameRate::FPS_30;
 
@@ -698,18 +699,220 @@ fn frames_holding_a_surface_stay_under_their_streams_cap() {
 /// frames go in and the playhead moves, and the playhead itself while no
 /// such time exists (M3 plan section 9).
 #[test]
-#[ignore = "M3.8 unit (c)"]
 fn the_group_base_is_the_newest_common_time() {
-    todo!()
+    // Each step's base as `playhead` reads it, which is the base with a
+    // group: the first that isn't frame `want` fails the run.
+    let run = |grouped: bool| -> Result<(), String> {
+        let c = FrameCache::new(1 << 20, Time::from_secs(1));
+        if grouped {
+            c.set_group(Some([0, 1]));
+        }
+        let base = |want: Time, step: &str| {
+            let (playhead, stats) = (c.playhead(), c.stats());
+            if playhead != want {
+                return Err(format!("{step}: the base is {playhead:?}, not {want:?}"));
+            }
+            assert_eq!(stats.base, grouped.then_some(want), "{step}");
+            assert_eq!(c.group_base(), stats.base, "{step}");
+            Ok(())
+        };
+        c.set_playhead(at(5));
+        base(at(5), "nothing held")?;
+        for k in 0..=8 {
+            assert_eq!(c.try_insert(0, frame(k, 1, k as u64, 10)), Insert::Stored);
+        }
+        base(at(5), "one member alone")?;
+        for k in 0..=3 {
+            assert_eq!(c.try_insert(1, frame(k, 1, k as u64, 10)), Insert::Stored);
+        }
+        base(at(3), "member 1 to frame 3")?;
+        assert_eq!(c.try_insert(1, frame(4, 1, 4, 10)), Insert::Stored);
+        base(at(4), "member 1's frame 4 in")?;
+        // The playhead moves: back, between frames, and on past both.
+        c.set_playhead(at(2));
+        base(at(2), "the playhead back at 2")?;
+        c.set_playhead(half(7));
+        base(at(3), "the playhead between 3 and 4")?;
+        assert!(c.try_set_playhead(at(30)));
+        base(at(4), "the playhead past both")?;
+        // A seek on its way holds the base at its time until both
+        // members have landed or failed it; an older request's move
+        // after it holds nothing.
+        c.seek_playhead(0, 7, at(20));
+        base(at(20), "a seek to 20 on its way")?;
+        c.landed(0, Some(7));
+        c.seek_playhead(1, 6, at(20));
+        c.landed(1, Some(6));
+        base(at(20), "member 0 landed")?;
+        c.landed(1, Some(7));
+        base(at(4), "both landed")?;
+        // A member that landed before the next request's hold was made
+        // isn't waited for.
+        c.landed(0, Some(8));
+        c.seek_playhead(1, 8, half(3));
+        base(half(3), "member 1 seeking")?;
+        c.landed(1, Some(8));
+        base(at(1), "member 1 landed too")?;
+        Ok(())
+    };
+    run(true).unwrap();
+
+    // Control: no group, and the base is the playhead given.
+    let e = must_fail("no group", run(false));
+    assert!(e.starts_with("member 1 to frame 3"), "{e}");
 }
 
 /// The cache's rules run from the group base: the faster member decodes
 /// at most its window past it, held back to the slower one, and each
 /// member's frame at the base is never evicted.
 #[test]
-#[ignore = "M3.8 unit (c)"]
 fn the_group_base_holds_the_faster_lens_back() {
-    todo!()
+    // Room for six frames of 10 bytes, a window of one (15 bytes, half
+    // the budget shared by two streams), and a playhead at frame 10.
+    // Member 1 holds frames 0 to 2; member 0 offers 0 to 10 as fast as
+    // it can. What member 0 holds after, and the frames it was refused.
+    let run = |grouped: bool| {
+        let c = FrameCache::new(60, Time::from_secs(1));
+        if grouped {
+            c.set_group(Some([0, 1]));
+        }
+        c.set_playhead(at(10));
+        for k in 0..=2 {
+            assert_eq!(c.try_insert(1, frame(k, 1, k as u64, 10)), Insert::Stored);
+        }
+        let full: Vec<i64> = (0..=10)
+            .filter(|&k| c.try_insert(0, frame(k, 1, k as u64, 10)) == Insert::Full)
+            .collect();
+        let held: Vec<i64> = c
+            .held()
+            .iter()
+            .filter(|(s, _)| *s == 0)
+            .map(|(_, f)| index(f))
+            .collect();
+        (c, held, full)
+    };
+    // The base is 2: member 0 keeps its frame there and one frame past
+    // it, its window, and is refused the rest.
+    let (c, held, full) = run(true);
+    assert_eq!(
+        (held.as_slice(), full.as_slice()),
+        ([1, 2, 3].as_slice(), [4, 5, 6, 7, 8, 9, 10].as_slice())
+    );
+    assert_eq!(c.group_base(), Some(at(2)));
+    assert!(c.stats().bytes <= 60);
+
+    // A worker's insert of frame 4 waits until member 1's frame 3 moves
+    // the base on.
+    let c = Arc::new(c);
+    let (tx, rx) = mpsc::channel();
+    let worker = {
+        let c = c.clone();
+        std::thread::spawn(move || {
+            tx.send(c.insert(0, frame(4, 1, 4, 10), &StopToken::never()))
+                .unwrap();
+        })
+    };
+    assert!(rx.recv_timeout(Duration::from_millis(300)).is_err());
+    assert_eq!(c.stats().waiting, 1);
+    assert_eq!(c.try_insert(1, frame(3, 1, 3, 10)), Insert::Stored);
+    assert_eq!(rx.recv_timeout(Duration::from_secs(10)), Ok(Insert::Stored));
+    worker.join().unwrap();
+    assert_eq!(c.group_base(), Some(at(3)));
+    assert_eq!(c.stats().waiting, 0);
+
+    // Control: no group, and member 0's frame 2 is history, evicted
+    // first, while it runs on to the playhead.
+    let (_, held, full) = run(false);
+    must_fail("no group", held.contains(&2));
+    assert_eq!(
+        (held.as_slice(), full.len()),
+        ([6, 7, 8, 9, 10].as_slice(), 0)
+    );
+}
+
+/// The backstop: with every member of the group waiting for room
+/// decoding ahead, and no time past the base at which each holds a frame,
+/// the cache holds the base at the earliest frame they wait with and
+/// tells each member, once, to seek there. A member whose token has
+/// stopped is on its way to a newer request, and isn't counted.
+#[test]
+fn the_backstop_resyncs_members_stuck_ahead() {
+    // Room for six frames of 10 bytes, a window of one, a playhead at
+    // frame 10 and the base at 2: member 0 holds 1 to 3, and member 1
+    // holds 1, 2 and 6, so that both windows are full. Member 0 offers
+    // frame 4 from one thread, then member 1 frame 7 from another, each
+    // with its own token, decoding ahead or not, member 0's token stopped
+    // first or not. What each offer came to by 200 ms after member 1's,
+    // and the base and the resyncs counted then.
+    let run = |ahead: bool, stopped: bool| {
+        let c = Arc::new(FrameCache::new(60, Time::from_secs(1)));
+        c.set_group(Some([0, 1]));
+        c.set_playhead(at(10));
+        for (s, k) in [(0, 1), (0, 2), (0, 3), (1, 1), (1, 2), (1, 6)] {
+            assert_eq!(c.try_insert(s, frame(k, 1, k as u64, 10)), Insert::Stored);
+        }
+        assert_eq!(c.group_base(), Some(at(2)));
+        let (tx, rx) = mpsc::channel();
+        let offer = |s: usize, k: i64, stops: &StopSource| {
+            let (c, tx, stop) = (c.clone(), tx.clone(), stops.next());
+            std::thread::spawn(move || {
+                let f = frame(k, 1, k as u64, 10);
+                let r = if ahead {
+                    c.insert_ahead(s, f, &stop)
+                } else {
+                    c.insert(s, f, &stop)
+                };
+                tx.send((s, r)).unwrap();
+            })
+        };
+        let stops = [StopSource::new(), StopSource::new()];
+        let first = offer(0, 4, &stops[0]);
+        let waiting = Instant::now();
+        while c.stats().waiting < 1 {
+            assert!(waiting.elapsed() < Duration::from_secs(10));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        if stopped {
+            stops[0].next();
+        }
+        let second = offer(1, 7, &stops[1]);
+        let mut got = BTreeMap::new();
+        let by = Instant::now() + Duration::from_millis(200);
+        while got.len() < 2
+            && let Ok((s, r)) = rx.recv_timeout(by.saturating_duration_since(Instant::now()))
+        {
+            got.insert(s, r);
+        }
+        let (base, resyncs) = (c.group_base(), c.stats().resyncs);
+        stops.iter().for_each(|s| s.shutdown());
+        first.join().unwrap();
+        second.join().unwrap();
+        (c, got, base, resyncs)
+    };
+    let resync = Insert::Resync { at: at(4) };
+
+    // Both waiting ahead: the base is held at member 0's frame 4, and
+    // each member is told to seek there. Once both have put a frame
+    // there in, the hold ends, and the base is the newest common time.
+    let (c, got, base, resyncs) = run(true, false);
+    assert_eq!(got, BTreeMap::from([(0, resync), (1, resync)]));
+    assert_eq!((base, resyncs), (Some(at(4)), 1));
+    assert_eq!(c.try_insert(0, frame(4, 2, 0, 10)), Insert::Stored);
+    assert_eq!(c.group_base(), Some(at(4)));
+    assert_eq!(c.try_insert(1, frame(4, 2, 0, 10)), Insert::Stored);
+    assert_eq!((c.group_base(), c.stats().resyncs), (Some(at(4)), 1));
+
+    // Member 0's token stopped, the run above its control: its offer is
+    // on its way out, and member 1 waits on, the base where it was.
+    let (_, got, base, resyncs) = run(true, true);
+    assert_eq!(got, BTreeMap::from([(0, Insert::Stopped)]));
+    assert_eq!((base, resyncs), (Some(at(2)), 0));
+
+    // Control: neither decoding ahead (a request's frames), and both
+    // wait on.
+    let (_, got, base, resyncs) = run(false, false);
+    must_fail("not decoding ahead", got.len() == 2);
+    assert_eq!((got.len(), base, resyncs), (0, Some(at(2)), 0));
 }
 
 // The model-checked property test.
@@ -1099,7 +1302,8 @@ fn offer(
             );
             prop_assert!(!after.contains_key(&(s, k)));
         }
-        Insert::Stopped => prop_assert!(false, "stopped"),
+        // No group here, and `try_insert` waits for nothing.
+        Insert::Stopped | Insert::Resync { .. } => prop_assert!(false, "{:?}", r),
     }
     let mut start = before.clone();
     if r != Insert::Full {
