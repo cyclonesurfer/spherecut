@@ -3351,9 +3351,12 @@ fn apart(presents: &[[Option<Time>; 2]]) -> usize {
 /// [`lock_held`] says (a failure in `zero_copy_pair_matches_copy`, never
 /// a skip); the second pass's lenses swapped differ from the first's;
 /// each pass's first slot, judged as its lens's next frame and as the
-/// other lens's, fails as the frame it is; lens 0's slot read for both
-/// fails the codes' check, lens 1 a frame late in one present fails the
-/// harness's count, and lens 1 where another seek left it fails the
+/// other lens's, fails as the frame it is; a pass judged against the
+/// truth with its lenses' frames crossed finds every slot wrong, tells
+/// each apart as the other lens's frame at its place (the same read
+/// again and in the cache), and fails the report; lens 0's slot read for
+/// both fails the codes' check, lens 1 a frame late in one present fails
+/// the harness's count, and lens 1 where another seek left it fails the
 /// landing's.
 #[test]
 fn the_bench_harness_plays_a_locked_pair() {
@@ -3384,6 +3387,16 @@ fn the_bench_harness_plays_a_locked_pair() {
     let truth = Truth::decode(&path, &streams, 4 + REACH).unwrap();
     let passes = [(); 2].map(|_| slot_pass(&rig, &path, &streams, &run, 4, false, &truth));
     let unlocked = slot_pass(&rig, &path, &streams, &Run::software(), 4, false, &truth);
+    // The truth with each lens's frames given as the other's.
+    let crossed = Truth {
+        lenses: (0..2)
+            .map(|l| TruthLens {
+                stream: truth.lenses[l].stream,
+                frames: truth.lenses[1 - l].frames.clone(),
+            })
+            .collect(),
+    };
+    let misjudged = slot_pass(&rig, &path, &streams, &run, 4, false, &crossed);
     let landings = seek_landings(&rig, &path, &streams, &run, Some((&mut reader, rate))).unwrap();
     std::fs::remove_dir_all(&dir).ok();
 
@@ -3443,6 +3456,41 @@ fn the_bench_harness_plays_a_locked_pair() {
     for p in &passes {
         check_controls(p.controls.as_ref().unwrap());
     }
+    // Judged against the crossed truth, every slot is wrong, told apart
+    // as the other lens's frame at its place, the same when read again
+    // and in the cache as in the slot; and the report fails it as a copy
+    // side's fault.
+    assert_eq!(misjudged.broken, None);
+    assert_eq!(misjudged.wrong().count(), 8, "{misjudged:?}");
+    for (&(lens, _), s) in misjudged.wrong() {
+        let w = s.first_wrong.as_ref().unwrap();
+        assert_eq!(
+            w.wrong.like().map(|l| (l.lens, l.off)),
+            Some((1 - lens, 0)),
+            "{}",
+            w.wrong
+        );
+        assert!(matches!(w.again, Again::Same), "{}", w.again);
+        assert!(matches!(w.cached, Cached::AsSlot), "{}", w.cached);
+    }
+    let report = pair_report(&[Played {
+        file: "pair64-matched".into(),
+        path: "software",
+        variant: "crossed truth",
+        passes: vec![("copy 1", false, misjudged)],
+    }]);
+    let failed = must_fail(
+        "a pass judged against the crossed truth",
+        if report.is_empty() {
+            Ok(())
+        } else {
+            Err(report)
+        },
+    );
+    assert!(
+        failed[0].starts_with("copy wrong: 1 copied passes"),
+        "{failed:?}"
+    );
     let (tag, codes) = read[5];
     must_fail(
         "lens 0's slot read for both",
@@ -4339,7 +4387,10 @@ struct Seen {
     uploaded: u32,
     /// Its slot's [`Yuv::hash`] at its first showing.
     hash: u64,
-    /// The showings that weren't the truth's, and the first of them.
+    /// The showings that weren't the truth's, and the first of them,
+    /// told apart, for the first [`LISTED`] frames of a pass that are
+    /// wrong (telling one apart reads it again, downloads its frame in the
+    /// cache and looks through the truth's frames near it).
     wrong: u32,
     first_wrong: Option<Showing>,
 }
@@ -4401,6 +4452,15 @@ impl SlotPass {
     /// The frames shown other than the truth's, at least once.
     fn wrong(&self) -> impl Iterator<Item = (&(usize, i64), &Seen)> {
         self.keys.iter().filter(|(_, s)| s.wrong > 0)
+    }
+
+    /// The wrong frames told apart so far: the first [`LISTED`], whose
+    /// lines the report gives.
+    fn told(&self) -> usize {
+        self.keys
+            .values()
+            .filter(|s| s.first_wrong.is_some())
+            .count()
     }
 }
 
@@ -4584,20 +4644,25 @@ fn look(
                 crossed: (other != lens).then(|| truth.judge(&slot, other, i)),
             });
         }
-        let judged = index.map_or(Err(Wrong::NotInTruth), |i| truth.judge(&slot, lens, i));
+        let right = truth.holds(&slot, lens, index);
+        let told = pass.told();
         let seen = pass.keys.entry((lens, pts)).or_default();
         seen.index = index;
         seen.shown += 1;
         if seen.shown == 1 {
             seen.hash = slot.hash();
         }
-        let Err(wrong) = judged else {
-            continue;
-        };
-        seen.wrong += 1;
-        if seen.first_wrong.is_some() {
+        if right {
             continue;
         }
+        seen.wrong += 1;
+        if seen.first_wrong.is_some() || told >= LISTED {
+            continue;
+        }
+        let Err(wrong) = index.map_or(Err(Wrong::NotInTruth), |i| truth.judge(&slot, lens, i))
+        else {
+            continue;
+        };
         let again = match read_slot(&on.gpu, f) {
             Ok(s) if s == slot => Again::Same,
             Ok(s) if truth.holds(&s, lens, index) => Again::Right,
@@ -5028,27 +5093,33 @@ fn pair_report(played: &[Played]) -> Vec<String> {
         for (name, _, p) in &g.passes {
             say(&g.row(name, p));
         }
-        say(&format!(
-            "{}, {}, {}: {}",
-            g.file,
-            g.path,
-            g.variant,
-            g.steadiness()
-        ));
+        let steady = g.steadiness();
+        if !steady.is_empty() {
+            say(&format!("{}, {}, {}: {steady}", g.file, g.path, g.variant));
+        }
     }
     for g in played {
         for (name, _, p) in &g.passes {
-            let wrong: Vec<_> = p.wrong().collect();
-            for &(&key, s) in wrong.iter().take(LISTED) {
+            let (told, more): (Vec<_>, Vec<_>) =
+                p.wrong().partition(|(_, s)| s.first_wrong.is_some());
+            for (&key, s) in told {
                 say(&g.key_line(name, key, s));
             }
-            if wrong.len() > LISTED {
+            if !more.is_empty() {
                 say(&format!(
-                    "{}, {}, {}, {name}: {} wrong frames more",
+                    "{}, {}, {}, {name}: {} wrong frames more, not told apart: {}",
                     g.file,
                     g.path,
                     g.variant,
-                    wrong.len() - LISTED
+                    more.len(),
+                    more.iter()
+                        .map(|&(&(lens, pts), s)| format!(
+                            "lens {lens} pts {pts} ({}, wrong {})",
+                            g.class(&(lens, pts)),
+                            s.wrong
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             }
         }
