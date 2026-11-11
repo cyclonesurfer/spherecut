@@ -40,8 +40,8 @@
 //! - `bench_playback_realtime_8k_8bit`: the 8K perf clip, recorded.
 //! - `bench_playback_x5_raw`: the longest file of each X5 recording mode,
 //!   its two lenses as two streams: M3's 8K budget, recorded, failing
-//!   only when a pass stalls (no frame for 5 s), as it does when the
-//!   engine stops. Then hw-test's two-track perf clips, both tracks
+//!   when an unthrottled pass stalls (no frame for 5 s), as it does when
+//!   the engine stops, or P-LOCK's verdict is Kill. Then hw-test's two-track perf clips, both tracks
 //!   opened as a sample's are, unthrottled only: on Auto's hardware as
 //!   the app plays it by default, and again with `SPHERECUT_ZERO_COPY=1`
 //!   where that imports VA-API's frames (path A), with notes on path A
@@ -55,10 +55,19 @@
 //!   beside the app's run: rows of unpaired presents, pairs presented,
 //!   drops, `pair_wait`, pair resyncs, slots, each lens's decodes and
 //!   path B's pool, and a verdict a mode (Pass, Redirect to 8 slots, or
-//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, at least 99 % of the
-//!   frames presented and at most 1 point more dropped than unlocked; at
-//!   8K25 on path B no pair apart and the pacing rule met, with the pairs
-//!   and `pair_wait` of each second that dropped.
+//!   Kill): at 8K30, 5.7K60 and 4K120 no pair apart, a new pair at 99 %
+//!   or more of the real-time presents that owed one, and at most 1 point
+//!   more dropped a lens than unlocked; at 8K25 on path B no pair apart
+//!   and the pacing rule met, with the pairs and `pair_wait` of each
+//!   second that dropped. A present owes a frame when its clock ran into
+//!   a later one since the present before, short of the end, or when it
+//!   is a loop's first after the seek back, so a rate above the presents'
+//!   and the loops of a short master owe only what can be shown ([`Owed`]).
+//!   The engine counts a locked pair's drops once a pair and an unlocked
+//!   player's for each stream, so the unlocked count is divided by its
+//!   streams. A real-time pass whose frame stands still for 5 s while its
+//!   clock runs has stalled, which with a pair apart or the lock undone
+//!   is Kill; a note sums every mode's verdict up.
 //! - `bench_playback_stitched_samples`: each stitched equirect among the
 //!   samples, gated as the perf clips are when it is within the criterion
 //!   (5.7K at 30 fps or less) and recorded otherwise; a skip saying so
@@ -75,14 +84,17 @@
 //! Where the GPU, hardware decode of the format, the perf clips or the
 //! samples aren't there, a benchmark records what it can and skips with
 //! the reason, which never counts as a pass. A run that only records and
-//! fails is a note saying why, but a stall fails the benchmark.
+//! fails is a note saying why, but an unthrottled pass's stall, or
+//! P-LOCK's Kill, fails the benchmark.
 //! `the_bench_harness_plays_on_lavapipe` runs the same harness in Tier 1,
 //! in software on a small clip, with one stream and with two, and
 //! `the_bench_harness_plays_both_tracks_of_a_pair` plays a 2 × 64² pair
 //! as the perf pairs are played, and `the_bench_harness_plays_a_locked_pair`
 //! plays it locked, reading its corner codes and its slots back as Tier
-//! 2h does, so that none can rot between hardware runs. Run the rest with
-//! `cargo xtask hw-test`.
+//! 2h does, so that none can rot between hardware runs;
+//! `p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens` scores
+//! synthetic passes as P-LOCK does. Run the rest with `cargo xtask
+//! hw-test`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -99,7 +111,9 @@ use spherecut_core::video::{
     Assumed, ChromaSiting, ColorCodes, ColorFamily, ColorInfo, Matrix, PixelLayout, PlaneDesc,
     Primaries, Range, SampleBytes, VideoPlanes,
 };
-use spherecut_core::{Clock, FrameRate, ManualClock, Rounding, StopToken, SystemClock, Time};
+use spherecut_core::{
+    Clock, FrameRate, ManualClock, Rational, Rounding, StopToken, SystemClock, Time,
+};
 use spherecut_media::HwDevice;
 use spherecut_media::backend::{
     DecodeMode, DecodePath, Fallback, FfmpegBackend, HwKind, HwOutput, MediaBackend, NextFrame,
@@ -109,6 +123,7 @@ use spherecut_media::decode::VideoDecoder;
 use spherecut_media::detect::Layout;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_media::probe::{self, ProbeReport, StreamKind};
+use spherecut_playback::budget::mem_available;
 use spherecut_playback::decoder::choose;
 use spherecut_playback::{
     CacheBudget, Counter, DecoderPreference, HwSupport, LockSpec, LockStatus, PerfStats, Player,
@@ -529,9 +544,17 @@ impl Screen {
 struct Second {
     /// Frames decoded, per stream.
     decoded: f64,
-    /// New frames on screen, of the first stream.
+    /// New frames on screen, of the first stream: of a locked pair, new
+    /// pairs.
     shown: u64,
+    /// Presents of the real-time pass that owed a new frame ([`Owed`]).
+    due: u64,
+    /// Frames passed over, as the engine counts them: once a pair for a
+    /// locked pair, summed over the streams otherwise
+    /// ([`Pass::drops_over`]).
     dropped: u64,
+    /// Frames a decoder behind the clock skipped, summed over the
+    /// streams: each worker counts its own.
     decode_dropped: u64,
     late: u64,
     /// The longest `pair_wait` a present of a locked pair recorded in the
@@ -550,8 +573,17 @@ struct Pass {
     loops: u64,
     /// UI ticks missed by taking longer than one.
     missed: u64,
-    /// Why an unthrottled pass stopped before the end, if it did.
+    /// Why an unthrottled pass stopped before the end, or why a real-time
+    /// pass stood still while its clock ran ([`Standing`]), if it did.
     stalled: Option<String>,
+    /// The streams played, and the streams `dropped` sums over: 1 for a
+    /// locked pair, whose frames passed over count once a pair (D67),
+    /// else every stream's. A share a lens divides by it.
+    streams: usize,
+    drops_over: usize,
+    /// `MemAvailable` as the pass began, in bytes, where `/proc/meminfo`
+    /// says.
+    mem_available: Option<u64>,
     /// Every sample each stage recorded, by [`Stage::name`].
     stages: BTreeMap<&'static str, Vec<f32>>,
     /// Where each stream decoded at the end, and whether it fell back.
@@ -749,6 +781,11 @@ impl Meter {
         self.current.late += 1;
     }
 
+    /// Note a present that owed a new frame ([`Owed`]).
+    fn due(&mut self) {
+        self.current.due += 1;
+    }
+
     /// Close every second that has passed by `now`.
     fn tick(&mut self, now: Instant) {
         self.gather();
@@ -779,6 +816,76 @@ impl Meter {
         self.pass.unpaired = unpaired - self.pairs[0];
         self.pass.resyncs = resyncs - self.pairs[1];
         self.pass
+    }
+}
+
+/// Which presents of a real-time pass owe a new frame (P-LOCK, M3 plan
+/// 4.3): a present owes one when the clock ran into a later frame since
+/// the present before, short of the clip's end, and the first present
+/// after the seek back to the start that a loop makes owes the play's
+/// first frame. So a present owes at most one, however many frames its
+/// clock passed (119.88 fps shown at 60 Hz owes 60 a second), and none
+/// while the clock stands: at the end, and through the seek, the landing
+/// and the preroll of a loop, which a short master makes every 3 to 5 s.
+/// The share presented is the presents that put a new frame up (a new
+/// pair, for a locked pair) over the presents that owed one.
+#[derive(Debug, Default)]
+struct Owed {
+    /// The time the present before was for.
+    last: Option<Time>,
+}
+
+impl Owed {
+    /// Whether the present for `time` (the clock one UI frame ahead, as
+    /// [`Presented::time`] is), at `rate`, owes a new frame, with the
+    /// clock `playing` or not and play `at_end` or not as the snapshot
+    /// after it says, of a clip that ends at `end` where that is known.
+    fn at(
+        &mut self,
+        time: Time,
+        rate: FrameRate,
+        playing: bool,
+        at_end: bool,
+        end: Option<Time>,
+    ) -> bool {
+        let frame = |t: Time| rate.time_to_frame(t, Rounding::Floor).unwrap_or(i64::MIN);
+        let owed = match self.last {
+            // Back to the start: a loop's seek, which owes the play's
+            // first frame; or the end's present, which set the clock back
+            // to the last frame and owes nothing.
+            Some(before) if time < before => !at_end,
+            Some(before) => playing && end.is_none_or(|e| time < e) && frame(time) > frame(before),
+            None => false,
+        };
+        self.last = Some(time);
+        owed
+    }
+}
+
+/// How long a real-time pass's first stream has shown one frame while
+/// its clock ran short of the end: a pass standing still for [`STALL`]
+/// has stalled, as an unthrottled one with no frame for as long has, and
+/// a locked pair's verdict is then Kill, since more slots wouldn't mend
+/// it (P-LOCK, M3 plan 4.3).
+#[derive(Debug)]
+struct Standing {
+    since: Instant,
+}
+
+impl Standing {
+    fn new(now: Instant) -> Self {
+        Standing { since: now }
+    }
+
+    /// How long the frame has stood at the present at `now`, which put a
+    /// new frame up or not, with the clock `playing` short of the end
+    /// (`at_end` false) or not: zero once it moves, or while the clock
+    /// stands.
+    fn at(&mut self, now: Instant, new: bool, playing: bool, at_end: bool) -> Duration {
+        if new || !playing || at_end {
+            self.since = now;
+        }
+        now.saturating_duration_since(self.since)
     }
 }
 
@@ -935,6 +1042,15 @@ fn stream_error(player: &Player) -> Result<(), String> {
     }
 }
 
+/// Where play ends: the earliest stream's end, once its decoding reached
+/// it, else its length.
+fn clip_end(snap: &PlayerSnapshot) -> Option<Time> {
+    snap.streams
+        .iter()
+        .filter_map(|s| s.end.or_else(|| s.info.as_ref()?.duration))
+        .min()
+}
+
 /// When `f` stops being on screen.
 fn ends(f: &SlotFrame, rate: Option<FrameRate>) -> Option<Time> {
     let d = f.duration.or_else(|| rate.map(FrameRate::frame_duration))?;
@@ -978,7 +1094,8 @@ fn open(player: &Player, path: &Path, streams: &[Option<usize>], run: &Run) -> R
 }
 
 /// What a pass's end adds to what its [`Meter`] counted: the streams'
-/// decodes, the slots and the lock, and the pool `watch` saw.
+/// decodes, the slots and the lock, the pair resyncs, and the pool
+/// `watch` saw. Off the UI thread: it reads the cache.
 fn finish_pass(mut pass: Pass, player: &Player, watch: Option<PoolWatch>) -> Pass {
     let snap = common::snapshot(player);
     pass.paths = snap.streams.iter().map(|s| s.decode.clone()).collect();
@@ -987,6 +1104,16 @@ fn finish_pass(mut pass: Pass, player: &Player, watch: Option<PoolWatch>) -> Pas
     pass.lens_decoded = snap.streams.iter().map(|s| s.decoded).collect();
     pass.slots = snap.slots;
     pass.lock = snap.lock.map(|l| l.status);
+    // From the cache, which counts each at once, where the engine's
+    // counter takes them in every 250 ms; the pass's player is its own,
+    // so these are the pass's since the open.
+    pass.resyncs = player.cache().stats().resyncs;
+    pass.streams = snap.streams.len();
+    pass.drops_over = if pass.lock == Some(LockStatus::Locked) {
+        1
+    } else {
+        pass.streams
+    };
     pass.pool = watch.map_or_else(Vec::new, PoolWatch::finish);
     pass
 }
@@ -1156,8 +1283,10 @@ fn unthrottled_with(
                 std::thread::sleep(Duration::from_micros(250));
             }
         }
-        let pass = finish_pass(meter.finish(Instant::now()), &player, watch);
+        let pass = meter.finish(Instant::now());
+        // The cache's counts take its lock, which the UI thread mustn't.
         drop(ui);
+        let pass = finish_pass(pass, &player, watch);
         if let Some(t) = timeline {
             t.write();
         }
@@ -1170,7 +1299,10 @@ fn unthrottled_with(
 }
 
 /// The real-time pass: `present`, `snapshot` and a draw at 60 Hz
-/// deadlines for `length`, playing from the start again at the end.
+/// deadlines for `length`, playing from the start again at the end. Each
+/// present is scored as [`Owed`] says, and a pass whose frame stands
+/// still for [`STALL`] while its clock runs is marked stalled
+/// ([`Standing`]) and plays on.
 fn realtime(
     rig: &Rig,
     path: &Path,
@@ -1195,9 +1327,14 @@ fn realtime(
         // loop seeks back.
         let mut presents = Vec::new();
         let mut samples = Vec::new();
+        let mem_available = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|m| mem_available(&m));
         player.play();
         let start = Instant::now();
         let mut meter = Meter::new(perf.clone(), streams.len(), start);
+        let mut owed = Owed::default();
+        let mut standing = Standing::new(start);
         let mut timeline = Timeline::new(path, run, "realtime", &perf, start);
         let mut deadline = start;
         while start.elapsed() < length {
@@ -1229,6 +1366,7 @@ fn realtime(
                 presents.push([time(0), time(1)]);
                 samples.push(pacing::Sample::of(presented.as_ref(), &snap, [0, 1]));
             }
+            let mut new = false;
             if let Some(p) = &presented {
                 if p.changed {
                     screen.draw(p, &perf).map_err(|e| e.to_string())?;
@@ -1240,6 +1378,7 @@ fn realtime(
                     && f.frame != last
                 {
                     last = f.frame;
+                    new = true;
                     meter.shown();
                 }
                 if snap.playing
@@ -1249,6 +1388,18 @@ fn realtime(
                 {
                     meter.late();
                 }
+                if let Some(rate) = rate
+                    && owed.at(p.time, rate, snap.playing, snap.at_end, clip_end(&snap))
+                {
+                    meter.due();
+                }
+            }
+            let stood = standing.at(now, new, snap.playing, snap.at_end);
+            if stood >= STALL && meter.pass.stalled.is_none() {
+                meter.pass.stalled = Some(format!(
+                    "no new frame for {stood:?} while the clock ran, at {:.3} s",
+                    snap.clock.to_secs_f64()
+                ));
             }
             if let Some((i, e)) = snap
                 .streams
@@ -1264,10 +1415,12 @@ fn realtime(
             }
             meter.tick(now);
         }
-        let mut pass = finish_pass(meter.finish(Instant::now()), &player, watch);
+        let pass = meter.finish(Instant::now());
+        drop(ui);
+        let mut pass = finish_pass(pass, &player, watch);
         pass.presents = presents;
         pass.samples = samples;
-        drop(ui);
+        pass.mem_available = mem_available;
         if let Some(t) = timeline {
             t.write();
         }
@@ -1532,6 +1685,9 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
     if let Some(why) = &u.stalled {
         bench::note(format!("{name}: the unthrottled pass stalled: {why}"));
     }
+    if let Some(why) = &r.stalled {
+        bench::note(format!("{name}: the real-time pass stood still: {why}"));
+    }
     if run.zero_copy != ZeroCopy::Off {
         let (n, k, why) = on_gpu(u, r);
         bench::note(format!(
@@ -1546,15 +1702,20 @@ fn record_passes(clip: &str, run: &Run, u: &Pass, r: &Pass) {
 
 /// A two-stream run's rows of P-LOCK's (M3 plan 4.3), locked or not,
 /// from its `passes`, unthrottled then real time where both ran: the
-/// unpaired presents over them all, each lens's decodes since the open
-/// and path B's pool in the last; of a locked run, its pair resyncs, the pairs it
-/// presented, `pair_wait`, its slots and its lock.
+/// unpaired presents over them all, each lens's decodes since the open,
+/// path B's pool and the slots in the last; of a real-time pass, the share
+/// of the presents that owed a frame that put one up, the frames dropped
+/// a lens and `MemAvailable` as it began; of a locked run, its pair
+/// resyncs, the pairs it presented, `pair_wait` and its lock. Both runs
+/// record their slots, since the lock takes all of `MAX_SLOTS` and the
+/// unlocked player its default.
 fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
     let Some(last) = passes.last() else {
         return;
     };
     let over = |of: fn(&Pass) -> u64| passes.iter().map(|p| of(p)).sum::<u64>() as f64;
-    let pass = if passes.len() > 1 {
+    let real_time = passes.len() > 1;
+    let pass = if real_time {
         "real time"
     } else {
         "unthrottled"
@@ -1581,6 +1742,24 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
             "{name}: lens {k}'s frames shown were in {images} Vulkan images, {pass}"
         ));
     }
+    bench::record(&format!("{name}: slots"), last.slots.active as f64, "slots");
+    // An unthrottled pass owes no frame at a present: its clock waits for
+    // every stream's.
+    if real_time {
+        if let Some(share) = presented_share(last) {
+            bench::record(&format!("{name}: presented after 1 s"), share, "%");
+        }
+        if let Some(share) = dropped_share(last) {
+            bench::record(&format!("{name}: dropped a lens after 1 s"), share, "%");
+        }
+        if let Some(bytes) = last.mem_available {
+            bench::record(
+                &format!("{name}: MemAvailable as the real-time pass began"),
+                bytes as f64 / f64::from(1u32 << 20),
+                "MiB",
+            );
+        }
+    }
     if !run.locked {
         return;
     }
@@ -1594,15 +1773,11 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
         last.shown as f64,
         "pairs",
     );
-    if let Some(share) = presented_share(last) {
-        bench::record(&format!("{name}: presented after 1 s"), share, "%");
-    }
     for p in [50.0, 95.0] {
         if let Some(ms) = last.stage(Stage::PairWait, p) {
             bench::record(&format!("{name}: pair_wait p{p}, {pass}"), ms, "ms");
         }
     }
-    bench::record(&format!("{name}: slots"), last.slots.active as f64, "slots");
     bench::note(format!(
         "{name}: the lock {}; {} slots in use, {} dead, at the end",
         match &last.lock {
@@ -1616,22 +1791,30 @@ fn record_pair(name: &str, run: &Run, passes: &[&Pass]) {
     ));
 }
 
-/// The frames a real-time pass's full seconds after the first had to
-/// show, at its rate.
+/// The presents of a real-time pass's full seconds after the first that
+/// owed a new frame ([`Owed`]); `None` for none, as of an unthrottled
+/// pass, which counts none.
 fn due_after_first(r: &Pass) -> Option<f64> {
-    let fps = r.rate?.to_f64();
-    let seconds = r.seconds.len().checked_sub(1).filter(|&n| n > 0)?;
-    Some(seconds as f64 * fps)
+    let due = r.after_first(|s| s.due);
+    (due > 0).then_some(due as f64)
 }
 
-/// Of those frames, the share shown, in %.
+/// Of those presents, the share that put a new frame up (a new pair, of
+/// a locked pair), in %. A loop's seek owes the play's first frame and
+/// its landing puts it up unowed, so the two even out.
 fn presented_share(r: &Pass) -> Option<f64> {
     Some(100.0 * r.after_first(|s| s.shown) as f64 / due_after_first(r)?)
 }
 
-/// Of those frames, the share dropped, in %.
+/// The frames passed over a lens in those seconds, as a share of those
+/// presents, in %: the engine counts a locked pair's once a pair and an
+/// unlocked player's for every stream, so the count is divided by
+/// [`Pass::drops_over`]. Until `Counter::Skipped` takes them out, the
+/// frames a clip faster than the presents passes over at each one count
+/// too, on both sides of the comparison.
 fn dropped_share(r: &Pass) -> Option<f64> {
-    Some(100.0 * r.after_first(|s| s.dropped) as f64 / due_after_first(r)?)
+    let a_lens = r.after_first(|s| s.dropped) as f64 / r.drops_over.max(1) as f64;
+    Some(100.0 * a_lens / due_after_first(r)?)
 }
 
 /// P-LOCK's verdict (M3 plan 4.3).
@@ -1649,7 +1832,8 @@ enum Verdict {
 }
 
 /// What a locked run's `passes` did that fails P-LOCK outright: a pair
-/// shown apart, the lock refused or undone (the slot floor), a stall.
+/// shown apart, the lock refused or undone (the slot floor), a stall of
+/// either pass ([`Standing`] for the real-time one's).
 fn lock_broken(passes: &[&Pass]) -> Vec<String> {
     let mut broken = Vec::new();
     for (pass, p) in ["unthrottled", "real time"].iter().zip(passes) {
@@ -1667,8 +1851,10 @@ fn lock_broken(passes: &[&Pass]) -> Vec<String> {
 }
 
 /// P-LOCK at 8K30, 5.7K60 and 4K120: the locked run's real-time pass
-/// presents at least 99 % of its frames and drops at most 1 percentage
-/// point more than `unlocked`'s, with no pair apart.
+/// put a new pair up at 99 % or more of the presents that owed one
+/// ([`presented_share`]) and dropped at most 1 percentage point more a
+/// lens than `unlocked`'s real-time pass ([`dropped_share`]), with no
+/// pair apart. The line gives both runs' shares.
 fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
     let broken = lock_broken(&[&locked.0, &locked.1]);
     if !broken.is_empty() {
@@ -1682,12 +1868,13 @@ fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
     ) else {
         return (
             Verdict::Kill,
-            "the real-time passes ran no full second after the first".into(),
+            "the real-time passes owed no frame after the first second".into(),
         );
     };
+    let was = presented_share(unlocked).unwrap_or(f64::NAN);
     let line = format!(
-        "0 unpaired, presented {shown:.2} % of the frames after 1 s, dropped {dropped:.2} % \
-         against {before:.2} % unlocked"
+        "0 unpaired, presented {shown:.2} % of the presents that owed a frame after 1 s \
+         against {was:.2} % unlocked, dropped {dropped:.2} % a lens against {before:.2} %"
     );
     if shown >= 99.0 && dropped - before <= 1.0 {
         (Verdict::Pass, line)
@@ -1699,7 +1886,9 @@ fn held_verdict(unlocked: &Pass, locked: &(Pass, Pass)) -> (Verdict, String) {
 /// P-LOCK at 8K25 on path B, where the unlocked raw view decode-drops:
 /// no pair apart and the pacing rule met over the real-time pass up to
 /// its first loop, with the pairs presented and `pair_wait` in each
-/// second that dropped.
+/// second that dropped, and the drops and decode drops of each a lens. A
+/// pair that trailed by [`STALL`]'s worth of frames or more, or showed
+/// none, froze, which more slots wouldn't mend: Kill, as a stall is.
 fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
     let broken = lock_broken(&[&locked.0, &locked.1]);
     if !broken.is_empty() {
@@ -1713,8 +1902,12 @@ fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
         .filter(|(_, s)| s.dropped > 0)
         .map(|(i, s)| {
             format!(
-                "second {i}: {} dropped ({} decode-dropped), {} pairs, pair_wait {:.1} ms at most",
-                s.dropped, s.decode_dropped, s.shown, s.pair_wait
+                "second {i}: {:.1} dropped a lens ({:.1} decode-dropped a lens), {} pairs, \
+                 pair_wait {:.1} ms at most",
+                s.dropped as f64 / r.drops_over.max(1) as f64,
+                s.decode_dropped as f64 / r.streams.max(1) as f64,
+                s.shown,
+                s.pair_wait
             )
         })
         .collect();
@@ -1726,10 +1919,15 @@ fn paced_verdict(locked: &(Pass, Pass)) -> (Verdict, String) {
     let Some(rate) = r.rate else {
         return (Verdict::Kill, "the pass has no frame rate".into());
     };
+    let frozen = (STALL.as_secs_f64() * rate.to_f64()).ceil() as i64;
     match pacing::pacing_cut(&r.samples, rate) {
         Ok(paced) => (
             Verdict::Pass,
             format!("0 unpaired, the pacing rule met ({paced:?}); {drops}"),
+        ),
+        Err(why @ pacing::Unpaced::Trailed { frames, .. }) if frames >= frozen => (
+            Verdict::Kill,
+            format!("0 unpaired, the pair froze: {why:?}; {drops}"),
         ),
         Err(why) => (
             Verdict::Redirect,
@@ -1753,7 +1951,8 @@ fn x5_mode(report: &ProbeReport) -> Option<Mode> {
 /// one: 8K30, 5.7K60 and 4K120 held to the unlocked raw view, 8K25 to the
 /// pacing rule on path B. `auto` is Auto's run, copied, and `copied` its
 /// passes, the unlocked ones where the app copies too. Stalls go into
-/// `stalls`; the verdict's line comes back.
+/// `stalls`; the verdict comes back, `None` where none was decided, with
+/// its line, which gives both runs' slots.
 fn p_lock(
     rig: &Rig,
     mode: &str,
@@ -1762,7 +1961,7 @@ fn p_lock(
     auto: &Run,
     copied: Option<&(Pass, Pass)>,
     stalls: &mut Vec<String>,
-) -> String {
+) -> (Option<Verdict>, String) {
     let streams = lens_streams(report);
     let class = x5_mode(report);
     let shared = rig.as_app_plays(auto);
@@ -1788,37 +1987,56 @@ fn p_lock(
     stalls.extend(stall(mode, &locked_run, &locked));
     let name = format!("P-LOCK, {mode}, {}", locked_run.label);
     let Some(locked) = locked else {
-        return format!("{name}: Kill: the locked run didn't play (see its note)");
+        return (
+            Some(Verdict::Kill),
+            format!("{name}: Kill: the locked run didn't play (see its note)"),
+        );
     };
+    // The baseline's slots beside the lock's: the lock takes all of
+    // MAX_SLOTS and the unlocked player its default.
+    let slots = format!(
+        "{} slots locked, {} unlocked",
+        locked.1.slots.active,
+        unlocked.map_or_else(|| "?".into(), |(_, r)| r.slots.active.to_string())
+    );
     let (verdict, why) = match class {
         Some(Mode::K8_25) if !base.path_b() => {
-            return format!(
-                "{name}: not decided: 8K25's verdict is on path B, and {}",
-                shared.err().unwrap_or_else(|| "the run copies".into())
+            return (
+                None,
+                format!(
+                    "{name}: not decided: 8K25's verdict is on path B, and {}",
+                    shared.err().unwrap_or_else(|| "the run copies".into())
+                ),
             );
         }
         Some(Mode::K8_25) => paced_verdict(&locked),
         Some(Mode::K8_30 | Mode::K5_7_60 | Mode::K4_120) => match unlocked {
             Some((_, r)) => held_verdict(r, &locked),
             None => {
-                return format!("{name}: not decided: the unlocked run didn't play");
+                return (
+                    None,
+                    format!("{name}: not decided: the unlocked run didn't play"),
+                );
             }
         },
         Some(Mode::K5_7_30) | None => {
             let broken = lock_broken(&[&locked.0, &locked.1]);
-            return format!(
-                "{name}: recorded, P-LOCK names no verdict for this mode{}",
-                if broken.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", broken.join("; "))
-                }
+            return (
+                None,
+                format!(
+                    "{name}: recorded, P-LOCK names no verdict for this mode; {slots}{}",
+                    if broken.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", broken.join("; "))
+                    }
+                ),
             );
         }
     };
-    format!(
-        "{name}: {verdict:?}: {why}; {} slots",
-        locked.1.slots.active
+    (
+        Some(verdict),
+        format!("{name}: {verdict:?}: {why}; {slots}"),
     )
 }
 
@@ -2178,10 +2396,33 @@ fn bench_perf_pair(
     })
 }
 
+/// P-LOCK's summary line: every mode's verdict, by mode, "not decided"
+/// where it has none.
+fn p_lock_summary(verdicts: &[(String, Option<Verdict>, String)]) -> String {
+    let each: Vec<String> = verdicts
+        .iter()
+        .map(|(mode, v, _)| match v {
+            Some(v) => format!("{mode} {v:?}"),
+            None => format!("{mode} not decided"),
+        })
+        .collect();
+    format!(
+        "P-LOCK on this machine: {}",
+        if each.is_empty() {
+            "no X5 raw mode among the samples".to_string()
+        } else {
+            each.join(", ")
+        }
+    )
+}
+
 /// Each X5 raw mode among the samples, its two lenses as two streams, on
 /// Auto's hardware and the rest, in real time and unthrottled; then each
 /// of hw-test's two-track perf clips, both tracks opened as a sample's
-/// are, unthrottled ([`bench_perf_pair`]). Recorded; a stall fails it.
+/// are, unthrottled ([`bench_perf_pair`]). Recorded; a stall of an
+/// unthrottled pass fails it, and so does P-LOCK's Kill (a pair apart, the
+/// lock refused or undone, a stall of either pass). A Redirect is a note,
+/// and so is the summary line that names every mode's verdict.
 #[test]
 #[ignore = "tier2: benchmark, needs camera samples or hw-test's perf pairs, and a GPU that decodes them"]
 fn bench_playback_x5_raw() {
@@ -2242,19 +2483,15 @@ fn bench_playback_x5_raw() {
             Ok(run) => {
                 let passes = record(&rig, mode, path, &streams, &run, RECORDED, RECORDED);
                 stalls.extend(stall(mode, &run, &passes));
-                verdicts.push(p_lock(
-                    &rig,
-                    mode,
-                    path,
-                    report,
-                    &run,
-                    passes.as_ref(),
-                    &mut stalls,
-                ));
+                let (verdict, line) =
+                    p_lock(&rig, mode, path, report, &run, passes.as_ref(), &mut stalls);
+                verdicts.push((mode.clone(), verdict, line));
             }
             Err(why) => {
-                verdicts.push(format!(
-                    "P-LOCK, {mode}: not decided: Auto decodes it in software here"
+                verdicts.push((
+                    mode.clone(),
+                    None,
+                    format!("P-LOCK, {mode}: not decided: Auto decodes it in software here"),
                 ));
                 no_hardware.push(format!("{mode}: {why}"));
             }
@@ -2279,10 +2516,19 @@ fn bench_playback_x5_raw() {
             synth_media::PERF_PAIR_2880_2997
         ))
     ));
-    for verdict in &verdicts {
-        bench::note(verdict);
+    for (_, _, line) in &verdicts {
+        bench::note(line);
     }
-    assert!(stalls.is_empty(), "{}", stalls.join("; "));
+    let summary = p_lock_summary(&verdicts);
+    bench::note(&summary);
+    eprintln!("{summary}");
+    let killed: Vec<&str> = verdicts
+        .iter()
+        .filter(|(_, v, _)| *v == Some(Verdict::Kill))
+        .map(|(_, _, line)| line.as_str())
+        .collect();
+    let failed: Vec<&str> = stalls.iter().map(String::as_str).chain(killed).collect();
+    assert!(failed.is_empty(), "{}", failed.join("; "));
     if no_hardware.len() == modes.len() + pairs.len() {
         tier2::skip(format!(
             "Auto decodes in software here: {}",
@@ -3169,6 +3415,9 @@ fn the_bench_harness_plays_both_tracks_of_a_pair() {
         matched.paths_line()
     );
     assert!(!matched.decoded_fps().is_empty());
+    // Unlocked, the engine counts drops for each stream, which P-LOCK's
+    // share a lens divides by (the locked pair's test sees 1).
+    assert_eq!((matched.streams, matched.drops_over), (2, 2));
     must_fail(
         "a pair whose lens 1 is a frame short",
         short.as_ref().is_ok_and(whole),
@@ -3439,6 +3688,10 @@ fn the_bench_harness_plays_a_locked_pair() {
     assert_eq!(apart(&r.presents), 0);
     assert!(r.shown > 0 && !r.samples.is_empty());
     assert_eq!(r.samples.len(), r.presents.len());
+    // Its presents scored as P-LOCK scores them: some owed a pair, and
+    // its drops count once a pair.
+    assert!(r.seconds.iter().any(|s| s.due > 0), "{:?}", r.seconds);
+    assert_eq!((r.streams, r.drops_over), (2, 1));
     assert_eq!(u.lens_decoded.len(), 2);
     assert!(
         u.lens_decoded.iter().all(|&d| d >= 29),
@@ -5603,6 +5856,238 @@ fn zero_copy_pair_matches_copy() {
     if !missing.is_empty() {
         tier2::skip(missing.join("; "));
     }
+}
+
+/// A synthetic real-time pass of 20 s for P-LOCK's scoring: a clip of
+/// `frames` frames of `mode`'s rate played as the engine plays it at
+/// [`TICK`]'s presents, each scored as [`realtime`] scores it ([`Owed`]).
+/// A present is for the clock one tick ahead. The one whose time reaches
+/// the clip's end puts nothing new up and has the clock set back to the
+/// last frame; then the loop's seek to the start stands for `stand`
+/// presents (the seek, the landing, which puts frame 0 up at the last of
+/// them, and the preroll) and plays on. A `held` present keeps the frame
+/// it owes back, as a pair waiting on a lens would; a `jumped` one finds
+/// the clock a frame further on, as after a tick the UI thread missed,
+/// and passes a frame over. The engine counts frames passed over once for
+/// a locked pair and for each of `streams` otherwise.
+fn simulated(
+    mode: Mode,
+    frames: i64,
+    stand: u64,
+    (streams, locked): (usize, bool),
+    held: impl Fn(u64) -> bool,
+    jumped: impl Fn(u64) -> bool,
+) -> Pass {
+    let (n, d) = mode.rate();
+    let rate = FrameRate::new(Rational::new(n.into(), d.into()).unwrap()).unwrap();
+    let tick = i64::try_from(TICK.as_nanos()).unwrap();
+    let ns = |n: i64| Time::seconds(Rational::new(n, 1_000_000_000).unwrap());
+    let at = |f: i64| rate.frame_to_time(f).unwrap();
+    let end = at(frames);
+    let counted = if locked { 1 } else { streams as u64 };
+    let mut owed = Owed::default();
+    let mut pass = Pass {
+        seconds: vec![Second::default(); 20],
+        rate: Some(rate),
+        streams,
+        drops_over: if locked { 1 } else { streams },
+        lock: locked.then_some(LockStatus::Locked),
+        elapsed: Duration::from_secs(20),
+        ..Pass::default()
+    };
+    // The frame on screen; the wall time the clock was at 0, playing,
+    // and the frames it jumped since; the presents a loop has left to
+    // stand.
+    let (mut shown, mut began, mut ahead, mut standing) = (0, 0, 0, None::<u64>);
+    for k in 0..1200u64 {
+        let w = k as i64 * tick;
+        let (time, playing, at_end, new, passed) = match standing {
+            Some(left) => {
+                standing = left.checked_sub(1).filter(|&n| n > 0);
+                let landed = standing.is_none();
+                if landed {
+                    (shown, began, ahead) = (0, w, 0);
+                }
+                (Time::ZERO, false, false, landed, 0)
+            }
+            None => {
+                ahead += i64::from(jumped(k));
+                let time = ns(w - began + tick).checked_add(at(ahead)).unwrap();
+                if time >= end {
+                    standing = Some(stand);
+                    pass.loops += 1;
+                    (at(frames - 1), false, true, false, 0)
+                } else {
+                    let f = rate.time_to_frame(time, Rounding::Floor).unwrap();
+                    if f > shown && !held(k) {
+                        let passed = f - shown - 1;
+                        shown = f;
+                        (time, true, false, true, passed as u64)
+                    } else {
+                        (time, true, false, false, 0)
+                    }
+                }
+            }
+        };
+        let second = &mut pass.seconds[usize::try_from(w / 1_000_000_000).unwrap()];
+        second.due += u64::from(owed.at(time, rate, playing, at_end, Some(end)));
+        second.shown += u64::from(new);
+        second.dropped += passed * counted;
+        pass.shown += u64::from(new);
+    }
+    pass
+}
+
+/// The share of a pass's frames presented as P-LOCK counted it before
+/// presents owed frames: wall seconds after the first times the rate,
+/// which a loop's restarts and a rate above the presents' fail.
+fn wall_second_share(r: &Pass) -> f64 {
+    let due = (r.seconds.len() - 1) as f64 * r.rate.map_or(f64::NAN, FrameRate::to_f64);
+    100.0 * r.after_first(|s| s.shown) as f64 / due
+}
+
+/// P-LOCK's scoring (M3 plan 4.3) on synthetic passes: frames owed
+/// count per present, so 4K120 at 60 Hz presents and a 5.7K60 master
+/// that loops every 3.17 s present all they owe and pass; drops compare
+/// a lens to a lens, the unlocked count divided by its streams; a stall
+/// is Kill. Each has a control that must fail: a real shortfall of pairs,
+/// a real excess of drops, a pass that stands still while its clock runs.
+#[test]
+fn p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens() {
+    let unthrottled = || Pass {
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let never = |_: u64| false;
+    let pair = (2, true);
+    let apart = (2, false);
+    // 4K120 at 60 Hz: 4.89 s of 586 frames, every present owing one and
+    // passing one over, which counts as dropped on both sides until
+    // `Counter::Skipped` takes it out.
+    let k4 = |held: &dyn Fn(u64) -> bool, (streams, locked): (usize, bool)| {
+        simulated(Mode::K4_120, 586, 4, (streams, locked), held, never)
+    };
+    let unlocked = k4(&never, apart);
+    let locked = (unthrottled(), k4(&never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "4K120: {line}");
+    let r = &locked.1;
+    assert!(r.loops >= 3, "4K120 looped {} times", r.loops);
+    assert!(presented_share(r).unwrap() >= 99.9, "{line}");
+    assert!(wall_second_share(r) < 51.0, "{}", wall_second_share(r));
+    let (dropped, before) = (dropped_share(r).unwrap(), dropped_share(&unlocked).unwrap());
+    assert!((dropped - before).abs() < 0.5, "{line}");
+    // The control: a pair held back at one present in 20.
+    let short = (unthrottled(), k4(&|k| k % 20 == 7, pair));
+    let (verdict, line) = held_verdict(&unlocked, &short);
+    must_fail(
+        "4K120 holding a pair back at 1 present in 20",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+
+    // 5.7K60: 3.17 s of 190 frames, five or six loops in 20 s, each
+    // standing four presents that owe nothing but the seek's.
+    let k57 = |held: &dyn Fn(u64) -> bool,
+               jumped: &dyn Fn(u64) -> bool,
+               (streams, locked): (usize, bool)| {
+        simulated(Mode::K5_7_60, 190, 4, (streams, locked), held, jumped)
+    };
+    let unlocked = k57(&never, &never, apart);
+    let locked = (unthrottled(), k57(&never, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "5.7K60: {line}");
+    let r = &locked.1;
+    assert!(r.loops >= 5, "5.7K60 looped {} times", r.loops);
+    assert!(wall_second_share(r) < 99.0, "{}", wall_second_share(r));
+    eprintln!(
+        "5.7K60 locked: {line}; wall seconds would say {:.2} %",
+        wall_second_share(r)
+    );
+    let short = (unthrottled(), k57(&|k| k % 40 == 7, &never, pair));
+    let (verdict, line) = held_verdict(&unlocked, &short);
+    must_fail(
+        "5.7K60 holding a pair back at 1 present in 40",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+
+    // Drops a lens: the unlocked baseline passes a frame over on each
+    // stream at 1 present in 100, which its counter sums to 2 %, and
+    // the locked pair at 1 in 70 (1.4 %) passes at 0.4 points more a lens.
+    let unlocked = k57(&never, &|k| k % 100 == 50, apart);
+    let a_lens = dropped_share(&unlocked).unwrap();
+    // About 1 %: a jump that falls on a loop's restart passes nothing over.
+    assert!((0.8..=1.1).contains(&a_lens), "{a_lens:.2} % a lens");
+    let locked = (unthrottled(), k57(&never, &|k| k % 70 == 50, pair));
+    let (verdict, line) = held_verdict(&unlocked, &locked);
+    assert_eq!(verdict, Verdict::Pass, "drops a lens: {line}");
+    // The control: 1 in 40 (2.5 %) is 1.5 points more a lens, which the
+    // summed baseline's 2 % would have let pass.
+    let more = (unthrottled(), k57(&never, &|k| k % 40 == 20, pair));
+    let (verdict, line) = held_verdict(&unlocked, &more);
+    must_fail(
+        "a pair dropping 1.5 points more a lens",
+        verdict == Verdict::Pass,
+    );
+    assert_eq!(verdict, Verdict::Redirect, "{line}");
+    let summed = dropped_share(&unlocked).unwrap() * unlocked.drops_over as f64;
+    assert!(dropped_share(&more.1).unwrap() - summed <= 1.0, "{line}");
+
+    // A real-time pass that stood still while its clock ran is Kill.
+    let stood = Pass {
+        stalled: Some("no new frame for 5s while the clock ran, at 2.000 s".into()),
+        ..k57(&never, &never, pair)
+    };
+    let (verdict, line) = held_verdict(&unlocked, &(unthrottled(), stood));
+    assert_eq!(verdict, Verdict::Kill, "{line}");
+    assert!(line.contains("real time: stalled"), "{line}");
+}
+
+/// A real-time pass stands still once its frame has stayed up for
+/// [`STALL`] while its clock ran short of the end; a clock paused, or at
+/// the end, never stands it still.
+#[test]
+fn a_real_time_pass_stands_still_only_while_its_clock_runs() {
+    let t0 = Instant::now();
+    let later = |s: u64| t0 + Duration::from_millis(s);
+    let mut standing = Standing::new(t0);
+    assert_eq!(standing.at(later(1000), true, true, false), Duration::ZERO);
+    assert_eq!(
+        standing.at(later(4000), false, true, false),
+        Duration::from_secs(3)
+    );
+    assert!(standing.at(later(6000), false, true, false) >= STALL);
+    // The controls: the same wait with the clock paused, or at the end.
+    for (playing, at_end, why) in [(false, false, "paused"), (true, true, "at the end")] {
+        let mut standing = Standing::new(t0);
+        standing.at(later(1000), true, true, false);
+        let stood = standing.at(later(6000), false, playing, at_end);
+        must_fail(&format!("a pass {why} standing still"), stood >= STALL);
+    }
+    // paced_verdict's line gives drops and decode drops a lens.
+    let r = Pass {
+        seconds: vec![Second {
+            dropped: 3,
+            decode_dropped: 4,
+            shown: 20,
+            ..Second::default()
+        }],
+        rate: Some(FrameRate::FPS_25),
+        streams: 2,
+        drops_over: 1,
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let unthrottled = Pass {
+        lock: Some(LockStatus::Locked),
+        ..Pass::default()
+    };
+    let (_, line) = paced_verdict(&(unthrottled, r));
+    assert!(
+        line.contains("3.0 dropped a lens (2.0 decode-dropped a lens)"),
+        "{line}"
+    );
 }
 
 /// K2's engine half holds VA-API's copied pass to 36 fps a lens in every
