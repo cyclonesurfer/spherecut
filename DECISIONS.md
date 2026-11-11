@@ -5,9 +5,81 @@ would make us revisit it. Heavy dependencies are justified here, as the
 project rules require. Entries go in number order, with the open
 questions last. M1's plan reserved D27 to D37 (`docs/design/m1-plan.md`,
 section 0), so each of those lands in its place with its slice, and D38
-came before some of them. Superseded entries stay and say so.
+came before some of them. M3's plan reserves D60 to D76 for M3's slices
+(`docs/design/m3-plan.md`, section 23), so a number there with no
+heading belongs to a slice not yet built (D64 is M3.5's, D66 M3.7's);
+D77 came from M3.8. Superseded entries stay and say so.
 
-## D1. Rust stable, edition 2024, MSRV 1.88 now and 1.95 with the GUI
+Index:
+
+- D1. Rust stable, edition 2024, MSRV 1.95
+- D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
+- D3. Hardware decoding never falls back to software silently
+- D4. Our own MP4 box parser and injector for spherical metadata
+- D5. glam for vectors and quaternions
+- D6. Our own exact rational time type
+- D7. GUI and GPU stack (for M1)
+- D8. Supply chain and no runtime network
+- D9. Test tiers and synthetic media
+- D10. GPL-3.0-or-later, and reuse of GPL code
+- D11. FFmpeg's C enums are read as ints, never as bindgen enums
+- D12. FFmpeg's log goes to `tracing`
+- D13. What `VideoDecoder` does with a damaged file
+- D14. A hardware decoder says why it refused a stream
+- D15. MP4 parser limits, damage checks and fuzzing
+- D16. `inject` and `Mp4Writer` write atomically
+- D17. First-order ambiX in AAC uses the 4.0 layout
+- D18. Doctor checks capability, and reads packages only to word fixes
+- D19. How `cargo xtask hw-test` reports Tier 2 tests
+- D20. Benchmarks repeat, and report median and spread
+- D21. The `deny.toml` bans list
+- D22. Direct dependencies
+- D23. Agent integration: an MCP server and the JSON CLI
+- D24. FFmpeg opens only the file Spherecut opened
+- D25. Zero-copy decode-to-render is proved in M1, decided before M3
+- D26. egui stays, checked against a timeline prototype at the end of M2
+- D27. The CLI JSON contract
+- D28. Crate layout, rust-version 1.95 and where unsafe may appear
+- D29. MediaBackend and frame-exact seek
+- D30. Pixel formats and colour defaults
+- D31. The render pipeline
+- D32. Golden images
+- D33. View conventions
+- D34. The playback engine
+- D35. Audio and A/V sync
+- D36. The GUI's dependencies, features and Wayland gaps
+- D37. Hardware testing in M1
+- D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
+- D39. `frame --decoder auto` tries VA-API on the rendering GPU, then software
+- D40. The overlay, the settings, the raw view and the smoke run
+- D41. The submit gate
+- D42. The real-time gate plays as the app does
+- D43. A1's MCP layer, schemas and roots
+- D44. A1's MCP server: the protocol and its conventions
+- D45. A1's roots: how an agent's paths are opened
+- D46. A1's analyze and check: what each measures
+- D47. The project file: JSON with a schema number
+- D48. The project model and `Edit`
+- D49. Rendering for export: the output frame, equirect output, the YUV pass and motion blur
+- D50. Keyframes and interpolation: Level by default, one scalar spline, Free on SO(3)
+- D51. `spherecut render`: the export from the command line, one envelope a line
+- D52. The export pipeline: presets, encoders, the MP4 in one last pass, audio cut to the sample, parity floors and the job handle
+- D53. The toolkit check: a timeline prototype behind a hidden flag, and its gates
+- D54. The reframer's GUI, part 1: the untitled project, the keyed view, the strip and the play span
+- D55. The reframer's GUI, part 2: the curve editor, the sphere overview, the Inspector and targets, the export window and its pace
+- D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own, the viewer first
+- D57. Projects for agents: the folder handle, the lock, the history file, and the project tools
+- D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
+- D59. Compare, and projects in look and check: a sequence's frames one way, the render's times
+- D60. M3's verification contract
+- D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
+- D62. Our own trailer reader: a hand-written walker, D15's limits, no telemetry-parser
+- D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
+- D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
+- D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
+- D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
+
+## D1. Rust stable, edition 2024, MSRV 1.95
 
 *2026-10-22, M0.*
 
@@ -34,6 +106,16 @@ rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
 `cargo +1.95 build --workspace --all-targets` builds without warnings and
 `cargo +1.95 test --workspace` passes (368 tests, then 377). Rechecked at
 0233870, after slice 3b's goldens: both pass, with 389 tests.
+
+*Updated 2026-11-11 (review-fix slice):* the heading said "MSRV 1.88
+now and 1.95 with the GUI"; it was 1.88 until the GUI's crates came
+and has been 1.95 since M1 slice 3a (c7f02cf, 2026-10-24), above. From
+this slice `cargo xtask check` builds every crate and target with
+`rust-version`'s toolchain through rustup (`cargo check --workspace
+--all-targets --all-features`, in a target directory of its own), with
+a control: a scratch crate whose `rust-version` is one minor past it
+must be refused. Without rustup or the toolchain the step is skipped
+and says so, except under CI, where it fails.
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
@@ -508,6 +590,21 @@ under strace and fail on any `AF_INET` or `AF_INET6` socket.
 anything and downloads nothing, but on Fedora it makes one read-only
 `rpm -q` query to word its fixes. `cargo xtask hw-test` also runs `rpm -q`
 in its prerequisite check.
+
+*Updated 2026-11-11 (review-fix slice):* `cargo xtask check` runs, in
+order: rustfmt, clippy with `-D warnings` and its network controls,
+rustdoc with `-D warnings` over every crate (intra-doc links and HTML,
+a bin's private items too) and its controls, the MSRV build (D1) and
+its control, the FFmpeg builds in `SPHERECUT_FFMPEG_COMPAT` (D2), Tier
+1, the doc tests, cargo-deny and its network bans' controls, and
+cargo-audit. Each control is a scratch crate made to fail its gate,
+and a control that passes fails the check (D32). The licence allow
+list now holds only what the Linux graph uses (GPL-3.0-or-later, MIT,
+Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+BSD-3-Clause, ISC, Zlib, Unicode-3.0), and `unused-allowed-license` is
+`warn`, so an entry nothing uses shows and goes; GPL-3.0, LGPL-3.0,
+MIT-0, Unicode-DFS-2016, CC0-1.0 and MPL-2.0 left the list, unused. A
+licence a new dependency brings is added with its reason here.
 
 ## D9. Test tiers and synthetic media
 
@@ -1372,6 +1469,19 @@ seconds (the playback benchmarks), with Runs counting the seconds and
 Range the slowest and the fastest; its spread says how even playback
 was, not how busy the machine was.
 
+*Updated 2026-11-11 (review-fix slice):* `docs/PROMPT.md:127` asks for
+criterion benchmarks on hot paths. This harness and the Tier 2
+end-to-end benchmarks (decode, upload, playback, export) stand in for
+them, because criterion brings a tree of crates of its own (its
+plotting and statistics), against the rule of no new crates without a
+reason that outweighs it, and the numbers PROMPT asks for are whole
+paths on Pat's machines, which a micro-benchmark doesn't give. The cost
+is no regression signal for the CPU's hot paths between hardware runs:
+CPU benchmarks of the fit's hot paths (the seam signature's candidate,
+about 70 ms) come with M3.6, through `testkit::bench`, tracked in
+`docs/perf.md`. The deviation was recorded only in the M1 plan
+(`docs/design/m1-plan.md`, its dependency list) until now.
+
 ## D21. The `deny.toml` bans list
 
 *2026-10-23, M0. Updates D8.*
@@ -1488,6 +1598,18 @@ was wgpu-hal's already, at the same version.
 on core and thiserror, and on proptest, synth and testkit for its tests,
 all in the tree already, so it adds no crate. Sphere joins its
 dependencies in M3.5, and media depends on it from M3.2's unit (c).
+
+*Updated 2026-11-11 (review-fix slice):* one more duplicate a Linux
+build compiles: syn 2.0.119 beside 3.0.9. `cargo tree --offline -e
+normal,build --target x86_64-unknown-linux-gnu -i syn@3.0.9` gives
+bindgen (ffmpeg-sys-next's build), bytemuck_derive, clap_derive,
+futures-macro, serde_derive and thiserror-impl 2; `-i syn@2.0.119`
+gives enum-primitive-derive (pulseaudio's), enumn (accesskit's, under
+egui), thiserror-impl 1 (pulseaudio's, calloop 0.13's and
+smithay-client-toolkit 0.19's), tracing-attributes (tracing's) and
+zerocopy-derive (ahash's and half's). Neither can be unified from here:
+each side is a dependency's own pin. It costs compile time only, as the
+others above do.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1801,6 +1923,21 @@ Revisit if: Spherecut needs a container outside MOV/MP4 and Matroska; an
 FFmpeg release renames these demuxers (the names hold from 6.1 to 9.0) or
 opens a format context's input other than through `s->io_open(s,
 &s->pb, ...)`; or a camera records pictures larger than 2^27 pixels.
+
+*Updated 2026-11-11 (review-fix slice):* `spherecut render` and `spherecut
+mcp`, which open media too, now run under strace beside probe, doctor
+and frame (`crates/cli/tests/confinement.rs`'s
+`render_opens_no_network_socket` and `mcp.rs`'s
+`mcp_opens_no_network_socket`, which calls probe and look). One check,
+`assert_no_network`, fails on an `AF_INET` or `AF_INET6` socket or a
+`connect` to anything but a Unix socket, and first fails on two planted
+lines, its control. clippy also refuses
+`std::net::ToSocketAddrs::to_socket_addrs`, the DNS lookup the banned
+types don't cover, and `cargo xtask check` runs clippy and cargo-deny
+on scratch crates that use a banned type, the lookup and a banned HTTP
+crate, each of which must fail (D8). The GUI under strace is still
+open: no Tier 1 test runs the window, and gui_smoke runs on odin
+without a trace.
 
 ## D25. Zero-copy decode-to-render is proved in M1, decided before M3
 
@@ -2394,6 +2531,14 @@ raw files read from their bytes), depends on core (and on sphere from
 M3.5), and media depends on it, never the reverse; it has
 `#![forbid(unsafe_code)]`. M3's lens maths and rig go in sphere and its
 blending, instrument and fit in render: there is no `stitch` crate.
+
+*Updated 2026-11-11 (review-fix slice):* the Why above says M2's export
+and `spherecut render` drive the engine; as built they don't. The
+export (D52) runs its own decode, render and encode threads on
+`export`'s own types, and `export` depends on core, media and render,
+not on playback; the app's export renders beside the viewer on a
+device of its own (D56). What the Why argued for still holds: the
+export, `spherecut render` and M5 run with no window.
 
 ## D29. MediaBackend and frame-exact seek
 
@@ -6364,10 +6509,18 @@ What:
   clipboard, turns on image's `bmp` and `tiff` for its Windows and macOS
   clipboards, which Linux never builds, and image's PNG-only allow list
   (D22) holds for Linux. Advisories pass with no ignores.
-- **Fonts.** egui's default fonts (Ubuntu-Light and Hack in
-  `epaint_default_fonts`) are OFL-1.1 and Ubuntu-font-1.0. *Pat decided
+- **Fonts.** egui's default fonts in `epaint_default_fonts` are
+  Ubuntu-Light, under the Ubuntu Font Licence 1.0, Hack, under MIT and
+  the Bitstream Vera licence (its `fonts/Hack-Regular.txt`), and
+  `egui-icons.ttf`, a subset of emoji-icon-font under MIT. OFL-1.1
+  covers only NotoEmoji, built only with the crate's
+  `monochrome_emoji_fonts` feature, which nothing turns on; the crate
+  declares all three licences, hence the exception. (*Corrected
+  2026-11-11 in the review-fix slice:* this said Ubuntu-Light and Hack
+  were OFL-1.1 and Ubuntu-font-1.0; `deny.toml`'s comment says the
+  same as here.) *Pat decided
   on 2026-10-24:* keep them, with a license exception in `deny.toml` for
-  that crate only. Both licences allow the fonts to be embedded in a
+  that crate only. Their licences allow the fonts to be embedded in a
   GPL program. They have no emoji or arrows: a missing glyph is drawn
   as a box (and fails a kittest), so the UI's buttons and the keys' help
   are words ("Play", "Prev", "Dismiss").
@@ -7029,6 +7182,40 @@ without them (Matroska), is refused and plays unlocked as before.
   plants a document for each.
 - The app passes `LockRefused` and `LensShort` over until M3.10 gives
   them notices.
+
+*Updated 2026-11-11 (review-fix slice):* the smoke run can hold decode
+back, so that hw-test sees the UI while decode falls behind, which
+gui_smoke never did (its clips decode in time on odin). Three hidden
+flags, each only with `--smoke`: `--smoke-decoder DECODER` plays on
+the decoder named; `--smoke-decode-floor-ms MS` (1 to 500) makes each
+stream hand out at most one frame a floor, held on the decode worker's
+thread; and `--smoke-control-ui-waits` makes the UI wait, after each
+pass's tick, for the next decoded frame (at most 250 ms a pass). The
+document's result says what was asked (`asked`).
+
+`gui_decode_behind` (`crates/cli/tests/tier2_gui.rs`) makes three runs:
+run 0, decode held to 20 fps on a 30 fps clip on the default path;
+run 1, VA-API with its frames copied (`SPHERECUT_ZERO_COPY=0`) on the
+noisy 5.7K 10-bit perf clip, which is behind where VA-API is slow, as
+on odin; and run 2, the control, run 0 with the UI waiting. Each run's
+precondition is that decode was behind: at most 85 % of the frames
+expected shown after the first second, or the run fails (run 1's is
+inconclusive instead, since a fast VA-API keeps up). The gates are
+gui_smoke's own UI gates: 90 % of the UI frames expected presented, a
+p99 of at most 1.5 refresh periods, and no blocking call on the UI
+thread. The control must fail them as a slow UI in a window drawn,
+and must block; one that passes fails the test (D32). The report has a
+section for it ("UI while decode falls behind").
+
+The control breaks D34's rule that the UI thread never waits, on
+purpose and only under `--smoke`; each wait is a `may_block`, so it
+shows in `blocked_on_ui_thread`. Considered: a cargo feature on the
+app, turned on through the cli's dev-dependency, as D30's
+`fault-injection` is. It would rest on feature unification in
+hw-test's `--all-targets` release build to reach the binary the GUI
+tests run, so a build of the binary alone would lack the flags and the
+test would fail for that rather than for the UI; a hidden flag in
+every build is plainer, and costs nothing unused.
 
 ## D41. The submit gate
 
@@ -7725,6 +7912,17 @@ Matroska `StereoMode`), with the same pictures and warnings.
 amendments. Pat was asked to choose between JSON, RON and SQLite, with
 JSON recommended; until Pat answers, this is the working choice, and
 another answer changes only `core::project::file`.*
+
+*Updated 2026-11-11 (review-fix slice):* not only `core::project::file`
+any more. Another answer also changes the folder's lock and history
+records, which `crates/core/src/project/folder.rs` writes and reads as
+JSON (the holder line at :374, the history at :623 and :646, the
+lock's read at :699); the undo budget, which `history.rs:183` sizes by
+each step's JSON length; `docs/cli-json.md`'s `not_project` ("not
+JSON", :307) and `malformed_project` ("the JSON pointer", :309); and
+M3.9's schema 2 (D68), built on this format. RON could keep the JSON
+sidecars and change the project file alone; SQLite would rework
+`folder.rs`'s write-the-whole-file-then-rename and its byte hashes.
 
 What, as `crates/core/src/project/file.rs` does it:
 
@@ -8484,7 +8682,9 @@ What, as `crates/export` does it:
   4's 10-bit AV1 is 13 dB under SVT-AV1's and 2.7 under its own 8-bit
   one, still 7 dB over PLAN's 40 dB, so it stands (below). The 8K 360
   export through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of
-  8.0).
+  8.0): seen on stderr at 6993987, not in a report, since libtest drops
+  a passing test's output. From odin's next run the test records both
+  (`bench::record`, "360 8k export <encoder>"), so the report has them.
 
 Not yet, and where it goes:
 
@@ -9435,6 +9635,81 @@ file); check rendering a frame to be sure (`job`'s check is the proof).
 Revisit if: an agent needs the source and the render side by side in
 one image; a codec's clamping moves compare's numbers (then read Y);
 or 1 % of shape lets a wrong project through.
+
+## D60. M3's verification contract
+
+*Decided in the M3 plan for M3.0 (2026-11-01; `docs/design/m3-plan.md`
+section 4.1, and D60's row in its section 23); recorded by the
+review-fix slice (2026-11-11), since M3.0 built it but left this entry
+out.*
+
+What: every M3 slice is checked against these rules, which its
+reviewer reads before the code (m3-plan 4.1):
+
+1. **Every check has a control that must fail**, run on every run.
+   D32's rule for the goldens, "a control that stops failing fails the
+   test", is `spherecut_testkit::control::must_fail(name, outcome)`,
+   which every M3 suite uses: it takes a `bool` or a `Result` and
+   panics, naming the control, if the doctored input passed. A control
+   is a doctored input or rule, not the check's own assertion negated.
+   xtask's checks keep the same rule with its own `must_fail`.
+2. **Independent instruments.** synth's lens model (pixel to
+   direction) shares no code with sphere's (direction to pixel), which
+   the WGSL mirrors; synth composes the extrinsics with its own code
+   from its own `Planted` and meets sphere's types only at a test's
+   boundary. The CPU reference measures the shader, and the seam
+   estimator samples through the CPU reference, never the WGSL under
+   test. synth prints the calibration strings and camera parses them.
+3. **Floors before gates.** A Tier 2 number on Pat's footage is
+   reported with the instrument's noise floor on the same take. A row
+   is recorded until its question is settled, then gated from the floor
+   with at least a 3σ margin, and the switch is a reviewed change.
+4. **Failing first.** A bug fix comes with a test that the slice note
+   shows failing on main.
+5. **Cheap Tier 1.** Each new suite has a wall-time budget and prints
+   its time, the slice note records how much `cargo xtask check` grew,
+   and synthetic media live in temporary folders, at most 50 MB at
+   once.
+6. **The push rule**: a full `cargo xtask check`, compat builds
+   against FFmpeg 8.1.3 and 9.0.2, and every new or touched property
+   test at `PROPTEST_CASES=100000`; from M3.6, `cargo xtask fit-matrix`
+   for a slice that touches `render::seam`, `sphere::rig` or
+   `synth::lens`.
+7. **Provenance.** The review lists every outside source the diff used,
+   and nothing comes from the Insta360 Media SDK or Studio,
+   telemetry-parser's `rig.rs` or mask files, video-types' statements
+   of vendor internals, the third-party stitchers the plan names, or
+   DJI's stitcher constants.
+8. **The slice note** in PROGRESS lists each new control and each
+   measured number with its floor and machine, in place of a separate
+   ledger.
+
+Beside them: the round-trip ladder (m3-plan 4.2), one scene and one
+rig climbed rung by rung from synth's points to Pat's footage, each
+rung compared with the one below and with the analytic ideal; and
+Tier 2c (4.4), tests that need Pat's samples and the CPU alone, which
+agents run in the cloud while they build. They gate on
+`spherecut_testkit::tier2::require_samples_cpu`, which needs only
+`SPHERECUT_SAMPLES`; Tier 2h's gates call `require_hw_run` first,
+which skips unless hw-test set `SPHERECUT_TIER2` (D9, README's
+Development).
+
+Why: conventions are M3's main risk (which lens is which, the Euler
+order, a sign), and a wrong one shows only as "a bad seam". Only a
+measured number with a control and a floor tells a guess from a fact.
+Instruments that share code agree with each other while both are
+wrong. The slice note carries the same rows as a per-PR ledger would,
+with no second document to keep in step.
+
+Considered: a ledger file per pull request (the slice note does it);
+controls only for the goldens, as D32 had them (a check without one
+can pass by testing nothing); Tier 2 tests that need
+samples kept under hw-test alone (then the fit could only be tried on
+odin).
+
+Revisit if: a control proves flaky in a way that its check isn't, or
+the ladder's thresholds stop separating a right rig from a wrong one
+(M3.21's review judges them again).
 
 ## D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
 
@@ -10925,7 +11200,29 @@ from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
   parsing alone.
 - **The project file format** (D47): Pat was asked on 2026-10-30
   (JSON, RON or SQLite; JSON recommended). M2 is built on JSON
-  meanwhile; another answer changes only `core::project::file`.
+  meanwhile. Another answer changes `core::project::file`, the folder's
+  JSON lock and history records, the undo budget, two of `cli-json.md`'s
+  codes and M3.9's schema 2 (D47's update); RON could keep the
+  sidecars, and SQLite would rework the folder's write-then-rename.
+- **The interpolation default** (D50): Level, which interpolates yaw,
+  pitch and roll each as an angle, or Free, which interpolates on
+  SO(3) as `docs/PROMPT.md` asks. Pat was asked on 2026-10-31, with
+  Level recommended; Level is the working choice, and another answer
+  changes only the default `OrientMode`, not the file.
+- **M3's defaults that change what Pat sees** (`docs/design/m3-plan.md`
+  section 24, question 3): the lens at the centre of the default view
+  (the one away from the screen, once take 15 says which), stitch
+  distance 2 m, seam width 10°, proxies WhenPresent. They are the
+  working defaults until Pat answers.
+- **Which GoPro and DJI cameras Pat owns** (m3-plan question 4): the
+  MAX or MAX 2, and the Osmo 360, for M3.18 and M3.19's clips.
+- **D77's Mesa report**: drafted in D77; filing it upstream, or not, is
+  Pat's call.
+- **The lock's catch-up when every lens trails** (D67, M3.8): whether
+  to cap the group's `until` (the clock less a window, or a fixed
+  step). As built, a pair below real time slides as one lens does, each
+  freeze bounded by its lag; odin's 8K25 path B row showed no slide, so
+  no cap is recommended, and none is built until Pat answers.
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).
