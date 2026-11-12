@@ -1232,9 +1232,9 @@ pub struct DecodedPair {
 /// calibration and geometry build. Each [`seek`](Self::seek) decodes
 /// both lenses' frames of one time, which [`render`](Self::render)
 /// stitches through a view.
-#[allow(
+#[expect(
     dead_code,
-    reason = "M3.5 unit (c)'s open_pair, seek and render read them; remove once they do"
+    reason = "M3.5 unit (c)'s open_pair, seek and render read them"
 )]
 pub struct StillPair<'g> {
     /// The path messages name the file by.

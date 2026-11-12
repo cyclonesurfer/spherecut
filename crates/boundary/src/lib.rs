@@ -30,6 +30,8 @@
 //! (`tests/insv/mod.rs`), each held to `testkit::pats` by a drift test of
 //! its own (M3.5's units (a), (b) and (d)).
 
+#![forbid(unsafe_code)]
+
 use spherecut_sphere::fisheye::{self, Canonical, KbLens, LensModel, Unified, V6Reading};
 use spherecut_sphere::rig::{
     self, Binding, CalibTerms, Calibration, CanvasMap, EulerConv, Extrinsics, Geometry, LensCalib,
