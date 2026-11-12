@@ -1,8 +1,9 @@
 //! `spherecut frame` end to end (M1 plan sections 5, 6 and 14, DECISIONS
 //! D16 and D27): the Euler table, the frame code read back through a 360°
 //! fisheye, every failure with no output and no temporary file left
-//! behind, `--overwrite` and the race it guards against, and the pipeline
-//! goldens with the swscale cross-check.
+//! behind, `--overwrite` and the race it guards against, the whole sphere
+//! (`--projection equirect`) on lavapipe, and the pipeline goldens with
+//! the swscale cross-check.
 //!
 //! Every run renders on lavapipe (`--adapter cpu`) or with `--reference`,
 //! and decodes in software (`--decoder software`) unless it says how:
@@ -210,6 +211,69 @@ fn grid_clip(dir: &Path, name: &str, size: (u32, u32), frames: u32, codec: Codec
         ..Spec::default()
     };
     media::write(&spec, dir).unwrap()
+}
+
+// ---------------------------------------------------------------------
+// The whole sphere
+
+/// D32's CPU rule for a picture against the CPU reference's: PSNR at
+/// least 36 dB, the floor's least, and no channel more than 0.1 off.
+fn within_cpu_rule(got: &Image, want: &Image) -> Result<(), String> {
+    let (a, b) = (unit(got), unit(want));
+    let (w, h) = (got.width as usize, got.height as usize);
+    let db = psnr(View::new(w, h, 3, &a), View::new(w, h, 3, &b)).unwrap();
+    let far = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f64::max);
+    if db >= 36.0 && far <= 0.1 {
+        Ok(())
+    } else {
+        Err(format!("PSNR {db:.2} dB, a channel {far:.3} off"))
+    }
+}
+
+/// `--projection equirect` (M3.5) on lavapipe: the whole sphere through
+/// `--yaw 30`, within D32's CPU rule of `--reference`'s picture of it,
+/// which `frame_insv.rs`'s `frame_projection_equirect_on_an_equirect_file`
+/// holds to `reference::render` byte for byte. It is here, not there,
+/// for that suite's budget. The control: `--reference`'s picture at
+/// `--yaw 0` is outside the rule.
+#[test]
+fn the_whole_sphere_on_lavapipe_keeps_to_the_cpu_rule() {
+    let dir = TempDir::new("whole-sphere");
+    let clip = grid_clip(&dir, "grid", (256, 128), 1, Codec::H264Lossless);
+    let runs: [(&str, &[&str]); 3] = [
+        ("lavapipe", &["--yaw", "30"]),
+        ("yaw30", &["--reference", "--yaw", "30"]),
+        ("yaw0", &["--reference"]),
+    ];
+    let ran: Vec<(Ran, PathBuf)> = std::thread::scope(|s| {
+        let handles: Vec<_> = runs
+            .iter()
+            .map(|(name, extra)| {
+                let (clip, dir) = (&clip, &dir);
+                s.spawn(move || {
+                    let mut args = vec!["--size", "256x128", "--projection", "equirect"];
+                    args.extend_from_slice(extra);
+                    let out = dir.join(format!("{name}.png"));
+                    (frame(clip, &out, &args), out)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let r = ran[0].0.ok();
+    assert_eq!(r["renderer"], "gpu", "{r}");
+    assert_eq!(r["view"]["projection"], "equirect", "{r}");
+    assert_eq!(r["view"]["fov"], 360.0, "{r}");
+    for (ran, _) in &ran[1..] {
+        assert_eq!(ran.ok()["renderer"], "reference");
+    }
+    let [gpu, want, yaw0] = [0, 1, 2].map(|k| load(&ran[k].1));
+    within_cpu_rule(&gpu, &want).unwrap();
+    must_fail("lavapipe against --yaw 0", within_cpu_rule(&gpu, &yaw0));
 }
 
 // ---------------------------------------------------------------------

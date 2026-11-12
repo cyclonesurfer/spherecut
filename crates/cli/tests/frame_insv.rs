@@ -36,7 +36,6 @@ use spherecut_core::TimeSpec;
 use spherecut_core::cancel::StopSource;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
-use spherecut_render::compare::{View, psnr};
 use spherecut_render::reference::{self, RigOptions};
 use spherecut_render::{Depth, Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -410,26 +409,6 @@ fn black_about_the_axes(img: &Image) -> Result<(), String> {
         return Err("every pixel is black".into());
     }
     Ok(())
-}
-
-/// D32's CPU rule for a picture against the CPU reference's: PSNR at
-/// least 36 dB, the floor's least, and no channel more than 0.1 off.
-fn within_cpu_rule(got: &Image, want: &Image) -> Result<(), String> {
-    let unit =
-        |img: &Image| -> Vec<f64> { rgb8(img).iter().map(|&v| f64::from(v) / 255.0).collect() };
-    let (a, b) = (unit(got), unit(want));
-    let (w, h) = (got.width as usize, got.height as usize);
-    let db = psnr(View::new(w, h, 3, &a), View::new(w, h, 3, &b)).unwrap();
-    let far = a
-        .iter()
-        .zip(&b)
-        .map(|(x, y)| (x - y).abs())
-        .fold(0.0, f64::max);
-    if db >= 36.0 && far <= 0.1 {
-        Ok(())
-    } else {
-        Err(format!("PSNR {db:.2} dB, a channel {far:.3} off"))
-    }
 }
 
 // The tests.
@@ -952,19 +931,19 @@ fn frame_insv_trailer_faults_are_clear_errors() {
 /// `--projection equirect`, which M3.5 adds for `.insv` files, on a file
 /// that is already a stitched equirect: the whole sphere through the
 /// keyed turn, as `reference::render` draws it through
-/// `ViewParams::equirect`; on lavapipe within D32's CPU rule of it; with
-/// `--fov` or `--morph`, and `--morph-to equirect` on any projection, a
-/// usage error.
+/// `ViewParams::equirect`; with `--fov` or `--morph`, and `--morph-to
+/// equirect` on any projection, a usage error. Its run on lavapipe is
+/// `frame.rs`'s `the_whole_sphere_on_lavapipe_keeps_to_the_cpu_rule`,
+/// which this suite's budget had no room for.
 #[test]
 fn frame_projection_equirect_on_an_equirect_file() {
     let _t = timed("frame_projection_equirect_on_an_equirect_file");
     let file = equirect_file();
     let dir = outputs("projection-equirect");
     let size = (256, 128);
-    let runs: [(&str, &[&str]); 7] = [
+    let runs: [(&str, &[&str]); 6] = [
         ("yaw30", &["--reference", "--yaw", "30"]),
         ("yaw0", &["--reference"]),
-        ("lavapipe", &["--adapter", "cpu", "--yaw", "30"]),
         ("fov", &["--reference", "--fov", "90"]),
         (
             "morph",
@@ -1052,17 +1031,8 @@ fn frame_projection_equirect_on_an_equirect_file() {
     let yaw0 = load(out);
     same_picture(&yaw0, &want_yaw0).unwrap();
     must_fail("--yaw 0 as --yaw 30", same_picture(&yaw0, &want));
-    // On lavapipe, within D32's CPU rule; --yaw 0's reference isn't.
-    let (gpu, out) = &ran[2];
-    assert_eq!(gpu.ok()["renderer"], "gpu");
-    let gpu = load(out);
-    within_cpu_rule(&gpu, &want).unwrap();
-    must_fail(
-        "lavapipe against --yaw 0",
-        within_cpu_rule(&gpu, &want_yaw0),
-    );
     // The usage errors.
-    for ((name, _), (ran, _)) in runs.iter().zip(&ran).skip(3) {
+    for ((name, _), (ran, _)) in runs.iter().zip(&ran).skip(2) {
         assert_eq!(ran.status, Some(2), "{name}: {}", ran.doc);
         assert_eq!(ran.code(), "usage", "{name}: {}", ran.doc);
     }
