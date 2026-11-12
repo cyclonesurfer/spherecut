@@ -89,6 +89,40 @@ pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("too many levels of symbolic links"))
 }
 
+/// The file at `path` where the kernel finds it, in its real folder: a
+/// project file's own place (the project review's F031). Links at the
+/// path's end are followed as [`follow_links`] follows them, but each
+/// from the real folder of the link, and the folder that holds the file
+/// is resolved physically (`realpath`), so a `..` in a link's target or
+/// in the path is taken where the kernel takes it, never lexically
+/// across a linked folder. Media paths in a project stay lexical from
+/// the folder this gives (D47). The file itself need not exist, as when
+/// a project is saved for the first time, but its folder must.
+pub fn real_file(path: &Path) -> io::Result<PathBuf> {
+    may_block("resolving a file's folder");
+    let mut p = std::path::absolute(path)?;
+    // The kernel's own limit for one lookup, as in `follow_links`.
+    for _ in 0..40 {
+        let Some(name) = p.file_name() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path names no file",
+            ));
+        };
+        let folder = std::fs::canonicalize(p.parent().unwrap_or(Path::new("/")))?;
+        let here = folder.join(name);
+        match std::fs::symlink_metadata(&here) {
+            // A relative target is relative to the link's real folder;
+            // an absolute one replaces it.
+            Ok(m) if m.file_type().is_symlink() => p = folder.join(std::fs::read_link(&here)?),
+            Ok(_) => return Ok(here),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(here),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
 /// What is at `dest`, if it is a regular file that a rename may replace;
 /// `None` if nothing is. Anything else is refused: a rename over a
 /// directory fails, but only once all the work is done, and one over a

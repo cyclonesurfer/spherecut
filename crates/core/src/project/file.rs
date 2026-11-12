@@ -194,10 +194,10 @@ pub fn save(project: &Project, path: &Path) -> Result<(), FileError> {
         path: path.to_path_buf(),
         source,
     };
-    let path = std::path::absolute(path).map_err(io)?;
     // Through a link the file is written where it points, so its paths
-    // are relative to that folder, which load reads them from too.
-    let dest = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    // are relative to that folder, which load reads them from too: the
+    // folder the kernel finds it in (F031).
+    let dest = crate::fs::real_file(path).map_err(io)?;
     let folder = dest.parent().unwrap_or(Path::new("/"));
     let text = to_json(project, folder)?;
     let mut tmp = TempFile::create(&dest).map_err(io)?;
@@ -221,8 +221,9 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
     if text.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::TooLarge { path });
     }
-    // The folder of the file itself, a link's target, as save takes it.
-    let real = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    // The real folder of the file itself, a link's target, as save
+    // takes it (F031).
+    let real = crate::fs::real_file(&path).map_err(io)?;
     let folder = real.parent().unwrap_or(Path::new("/"));
     from_json(&text, folder)
 }

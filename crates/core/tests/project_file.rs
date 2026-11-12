@@ -181,10 +181,73 @@ fn a_misspelt_key_in_tune_is_refused() {
 /// finds its media from the file's real folder, while media paths stay
 /// lexical as D47 intends (F031; the CLI's half is cli's
 /// `a_project_in_a_linked_folder_renders_its_media`).
+///
+/// Two layouts, each read through `file::load` and
+/// `ProjectFolder::of_file`: `link` names `real/sub`, whose project
+/// keeps its media in `real` as `../clip.mp4`; and `home/proj` names
+/// `nas/proj`, whose `current.spherecut` is a link to
+/// `../archive/v3.spherecut`, kept with its media in `nas/archive`.
+///
+/// Control: the base's rule, the link's own folder taken lexically, puts
+/// the media beside the link's parent, where it isn't.
+#[cfg(unix)]
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
-    todo!()
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("linked-folder");
+    // Where the system's temp folder is reached through a link, its
+    // real path.
+    let root = std::fs::canonicalize(&dir.0).unwrap();
+    let root = root.as_path();
+    std::fs::create_dir_all(root.join("real/sub")).unwrap();
+    std::fs::create_dir_all(root.join("nas/proj")).unwrap();
+    std::fs::create_dir_all(root.join("nas/archive")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    symlink("real/sub", root.join("link")).unwrap();
+    symlink("../nas/proj", root.join("home/proj")).unwrap();
+    symlink(
+        "../archive/v3.spherecut",
+        root.join("nas/proj/current.spherecut"),
+    )
+    .unwrap();
+    let cases = [
+        // (the path a user gives, where the project is, its media)
+        (
+            root.join("link/p.spherecut"),
+            root.join("real/sub/p.spherecut"),
+            root.join("real/clip.mp4"),
+        ),
+        (
+            root.join("home/proj/current.spherecut"),
+            root.join("nas/archive/v3.spherecut"),
+            root.join("nas/archive/clip.mp4"),
+        ),
+    ];
+    for (given, real, media) in &cases {
+        std::fs::write(media, b"a clip").unwrap();
+        let p = project_at(media.to_str().unwrap());
+        file::save(&p, real).unwrap();
+        let text = std::fs::read_to_string(real).unwrap();
+        assert!(!text.contains(root.to_str().unwrap()), "relative: {text}");
+
+        let loaded = file::load(given).unwrap();
+        assert_eq!(&loaded.media()[0].path, media, "{}", given.display());
+        assert!(loaded.media()[0].path.exists());
+        let (folder, name) = ProjectFolder::of_file(given).unwrap();
+        assert_eq!(folder.path(), real.parent().unwrap(), "{}", given.display());
+        assert_eq!(name, real.file_name().unwrap());
+        let loaded = folder.load(&name).unwrap().project;
+        assert_eq!(&loaded.media()[0].path, media, "{}", given.display());
+
+        // The base's rule: the file's folder lexically from the link.
+        let lexical = file::lexical(&spherecut_core::fs::follow_links(given).unwrap());
+        let rel = Path::new(text.split("\"path\": \"").nth(1).unwrap().split('"').next().unwrap());
+        let there = file::lexical(&lexical.parent().unwrap().join(rel));
+        must_fail(
+            &format!("{}'s media found lexically", given.display()),
+            there.exists(),
+        );
+    }
 }
 
 /// `file::load` behaves as `ProjectFolder::load` does (F034): it opens

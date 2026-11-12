@@ -256,14 +256,16 @@ impl ProjectFolder {
     /// The folder the project at `path` is in, and the project's name: a
     /// link at `path` is followed, so the project is written where it
     /// points and its paths are from that folder (D47), and its lock is
-    /// the one an agent takes there.
+    /// the one an agent takes there. The folder is the one the kernel
+    /// finds the file in, its path resolved physically
+    /// ([`crate::fs::real_file`], F031), so a `..` across a linked folder
+    /// names the folder the file is really in.
     pub fn of_file(path: &Path) -> Result<(ProjectFolder, OsString), FolderError> {
         let io = |source| FolderError::Io {
             path: path.to_path_buf(),
             source,
         };
-        let path = std::path::absolute(path).map_err(io)?;
-        let path = file::lexical(&crate::fs::follow_links(&path).map_err(io)?);
+        let path = crate::fs::real_file(path).map_err(io)?;
         let name = path
             .file_name()
             .ok_or_else(|| io(io::Error::new(io::ErrorKind::InvalidInput, "no file name")))?
