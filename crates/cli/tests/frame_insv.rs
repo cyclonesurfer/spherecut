@@ -5,14 +5,14 @@
 //! `--stitch-distance` and `--projection equirect`, which also renders an
 //! equirect file whole.
 //!
-//! The files: synth's `InsvSpec::small()` (2 × 384², lossless) cut to
-//! its first 6 frames, since its 30 took 0.6 s of the budget to write,
-//! written once a binary, for the tests whose pictures matter;
+//! The files: synth's `InsvSpec::small()` (2 × 384², 30 lossless
+//! frames), written once a binary, for the tests whose pictures matter;
 //! and the CLI's own 2 × 128² masters of 6 frames (`tests/insv/mod.rs`),
 //! each with a fault or none, for the rest and for a lens of a file
 //! with no calibration. Each is written once into a folder of this
-//! binary's, kept for the run. Each test runs its
-//! controls beside its own checks, through `must_fail`.
+//! binary's, kept for the run and removed by the next run once this one
+//! has ended. Each test runs its controls beside its own checks, through
+//! `must_fail`.
 //!
 //! Budget (4.1 rule 5, 19.6): 1 s of the M3.5 row's 3 s, rung 3's 2 s
 //! being the rest. Each test prints its time and the suite's.
@@ -83,15 +83,41 @@ impl Drop for Timed {
 
 // The files.
 
-/// A folder of this test binary's, kept for the run.
+/// The start of the name of each run's folder, before its process id.
+const RUN: &str = "frame-insv-";
+
+/// A folder of this test binary's, kept for the run. The folders of
+/// runs that have ended go first, so that they don't pile up.
 fn tmp() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let d = Path::new(env!("CARGO_TARGET_TMPDIR"))
-            .join(format!("frame-insv-{}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        sweep(root);
+        let d = root.join(format!("{RUN}{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     })
+}
+
+/// Removes each folder in `root` named [`RUN`] and the id of a process
+/// that is no longer running: a run that has ended, whose files no test
+/// will read again.
+fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(RUN))
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = pid
+            && !Path::new(&format!("/proc/{pid}")).exists()
+        {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
 }
 
 /// A folder of `tmp()`'s for one test's outputs.
@@ -101,16 +127,20 @@ fn outputs(name: &str) -> PathBuf {
     d
 }
 
-/// `InsvSpec::small()`'s master, 2 × 384², at 6 lossless frames: frame
-/// 5 is the last.
+/// `InsvSpec::small()`'s master: 2 × 384², 30 lossless frames. It
+/// prints how long it took to write, that share of the budget.
 fn small_file() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| {
-        let spec = InsvSpec {
-            frames: 6,
-            ..InsvSpec::small()
-        };
-        write_insv(&spec, &tmp().join("small")).unwrap().master
+        let began = Instant::now();
+        let master = write_insv(&InsvSpec::small(), &tmp().join("small"))
+            .unwrap()
+            .master;
+        eprintln!(
+            "InsvSpec::small(): written in {:.3} s",
+            began.elapsed().as_secs_f64()
+        );
+        master
     })
 }
 
@@ -368,7 +398,9 @@ fn code_is(img: &Image, track: usize, n: u32) -> Result<(), String> {
 
 /// `--seam weights`' rule: red, block 0's weight, plus blue, block 1's,
 /// is 255 within a code at every pixel, both lenses covering the whole
-/// sphere between them.
+/// sphere between them on an equirect finer than about 2.5° a pixel, as
+/// 512 × 256 is (amendment 5, D64); a coarser one leaves a gap at the
+/// seam that no lens covers, where both are 0.
 fn weights_sum_to_one(img: &Image) -> Result<(), String> {
     let off: Vec<(usize, u8, u8)> = rgb8(img)
         .chunks_exact(3)
@@ -428,7 +460,7 @@ fn frame_insv_reference_matches_the_library() {
         "--projection",
         "equirect",
         "--size",
-        "256x128",
+        "512x256",
         "--frame",
         "5",
     ];
@@ -453,7 +485,7 @@ fn frame_insv_reference_matches_the_library() {
                 },
                 rig: RigOptions::default(),
             };
-            library(file, &pair, 5, turn(0.0, 0.0, 0.0), (256, 128))
+            library(file, &pair, 5, turn(0.0, 0.0, 0.0), (512, 256))
         });
         let ran = each(&runs, |(name, extra)| {
             let mut args = common.to_vec();
@@ -570,7 +602,7 @@ fn frame_insv_shows_a_lens_and_the_seam() {
                         "--projection",
                         "equirect",
                         "--size",
-                        "256x128",
+                        "512x256",
                         "--seam",
                         seam,
                     ],
@@ -636,8 +668,11 @@ fn frame_insv_shows_a_lens_and_the_seam() {
 /// error naming it; and each of `--lens`, `--seam`, `--geometry` and
 /// `--stitch-distance` is a usage error with `--project`, `--equirect`
 /// or `--stream`, or on a file that isn't a camera's pair, as `--lens`
-/// is with any of the other three. The control: binding=direct and
-/// binding=reversed render different pictures.
+/// is with any of the other three; and a pair under `--reference` with
+/// `--decoder vaapi` or `vulkan` is one too, since a pair decodes in
+/// software until M3.7. The controls: binding=direct and
+/// binding=reversed render different pictures, and `--decoder software`
+/// on the pair isn't refused.
 #[test]
 fn frame_insv_takes_geometry_and_distance() {
     let _t = timed("frame_insv_takes_geometry_and_distance");
@@ -698,6 +733,11 @@ fn frame_insv_takes_geometry_and_distance() {
         conflicts.push([new[0], *flag].concat());
     }
     let projects: Vec<Vec<&str>> = new.iter().map(|f| f.to_vec()).collect();
+    // The decoders a pair can't use until M3.7.
+    let decoders: [&[&str]; 2] = [
+        &["--reference", "--size", "64x32", "--decoder", "vaapi"],
+        &["--reference", "--size", "64x32", "--decoder", "vulkan"],
+    ];
     let project = |args: &Vec<&str>| {
         let o = spherecut()
             .args(["frame", "--project"])
@@ -714,9 +754,10 @@ fn frame_insv_takes_geometry_and_distance() {
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
         }
     };
-    let (parsed_runs, bad_runs, conflict_runs, project_runs, plain_runs, pictures) =
+    let (parsed_runs, bad_runs, conflict_runs, project_runs, plain_runs, decoder_runs, pictures) =
         std::thread::scope(|s| {
             let parsed_runs = s.spawn(|| each(&parsed, |args| frame(&missing, &out, args)));
+            let decoder_runs = s.spawn(|| each(&decoders, |args| frame(pair_file(), &out, args)));
             let bad_runs = s.spawn(|| each(&bad, |(args, _)| frame(&missing, &out, args)));
             let conflict_runs = s.spawn(|| each(&conflicts, |args| frame(pair_file(), &out, args)));
             let project_runs = s.spawn(|| each(&projects, project));
@@ -751,6 +792,7 @@ fn frame_insv_takes_geometry_and_distance() {
                 conflict_runs.join().unwrap(),
                 project_runs.join().unwrap(),
                 plain_runs.join().unwrap(),
+                decoder_runs.join().unwrap(),
                 pictures,
             )
         });
@@ -791,9 +833,14 @@ fn frame_insv_takes_geometry_and_distance() {
             ran.message()
         );
     }
+    for (args, ran) in decoders.iter().zip(&decoder_runs) {
+        refuses_decoder(ran).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+    }
     let [(direct, direct_out), (reversed, reversed_out)] = &pictures[..] else {
         unreachable!()
     };
+    // The control: the same pair under --reference, decoded in software.
+    must_fail("--decoder software", refuses_decoder(direct));
     for ran in [direct, reversed] {
         let r = ran.ok();
         assert_eq!(r["stitch"]["geometry"]["status"], "user", "{r}");
@@ -809,6 +856,16 @@ fn frame_insv_takes_geometry_and_distance() {
         "binding=direct against binding=reversed",
         same_picture(&load(direct_out), &load(reversed_out)),
     );
+}
+
+/// Whether a run refused `--decoder` as a usage error: exit 2, `usage`,
+/// and the flag named in its message.
+fn refuses_decoder(ran: &Ran) -> Result<(), String> {
+    if ran.status == Some(2) && ran.code() == "usage" && ran.message().contains("--decoder") {
+        Ok(())
+    } else {
+        Err(format!("exit {:?}: {}", ran.status, ran.doc))
+    }
 }
 
 /// Whether a run is a clear error for a trailer at fault: the exit the

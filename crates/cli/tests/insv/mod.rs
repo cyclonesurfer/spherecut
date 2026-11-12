@@ -9,9 +9,12 @@
 //! `testkit::pats`, the one copy of Pat's strings (F137): none of Pat's
 //! numbers is copied here.
 //!
-//! The pictures don't matter to the tests that use these files: each
-//! lens shows `SeamLines` through Pat's V3 composed under synth's
-//! `x5_like_planted` at SIDE², whatever the trailer says.
+//! The pattern doesn't matter to the tests that use these files, but
+//! the corner codes `write_insv` draws on each lens do: `frame_insv.rs`
+//! and `frame.rs` read them, or hold `--lens`'s pictures to one another,
+//! to tell the lenses' tracks and frames apart. Each lens shows
+//! `SeamLines` through Pat's V3 composed under synth's `x5_like_planted`
+//! at SIDE², whatever the trailer says.
 
 use std::path::{Path, PathBuf};
 

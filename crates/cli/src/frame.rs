@@ -80,7 +80,8 @@ const SIDES: std::ops::RangeInclusive<u32> = 16..=16384;
 #[derive(Args, Debug, Clone)]
 pub struct FrameArgs {
     /// The video: a stitched equirect, tagged with spherical metadata or
-    /// treated as one with --equirect. Not with --project.
+    /// treated as one with --equirect, or a camera's pair of lenses (an
+    /// Insta360 file), stitched with --reference. Not with --project.
     #[arg(required_unless_present = "project")]
     pub file: Option<PathBuf>,
     /// A project file: render its sequence's frame at --time or --frame,
@@ -126,8 +127,9 @@ pub struct FrameArgs {
     /// --projection equirect, which is the whole sphere.
     #[arg(long, value_name = "DEG", value_parser = angle, allow_negative_numbers = true)]
     pub fov: Option<f64>,
-    /// The virtual camera's projection; equirect is the whole sphere, 2:1,
-    /// turned by --yaw, --pitch and --roll.
+    /// The virtual camera's projection; equirect is the whole sphere,
+    /// turned by --yaw, --pitch and --roll, drawn at --size (2:1, such as
+    /// 2048x1024, for a standard equirect).
     #[arg(long, value_enum, default_value_t = ProjectionArg::Rectilinear)]
     pub projection: ProjectionArg,
     /// A projection to morph towards, by --morph.
@@ -148,7 +150,8 @@ pub struct FrameArgs {
     #[arg(long, value_enum, default_value_t = FilterArg::Iso)]
     pub filter: FilterArg,
     /// auto tries VA-API on the GPU's render node and falls back to
-    /// software; vaapi and vulkan fail instead (exit 3).
+    /// software; vaapi and vulkan fail instead (exit 3). A camera's pair
+    /// decodes in software until M3.7, and refuses vaapi and vulkan.
     #[arg(long, value_enum, default_value_t = DecoderArg::Auto)]
     pub decoder: DecoderArg,
     /// The DRM render node to decode on [default: the rendering GPU's,
@@ -228,7 +231,8 @@ pub enum ProjectionArg {
     Rectilinear,
     Fisheye,
     Stereographic,
-    /// The whole sphere, through the turn alone (`--projection` only).
+    /// The whole sphere, through the turn alone: --projection only, never
+    /// --morph-to.
     Equirect,
 }
 
@@ -262,7 +266,7 @@ impl ProjectionArg {
 /// What `--seam` paints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SeamArg {
-    /// Each lens's weight: lens 0's red, lens 1's blue.
+    /// Each calibration block's weight: block 0's red, block 1's blue.
     Weights,
     /// How far the two lenses disagree where both see.
     Difference,
@@ -1124,6 +1128,22 @@ impl Job {
         }
         let lens = self.args.lens.filter(|_| pair);
         if pair && self.args.reference && lens.is_none() {
+            // A pair decodes in software until M3.7: a hardware decoder
+            // named is the flags' fault, not the file's.
+            let hardware = match self.args.decoder {
+                DecoderArg::Vaapi => Some("vaapi"),
+                DecoderArg::Vulkan => Some("vulkan"),
+                DecoderArg::Auto | DecoderArg::Software => None,
+            };
+            if let Some(name) = hardware {
+                return Err(failure(
+                    codes::USAGE,
+                    format!(
+                        "--decoder {name}: {file} is a camera's pair of lenses, which decode in \
+                         software until M3.7; give --decoder auto or software"
+                    ),
+                ));
+            }
             return self.run_pair(tmp, &shot, src, &report, &stop);
         }
         let opts = match lens {
