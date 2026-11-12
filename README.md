@@ -589,6 +589,12 @@ FFmpeg's warnings and errors about each file whatever it is set to.
   stalls nothing else; with `picture` it waits after every packet too,
   zero copy's decoders included. `off` or `0`, or unset, the default,
   waits for nothing. The viewer and the playback benchmarks read it.
+- `SPHERECUT_GATE_PROBE`: another diagnostic of that stall, off by
+  default. Set to a whole number of milliseconds from 2 to 50, a
+  `--smoke` run submits a tiny job on the viewer's GPU queue that often
+  while it plays and lists in its document how long each took
+  (`result.probe` in `docs/cli-json.md`); anything else is ignored with
+  a warning.
 - `SPHERECUT_EXPORT_DEVICE`: where the window's exports render. By
   default on a device of their own on the window's GPU (M2.10,
   DECISIONS D56); `window` puts them on the viewer's own device, as

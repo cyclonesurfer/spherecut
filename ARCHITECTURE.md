@@ -1081,7 +1081,16 @@ without waiting.
   frame (at most `CONTROL_WAIT`, 250 ms), breaking D34's rule on
   purpose and only under `--smoke`. The document's `asked` says which
   of them the run had; hw-test's Tier 2 `gui_decode_behind` runs them
-  (below, "Testing tiers").
+  (below, "Testing tiers"). Two diagnostics of the VA-API copy path's
+  stall, both off by default, show in the document too: `vaapi_drain`
+  names the drain the player ran with (`SPHERECUT_VAAPI_DRAIN`), and
+  with it on `drain` says what it waited for; and with
+  `SPHERECUT_GATE_PROBE=<ms>` the run starts the gate probe
+  (`render::GateProbe`) as it starts playing, which every period waits
+  at the submit gate (D41) as the uploader does, submits a clear of a
+  256-byte buffer of its own on the viewer's queue and times it to
+  wgpu's work-done callback, and `probe` lists its jobs slower than 8
+  ms while the run played, to set beside the late UI passes.
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
   M2.2b, D53) is the toolkit check's (D26): `proto::TimelineProto`, on
   the device the viewer would take, draws 500 seeded clips on 6 tracks
@@ -1112,7 +1121,11 @@ without waiting.
   which the UI reports, and at exit
   `run` joins them beside the player's threads, with 3 s. The smoke
   run's `smoke-watchdog` is the one thread never joined: it ends with
-  the process, or ends the process itself (above).
+  the process, or ends the process itself (above). The gate probe's
+  `gate-probe` (it submits) and `gate-probe-poll` (it polls the device
+  every millisecond) run only with `SPHERECUT_GATE_PROBE`: the smoke
+  run's `smoke-out` job stops and joins them; a run that fails drops
+  the probe, and they end by themselves.
 * *(planned, M2 on)* Background workers for thumbnails, waveforms,
   proxies and export, each with progress reporting and cancellation
   tokens.

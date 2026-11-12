@@ -40,6 +40,16 @@
 //! [`SCREENSHOT_WIDTH`] pixels wide, and the files are written on a
 //! worker: the UI thread never waits on the disk.
 //!
+//! Two diagnostics of the VA-API copy path's stall on AMD, both off by
+//! default, show in the document. The VA-API drain the player ran with
+//! (`SPHERECUT_VAAPI_DRAIN`) is always named, and with it on, what it
+//! waited for. With `SPHERECUT_GATE_PROBE=<ms>` ([`gate_probe_from_env`])
+//! the run starts a [`GateProbe`] on the window's device as it starts
+//! playing, which times a tiny job on the UI's queue every `<ms>`; the
+//! writer stops it, and the document lists its jobs submitted while the
+//! run played, on the run's own time base (`late`'s), so that a slow job
+//! can be lined up with a late UI pass.
+//!
 //! The run's own limits are checked in its UI passes, which stop where
 //! the compositor draws nothing of the window: eframe then runs only its
 //! `logic`, or the UI thread waits in presenting (a locked GNOME session,
@@ -52,7 +62,9 @@
 //! [`PerfStats::samples_after`]: spherecut_playback::PerfStats::samples_after
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -68,7 +80,8 @@ use spherecut_media::backend::{
 };
 use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
-use spherecut_playback::{Counter, LockStatus, PlayState, Player, Stage};
+use spherecut_playback::{Counter, DrainWaits, LockStatus, PlayState, Player, Stage, VaapiDrain};
+use spherecut_render::{GateProbe, ProbeReport as GateProbeReport};
 
 use spherecut_core::project::{AnyKey, Ease, Edit, Key, KeyId, Orient};
 use spherecut_core::time::{Rational, Time};
@@ -99,9 +112,10 @@ pub const LATE_KEPT: usize = 64;
 
 /// The stages a [`Late`] pass gives the slowest of, from the samples
 /// recorded since the pass before it.
-const LATE_STAGES: [Stage; 5] = [
+const LATE_STAGES: [Stage; 6] = [
     Stage::Decode,
     Stage::Download,
+    Stage::Drain,
     Stage::UploadCpu,
     Stage::UploadGpu,
     Stage::RenderGpu,
@@ -127,6 +141,53 @@ pub const CONTROL_WAIT: Duration = Duration::from_millis(250);
 
 /// The longest a held frame sleeps at a time between looks at its stop.
 const FLOOR_STEP: Duration = Duration::from_millis(5);
+
+/// `SPHERECUT_GATE_PROBE=<ms>`: the smoke run probes the window's queue
+/// every `<ms>` ([`GateProbe`]), a diagnostic of the VA-API copy path's
+/// stall; unset, it doesn't.
+pub const GATE_PROBE_ENV: &str = "SPHERECUT_GATE_PROBE";
+
+/// The gate probe's periods [`GATE_PROBE_ENV`] takes, in whole ms.
+pub const GATE_PROBE_MS: RangeInclusive<u64> = 2..=50;
+
+/// The probe's jobs slower than this, in ms, the document lists one by
+/// one ([`ProbeSummary::over_8ms`]), at most [`OVER_KEPT`] of them.
+pub const OVER_MS: f32 = 8.0;
+pub const OVER_KEPT: usize = 4000;
+
+/// The probe's period `get` (the environment, or a test's) asks for: a
+/// whole number of ms in [`GATE_PROBE_MS`], with spaces around it. Unset
+/// or empty, none; anything else is none too, and is warned of, the
+/// first time only.
+pub fn gate_probe_from_env(get: impl Fn(&str) -> Option<String>) -> Option<Duration> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let value = get(GATE_PROBE_ENV);
+    let (period, warn) = probe_period(value.as_deref(), &WARNED);
+    if warn {
+        tracing::warn!(
+            "ignoring {GATE_PROBE_ENV}={:?}, which isn't a whole number of ms from {} to {}: \
+             the gate probe is off",
+            value.unwrap_or_default(),
+            GATE_PROBE_MS.start(),
+            GATE_PROBE_MS.end()
+        );
+    }
+    period
+}
+
+/// The period `value` names (see [`gate_probe_from_env`]), and whether
+/// to warn of it: a value it doesn't take is warned of only while
+/// `warned` is unset, which this sets.
+fn probe_period(value: Option<&str>, warned: &AtomicBool) -> (Option<Duration>, bool) {
+    let value = value.map(str::trim).unwrap_or_default();
+    if value.is_empty() {
+        return (None, false);
+    }
+    match value.parse::<u64>() {
+        Ok(ms) if GATE_PROBE_MS.contains(&ms) => (Some(Duration::from_millis(ms)), false),
+        _ => (None, !warned.swap(true, Ordering::Relaxed)),
+    }
+}
 
 /// What `--smoke` and its flags ask for.
 #[derive(Debug, Clone, PartialEq)]
@@ -400,6 +461,8 @@ pub struct SmokeDriver {
     phase: Phase,
     outcome: Option<Outcome>,
     watchdog: Option<Watchdog>,
+    /// The gate probe's period, with one ([`GATE_PROBE_ENV`]).
+    gate_probe: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -415,6 +478,7 @@ enum Phase {
         doc: Box<Document>,
         asked: Instant,
         shot: mpsc::Receiver<Arc<egui::ColorImage>>,
+        probe: Option<ProbeRun>,
     },
     Writing {
         job: Job<Outcome>,
@@ -455,6 +519,33 @@ struct Run {
     /// stopped for an export still running (D56): what the run reports
     /// is up to here.
     stopped: Option<Mark>,
+    /// The VA-API drain the player runs with, and with it on, the drains'
+    /// waits when the run started.
+    vaapi_drain: VaapiDrain,
+    drain_from: Option<DrainWaits>,
+    /// The gate probe, with [`GATE_PROBE_ENV`].
+    probe: Option<GateProbe>,
+}
+
+/// The gate probe of a run that has ended, which the writer stops: its
+/// jobs submitted from `since` (the run's start) to `until` (its end)
+/// are the run's.
+#[derive(Debug)]
+struct ProbeRun {
+    probe: GateProbe,
+    since: Instant,
+    until: Instant,
+}
+
+impl ProbeRun {
+    /// Stop the probe, which waits for its threads, and put what it saw
+    /// in `doc`. Never on the UI thread.
+    fn finish(self, doc: &mut Document) {
+        let report = self.probe.stop();
+        if let Some(r) = &mut doc.result {
+            r.probe = Some(ProbeSummary::of(&report, self.since, self.until));
+        }
+    }
 }
 
 /// The counters, UI samples and passes at a moment of the run.
@@ -480,7 +571,14 @@ impl SmokeDriver {
             },
             outcome: None,
             watchdog: None,
+            gate_probe: gate_probe_from_env(|k| std::env::var(k).ok()),
         }
+    }
+
+    /// Probe the window's queue every `period` while the run plays, or
+    /// not: [`GATE_PROBE_ENV`]'s, over the environment.
+    pub fn set_gate_probe(&mut self, period: Option<Duration>) {
+        self.gate_probe = period;
     }
 
     /// Start the watchdog: from now, `stall` with no UI pass ends the run
@@ -573,6 +671,14 @@ impl SmokeDriver {
                 {
                     let Some(p) = &s.player else { return };
                     let perf = p.perf();
+                    let vaapi_drain = p.config().vaapi_drain;
+                    let probe = self.gate_probe.and_then(|period| {
+                        GateProbe::start(&s.gpu, period)
+                            .inspect_err(
+                                |e| tracing::warn!(error = %e, "the gate probe didn't start"),
+                            )
+                            .ok()
+                    });
                     let mut run = Run {
                         since: now,
                         start: Counter::ALL.map(|c| perf.count(c)),
@@ -589,6 +695,9 @@ impl SmokeDriver {
                         export_from: None,
                         export_to: None,
                         stopped: None,
+                        vaapi_drain,
+                        drain_from: (vaapi_drain != VaapiDrain::Off).then(|| perf.drain_waits()),
+                        probe,
                     };
                     run.gather(perf);
                     if !s.snapshot.want_play {
@@ -635,6 +744,13 @@ impl SmokeDriver {
                     run.gather(p.perf());
                 }
                 let doc = Box::new(Document::ok(self.report(s, ctx, &run, played)));
+                // Its jobs while the run played, as the report counts it.
+                let played_s = run.stopped.as_ref().map_or(played, |m| m.played_s);
+                let probe = run.probe.take().map(|probe| ProbeRun {
+                    probe,
+                    since: run.since,
+                    until: run.since + Duration::from_secs_f64(played_s.max(0.0)),
+                });
                 if self.args.screenshot.is_some() {
                     let (tx, rx) = mpsc::channel();
                     ctx.request_screenshot(move |image| {
@@ -644,24 +760,25 @@ impl SmokeDriver {
                         doc,
                         asked: now,
                         shot: rx,
+                        probe,
                     };
                 } else {
-                    self.write(doc, None);
+                    self.write(doc, None, probe);
                 }
             }
             Phase::Shooting { asked, shot, .. } => match shot.try_recv() {
                 Ok(image) => {
-                    let Phase::Shooting { doc, .. } =
+                    let Phase::Shooting { doc, probe, .. } =
                         std::mem::replace(&mut self.phase, Phase::Done { closed: false })
                     else {
                         return;
                     };
-                    self.write(doc, Some(image));
+                    self.write(doc, Some(image), probe);
                 }
                 Err(mpsc::TryRecvError::Empty)
                     if now.saturating_duration_since(*asked) < SCREENSHOT => {}
                 Err(_) => {
-                    let Phase::Shooting { mut doc, .. } =
+                    let Phase::Shooting { mut doc, probe, .. } =
                         std::mem::replace(&mut self.phase, Phase::Done { closed: false })
                     else {
                         return;
@@ -670,7 +787,7 @@ impl SmokeDriver {
                         "no screenshot came within {} s",
                         SCREENSHOT.as_secs()
                     ));
-                    self.write(doc, None);
+                    self.write(doc, None, probe);
                 }
             },
             Phase::Writing { job } => match job.poll() {
@@ -708,14 +825,26 @@ impl SmokeDriver {
 
     fn fail(&mut self, code: &'static str, message: String) {
         tracing::error!(code, message, "the smoke run failed");
-        self.write(Box::new(Document::failed(code, message)), None);
+        self.write(Box::new(Document::failed(code, message)), None, None);
     }
 
-    /// Write `doc`, and the screenshot with it, on a worker.
-    fn write(&mut self, doc: Box<Document>, shot: Option<Arc<egui::ColorImage>>) {
+    /// Write `doc`, and the screenshot with it, on a worker, which stops
+    /// the gate probe first and puts what it saw in `doc`.
+    fn write(
+        &mut self,
+        doc: Box<Document>,
+        shot: Option<Arc<egui::ColorImage>>,
+        probe: Option<ProbeRun>,
+    ) {
         let args = self.args.clone();
         self.phase = Phase::Writing {
-            job: Job::spawn("smoke-out", move || write_out(&args, *doc, shot)),
+            job: Job::spawn("smoke-out", move || {
+                let mut doc = *doc;
+                if let Some(p) = probe {
+                    p.finish(&mut doc);
+                }
+                write_out(&args, doc, shot)
+            }),
         };
     }
 
@@ -1121,6 +1250,9 @@ pub struct Report {
     pub ended: bool,
     /// What it was asked to play with beside the clip (D40).
     pub asked: Asked,
+    /// The VA-API drain the player ran with ([`VaapiDrain::name`]):
+    /// `off`, `download` or `picture`.
+    pub vaapi_drain: &'static str,
     pub adapter: Adapter,
     pub surface_format: String,
     /// Pixels a point, and the window's own scale factor.
@@ -1145,6 +1277,9 @@ pub struct Report {
     pub late: Vec<Late>,
     /// Each stage's milliseconds by its name ([`Stage::name`]).
     pub stages: BTreeMap<&'static str, Percentiles>,
+    /// What the VA-API drain waited for, with it on; absent with it off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drain: Option<DrainReport>,
     pub av: Option<Av>,
     pub audio: Option<Audio>,
     pub cache: Option<Cache>,
@@ -1154,6 +1289,10 @@ pub struct Report {
     /// something is wrong (`core::blocking`).
     pub blocked_on_ui_thread: u64,
     pub submit_gate: Gate,
+    /// What the gate probe saw while the run played, with
+    /// [`GATE_PROBE_ENV`]; absent without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe: Option<ProbeSummary>,
     /// Where the screenshot went, once written.
     pub screenshot: Option<String>,
     pub screenshot_size: Option<[u32; 2]>,
@@ -1448,6 +1587,104 @@ pub struct Gate {
     pub longest_ms: f32,
 }
 
+/// What the VA-API drain did over the run ([`VaapiDrain`]), from the
+/// player's counters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DrainReport {
+    /// Of the frames whose drains took some time ([`Stage::Drain`]'s
+    /// samples), how many surfaces their drains found not yet ready.
+    pub waited_per_download: Waited,
+    /// Syncs that failed, and surfaces forgotten past the 64 a decoder
+    /// keeps.
+    pub errors: u64,
+    pub overflow: u64,
+    /// Decoders asked to drain that found no `vaSyncSurface` to call (no
+    /// libva loaded), so drained nothing, since the player started.
+    pub unavailable: u64,
+}
+
+/// Surfaces waited for a frame, by the nearest rank; 64 stands for 64 or
+/// more, and `None` for no frame drained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Waited {
+    pub p50: Option<u64>,
+    pub max: Option<u64>,
+}
+
+impl DrainReport {
+    /// From the frames' waits over the run, and the counts.
+    pub(crate) fn of(waits: &DrainWaits, errors: u64, overflow: u64, unavailable: u64) -> Self {
+        DrainReport {
+            waited_per_download: Waited {
+                p50: waits.percentile(50.0),
+                max: waits.max(),
+            },
+            errors,
+            overflow,
+            unavailable,
+        }
+    }
+}
+
+/// What the gate probe ([`GateProbe`]) saw of the jobs it submitted
+/// while the run played.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProbeSummary {
+    pub period_ms: f64,
+    /// Jobs submitted and done; their latency, from the submit to the
+    /// completion, by the nearest rank, in ms.
+    pub n: usize,
+    pub p50: Option<f32>,
+    pub p99: Option<f32>,
+    pub max: Option<f32>,
+    /// Each job slower than [`OVER_MS`], in the order submitted, as
+    /// `[t_s, ms]`: when it was submitted, in seconds into the run (as
+    /// `late`'s `at_s`), and its latency; the first [`OVER_KEPT`].
+    pub over_8ms: Vec<[f64; 2]>,
+    /// Those slower jobs past the first [`OVER_KEPT`].
+    pub over_8ms_dropped: usize,
+    /// Jobs the probe submitted that weren't done a second after it
+    /// stopped ([`GateProbeReport::unfinished`]).
+    pub unfinished: u64,
+}
+
+impl ProbeSummary {
+    /// `report`'s jobs submitted from `since` to `until`, the run's start
+    /// and end, timed from `since`: seconds to a tenth of a millisecond,
+    /// latencies to a hundredth.
+    pub(crate) fn of(report: &GateProbeReport, since: Instant, until: Instant) -> ProbeSummary {
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let run: Vec<(f64, f64)> = report
+            .samples
+            .iter()
+            .filter(|s| s.submitted >= since && s.submitted <= until)
+            .map(|s| {
+                (
+                    s.submitted.duration_since(since).as_secs_f64(),
+                    ms(s.latency),
+                )
+            })
+            .collect();
+        let mut sorted: Vec<f32> = run.iter().map(|&(_, l)| l as f32).collect();
+        sorted.sort_by(f32::total_cmp);
+        let over: Vec<[f64; 2]> = run
+            .iter()
+            .filter(|&&(_, l)| l > f64::from(OVER_MS))
+            .map(|&(t, l)| [(t * 1e4).round() / 1e4, (l * 1e2).round() / 1e2])
+            .collect();
+        ProbeSummary {
+            period_ms: ms(report.period),
+            n: run.len(),
+            p50: rank(&sorted, 0.50),
+            p99: rank(&sorted, 0.99),
+            max: sorted.last().copied(),
+            over_8ms_dropped: over.len().saturating_sub(OVER_KEPT),
+            over_8ms: over.into_iter().take(OVER_KEPT).collect(),
+            unfinished: report.unfinished,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Memory {
     pub rss: Option<u64>,
@@ -1576,6 +1813,14 @@ impl SmokeDriver {
                     .map(|(a, b)| (b.played_s - a.played_s).max(0.0)),
             )
         });
+        let drain = run.drain_from.as_ref().zip(perf.as_ref()).map(|(from, p)| {
+            DrainReport::of(
+                &p.drain_waits().since(from),
+                counted(Counter::DrainErrors),
+                counted(Counter::DrainOverflow),
+                p.count(Counter::DrainUnavailable),
+            )
+        });
         Report {
             version: spherecut_core::brand::VERSION,
             clip: self.args.clip.display().to_string(),
@@ -1583,6 +1828,7 @@ impl SmokeDriver {
             played_s,
             ended: snap.at_end,
             asked: Asked::of(&self.args),
+            vaapi_drain: run.vaapi_drain.name(),
             adapter: Adapter::of(&s.gpu),
             surface_format: self.surface_format.clone(),
             scale: ppp,
@@ -1621,6 +1867,7 @@ impl SmokeDriver {
                 work: Percentiles::of(work, 0),
             },
             stages,
+            drain,
             av,
             audio: audio.map(|a| Audio {
                 host: a.host,
@@ -1652,6 +1899,7 @@ impl SmokeDriver {
                     longest_ms: g.longest.as_secs_f32() * 1e3,
                 }
             },
+            probe: None,
             screenshot: None,
             screenshot_size: None,
             export,
@@ -1826,6 +2074,9 @@ mod tests {
             export_from: None,
             export_to: None,
             stopped: None,
+            vaapi_drain: VaapiDrain::Off,
+            drain_from: None,
+            probe: None,
         };
         // Before the mark, late or not, nothing is listed.
         run.note_late(at(0), 0.0, Some(60.0));
@@ -1972,6 +2223,175 @@ mod tests {
                 control_ui_waits: false,
                 ..control
             }),
+        );
+    }
+
+    /// `SPHERECUT_GATE_PROBE` takes a whole number of ms from 2 to 50,
+    /// with spaces around it; unset or empty is no probe, and so is any
+    /// other value, which is warned of the first time only.
+    ///
+    /// Control: a period past 50 ms isn't taken.
+    #[test]
+    fn the_gate_probe_period_comes_from_its_variable() {
+        use spherecut_testkit::control::must_fail;
+
+        let env = |value: Option<&'static str>| {
+            move |key: &str| {
+                assert_eq!(key, GATE_PROBE_ENV);
+                value.map(str::to_owned)
+            }
+        };
+        let ms = |v: u64| Some(Duration::from_millis(v));
+        for (value, period) in [
+            ("4", ms(4)),
+            (" 2\n", ms(2)),
+            ("50", ms(50)),
+            ("\t17 ", ms(17)),
+        ] {
+            assert_eq!(gate_probe_from_env(env(Some(value))), period, "{value:?}");
+            assert_eq!(
+                probe_period(Some(value), &AtomicBool::new(false)),
+                (period, false),
+                "{value:?}"
+            );
+        }
+        for value in [None, Some(""), Some("  ")] {
+            assert_eq!(gate_probe_from_env(env(value)), None, "{value:?}");
+            assert_eq!(probe_period(value, &AtomicBool::new(false)), (None, false));
+        }
+        assert_eq!(gate_probe_from_env(env(Some("1"))), None);
+        // Warned of once: the values after the first it doesn't take
+        // aren't.
+        let warned = AtomicBool::new(false);
+        assert_eq!(probe_period(Some("1"), &warned), (None, true));
+        for value in ["0", "51", "4.5", "-4", "4ms", "off", "1000"] {
+            assert_eq!(
+                probe_period(Some(value), &warned),
+                (None, false),
+                "{value:?}"
+            );
+            assert_eq!(
+                probe_period(Some(value), &AtomicBool::new(false)),
+                (None, true),
+                "{value:?}"
+            );
+        }
+        must_fail(
+            "a period of 51 ms taken",
+            probe_period(Some("51"), &AtomicBool::new(false))
+                .0
+                .is_some(),
+        );
+    }
+
+    /// The probe's block counts the jobs submitted while the run played,
+    /// times them from its start, and lists those over 8 ms with when
+    /// they were submitted, rounded, in order, at most 4000 of them,
+    /// counting the rest.
+    ///
+    /// Control: the same jobs counted from before the run, which takes in
+    /// a slow job submitted before it started, list another.
+    #[test]
+    fn the_probe_block_lists_the_slow_jobs_of_the_run() {
+        use spherecut_render::ProbeSample;
+        use spherecut_testkit::control::must_fail;
+
+        let t0 = Instant::now();
+        let job = |at_ms: u64, ms: f64| ProbeSample {
+            submitted: t0 + Duration::from_millis(at_ms),
+            latency: Duration::from_secs_f64(ms / 1e3),
+        };
+        let since = t0 + Duration::from_millis(100);
+        let until = since + Duration::from_secs(2);
+        // 200 jobs of 0.5 ms every 4 ms through the run, three of them
+        // slow; one before the run and one after, both slow.
+        let mut samples: Vec<ProbeSample> = (0..200).map(|k| job(100 + 4 * k, 0.5)).collect();
+        samples[10] = job(140, 8.0);
+        samples[50] = job(300, 45.678);
+        samples[120] = job(580, 9.004);
+        samples.insert(0, job(50, 90.0));
+        samples.push(job(2200, 70.0));
+        let report = GateProbeReport {
+            period: Duration::from_millis(4),
+            samples,
+            unfinished: 1,
+        };
+        let p = ProbeSummary::of(&report, since, until);
+        let listed = |p: &ProbeSummary| p.over_8ms == [[0.2, 45.68], [0.48, 9.0]];
+        assert!(listed(&p), "{:?}", p.over_8ms);
+        // As the document's text holds it (an f32 as its shortest form).
+        let text = serde_json::to_string(&p).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            serde_json::json!({
+                "period_ms": 4.0, "n": 200, "p50": 0.5, "p99": 8.0, "max": 45.678,
+                "over_8ms": [[0.2, 45.68], [0.48, 9.0]], "over_8ms_dropped": 0, "unfinished": 1,
+            })
+        );
+        must_fail(
+            "the jobs counted from before the run",
+            listed(&ProbeSummary::of(&report, t0, until)),
+        );
+        // No job: nothing to rank.
+        let none = ProbeSummary::of(&GateProbeReport::default(), since, until);
+        assert_eq!((none.n, none.p50, none.max), (0, None, None));
+        // Every job slow: the first 4000 listed, the rest counted.
+        let slow = GateProbeReport {
+            period: Duration::from_millis(2),
+            samples: (0..4100).map(|k| job(100 + k / 4, 12.0)).collect(),
+            unfinished: 0,
+        };
+        let p = ProbeSummary::of(&slow, since, until);
+        assert_eq!(
+            (p.n, p.over_8ms.len(), p.over_8ms_dropped),
+            (4100, 4000, 100)
+        );
+        assert_eq!(p.over_8ms[0], [0.0, 12.0]);
+        assert_eq!(p.over_8ms[3999], [0.999, 12.0]);
+    }
+
+    /// The drain's block counts the frames' waits over the run: the
+    /// median and the most, none with no frame drained.
+    ///
+    /// Control: the player's waits from before the run, taken for the
+    /// run's, give another median and most.
+    #[test]
+    fn the_drain_block_counts_the_runs_waits() {
+        use spherecut_playback::PerfStats;
+        use spherecut_testkit::control::must_fail;
+
+        let p = PerfStats::new();
+        for w in [9, 9, 9] {
+            p.record_drain_waits(w);
+        }
+        let from = p.drain_waits();
+        for w in [0, 1, 1, 2, 5] {
+            p.record_drain_waits(w);
+        }
+        let run = DrainReport::of(&p.drain_waits().since(&from), 1, 2, 0);
+        let waited = |d: &DrainReport| {
+            d.waited_per_download
+                == Waited {
+                    p50: Some(1),
+                    max: Some(5),
+                }
+        };
+        assert!(waited(&run), "{run:?}");
+        assert_eq!(
+            serde_json::to_value(&run).unwrap(),
+            serde_json::json!({
+                "waited_per_download": {"p50": 1, "max": 5},
+                "errors": 1, "overflow": 2, "unavailable": 0,
+            })
+        );
+        must_fail(
+            "the waits from before the run",
+            waited(&DrainReport::of(&p.drain_waits(), 1, 2, 0)),
+        );
+        let none = DrainReport::of(&DrainWaits::default(), 0, 0, 3);
+        assert_eq!(
+            serde_json::to_value(&none).unwrap()["waited_per_download"],
+            serde_json::json!({"p50": null, "max": null})
         );
     }
 
