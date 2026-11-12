@@ -607,6 +607,12 @@ impl CalibTerms {
 /// change every frame and sphere can't name core's types, so they are the
 /// media's, in core. The default is what a new source opens with
 /// (11.5), inside every one of `validate`'s bounds (11.2).
+///
+/// Beside each number's bounds, `validate` refuses a tune that leaves a
+/// direction covered by neither lens at its q (the coverage rule): lens
+/// b's mask holds the cap of half-angle min(θ_max, θ_frame) −
+/// asin(q |c_b|) about its axis, and two caps cover the sphere when their
+/// half-angles sum to at least 360° less the angle between the axes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tune {
@@ -614,7 +620,9 @@ pub struct Tune {
     pub lenses: [LensTune; 2],
     /// The feather's half width h, in degrees: each lens's weight falls
     /// from 1 to 0 over 90° ± h (the pane's seam width is 2h). 0 to 15,
-    /// and at most min(θ_max, θ_frame) − 90° for each lens. 5 by default,
+    /// and at most max(0, min(θ_max, θ_frame) − 90°) for each lens, so
+    /// that where a lens's min(θ_max, θ_frame) is under 90° only 0 is: a
+    /// hard switch, which makes no hole of its own. 5 by default,
     /// question 3's recommendation.
     pub feather_deg: f64,
     /// The stitch distance as q = 1/D, in m⁻¹: 0 is infinitely far. 0 to
@@ -646,7 +654,10 @@ pub struct LensTune {
     pub centre_px: [f64; 2],
     /// A factor on the focal, 0.9 to 1.1; 1 by default.
     pub radius_scale: f64,
-    /// Added to ξ: 0 unless an own calibration fits it (8.7).
+    /// Added to ξ: 0 unless an own calibration fits it (8.7). Within
+    /// ±0.15, about as far as the radius scale's 0.9 to 1.1 moves θ_frame
+    /// on X5-shaped sets, and ξ plus it above −1, where the unified model
+    /// images nothing (F038).
     pub xi_delta: f64,
     /// θ_max, the widest angle off the axis the lens is used to, in
     /// degrees: 85 to 110 and below the model's `limit_theta`; the pane's
