@@ -10,12 +10,12 @@ This plan starts from the verification draft and takes in what the judges named 
 two, with every error they found fixed. Where the judges disagreed, the choice and its evidence
 are given where the choice is made; Appendix B lists them. Tags: **[F]** checked on the code or
 the bytes, **[G]** a guess or proposal, **[C]** computed for this plan from Pat's V3 and V6
-numbers (section 3.4). Section 0 holds the amendments. Items 1 and 2, the fresh review and the check
-of its fixes, are folded into the sections below; items 3 on override the sections they name, which
-keep their old text, marked [amendment N] where a reader would trip, except the places each item
-says it changed in place; an amendment wins where the two differ. File:line citations in sections 1
-to 24 are at fde9540 (read them with `git show fde9540:<path>`, or find the symbol); an amendment's
-are at its own date.*
+numbers (section 3.4). Section 0 holds the amendments, items 1 to 8. Items 1 and 2, the fresh review
+and the check of its fixes, are folded into the sections below; items 3 on override the sections
+they name, which keep their old text, marked [amendment N] where a reader would trip, except the
+places each item says it changed in place; an amendment wins where the two differ. File:line
+citations in sections 1 to 24 are at fde9540 (read them with `git show fde9540:<path>`, or find the
+symbol); an amendment's are at its own date.*
 
 ## 0. Amendments (read first)
 
@@ -258,7 +258,8 @@ are at its own date.*
      before any chain is built. The reference has no pair form of `render_blurred`: M3.5's `frame
      <insv>` and 10.4's no-GPU path make one `LensPair` per pair of frames and average
      `render_rig_of` over the views as `render_blurred` averages, never `render_rig` once per view
-     or tile. 19.6's M3.6 line gives the cost in place.
+     or tile [amendment 8: M3.5's renders one view; the average waits for a caller with several].
+     19.6's M3.6 line gives the cost in place.
    - **The prediction (8.3, 8.4, 8.6).** `predict_bins` and `predict_through`
      (`tests/common/predict.rs`) and `apart_deg` (private to `tests/instrument.rs`) are test code:
      they solve through synth's `lens::seen`, and synth is only a dev-dependency of render. M3.6's
@@ -1002,6 +1003,174 @@ are at its own date.*
      9.0, then settle the two FFmpeg 9 differences in PROGRESS's Known issues (the MP4 muxer's
      edit-list movie timescale; Matroska audio before 0 after a seek). Whichever slice next touches
      media's muxing or audio seeks takes it, and M3.21's review checks it was done.
+8. **What M3.5 settled (2026-11-12).** These override the sections they name, which are not
+   rewritten. D64 (drafted in M3.5), the slice's dated notes in DECISIONS (on D28, D30, D35, D63 and
+   D65) and PROGRESS's M3.5 note hold the detail; where one of them says otherwise, this item holds.
+   The slice was built in four units on the types they share, reviewed afresh (R1 to R19, and FFmpeg
+   9's audio seek) and fixed in a round of four more units; the orchestrator's compat run on 8.1.3
+   and 9.0.2 comes after it. Where the orchestrator settled a unit's question for Pat within the
+   plan, the item says "decision (i)" to "(vii)"; Pat may overrule any of them.
+   - **The calibration and the table (5.2, 5.3).** 5.2's `to_calibration(&Calib) -> Calibration`
+     can't fill sphere's `Calibration`, which holds the source side, field 27's window and both
+     generations. As built: `camera::insta360::to_calibration(v3: Option<&Calib>, v6:
+     Option<&Calib>, window: Option<&Window>) -> Result<Calibration, CameraError>`, with a new
+     `CameraError::NotCalibration`; with no window dst = src, and an empty window (dst 0) is refused
+     in field 27 ("its window is empty"), so M3.9's `validate` needs no rule of its own for it.
+     `stitching(&Metadata) -> Result<Option<Stitching>, CameraError>` is the one entry probe and the
+     stitch share: field 136 must be 3 or 4 and name a generation the file holds, else
+     `NotCalibration` in field 136, and a file with no V3 or V6 string is `Ok(None)`. A trailer
+     without field 136 is refused rather than read at its newest generation, since no X5 file lacks
+     it (decision (iv)); a corrupt string of the generation not in use refuses too. `known::lookup`
+     is total: `Known.model` is "X5" for every lookup, the X5 row's turn axis is Y, and an unlisted
+     firmware or model gets the row as provisional, with evidence that says why and never quotes the
+     file. `Known::refusal()` words a `stitchable: false` row for frame's `not_equirect` and doctor
+     `--file`'s `missing` line alike, and 5.3's notice "geometry assumed from the X5" reaches a user
+     as probe's `geometry.notice`, frame's `stitch.geometry.notice` and the frame warning
+     `geometry_assumed` (D64).
+   - **Probe and doctor (5.4).** An LRV carries `geometry` (it holds the master's strings), its
+     `lenses` null. `lenses.binding`, `evidence` and `geometry` are null without a calibration a
+     stitch reads. `screen_side` is the FFmpeg stream index of `tracks[screen_side_track]`, null
+     until M3.12, which confirms that this is the meaning it wants (decision (v)). A calibration
+     that parses but that `stitching` refuses gets a `bad_trailer` warning, "the Insta360 trailer's
+     calibration can't be stitched: …". doctor `--file`'s geometry word is probe's
+     `geometry.status`, else `lookup` on the model and firmware; `stitchable` also needs `stitching`
+     to accept the calibration and the table's row to be stitchable, and `missing` says "a
+     calibration a stitch can read: …" for V1/V2-only trailers and oblong windows. media now depends
+     on sphere (for the binding and status in probe), beside camera → sphere; ARCHITECTURE records
+     both, and no third-party crate was added (20).
+   - **The synthetic file (7.2; 22.1's M3.5 row).** 22.1's "N-track `Mp4Writer`" and 7.2's
+     "`Mp4Writer` takes N video streams": as built, `write_insv` codes each lens alone with
+     `Mp4Writer` and muxes the two tracks with a silent AAC stream through media's
+     `encode::mux_video_streams_with_audio(srcs: &[(&Path, Time)], audio, dst)`. Each delay is whole
+     ticks of its source's time base, and a negative one is refused. That mux writes the least
+     common multiple of its tracks' timescales as the movie timescale on every FFmpeg (240000 at
+     29.97), so every edit is exact. The two lens tracks and the LRV are coded side by side
+     (`std::thread::scope`, a one-thread encoder each), so the bytes don't depend on threads, and
+     errors still come in the order track 0, track 1, the mux, the LRV. 7.2's sketch as built:
+     `InsvSpec` gains `name`, `keyint: Option<u32>` and `ss: u32`; `InsvFiles { master, lrv, layout
+     }`; `LrvSpec { side, quality }`; `InsvSpec::planes`, `rung3()` and `small()` (both without an
+     LRV, named `VID_20250101_120000_00_001.insv` and `_002`); `print(cal, planted)` has no
+     generation argument, the generation being the calibration's own. The faults: `StartPtsDiffer`
+     delays lens 1 by exactly one frame (1001 ticks of 1/30000 s) through the mux's delay, not with
+     a late-starting source, because FFmpeg 6.1's MP4 demuxer shortens the last packet of a track
+     that starts with an empty edit (PROGRESS's Known issues), and an offset of one frame
+     compensates it exactly. `StssDiffer`: lens 1's keyint is min(g, frames) − 1, where g is lens
+     0's GOP (2 when g = 1), so its second IDR comes a frame before lens 0's, or on its last frame
+     when the file is no longer than lens 0's GOP. `RateDiffer` at a whole rate also moves track 0
+     to 1/(1200n). `write_insv` keeps FFmpeg's `ftyp` and handler names, not the X5's (major brand
+     avc1, INS.HVC, INS.AAC), since nothing reads them; revisit if a reader needs them (decision
+     (i)). The LRV stays unfaulted, with FFmpeg's own movie timescale and without its LRV-only
+     `inst` fields (9, 26, 36, 44 and 135), until a consumer needs them (decision (ii)), and a
+     lossless LRV is H.264 High 4:4:4 Predictive (qp 0) where the camera's is High, which is fine
+     for tests (decision (iii)). Tier 1 holds the X5's default GOP in a 61-frame file at 29.97 (the
+     master's key frames at 1 and 61, the LRV's at 1, 31 and 61), 0.34 to 0.38 s of `insv_file.rs`'s
+     2 s.
+   - **Pat's numbers (F137; amendment 7's F137 bullet).** `testkit::pats` holds Pat's four strings
+     byte for byte, and the dev-only crate `spherecut-boundary` (`crates/boundary`) holds
+     `pats(generation)` parsed from them, with the boundary and `sphere_rig` (render's
+     `tests/common/rig.rs` re-exports them). synth's library keeps its copies under a drift test,
+     and sphere's `tests/rig.rs` and `tests/unified.rs` theirs under
+     `pats_copies_match_testkit_pats`; camera's and cli's tests keep no lens number of Pat's. What
+     they still write out is the X5's format (the canvas 10752 × 5376, lens type 113, the packed
+     words 0x471, 0x20400, 0x30400 and 0x60400, and field 27's window, 5376² cut to 5312²), each in
+     an exact assertion or a planted fault, and Tier 2c checks the window against the files. Two
+     samples nothing depends on stay in docs: −0.198 (camera's `Token::new` and `strings.rs`'s
+     grammar test) and 8075.73 (sphere's `rig.rs`). `testkit::pats`'s doc lists all of this.
+   - **Rung 1's fixtures (amendment 5's rung 1 bullet; D65).** Amendment 5's move is done as
+     written: `synth::rung` is the only copy of rung 1's camera (`cal`, `planted`, `truth`), far
+     tune, `track` and `pair` (with `track_through` and `pair_through`), shots, `equirect` and
+     `whole_view(k)`. render's `tests/instrument.rs` and agent's `tests/rung3.rs` take them from it,
+     and M3.7's rung 2 can. `Scene`, `Masks`, the ideals and the attribution (`Plant`, `Lands`,
+     `attribute_to`) and `apart_deg` stay private to `tests/instrument.rs`. The slice's first cut
+     kept a copy in `synth::rung` held by render's `tests/rung_copy.rs` to literals of its own; that
+     test is gone.
+   - **The ladder's frame codes (4.2, 7.1, 8.8; amendment 7's F026).** Grid's back-hemisphere frame
+     code is not built, so three clauses are dropped: 4.2's "a frame code on both hemispheres",
+     7.1's "`Grid` gains a back-hemisphere frame code" and 8.8's "the round trip's frame codes read
+     wrong if mirrored". Handedness on synthetic footage is amendment 7's F026 (M3.6's truth
+     mirrored on both lenses, which a handedness check, not the seam, catches). Rung 3's corner
+     codes left its render equal to rung 1's byte for byte.
+   - **The pair on the CPU (amendment 5's reference bullet; 6.2, 10.4, 11.1).** Amendment 5's
+     average of `render_rig_of` over several views for `frame <insv>` is not built:
+     `StillPair::render` keeps the CPU arm's one-view rule and refuses several views as internal,
+     and the average waits for a caller that passes several. `Still::open_pair` decodes in software
+     only: a GPU, VA-API, Vulkan Video or zero copy is refused as internal until M3.7. Track 0 is in
+     front until question 3 settles (6.2, 11.1). `StillPair::seek` moves track 0 to the time and
+     track 1 exactly to the pts track 0 shows, and the pair is `damaged` if they differ; with
+     `SeekMode::Keyframe`, track 0 lands on its keyframe and track 1 is decoded exactly to that
+     time, and docs/agents.md's look section says so when M3.7 lets look reach a pair. Every
+     can't-stitch refusal is `not_equirect`, an unreadable trailer included (probe's `bad_trailer`
+     stays a probe warning), with the reason in the message ("isn't a camera's pair of lenses", "no
+     calibration", "can't be stitched" or "build no rig"); a file that can't be opened fails with
+     media's `not_found` or `io_error`. `still::pair_stitching` calls `may_block` before it opens
+     the file, and a pair's damage warns as any file's does (`still::damage_warnings`).
+   - **frame on a camera's pair (12, 14's frame row).** 14's row says frame stitches by default.
+     Until M3.7 a run without `--reference` is refused as `not_equirect`, with hints for
+     `--reference`, M3.7 and `--equirect`, and M3.7 replaces the refusal with the GPU stitch. The
+     refusal no longer says "stitching arrives in M3"; look, compare and the project tools keep
+     those words through `still::INSTA360_UNSTITCHED`, which M3.7 rewords. Under `--reference` a
+     pair decodes in software: `--decoder vaapi` or `vulkan` is a usage error (exit 2) naming
+     `--decoder`, refused before `Still::open_pair`, and `auto` decodes in software. `--projection
+     equirect` works on any file the run renders, drawn at `--size`, which isn't held to 2:1 (a 2:1
+     default without `--size` is a later slice's choice), with `view.fov` 360; `--fov` and
+     `--morph`/`--morph-to` are usage errors with it, and `--morph-to equirect` is one on any
+     projection. `--lens N` indexes probe's `lenses.tracks`, never calibration blocks (when the
+     trailer can't be read, the first two video streams), draws flat on the GPU or with
+     `reference::render_flat` under `--reference`, needs no calibration and leaves `stitch` null.
+     `--geometry`'s keys are binding, canvas (a, b or c), turn, tz, upright and generation, applied
+     over `pair_stitching`'s entry with status `user`; `EulerConv`, `V6Reading` and fitted values
+     have no keys and stay M3.6's. `--stitch-distance` takes 0.3 m or more, or inf, and is 2 m by
+     default (`Tune::default`). `--seam weights` has red and blue summing to 1 wherever a lens
+     covers (an equirect coarser than about 2.5° a pixel leaves a gap at the seam, amendment 5);
+     `--seam difference` is unclamped and the PNG clips it at 1. frame carries probe's `bad_trailer`
+     warnings on runs that render and runs that fail. D64 is drafted (M3.5) and takes the weights
+     rule over from D63's note of 2026-11-10; M3.6 adds the fit's half, and M3.12 makes it final.
+   - **FFmpeg 9 (amendment 7's FFmpeg 9 bullet).** M3.5 took both halves of the duty. The muxer's:
+     `tests/mux.rs` compares edit lists by duration in seconds, so FFmpeg 9's movie timescale (the
+     tracks' least common multiple, where 6.1 and 8.1.3 write 1000) no longer matters; its controls
+     are an edit list rescaled to 2,880,000, which compares equal while a strict == fails, and an
+     edit one track tick longer, which fails with "edit:". M3.5's audio mux writes the least common
+     multiple itself on every FFmpeg. The audio seek's, in the fix round: 9.0's MP4 demuxer reports
+     AAC's 1024 priming samples as the stream's `initial_padding`, which 6.1's and 8.1's keep
+     internal, so on 9.0 `encode::remux_to_matroska` copies them and the Matroska muxer writes them
+     as the track's CodecDelay. 8.1's and 9.0's Matroska demuxers (libavformat 62 and 63) set the
+     skip from a CodecDelay at open only, and a seek clears it, while 6.1's and 7.1's (60 and 61)
+     drop nothing; so a seek to before the stream's first sample decoded the priming again, and
+     `FfmpegAudio` handed it out. `FfmpegAudio` now keeps where its open found the stream's first
+     sample and never starts a run before it, so a seek's chunk is the open's, with silence before
+     the first sample (media::audio's Timing, D35); `remux_to_matroska_at` takes a `Priming`
+     (`AsSource`, which every existing caller passes and whose files are unchanged, or
+     `Samples(n)`). synth's `a_seek_gives_a_sequential_decodes_samples` holds it at 48 and 44.1 kHz
+     on the MP4, on "-mkv" (no CodecDelay) and on "-mkv-delay" (1024 samples', its start pinned to 0
+     on libavformat 62 and later and to the priming block on 6.1), with both Matroska copies through
+     the open-time drop: "-mkv" always through media's fault-injection
+     `AudioFault::frames_dropped_at_open`, and "-mkv-delay" through the same emulation where the
+     demuxer drops nothing (6.1, 7.1) or through the demuxer's own drop (8.1, 9.0). Its controls
+     (`AudioFault::keeps_samples_before_first`, the fix turned off) must fail with the priming
+     handed out, on both copies and every FFmpeg. `scripts/build-ffmpeg.sh` now builds FFmpeg 9,
+     which has no `--enable-libshaderc`, and the orchestrator rebuilt the 9.0.2 install with it
+     (`n9.0.2-full`: VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, libsvtav1, Opus and Vorbis
+     on Vulkan-Headers 1.4.354, without `glslc`, so its spirv_compiler is off). Both halves wait on
+     that compat run, the only place the demuxers' own drop runs, and M3.21's review checks it.
+     Still open: on 7.1 the CodecDelay copy's start isn't pinned, and whether 9.0's Matroska muxer
+     trims the AAC track's end with a DiscardPadding is unchecked.
+   - **The M3.5 row's budget (19.6, 22.1's M3.5 row; decision (vi)).** 19.6's 3 s for rung 3 and
+     `frame --reference` isn't met on the 4-core cloud box: 3.42 to 3.61 s at the fix round's unit
+     (b) and 3.56 to 3.71 s at 7f444b6, with `rung3.rs` 2.05 to 2.09 s (CPU-bound, about 7.3 CPU-s)
+     and `frame_insv.rs` 1.51 to 1.62 s (about 1 s of it writing `small()`), after `write_insv`'s
+     tracks were coded side by side, with no fixture shrunk and no check cut. The row is raised to
+     the measured time plus 20 %, rounded up to a tenth of a second: the highest measured, 3.71 s,
+     gives 4.452, so 4.5 s (unit (b)'s 3.61 s alone would give 4.4 s). M3's budgets then sum to
+     134.5 s, from 133 s, inside its 135 s. The shares that fit are rung3 2.5 s and frame_insv 2.0
+     s; the suites' printed `BUDGET_S` (2.0 and 1.0 s) move with the next change to their code. Tier
+     2c's clip 8 frame stays at 1 s (decision (vii)): its three renders take 14.9 s and 1.31 GB at
+     peak, and one 4.8 s, since a render at 1 s decodes both 3840² tracks in software from the
+     keyframe on top of making the pair (amendment 5: about 0.5 s and 470 MB at 3840²).
+   - **Changed in place.** The header's paragraph on section 0 (the items run 1 to 8); amendment 5's
+     average over views; 4.2's frame code on both hemispheres; 5.2's `to_calibration`; 7.1's
+     back-hemisphere frame code; 7.2's N video streams; 8.8's mirrored frame codes; 14's frame row
+     (stitching by default); 19.6's M3.5 line (4.5 s); and 22.1's M3.5 row (its writer and its
+     time). Each is marked [amendment 8].
 
 ## 1. Summary
 
@@ -1272,11 +1441,12 @@ rung below and with the analytic ideal (`synth::render_view_ideal`).
 
 **The scene** is `Grid` plus a new `SeamLines` (tilted great circles across both seams, a 1°
 checker within ±15° of the seam, a luminance ramp for exposure), with `HighFrequency` for the LOD
-rows, a frame code on both hemispheres, and a radius that is finite (R) or ∞. **The rig** is
-X5-like at 768² per lens over 200°: V3 Mei with ξ = 2 and the format notes' Brown coefficients,
-rolls of 90.5° and 89.3°, yaw and pitch of a few tenths of a degree per lens, principal points 2
-to 3 px off centre, tz = −32 mm. A second rig uses equidistant lenses with KB distortion
-(PROMPT's model, and the no-calibration fallback), which proves the source path is not Mei-only.
+rows, a frame code on both hemispheres [amendment 8: not built; F026 instead], and a radius that is
+finite (R) or ∞. **The rig** is X5-like at 768² per lens over 200°: V3 Mei with ξ = 2 and the format
+notes' Brown coefficients, rolls of 90.5° and 89.3°, yaw and pitch of a few tenths of a degree per
+lens, principal points 2 to 3 px off centre, tz = −32 mm. A second rig uses equidistant lenses with
+KB distortion (PROMPT's model, and the no-calibration fallback), which proves the source path is not
+Mei-only.
 **Outputs**: a 512×256 equirect and 90° rectilinear views at 256² on each seam and each pole. The
 rung-3 file is the same rig at 2×768², 8 frames, libx265 `lossless=1`.
 
@@ -1498,8 +1668,9 @@ in canvas pixels. The grammar is insta360.md §4.1: token counts 6N + 4, 16N + 2
 the generation. Values keep their token strings, so `parse(print(c)) == c` bit for bit and
 `print(parse(s)) == s` for every string in Pat's files. V6's 13 terms stay in token order;
 geometry reads them (6.1). `camera::insta360::to_calibration(&Calib) -> sphere::rig::Calibration`
-makes block 1's centre local to its square (cx − 5376) and is added in M3.5, the first slice that
-needs both crates; M3.2 does not wait for sphere's types.
+[amendment 8: it takes V3, V6 and field 27's window, and can refuse] makes block 1's centre local to
+its square (cx − 5376) and is added in M3.5, the first slice that needs both crates; M3.2 does not
+wait for sphere's types.
 
 ### 5.3 The built-in geometry table
 
@@ -1822,7 +1993,7 @@ planes: pairing is checked at the pixel. synth asserts
 b ≤ s/2 − |centre offset| − (r(`theta_max`) + 2)/√2 for every truth it renders, so no block
 reaches content: for the X5-like truth with centres up to 3 px off, the bound is 47.8 px at 384²
 and 100 px at 768² [C]. A 64-px block at 384² would reach θ ≈ 94°, inside the feather and the
-strips [C]. `Grid` gains a back-hemisphere frame code.
+strips [C]. `Grid` gains a back-hemisphere frame code [amendment 8: not built].
 **Extrinsics, independently** (4.1 rule 2). `synth::lens::compose(&CalibTruth, &Planted,
 front_track) -> RigTruth` builds each lens's model in its slot's pixels under the planted canvas
 map, its `to_rig` and its `centre_m` from the stored triples, the roll offset, the binding, T_b, S,
@@ -1858,7 +2029,8 @@ pub fn print(cal: &CalibTruth, planted: &Planted, generation: Generation) -> Str
 
 **The container** has two square `hvc1` tracks with the X5's coding (full range, BT.709, chroma
 left, the mode's GOP as 3.1 gives it, no B-frames; insta360.md:33-37), one silent AAC track, `ftyp wide mdat moov`, then
-`inst` of size E + 8 and the trailer; `Mp4Writer` takes N video streams (`encode.rs:544-569`), and
+`inst` of size E + 8 and the trailer; `Mp4Writer` takes N video streams (`encode.rs:544-569`)
+[amendment 8: each lens is coded alone, then the tracks are muxed with the AAC], and
 `Quality::Lossless` is libx265 `lossless=1`, which every FFmpeg we build against has. **The
 trailer** comes from synth's own writer, not camera's (insta360.md §3): 6-byte footers on 128 KiB
 boundaries, the 31-slot index at EOF−388, the 72-byte tail and magic, record 1 as hand-written
@@ -2142,7 +2314,8 @@ Studio export is never fitted to.
 - **Take 15:** the track whose mean luma falls is the screen-side lens. That settles the physical
   side for the default facing and the pane's names, not the binding, which the fit settles.
 - **Handedness:** every lens frame has det +1 by construction, and the round trip's frame codes
-  read wrong if mirrored; on Pat's footage, the text on clip 8's wall must read left to right.
+  read wrong if mirrored [amendment 8: not built; F026's mirrored truth instead]; on Pat's footage,
+  the text on clip 8's wall must read left to right.
 
 ### 8.9 The `rig-fit` tool
 
@@ -2776,7 +2949,7 @@ without it.
 |---|---|---|
 | `spherecut probe`, agent `probe` | the camera block (5.4); folder listings group the master with its LRV through `companions` | M3.2 |
 | `spherecut doctor --file` | stitchable or not, and why; both lenses on the chosen decode path | M3.2 |
-| `spherecut frame <insv>` | stitches by default with the file's calibration and the `Known` geometry, through `agent::still::Still::open_pair` (two decoders, an exact seek of both to one time, equal pts asserted), then `render_blurred` with a `Pair` on the run's upload path (10.4); `--reference` for the CPU reference; `--projection equirect`; `--lens 0\|1` for one lens raw; `--seam weights\|difference`; `--geometry binding=…,canvas=…` and `--stitch-distance 2m` for a file without a project | M3.5 (CPU), M3.7 (GPU) |
+| `spherecut frame <insv>` | stitches by default [amendment 8: from M3.7; until then only with `--reference`] with the file's calibration and the `Known` geometry, through `agent::still::Still::open_pair` (two decoders, an exact seek of both to one time, equal pts asserted), then `render_blurred` with a `Pair` on the run's upload path (10.4); `--reference` for the CPU reference; `--projection equirect`; `--lens 0\|1` for one lens raw; `--seam weights\|difference`; `--geometry binding=…,canvas=…` and `--stitch-distance 2m` for a file without a project | M3.5 (CPU), M3.7 (GPU) |
 | frame's hint (`frame.rs:896-904`), check's `no_sphere` (`check.rs:872-881`), `equirect_doubt` (`agent/src/still.rs:181`, through `check_equirect`, 236-316), look's `assume_equirect` (`look.rs:229, 1078`) and its hint (693-696) | a camera file with a calibration is not doubted and points to `project create` and `render`; one without says "no calibration: shown as its lenses" | M3.7, M3.9 |
 | agent `look` | an `.insv` with no project stitches (M3.7); `mode: "seam"` tiles both side seams and both poles with lens A, lens B and their difference × 4, and returns the signature in the JSON (misregistration px, terms, NCC, photometric step, the dominant term) | M3.7, M3.13 |
 | agent `project create` (`ops/project.rs:160-201`) | builds `dual_fisheye`; warns `no_calibration` and falls back to a generic KB equidistant 200° rig with centred circles, labelled so, only when the trailer has none; the summary (486-505) shows the source kind, camera, geometry status, tune and profile | M3.9 |
@@ -3069,7 +3242,7 @@ The stitch shader's cost is P-SHADE's (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K on 
 Each new suite prints its time against its budget: camera ≤ 1 s, its 100k run apart (M3.2);
 sphere's properties and rung 0 ≤ 30 s in release [amendment 4: in a debug build, sphere and synth at
 opt-level 3] (M3.3); metrics, seam self-tests, the
-attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
+attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s [amendment 8: 4.5 s, measured 3.56 to 3.71 s] (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
 recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8, measured: its 32 tests 5.3 to 5.9 s alone and 6.7 to 7.4 s beside four busy loops, 5.5 s alone after D77's compute mips, none measured under load since: amendment 6); schema, edits
 and agents ≤ 3 s (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
 (M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s to `cargo xtask
@@ -3139,7 +3312,7 @@ one reviewer each.
 | **M3.2** Camera crate | (a) trailer, index, records and limits (5.1); (b) the walker, metadata, strings parse and print (5.2); (c) `companions`, `verify_companion`, probe, doctor `--file`, `cli-json.md` (5.4); (d) synth's own trailer writer and string printer from numbers | M3.0 (c) | 5.5's properties at 100k; the cross parse; every trailer fault a clear error with its offset; both Tier 2c tests on the 14; probe's contract test, which also pins the old shapes (the CLI's `camera` object keeps `layout` and `evidence` beside the new `serial`, and the agent's summary `camera` stays a string beside the new `camera_detail`); each camera reader (`read_trailer`, `read_record`, `verify_companion`) panics on a thread marked as the UI thread (5.1); clips.rs's tests unchanged | none | the 14 | `spherecut probe` names the camera, serial, firmware, lenses and calibration |
 | **M3.3** Lens maths | (a) `Unified`, `Canonical`, V3's reading and `V6Reading` (21 values), the inverse, `limit_theta`, `KbLens`; (b) `sphere::rig` (6.2) with `rig::theta_frame` (6.1); (c) `synth::lens`, `synth::lens::compose` with its hand-worked unit tests, `RigTruth`'s ground plane, per-lens time offset and rolling-shutter readout, the per-binary render cache (7.1), and `SeamLines`; rung 0 | M3.0 (c) | 6.3's properties at 100k in ≤ 30 s; rung 0 on every truth model; all 1152 `EulerConv` values and all 21 `V6Reading` values distinct; `euler_twins_are_quarter_turns` (6.2): the twin groups for sampled stored angles, whose common rotations are exactly the quarter turns about Z once stage G's −Z filter is applied; synth's self-tests, `compose`'s hand-worked values among them; `Rig::build` agrees with `compose` (6.3's Against synth) | none | none | nothing |
 | **M3.4** The instrument | (a) weighted metrics (8.1); (b) `reference::render_rig` with debug modes 4 to 7; (c) strips, shifts, signature and self-tests (8.2); (d) the attribution matrix (8.3); rung 1 with every control | M3.3 | each control fails and is attributed to the term 8.3's step 1 predicts (prediction within 0.05 px rms, crosstalk under its bound); the common-mode control passes every seam check and fails the comparison with the ideal (4.2); rung 1 within 4.2's thresholds [amendment 7: met as amendment 5 sets out, after measuring: `SeamLines`' common-mode margin recorded, not gated; the band control a 0.5° yaw; 0.05 px in strip pixels]; 3.4's budget matches the images; within 19.6's budget (≤ 15 s) | none | none | nothing |
-| **M3.5** The file (review: F038, F137, F141's 7.2; amendment 7) | (a) `write_insv` (N-track `Mp4Writer`, LRV, faults); (b) `to_calibration`, `known` with the placeholder entry, probe's geometry blocks; (c) `Still::open_pair` and `frame <insv>` on the CPU reference; rung 3's CPU half | M3.2, M3.4 | rung 3's planes hash equal and its render equals rung 1's; each trailer `InsvFault` (`TruncatedTrailer` to `VarintOverflow`) a clear error naming the record (5.5); ≤ 3 s; `frame` of clip 8 renders in Tier 2c | none | 8 | nothing new (placeholder geometry) |
+| **M3.5** The file (review: F038, F137, F141's 7.2; amendment 7) | (a) `write_insv` (N-track `Mp4Writer` [amendment 8: each lens alone, muxed with the AAC], LRV, faults); (b) `to_calibration`, `known` with the placeholder entry, probe's geometry blocks; (c) `Still::open_pair` and `frame <insv>` on the CPU reference; rung 3's CPU half | M3.2, M3.4 | rung 3's planes hash equal and its render equals rung 1's; each trailer `InsvFault` (`TruncatedTrailer` to `VarintOverflow`) a clear error naming the record (5.5); ≤ 3 s [amendment 8: 4.5 s]; `frame` of clip 8 renders in Tier 2c | none | 8 | nothing new (placeholder geometry) |
 | **M3.6** The fit, provisional (review: F017, F019 to F021, F026, F029, F041, F060, F067, F138, F139, F143; U13; amendment 7) | (a) `render::seam::fit` (8.4); (b) `rig-fit`, `xtask fit-matrix` (from then on part of 4.1 rule 6's push rule for any slice that touches `render::seam`, `sphere::rig` or `synth::lens`); (c) `fit_recovers_planted_geometry` (8.5); (d) the run on clips 8 to 10: `known`'s provisional X5 entry, `samples_lens_offset_is_zero`, `samples_thumbnail_orientation` (Pat agreed, 2026-11-01), P-GAIN's first numbers | M3.5 | 8.5's expected verdicts met in Tier 1 and in `fit-matrix`, the redirect and out-of-family truths included; `docs/research/m3/fit-clip{8,9,10}.md` with σ, the ranking, each question settled or open, the directions stage F leaves undetermined, and the fine class open on clips 8 to 10; the image circle's centre on both lenses against readings A to D's principal points (U13) [amendment 7]; the X5 entry written from the run whatever the rules decide (the decisive value, the redirect's, or the best candidate as "best of N, not decisive", 8.6), the placeholder kept, with `stitchable: false`, only if clips 8 and 10 fail the gross rule; k = 0 by 5σ or the offset recorded; D64 and D65's fit half drafted (D65's instrument half is M3.4's: amendment 5) | none | 8, 9, 10 | **the first stitched stills of clip 8** (`spherecut frame`), with the provisional numbers; if the gross rule fails, a note that says so and what the design note will look at |
 | **M3.7** Stitch on the GPU (review: F025, F039, F055, F066, F120; the list budget; amendment 7) | (a) `fs_rig` and its structs (10.3, as amendment 5 corrects it: the weights where no feather weighs, the mask's θ in angle, an output on the strips' grid); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B), against a software decode, strict, with the pair check's signature label; nothing renders into a slot's 8-bit planes (D77; amendment 6) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
 | **M3.8** Frame lock | section 9: (a) `MediaBackend::track_timing` (`FfmpegBackend` from P-TRK's MP4 tables, `None` otherwise), the open checks, `LockRefused` and `LensShort`; (b) `pick_pair`, `unpaired_presents` over every stream, `pair_wait`, `pair_resyncs`; (c) the group base in `FrameCache` (`set_group`, Tg as the members' playhead), the group `until`, group seeks and the end, the resync backstop; (d) slots and their floor of 2 per member, per-lens fallback; the `PerStream` test backend and the readback tests | M3.0 (`track_timing`); M3.1 (`mux_video_streams`' MP4 output, the corner codes, the two-track MP4 perf clips and the 2×64² test files) | `pick_pair`'s property at 100k; `a_locked_pair_never_shows_mismatched_frames` at 0 unpaired by tag and by content, its lock-off control above 0 on both; `a_locked_pair_paces_to_its_slowest_lens` meets the pacing rule in every case and its control fails; each planted fault refused by name, and the one-frame-short lens locked and ended at the shorter lens with one `LensShort`; the slot floor unlocks within `WAIT` and its no-floor control times out; the fallback test keeps lens 0 on hardware with one notice; old two-stream tests pass; on odin 0 unpaired by tag and by corner code, `zero_copy_pair_matches_copy` (9), and P-LOCK's verdict (8K25 on path B included) with the slot count | odin | 1, 2, 3, 4 (P-LOCK's 8K30, 8K25, 5.7K60 and 4K120) and 9 (real-time play), and M3.1's MP4 perf clips | the raw view never shows the lenses at different frames, and a lagging lens slows the pair instead of freezing it; `unpaired` and `pair_wait` in the overlay |
