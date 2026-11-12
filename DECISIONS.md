@@ -3399,7 +3399,12 @@ What:
   `crates/playback/tests/engine.rs`, D34). The Tier 2 tests check their
   own checks the same way: they pass on a stand-in and fail on a fault.
   *From 2026-10-28 `Fault::Reopen` fails instead every opening of the
-  decoder afresh for the stream's start (D29).*
+  decoder afresh for the stream's start (D29).* *From M3.5 it also adds
+  `FfmpegAudio::open_faulted` with an `AudioFault`: frames dropped at
+  open and not after a seek, as FFmpeg 8.1's and 9.0's Matroska
+  demuxers drop a CodecDelay's priming, so that synth's audio tests run
+  that case on every FFmpeg, and, for their controls, samples a seek
+  decodes from before the stream's first handed out (D35).*
 
 Where this differs from the plan:
 
@@ -6213,7 +6218,13 @@ What:
     silence, so chunks follow each other without a gap.
   - libavcodec removes AAC's priming and the demuxer applies edit lists.
     The last frame's padding (AAC codes whole frames of 1024) is cut
-    where the packets' durations say the stream ends.
+    where the packets' durations say the stream ends. *M3.5: libavcodec
+    removes the priming where the demuxer says how much it is. FFmpeg
+    9.0's MP4 demuxer reports AAC's, so a Matroska remux carries it as
+    a CodecDelay, and 8.1's and 9.0's Matroska demuxers have it dropped
+    at open only, not after a seek (6.1's drop nothing). So nothing from
+    before the stream's first sample, where the open found it, is handed
+    out, even when a seek decodes it again.*
   - Channels: mono is duplicated and stereo passes through. First-order
     ambiX (`SA3D`, D17) is read as four channels in no order, so that
     swresample can't remix it as 4.0 surround, and decoded here to two

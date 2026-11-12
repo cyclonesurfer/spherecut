@@ -365,9 +365,13 @@ The other modules are safe Rust:
   output's rate and channels in chunks on the clip's axis (sample `s` is
   clip time `s / rate`, 0 being the video's first frame): AAC's priming
   and the last frame's padding gone, edit lists applied, audio before 0
-  dropped and audio after it led by silence. Mono is duplicated, stereo
-  passed through, first-order ambiX decoded to two cardioids, the rest
-  mixed down by swresample, and stereo spread to the output's channels.
+  dropped and audio after it led by silence. Nothing from before the
+  stream's first sample, where its open found it, is handed out, even
+  when a seek decodes it again: a Matroska CodecDelay's priming, which
+  FFmpeg 8.1's and 9.0's demuxers drop at open only (M3.5). Mono is
+  duplicated, stereo passed through, first-order ambiX decoded to two
+  cardioids, the rest mixed down by swresample, and stereo spread to the
+  output's channels.
   The resampler starts only on a grid of input samples whose phase a
   decode from the start has, so a seek, which decodes from 100 ms
   before its time and drops what comes before round(at × rate), gives a
