@@ -7,9 +7,10 @@
 //! `spherecut_camera`'s reader and parser, which it is there to check
 //! (4.1 rule 2): a bug a shared writer mirrored would go unseen. M3.2
 //! writes the trailer, gives the records of a master and of its LRV and
-//! prints the strings; M3.5 adds `write_insv` and its `InsvSpec`, which
-//! write both files and call [`append_trailer`] once `Mp4Writer` has
-//! written the tracks.
+//! prints the strings; M3.5 adds [`write_insv`] and its [`InsvSpec`],
+//! which write both files: each lens coded on its own, the two tracks
+//! muxed with a silent AAC stream into one MP4 (not one `Mp4Writer` of N
+//! tracks), and then [`append_trailer`] on it.
 //!
 //! The trailer is laid out as the X5's (§3.1 and §3.2): records in
 //! descending id order, each its payload and then six bytes giving its
@@ -30,13 +31,17 @@
 use std::cmp::Reverse;
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use spherecut_core::FrameRate;
 use spherecut_core::fs::TempFile;
 
-use crate::lens::{CalibTruth, Generation, Planted};
+use crate::Pattern;
+use crate::lens::{
+    CalibTruth, Generation, Planted, RigTruth, X5_LIKE_SIDE, compose, x5_like, x5_like_planted,
+};
 use crate::media::SynthError;
+use crate::yuv::YuvPlanes;
 
 /// What a synthetic `.insv` gets wrong on purpose (7.2). The trailer's
 /// faults, [`InsvFault::in_trailer`], are planted by [`inst_box`] (M3.2);
@@ -737,10 +742,10 @@ pub fn inst_box(
 /// Writes `mp4`'s bytes and then [`inst_box`] at the X5's alignment to
 /// `out`, whole or not at all (`core::fs::TempFile`), so `out` exists
 /// only once it is complete; a file at `out` is replaced, even `mp4`
-/// itself. `write_insv` (M3.5) writes the tracks with `Mp4Writer` to a
-/// file of its own and calls `append_trailer(&tracks,
-/// &dir.join("VID_…_00_001.insv"), &spec.records, spec.fault)`, and the
-/// same for the LRV with its records.
+/// itself. [`write_insv`] (M3.5) codes each lens on its own, muxes the
+/// two tracks with a silent AAC stream into a file of its own and calls
+/// `append_trailer(&muxed, &dir.join(&spec.name), &spec.records,
+/// spec.fault)`, and the same for the LRV with its records.
 pub fn append_trailer(
     mp4: &Path,
     out: &Path,
@@ -792,9 +797,9 @@ fn fixed(v: f64, decimals: usize) -> String {
 /// token depends on it: the strings are `cal`'s canvas numbers as stored,
 /// never scaled to a track, as the X5 writes the same strings in every
 /// master, LRV and mode (plan 3.1). Only [`crate::lens::compose`] scales
-/// a block to a track. The files M3.5 writes print a rig's stored numbers
-/// through this unchanged; plan 7.2's "scaled to the lens size" is stale
-/// on this.
+/// a block to a track. The files [`write_insv`] writes print a rig's
+/// stored numbers through this unchanged, as the plan's amendment 7
+/// corrects 7.2's "scaled to the lens size" (the project review's F141).
 pub fn print(cal: &CalibTruth, planted: &Planted) -> String {
     // The stored numbers are printed as they are, whatever is planted.
     let _ = planted;
@@ -817,6 +822,145 @@ pub fn print(cal: &CalibTruth, planted: &Planted) -> String {
     let word = (code << 16) | (u32::from(cal.body) << 8);
     tokens.push(word.to_string());
     tokens.join("_")
+}
+
+// The files (M3.5): a master and its LRV, written whole.
+
+/// How [`write_insv`] codes each lens (7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Quality {
+    /// Mathematically lossless: libx265 `lossless=1` for the master's
+    /// tracks and x264 at qp 0 for the LRV's, so that the planes decoded
+    /// are the planes coded, bit for bit, and a test can hash them (4.2's
+    /// rung 3).
+    Lossless,
+    /// Lossy, at the constant rate factor `crf`, for a test that needs a
+    /// camera's coding loss.
+    CameraLike { crf: u8 },
+}
+
+/// What a master's LRV needs that the master doesn't fix (plan 3.1's LRV
+/// lines). The rest follows from the master by the X5's rules: one H.264
+/// track holding both lenses side by side at the same scale, track 1 on
+/// the left and track 0 on the right; 25 frames a second for a 25 fps
+/// master and 29.97 otherwise; the master's frame count at 25 and 29.97,
+/// half of it at 59.94 and a quarter, rounded up, at 119.88; and the
+/// master's trailer with the LRV's own fields ([`Records::x5_lrv`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LrvSpec {
+    /// Each half's side: the LRV is 2 · side wide and side high, as the
+    /// X5's 1664 × 832 is at 832.
+    pub side: u32,
+    /// How its track is coded.
+    pub quality: Quality,
+}
+
+/// A synthetic X5 recording (7.2): a master of two square HEVC tracks
+/// coded as the X5 codes them (3.1), a silent AAC track and synth's
+/// trailer, and its LRV if it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsvSpec {
+    /// The master's file name, `VID_<date>_<time>_00_<NNN>.insv`. The
+    /// LRV's follows by the X5's rule (insta360.md §2.3):
+    /// `LRV_<date>_<time>_01_<NNN>.lrv`.
+    pub name: String,
+    /// The camera: what each track shows, by track, and how the rig moves.
+    pub rig: RigTruth,
+    /// The scene the rig sees.
+    pub pattern: Pattern,
+    /// Frames a track.
+    pub frames: u32,
+    pub rate: FrameRate,
+    pub quality: Quality,
+    /// The conventions the camera's files leave open, as `rig` was
+    /// composed under them. No token of the strings in `records` depends
+    /// on them: those are printed as stored ([`print()`]).
+    pub calib: Planted,
+    /// The master's trailer records; the LRV's are [`Records::x5_lrv`] of
+    /// them.
+    pub records: Records,
+    /// What the files get wrong on purpose, or nothing.
+    pub fault: Option<InsvFault>,
+    /// The LRV, or none.
+    pub lrv: Option<LrvSpec>,
+    /// An IDR every `keyint` frames, or `None` for the X5's GOP at `rate`
+    /// (3.1): every 60 frames at 29.97, 50 at 25, and 120 at 59.94 and
+    /// 119.88. 8.4's file with an IDR every 2 frames sets it.
+    pub keyint: Option<u32>,
+    /// The supersampling each lens's picture is rendered at, per axis
+    /// ([`crate::lens::render_lens`]).
+    pub ss: u32,
+}
+
+/// What [`write_insv`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsvFiles {
+    /// The master, `dir` joined with the spec's name.
+    pub master: PathBuf,
+    /// The LRV beside it, when the spec asked for one.
+    pub lrv: Option<PathBuf>,
+    /// Where the master's trailer put each part.
+    pub layout: TrailerLayout,
+}
+
+/// Writes `spec`'s master into `dir`, and its LRV beside it when the spec
+/// has one, each whole or not at all: each lens's track coded on its own
+/// from [`InsvSpec::planes`], the two muxed with a silent AAC stream, and
+/// the trailer appended ([`append_trailer`]). `spec.fault` is planted in
+/// the file it belongs to: a trailer's in the trailer, the others in the
+/// tracks.
+#[expect(unused_variables, reason = "M3.5 unit (a) writes the body")]
+pub fn write_insv(spec: &InsvSpec, dir: &Path) -> Result<InsvFiles, SynthError> {
+    todo!("M3.5 unit (a)")
+}
+
+/// A rung-3-like spec of `frames` frames at 29.97 with lenses of `side`²:
+/// [`x5_like`] under [`x5_like_planted`], composed at front track 0, seeing
+/// `SeamLines` infinitely far, lossless at ss 2, with [`Records::x5_like`]
+/// of the same calibration and no LRV.
+fn x5_like_spec(name: &str, side: u32, frames: u32) -> InsvSpec {
+    let (cal, planted) = (x5_like(), x5_like_planted());
+    let rate = FrameRate::FPS_29_97;
+    InsvSpec {
+        name: name.to_owned(),
+        rig: compose(&cal, &planted, 0, [side; 2]),
+        pattern: Pattern::SeamLines,
+        frames,
+        rate,
+        quality: Quality::Lossless,
+        records: Records::x5_like(std::slice::from_ref(&cal), &planted, frames, rate),
+        calib: planted,
+        fault: None,
+        lrv: None,
+        keyint: None,
+        ss: 2,
+    }
+}
+
+impl InsvSpec {
+    /// Rung 3's file (4.2): [`x5_like`] under [`x5_like_planted`], composed
+    /// at front track 0 and `[X5_LIKE_SIDE; 2]` (2 × 768²) as rung 1's
+    /// camera is, seeing `SeamLines` infinitely far, 8 frames at 29.97,
+    /// lossless, at ss 2, with [`Records::x5_like`] of the same
+    /// calibration and no LRV.
+    pub fn rung3() -> InsvSpec {
+        x5_like_spec("VID_20250101_120000_00_001.insv", X5_LIKE_SIDE, 8)
+    }
+
+    /// The file the other app and agent tests open (7.2's sizes): rung 3's
+    /// at 2 × 384², 30 frames.
+    pub fn small() -> InsvSpec {
+        x5_like_spec("VID_20250101_120000_00_002.insv", 384, 30)
+    }
+
+    /// The planes [`write_insv`] codes for track `track`'s frame `frame`,
+    /// its corner code and all, as the X5 codes them
+    /// ([`crate::lens::Coding::X5`]): what a lossless file's decoded frame
+    /// must hash equal to.
+    #[expect(unused_variables, reason = "M3.5 unit (a) writes the body")]
+    pub fn planes(&self, track: usize, frame: u32) -> Result<YuvPlanes, SynthError> {
+        todo!("M3.5 unit (a)")
+    }
 }
 
 #[cfg(test)]
