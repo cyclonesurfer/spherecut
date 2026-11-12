@@ -983,14 +983,7 @@ fn an_altered_calibration_is_refused() {
         json!({"file": p, "create": {"media": cam}}),
     );
     let made = fisheye(&p, 1);
-    // Each sends the other binding too, so that it changes something
-    // when it applies.
-    let mut same = made.clone();
-    same.geometry.binding = match made.geometry.binding {
-        Binding::Direct => Binding::Reversed,
-        Binding::Reversed => Binding::Direct,
-    };
-    let mut raw = same.clone();
+    let mut raw = made.clone();
     let r = &mut raw.calibration.raw;
     let string = [&mut r.v6, &mut r.v3, &mut r.v2, &mut r.v1]
         .into_iter()
@@ -999,7 +992,7 @@ fn an_altered_calibration_is_refused() {
         .unwrap();
     *string = a_digit_off(string);
     raw.calibration.hash = raw.calibration.raw.hash();
-    let mut parsed = same.clone();
+    let mut parsed = made.clone();
     let (blocks, generation) = match (&mut parsed.calibration.v3, &mut parsed.calibration.v6) {
         (Some(v3), _) => (v3, "v3"),
         (None, Some(v6)) => (v6, "v6"),
@@ -1033,9 +1026,9 @@ fn an_altered_calibration_is_refused() {
         );
         assert_eq!(std::fs::read(&p).unwrap(), bytes, "{what} was saved");
     }
-    let applied = must_fail("the file's calibration, sent unchanged", mismatch(&same));
+    let applied = must_fail("the source sent unchanged", mismatch(&made));
     assert!(applied.starts_with("applied"), "{applied}");
-    assert_eq!(fisheye(&p, 1), same);
+    assert_eq!(fisheye(&p, 1), made);
 }
 
 /// `project create` of a camera file records its camera, calibration and
@@ -1165,8 +1158,8 @@ fn no_calibration_is_made_with_a_warning() {
 
 /// A stored camera model with control, bidi and ANSI characters reaches
 /// the summary only as a text field gives it, and neither a raw string nor
-/// an Auto sample appears in the summary. Control: the camera passed
-/// through as it is fails the check.
+/// an Auto sample, set by an agent's `set_stitch`, appears in the
+/// summary. Control: the camera passed through as it is fails the check.
 #[test]
 fn the_summary_keeps_camera_text_as_fields() {
     let _t = timed("the_summary_keeps_camera_text_as_fields");
@@ -1178,8 +1171,15 @@ fn the_summary_keeps_camera_text_as_fields() {
         unreachable!()
     };
     d.camera.model = Some(model.into());
+    let r = &d.calibration.raw;
+    let raw: Vec<String> = [&r.v1, &r.v2, &r.v3, &r.v6]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    assert!(!raw.is_empty());
     let sample = "0.1234567";
-    d.gains = serde_json::from_value(json!({
+    let gains = json!({
         "mode": "auto",
         "rate_hz": 30.0,
         "log_ratio": [[sample.parse::<f32>().unwrap(), 0.0, 0.0]],
@@ -1190,17 +1190,20 @@ fn the_summary_keeps_camera_text_as_fields() {
             "frames": {"kind": "every", "n": 1},
         },
         "estimator": 1,
-    }))
-    .unwrap();
-    let r = &d.calibration.raw;
-    let raw: Vec<String> = [&r.v1, &r.v2, &r.v3, &r.v6]
-        .into_iter()
-        .flatten()
-        .cloned()
-        .collect();
-    assert!(!raw.is_empty());
+    });
+    // The model is written into the saved file, as a camera's file gives
+    // it; the gains are an agent's.
     let p = dir.camera_fixture("a.spherecut", camera);
-    let s = ok(&dir.tools(), "project", json!({"file": p}));
+    let tools = dir.tools();
+    ok(
+        &tools,
+        "edit",
+        edit(
+            &p,
+            json!([{"op": "set_stitch", "media": 12, "gains": gains}]),
+        ),
+    );
+    let s = ok(&tools, "project", json!({"file": p}));
     let source = &s["media"][1]["source"];
     assert_eq!(s["media"][1]["id"], 12, "{s}");
     assert_eq!(source["camera"]["model"], text::field(model), "{source}");
