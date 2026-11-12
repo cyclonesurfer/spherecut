@@ -575,8 +575,9 @@ fn frame_insv_reference_matches_the_library() {
 
 /// Whether a run is the refusal until M3.7: `not_equirect`, its exit,
 /// both hints (`--reference` for the CPU's stitch, and M3.7 for the
-/// GPU's) beside `--equirect`'s, and nothing written to `out` or beside
-/// it.
+/// GPU's) beside `--equirect`'s, not M1's "stitching arrives in M3",
+/// which a pair `--reference` stitches makes untrue, and nothing written
+/// to `out` or beside it.
 fn refused_until_m3_7(ran: &Ran, out: &Path) -> Result<(), String> {
     if ran.code() != "not_equirect" {
         return Err(format!("{} / {}", ran.doc, ran.stderr));
@@ -588,6 +589,9 @@ fn refused_until_m3_7(ran: &Ran, out: &Path) -> Result<(), String> {
         if !ran.message().contains(hint) {
             return Err(format!("no {hint:?} in {:?}", ran.message()));
         }
+    }
+    if ran.message().contains("stitching arrives in M3") {
+        return Err(format!("M1's words in {:?}", ran.message()));
     }
     if out.exists() || !temp_files(out.parent().unwrap()).is_empty() {
         return Err("something was written".into());
@@ -619,10 +623,26 @@ fn frame_insv_needs_reference_until_m3_7() {
     assert_eq!(r["renderer"], "gpu", "{r}");
     assert_eq!(r["source"]["stream"], 0, "{r}");
     assert_eq!(r["stitch"], Value::Null, "{r}");
-    // The control: --reference stitches.
+    // The controls: --reference stitches; and M3.5's first words, which
+    // still said M1's "stitching arrives in M3" (look's, compare's and
+    // the project tools', which don't stitch a pair).
     let (reference, out) = &ran[2];
     assert_eq!(reference.ok()["renderer"], "reference");
     must_fail("--reference", refused_until_m3_7(reference, out));
+    let mut doc = gpu.doc.clone();
+    doc["error"]["message"] = format!(
+        "{} is Insta360 dual fisheye: stitching arrives in M3; --reference stitches it on \
+         the CPU, and the GPU's stitch arrives in M3.7; --equirect renders it as equirect \
+         anyway",
+        file.display()
+    )
+    .into();
+    let m1_words = Ran {
+        status: gpu.status,
+        doc,
+        stderr: String::new(),
+    };
+    must_fail("M1's words", refused_until_m3_7(&m1_words, &ran[0].1));
 }
 
 /// `--lens 0` and `--lens 1` show one lens raw, its corner code naming

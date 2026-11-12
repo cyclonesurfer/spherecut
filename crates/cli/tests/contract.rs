@@ -1379,7 +1379,11 @@ fn frame_documents_have_the_envelope_too() {
 
 /// frame's exit statuses 0 to 3 (4 is SIGINT's, below), each with its
 /// document: no adapter at all, by running the child with
-/// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device.
+/// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device. The
+/// usage errors M3.5 adds are held to the exit table's status 2 too:
+/// `--fov` and `--morph-to` under `--projection equirect`, `--morph-to
+/// equirect`, a pair's flag on a file that isn't a pair, and a hardware
+/// decoder on a pair stitched with `--reference`, which is 2, not 3.
 #[test]
 fn frame_exits_0_to_3_with_one_document_each() {
     let dir = tmp("frame-exits");
@@ -1398,6 +1402,30 @@ fn frame_exits_0_to_3_with_one_document_each() {
             "out_of_range",
         ),
         (&["--size", "1x1"], &[], 2, "usage"),
+        // M3.5's: the whole sphere takes no --fov and morphs to nothing,
+        // nothing morphs to it, and a pair's flag needs a pair, which
+        // the equirect clip isn't.
+        (
+            &["--projection", "equirect", "--fov", "90"],
+            &[],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--projection",
+                "equirect",
+                "--morph-to",
+                "fisheye",
+                "--morph",
+                "1",
+            ],
+            &[],
+            2,
+            "usage",
+        ),
+        (&["--morph-to", "equirect", "--morph", "1"], &[], 2, "usage"),
+        (&["--adapter", "cpu", "--lens", "0"], &[], 2, "usage"),
         (
             &["--size", "64x32"],
             &[("VK_DRIVER_FILES", no_icd), ("VK_ICD_FILENAMES", no_icd)],
@@ -1437,6 +1465,25 @@ fn frame_exits_0_to_3_with_one_document_each() {
     );
     let m = v["error"]["message"].as_str().unwrap();
     assert!(m.contains("spherecut doctor"), "{m}");
+    // A camera's pair stitched with --reference decodes in software
+    // until M3.7: a hardware decoder named is a usage error, exit 2, not
+    // the exit 3 of a decoder that is missing. The control: --decoder
+    // software renders.
+    let pair = insv::master(&dir, insv::MASTER, None).path;
+    for (decoder, status, code) in [
+        ("vaapi", 2, "usage"),
+        ("vulkan", 2, "usage"),
+        ("software", 0, ""),
+    ] {
+        std::fs::remove_file(&out).ok();
+        let args = ["--reference", "--size", "64x32", "--decoder", decoder];
+        let (got, v, stderr) = frame_json(&pair, &out, &args, &[]);
+        assert_eq!(got, Some(status), "{decoder}: {v} {stderr}");
+        if status != 0 {
+            assert_eq!(v["error"]["code"], code, "{decoder}: {v}");
+            assert_eq!(contract::frame_exit(code) as i32, status, "{decoder}");
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -151,8 +151,8 @@ its `time_base`.
 |---:|---|---|---|---|---|
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error; with `--file`, the file probes too, whether or not it can be stitched | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18); or, with `--file`, the file can't be probed (probe's code for it, in place of `doctor_errors`) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
-| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` | An unknown preset, codec or choice, or a `--range` that doesn't parse |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software`; `--fov` or `--morph-to` (and so `--morph`) with `--projection equirect`, and `--morph-to equirect` on any projection; and, once probe has seen the file, `--lens`, `--seam`, `--geometry` or `--stitch-distance` on a file that isn't a camera's pair, and `--decoder vaapi` or `vulkan` on a camera's pair stitched with `--reference`, which decodes in software until M3.7 | An unknown preset, codec or choice, or a `--range` that doesn't parse |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware (on a camera's pair stitched with `--reference`, those two are a usage error instead, exit 2, until M3.7), and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
@@ -172,7 +172,7 @@ The run's `error.code`:
 
 | Code | Exit | Meaning |
 |---|---:|---|
-| `usage` | 2 | The command line doesn't parse; the message is clap's, with the usage line |
+| `usage` | 2 | The command line doesn't parse, or frame's own check of the flags fails (the exit table's status 2); the message is clap's, or names the flag, with the usage line. frame's checks made once probe has seen the file (a pair's flag on a file that isn't a pair, a hardware decoder on a pair stitched with `--reference`) name the flag and the file, with no usage line |
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
@@ -1151,10 +1151,16 @@ $ echo $?
 The schema is the subcommand's when the first argument that isn't an
 option names one (`probe`, `doctor`, `frame`, `render`, `call`), and
 `spherecut/1` otherwise. `call`'s are JSON without `--json`.
-frame's own usage errors, which clap can't find (a `--fov` past the
-projection's limit, a `--size` past the GPU's, a `--stream` that isn't a
-video stream), are `usage` errors with exit 2 too, under
-`spherecut.frame/1`.
+frame's own usage errors, which clap can't find, are `usage` errors
+with exit 2 too, under `spherecut.frame/1`, each message naming the
+flag: a `--fov` past the projection's limit, a `--size` past the GPU's,
+a `--stream` that isn't a video stream, `--reference` with `--filter
+aniso`, `--zero-copy` with `--decoder software`, `--fov` or
+`--morph-to` with `--projection equirect`, `--morph-to equirect`, and,
+once probe has seen the file, `--lens`, `--seam`, `--geometry` or
+`--stitch-distance` on a file that isn't a camera's pair and `--decoder
+vaapi` or `vulkan` on a camera's pair stitched with `--reference` (until
+M3.7).
 `--json` counts only before a `--`: in `spherecut probe -- --json`,
 `--json` is a file name. Without `--json`, a usage error is clap's text
 on stderr, with exit 2.

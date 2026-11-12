@@ -273,6 +273,13 @@ fn choose_stream<'r>(
     }
 }
 
+/// What `not_equirect` says an Insta360 file is, after "{file} is ":
+/// look's, compare's and the project tools' words, as none of them
+/// stitches a pair. frame, whose `--reference` does, words its refusal
+/// of a pair without the clause after the colon (`cli::frame`'s
+/// `flags`).
+pub const INSTA360_UNSTITCHED: &str = "Insta360 dual fisheye: stitching arrives in M3";
+
 /// Whether the file is a stitched equirect: tagged so (Spherical Video
 /// V2's `equi` in an MP4 or MOV file, the `Projection` element FFmpeg
 /// exports from a Matroska or WebM file, or V1's `equirectangular`), or
@@ -330,9 +337,7 @@ fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failu
         .map(|v| format!("{}x{}", v.width, v.height))
         .unwrap_or_else(|| "of unknown size".into());
     match report.camera.as_ref().map(|c| c.layout) {
-        Some(Layout::Insta360DualFisheye) => Err(refuse(
-            "Insta360 dual fisheye: stitching arrives in M3".into(),
-        )),
+        Some(Layout::Insta360DualFisheye) => Err(refuse(INSTA360_UNSTITCHED.into())),
         Some(Layout::DjiDualFisheye) => Err(refuse(
             "DJI dual fisheye, one stream per lens: stitching arrives in M3".into(),
         )),

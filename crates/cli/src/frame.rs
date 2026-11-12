@@ -151,7 +151,9 @@ pub struct FrameArgs {
     pub filter: FilterArg,
     /// auto tries VA-API on the GPU's render node and falls back to
     /// software; vaapi and vulkan fail instead (exit 3). A camera's pair
-    /// decodes in software until M3.7, and refuses vaapi and vulkan.
+    /// stitched with --reference decodes in software until M3.7 and
+    /// refuses vaapi and vulkan (exit 2); --lens decodes as any stream
+    /// does.
     #[arg(long, value_enum, default_value_t = DecoderArg::Auto)]
     pub decoder: DecoderArg,
     /// The DRM render node to decode on [default: the rendering GPU's,
@@ -1413,15 +1415,22 @@ impl Job {
 
     /// Step 4's errors with the flags that answer them: for a file that
     /// isn't an equirect, `--equirect`, and for a camera's pair
-    /// `--reference` first; `--stream` for a stream it hasn't.
+    /// `--reference` first; `--stream` for a stream it hasn't. A pair's
+    /// refusal drops M1's "stitching arrives in M3", which look's,
+    /// compare's and the project tools' keep: frame's `--reference`
+    /// stitches one.
     fn flags(&self, mut e: Failure, pair: bool) -> Failure {
         match (e.code, self.args.stream) {
             (codes::NOT_EQUIRECT, _) => {
                 if pair {
-                    e.message.push_str(
-                        "; --reference stitches it on the CPU, and the GPU's stitch arrives in \
-                         M3.7",
-                    );
+                    let hint = "--reference stitches it on the CPU, and the GPU's stitch \
+                                arrives in M3.7";
+                    e.message = match e.message.strip_suffix(still::INSTA360_UNSTITCHED) {
+                        Some(head) => format!(
+                            "{head}a camera's pair of lenses (Insta360 dual fisheye): {hint}"
+                        ),
+                        None => format!("{}; {hint}", e.message),
+                    };
                 }
                 e.message
                     .push_str("; --equirect renders it as equirect anyway");
