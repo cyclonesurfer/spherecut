@@ -1281,11 +1281,13 @@ impl std::fmt::Debug for StillPair<'_> {
 /// A caller that changes one field of the geometry starts from this
 /// entry's ([`PairOptions::geometry`]).
 ///
-/// A trailer, record or string that can't be read is `bad_trailer`, as
-/// probe warns of it, with camera's words, which name the part at fault;
-/// a file with no calibration to stitch by (no trailer, no metadata, or
-/// neither a V3 nor a V6 string) is `not_equirect`, saying "no
-/// calibration".
+/// Each failure is `not_equirect`, the code frame gives a file it can't
+/// render as a stitched picture, since probe's `bad_trailer` is a
+/// warning, never an error: a file with no calibration to stitch by (no
+/// trailer, no metadata, or neither a V3 nor a V6 string) says "no
+/// calibration", and a trailer, record or string that can't be read says
+/// "can't be stitched" with probe's words and camera's, which name the
+/// part at fault.
 pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
     /// The trailer's metadata record.
     const METADATA: u8 = 1;
@@ -1297,7 +1299,12 @@ pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
             format!("{file} has no calibration to stitch by: {why}"),
         )
     };
-    let bad = |message: String| refuse(probe::codes::BAD_TRAILER, message);
+    let bad = |why: String| {
+        refuse(
+            codes::NOT_EQUIRECT,
+            format!("{file} can't be stitched: {why}"),
+        )
+    };
     let io = |error| {
         media_error(
             MediaError::Io {
@@ -1313,9 +1320,7 @@ pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
         Ok(Some(t)) => t,
         Ok(None) => return Err(none("it has no Insta360 trailer")),
         Err(e) => {
-            return Err(bad(format!(
-                "{file}: the Insta360 trailer can't be read: {e}"
-            )));
+            return Err(bad(format!("the Insta360 trailer can't be read: {e}")));
         }
     };
     let metadata = match read_record(&mut f, &trailer, METADATA, MAX_METADATA) {
@@ -1323,13 +1328,13 @@ pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
         Ok(None) => return Err(none("its Insta360 trailer has no metadata (record 1)")),
         Err(e) => {
             return Err(bad(format!(
-                "{file}: the Insta360 trailer's record {METADATA} can't be read: {e}"
+                "the Insta360 trailer's record {METADATA} can't be read: {e}"
             )));
         }
     };
     let metadata = parse_metadata(&metadata).map_err(|e| {
         bad(format!(
-            "{file}: the Insta360 trailer's metadata (record {METADATA}): {e}"
+            "the Insta360 trailer's metadata (record {METADATA}): {e}"
         ))
     })?;
     match stitching(&metadata) {
@@ -1338,7 +1343,7 @@ pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
             "its Insta360 trailer holds neither a V3 nor a V6 calibration string",
         )),
         Err(e) => Err(bad(format!(
-            "{file}: the Insta360 trailer's calibration can't be stitched: {e}"
+            "the Insta360 trailer's calibration can't be read: {e}"
         ))),
     }
 }
@@ -1363,13 +1368,13 @@ impl<'g> Still<'g> {
     /// GPU, since the stitch is the CPU reference's until M3.7, and for a
     /// decoder or zero copy `opts` asks for that isn't software;
     /// `not_equirect` for a file that isn't a camera's pair of lenses,
-    /// one with no calibration ("no calibration"), one whose camera the
-    /// table says isn't stitchable, and a rig that can't be built
-    /// ("build no rig", with sphere's `RigError`); `bad_trailer` for a
-    /// trailer that can't be read; and a lens's own failure to open,
-    /// naming its track. The tables' open checks are the player's (M3.8's
-    /// lock), not this one's: a pair whose lenses don't show one time
-    /// fails at [`StillPair::seek`].
+    /// one with no calibration ("no calibration"), one whose trailer
+    /// can't be read ("can't be stitched", as [`pair_stitching`] says),
+    /// one whose camera the table says isn't stitchable, and a rig that
+    /// can't be built ("build no rig", with sphere's `RigError`); and a
+    /// lens's own failure to open, naming its track. The tables' open
+    /// checks are the player's (M3.8's lock), not this one's: a pair whose
+    /// lenses don't show one time fails at [`StillPair::seek`].
     pub fn open_pair(
         src: Source<'_>,
         report: &ProbeReport,

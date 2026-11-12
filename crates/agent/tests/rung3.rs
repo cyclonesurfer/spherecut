@@ -111,10 +111,12 @@ fn small_file() -> &'static Path {
     FILE.get_or_init(|| written(&InsvSpec::small(), "small"))
 }
 
-/// `small()` with `fault` planted.
+/// `small()` with `fault` planted, 8 frames long: enough for frame 5,
+/// and a quarter of `small()`'s coding.
 fn faulty(fault: InsvFault, folder: &str) -> PathBuf {
     let spec = InsvSpec {
         fault: Some(fault),
+        frames: 8,
         ..InsvSpec::small()
     };
     written(&spec, folder)
@@ -131,6 +133,14 @@ fn late_file() -> &'static Path {
 fn uncalibrated_file() -> &'static Path {
     static FILE: OnceLock<PathBuf> = OnceLock::new();
     FILE.get_or_init(|| faulty(InsvFault::NoCalibration, "no-calibration"))
+}
+
+/// `small()` with every calibration string a token short
+/// (`InsvFault::WrongTokenCount`): a trailer that reads, with strings
+/// that don't.
+fn bad_strings_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| faulty(InsvFault::WrongTokenCount, "wrong-token-count"))
 }
 
 /// Rung 3's file coded as a camera codes, at crf 28, two frames long.
@@ -488,9 +498,10 @@ fn open_pair_seeks_both_lenses_to_one_time() {
 }
 
 /// `Still::open_pair` refuses a file it can't stitch, each with a clear
-/// failure: one with no calibration (`InsvFault::NoCalibration`), a pair
-/// of tracks with no trailer, and a geometry `Rig::build` refuses; and
-/// it refuses a GPU until M3.7, and `render` more than one view.
+/// failure: one with no calibration (`InsvFault::NoCalibration`), one
+/// whose calibration strings can't be read (`InsvFault::WrongTokenCount`),
+/// a pair of tracks with no trailer, and a geometry `Rig::build` refuses;
+/// and it refuses a GPU until M3.7, and `render` more than one view.
 #[test]
 fn open_pair_refuses_a_file_it_cant_stitch() {
     let _t = timed("open_pair_refuses_a_file_it_cant_stitch");
@@ -498,14 +509,21 @@ fn open_pair_refuses_a_file_it_cant_stitch() {
         Ok(p) => panic!("opened {p:?}"),
         Err(e) => e,
     };
-    let files = [uncalibrated_file, plain_file].map(std::thread::spawn);
+    let files = [uncalibrated_file, bad_strings_file, plain_file].map(std::thread::spawn);
     let gpu = std::thread::spawn(|| still::gpu(&AdapterChoice::Cpu, &Options::default()));
     small_file();
-    let [uncalibrated, plain] = files.map(|f| f.join().unwrap());
+    let [uncalibrated, bad_strings, plain] = files.map(|f| f.join().unwrap());
     // No calibration.
     let e = refused(open(uncalibrated, &PairOptions::default()));
     assert_eq!(e.code, "not_equirect", "{e:?}");
     assert!(e.message.contains("no calibration"), "{}", e.message);
+    // Strings that don't parse: not_equirect, never probe's bad_trailer,
+    // which is a warning, with camera's words for the string at fault.
+    let e = refused(open(bad_strings, &PairOptions::default()));
+    assert_eq!(e.code, "not_equirect", "{e:?}");
+    for words in ["can't be stitched", "calibration can't be read", "token"] {
+        assert!(e.message.contains(words), "{words}: {}", e.message);
+    }
     // Two lens tracks with no trailer: no camera's pair.
     let e = refused(open(plain, &PairOptions::default()));
     assert_eq!(e.code, "not_equirect", "{e:?}");
