@@ -10962,6 +10962,14 @@ come in a container without tables; a display rate near a whole
 multiple of a clip's counts its drops as skips; or M3.14's LRV proxy
 needs the group's members over one stream.
 
+*Noted 2026-11-12 (Pat's answer of 2026-11-11, the review-fix slice):*
+no cap for now. When every member trails the clock, `until` stays
+uncapped, as built: the pair slides behind as one lens alone does, each
+freeze bounded by its lag. odin's 8K25 path B row showed no slide. M3.10
+no longer waits on the question (plan amendment 7). A mode that shows
+the slide (M3.10's stitched `gui_smoke`, a slower part) goes back to Pat
+with its numbers; a cap is a playback change.
+
 ## D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
 
 *2026-11-11, M3 slice M3.8's fix round. Updates D25 and D31. What it
@@ -11308,11 +11316,6 @@ before a merge.
   MAX or MAX 2, and the Osmo 360, for M3.18 and M3.19's clips.
 - **D77's Mesa report**: drafted in D77; filing it upstream, or not, is
   Pat's call.
-- **The lock's catch-up when every lens trails** (D67, M3.8): whether
-  to cap the group's `until` (the clock less a window, or a fixed
-  step). As built, a pair below real time slides as one lens does, each
-  freeze bounded by its lag; odin's 8K25 path B row showed no slide, so
-  no cap is recommended, and none is built until Pat answers.
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).
