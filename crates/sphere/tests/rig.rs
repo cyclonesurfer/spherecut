@@ -3436,3 +3436,11 @@ fn theta_frame_matches_an_edge_scan() {
         at_most((farthest - lens.theta_frame).abs(), SCAN),
     );
 }
+
+/// Each of Pat's numbers this file copies is `testkit::pats`'s (the
+/// project review's F137): a drift test of the copy.
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn pats_copies_match_testkit_pats() {
+    todo!()
+}

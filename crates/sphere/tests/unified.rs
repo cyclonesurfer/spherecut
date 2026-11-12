@@ -1797,3 +1797,21 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
     );
     assert!((px.length() - near).abs() < 1e-9, "{px:?}");
 }
+
+/// `Unified::limit_theta` is total when its scan has no steps (the
+/// project review's F038): at ξ = −1 and −2 on Pat's terms it returns
+/// rather than overflow, and `Rig::build` refuses ξ + `xi_delta` ≤ −1 as
+/// `NotPositive`. Its control, ξ = −0.9999, builds.
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn limit_theta_is_total_below_xi_minus_one() {
+    todo!()
+}
+
+/// Each of Pat's numbers this file copies is `testkit::pats`'s (the
+/// project review's F137): a drift test of the copy.
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn pats_copies_match_testkit_pats() {
+    todo!()
+}

@@ -586,3 +586,12 @@ fn blank_track(path: &Path, track: usize) {
     assert_eq!(sample, sizes.len());
     std::fs::write(path, &f).unwrap();
 }
+
+/// `spherecut doctor --file` on a synthetic `.insv` says whether it can
+/// be stitched and names the camera and its geometry's status, as
+/// "Insta360 X5 v1.1.22, geometry provisional" (M3 plan 5.4).
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn doctor_file_reports_the_known_geometry() {
+    todo!()
+}

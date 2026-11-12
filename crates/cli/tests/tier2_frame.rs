@@ -660,3 +660,12 @@ fn the_check_runs_on_lavapipe_with_software_standing_in() {
         "the next frame is only {off} LSB away"
     );
 }
+
+/// Tier 2c: `spherecut frame --reference` of clip 8 (`tripod_seam`,
+/// take 008) renders, stitched with the file's calibration and the
+/// `Known` geometry (M3 plan 22.1's M3.5 row).
+#[test]
+#[ignore = "M3.5 unit (d)"]
+fn samples_frame_clip8_renders() {
+    todo!()
+}

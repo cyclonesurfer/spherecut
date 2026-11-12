@@ -391,3 +391,13 @@ fn the_destination_s_extension_picks_the_container() {
     assert!(!matches!(e, Mp4Error::NoTrack { .. }), "{e:?}");
     must_fail("lenses.MKV kept 29.97's times", same_packets(&src, &mkv, 0));
 }
+
+/// The MP4 mux `synth::insv::write_insv` uses (M3.5) carries a silent
+/// AAC track beside the video tracks, each video track's packets and
+/// times kept as `mux_video_streams` keeps them, and the 2×64² pair files
+/// keep their bytes.
+#[test]
+#[ignore = "M3.5 unit (a)"]
+fn mux_carries_the_silent_audio_track() {
+    todo!()
+}

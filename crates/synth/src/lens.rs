@@ -4565,4 +4565,14 @@ mod tests {
             start.elapsed().as_secs_f64()
         });
     }
+
+    /// Each copy of Pat's numbers in this crate (`PATS_V6_D`, `x5_like`'s
+    /// focal lengths and terms, and `insv.rs`'s tests' strings) is
+    /// `testkit::pats`'s (the project review's F137): a drift test of the
+    /// copies.
+    #[test]
+    #[ignore = "M3.5 unit (a)"]
+    fn pats_copies_match_testkit_pats() {
+        todo!()
+    }
 }

@@ -2267,3 +2267,20 @@ fn the_readme_shows_how_to_run_every_command() {
     );
     assert!(failed.contains("nosuch"), "{failed}");
 }
+
+/// `spherecut probe` of a synthetic `.insv` reports `lenses.binding` and
+/// the `geometry` block (`status`, `evidence`) of the file's `Known`
+/// entry (M3 plan 5.3, 5.4), as `docs/cli-json.md` documents them.
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn probe_reports_binding_and_geometry() {
+    todo!()
+}
+
+/// `spherecut frame <insv>`'s JSON result carries the stitch it used (M3
+/// plan 14's frame row), as `docs/cli-json.md` documents it.
+#[test]
+#[ignore = "M3.5 unit (d)"]
+fn frame_pins_the_stitch_object() {
+    todo!()
+}

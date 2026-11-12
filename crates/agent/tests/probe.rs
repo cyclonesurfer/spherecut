@@ -510,3 +510,12 @@ fn the_largest_results_fit() {
             .all(|f| f["report"].is_object())
     );
 }
+
+/// The probe tool's summary of a synthetic `.insv` carries
+/// `lenses.binding` and `geometry` (`status`, `evidence`) as the CLI's
+/// report does (M3 plan 5.4).
+#[test]
+#[ignore = "M3.5 unit (b)"]
+fn probe_summary_carries_binding_and_geometry() {
+    todo!()
+}
