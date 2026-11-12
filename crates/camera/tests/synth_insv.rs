@@ -106,103 +106,16 @@ fn planted() -> Planted {
     }
 }
 
-/// Pat's V3 calibration, from insta360.md's "Pat's X5 samples".
+/// Pat's V3 calibration: the boundary crate's, which it parses from
+/// `testkit::pats::V3`, the one copy of Pat's strings (the project
+/// review's F137).
 fn pats_v3() -> CalibTruth {
-    let blocks = [
-        BlockTruth {
-            xi: 2.0,
-            fx: 4284.62,
-            fy: 4284.28,
-            cx: 2701.13,
-            cy: 2692.13,
-            ypr_deg: [-0.198, 0.211, 90.28],
-            t_m: [0.0; 3],
-        },
-        BlockTruth {
-            xi: 2.0,
-            fx: 4291.03,
-            fy: 4291.03,
-            cx: 8069.0,
-            cy: 2684.95,
-            ypr_deg: [0.239, 0.113, 89.107],
-            t_m: [-0.00446, 0.000017, -0.03192],
-        },
-    ];
-    CalibTruth {
-        blocks,
-        dist: StoredDist::V3 {
-            k: [
-                [0.18632051, 2.04984355, -3.24446917],
-                [0.18940836, 2.07073069, -3.24103332],
-            ],
-            p: [[-0.00143576, -0.0033924], [0.00013831, -0.00299873]],
-        },
-        canvas: [10752, 5376],
-        dst: 5312,
-        lens_type: 113,
-        body: 4,
-    }
+    spherecut_boundary::pats(spherecut_synth::lens::Generation::V3)
 }
 
-/// Pat's V6 calibration, from the same table.
+/// Pat's V6 calibration, from `testkit::pats::V6` the same way.
 fn pats_v6() -> CalibTruth {
-    let blocks = [
-        BlockTruth {
-            xi: 2.0,
-            fx: 4277.52,
-            fy: 4277.27,
-            cx: 2713.05,
-            cy: 2689.21,
-            ypr_deg: [-0.31, -0.271, 90.255],
-            t_m: [0.0; 3],
-        },
-        BlockTruth {
-            xi: 2.0,
-            fx: 4284.4,
-            fy: 4284.76,
-            cx: 8075.73,
-            cy: 2680.35,
-            ypr_deg: [0.12, -0.173, 89.112],
-            t_m: [0.000637, 0.000001, -0.031525],
-        },
-    ];
-    let d = [
-        [
-            0.28032997,
-            0.89045405,
-            2.04927588,
-            -8.05179787,
-            0.0,
-            0.001202,
-            -0.00259487,
-            0.02324706,
-            0.0053392,
-            -0.01560208,
-            0.00019357,
-            -0.04580523,
-            0.00197187,
-        ],
-        [
-            0.27665332,
-            0.98522973,
-            1.83605266,
-            -7.99374485,
-            0.0,
-            0.00021056,
-            -0.00147626,
-            0.01940425,
-            0.00331838,
-            -0.01330665,
-            0.00074511,
-            -0.02859299,
-            0.00888746,
-        ],
-    ];
-    CalibTruth {
-        blocks,
-        dist: StoredDist::V6 { d },
-        ..pats_v3()
-    }
+    spherecut_boundary::pats(spherecut_synth::lens::Generation::V6)
 }
 
 /// What `parse_metadata` reads from `Records::x5_like` of Pat's two

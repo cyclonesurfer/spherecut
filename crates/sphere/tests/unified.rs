@@ -7,7 +7,8 @@
 //! and the two sourced readings as their sources name the terms, apart
 //! from `Canonical`'s code. Pat's numbers are docs/formats/insta360.md's
 //! ("Pat's X5 samples"), in canvas pixels with block 1's cx local to its
-//! square.
+//! square, and `pats_copies_match_testkit_pats` holds them to
+//! `testkit::pats`, the one copy of Pat's strings (F137).
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): sphere's properties and rung 0
 //! take at most 30 s together at `PROPTEST_CASES=100000`, shared with
@@ -31,6 +32,7 @@ use spherecut_sphere::fisheye::{
     Tangential, Unified, V6Reading,
 };
 use spherecut_testkit::control::{Comparison, above, at_most, below, must_fail};
+use spherecut_testkit::pats::{self, tokens};
 
 /// The suite's budget in seconds, at 100,000 cases, shared as the module
 /// doc says.
@@ -393,7 +395,7 @@ fn scaled_lens(
             d[12] * rest[7] * s.powi(3),
         ],
     };
-    let fx = 4277.52 * s * focal;
+    let fx = PATS_V6[0][1] * s * focal;
     Unified {
         xi,
         fx,
@@ -1849,10 +1851,89 @@ fn limit_theta_is_total_below_xi_minus_one() {
     }
 }
 
-/// Each of Pat's numbers this file copies is `testkit::pats`'s (the
-/// project review's F137): a drift test of the copy.
+/// `s` with token `k`'s last digit one more, 9 going to 0.
+fn last_digit_changed(s: &str, k: usize) -> String {
+    let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
+    let token = &mut tokens[k];
+    let last = token.pop().and_then(|c| c.to_digit(10)).unwrap();
+    token.push(char::from_digit((last + 1) % 10, 10).unwrap());
+    tokens.join("_")
+}
+
+/// Whether each of this file's copies of Pat's numbers (`PATS_V3` to
+/// `PATS_D`) is exactly its token of `v3` or `v6`, as
+/// `testkit::pats::tokens` reads them, block 1's local cx as its token
+/// less the square's 5376; or the first that isn't, named. The strings
+/// are `testkit::pats::V3` and `V6` but in the control.
+fn copies_match(v3: &str, v6: &str) -> Result<(), String> {
+    let (v3, v6) = (tokens(v3), tokens(v6));
+    // Token k of block b in a string of `block`-token blocks, after the
+    // lens count (insta360.md §4.1: 19 in V3, 27 in V6).
+    let token = |t: &[f64], block: usize, b: usize, k: usize| t[1 + b * block + k];
+    let mut copies: Vec<(String, f64, f64)> = Vec::new();
+    for b in 0..2 {
+        let left = if b == 0 { 0.0 } else { 5376.0 };
+        for (g, copy, t, block) in [("V3", PATS_V3[b], &v3, 19), ("V6", PATS_V6[b], &v6, 27)] {
+            for (k, name) in ["ξ", "fx", "fy", "cx", "cy"].into_iter().enumerate() {
+                let local = if name == "cx" { left } else { 0.0 };
+                copies.push((
+                    format!("{g} block {b}'s {name}"),
+                    copy[k],
+                    token(t, block, b, k) - local,
+                ));
+            }
+        }
+        for (k, v) in PATS_V3_K[b].into_iter().enumerate() {
+            copies.push((
+                format!("V3 block {b}'s k{}", k + 1),
+                v,
+                token(&v3, 19, b, 11 + k),
+            ));
+        }
+        for (k, v) in PATS_V3_P[b].into_iter().enumerate() {
+            copies.push((
+                format!("V3 block {b}'s p{}", k + 1),
+                v,
+                token(&v3, 19, b, 14 + k),
+            ));
+        }
+        for (k, v) in PATS_D[b].into_iter().enumerate() {
+            copies.push((format!("V6 block {b}'s d{k}"), v, token(&v6, 27, b, 11 + k)));
+        }
+    }
+    match copies
+        .into_iter()
+        .find(|(_, copy, token)| copy.to_bits() != token.to_bits())
+    {
+        Some((name, copy, token)) => Err(format!("{name} is {copy}, not {token}")),
+        None => Ok(()),
+    }
+}
+
+/// Each of Pat's numbers this file copies is `testkit::pats`'s to the
+/// bit (the project review's F137): a drift test of the copy, which
+/// sphere's tests keep because they can't take the boundary crate (it
+/// depends on sphere, and would bring synth and FFmpeg into their
+/// build).
+///
+/// Control: against V6 with block 1's cy (token 32) a unit off in its
+/// last digit, and V3 with block 0's p2 (token 16) so, the copies fail,
+/// naming the field.
 #[test]
-#[ignore = "M3.5 unit (b)"]
 fn pats_copies_match_testkit_pats() {
-    todo!()
+    let _time = timed("pats_copies_match_testkit_pats");
+    copies_match(pats::V3, pats::V6).unwrap();
+    let e = must_fail(
+        "the copies against V6 with block 1's cy changed",
+        copies_match(pats::V3, &last_digit_changed(pats::V6, 1 + 27 + 4)),
+    );
+    assert!(
+        e.starts_with("V6 block 1's cy is 2680.35, not 2680.351"),
+        "{e}"
+    );
+    let e = must_fail(
+        "the copies against V3 with block 0's p2 changed",
+        copies_match(&last_digit_changed(pats::V3, 1 + 15), pats::V6),
+    );
+    assert!(e.starts_with("V3 block 0's p2 is"), "{e}");
 }
