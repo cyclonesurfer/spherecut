@@ -1273,7 +1273,7 @@ without waiting.
   finds, in this order: rustfmt; clippy with `-D warnings`, then
   clippy's network lints on a scratch crate that opens a TCP stream and
   looks up a name, which must fail them; rustdoc over every crate with
-  `-D warnings` whatever the caller's flags, then on scratch crates
+  `-D warnings` last, after the caller's flags, then on scratch crates
   with a broken link, an ambiguous one and an unclosed HTML tag, which
   must fail; the build with the toolchain of `rust-version` (1.95),
   then a scratch crate a minor release past it, which must fail (the

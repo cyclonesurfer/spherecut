@@ -75,7 +75,7 @@ pub fn run(a: Args) -> Result<()> {
     // The network lints must fail a crate that reaches the network (D32).
     crate::controls::clippy_controls(&crate::workspace_root())?;
     // Every crate's docs, with their intra-doc links and HTML, and a
-    // warning an error whatever the caller's flags (D8).
+    // warning an error even under the caller's `-A warnings` (D8).
     let vars: Vec<(OsString, OsString)> = std::env::vars_os().collect();
     run_step("rustdoc", &mut rustdoc_command(None, rustdocflags(&vars)))?;
     crate::controls::rustdoc_controls()?;
@@ -130,8 +130,9 @@ pub(crate) fn rustdoc_command(manifest: Option<&Path>, flags: OsString) -> Comma
 /// Rustdoc's flags for the check, in cargo's encoded form (separated by
 /// 0x1f): the caller's own (`CARGO_ENCODED_RUSTDOCFLAGS` as given, else
 /// `RUSTDOCFLAGS` split on spaces as cargo splits it), then `-D warnings`
-/// last. A later lint level wins, so no flag of the caller's lets a
-/// warning through.
+/// last. A later lint level wins, so the caller's `-A warnings` can't
+/// turn the gate off; a lint the caller allows by name, or
+/// `--cap-lints`, still can.
 pub(crate) fn rustdocflags(vars: &[(OsString, OsString)]) -> OsString {
     let get = |name: &str| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
     let mut flags: Vec<OsString> = Vec::new();
