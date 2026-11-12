@@ -19,11 +19,14 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use spherecut_core::{FrameRate, Rational};
+use spherecut_core::{FrameRate, Rational, StopToken, Time};
+use spherecut_media::audio::FfmpegAudio;
+use spherecut_media::backend::{AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::encode::{
-    self, ColorTags, Mp4Writer, MuxedAs, PixelLayout, VideoSettings, YuvPlanes,
+    self, AudioSettings, AudioTrack, ColorTags, Mp4Writer, MuxOptions, MuxedAs, PixelLayout,
+    VideoSettings, YuvPlanes,
 };
-use spherecut_media::mp4::{self, Mp4Error};
+use spherecut_media::mp4::{self, Mp4Error, TrackTiming};
 use spherecut_media::packets::{NextPacket, PacketInfo, PacketReader};
 use spherecut_testkit::control::must_fail;
 
@@ -136,7 +139,68 @@ fn sources() -> [Source; 3] {
 /// `src` written into `dir` by FFmpeg's MP4 muxer, 64² and each frame a
 /// different grey.
 fn written(dir: &Path, src: &Source) -> PathBuf {
-    let settings = VideoSettings {
+    written_as(dir, src, false, None)
+}
+
+/// A movie timescale in which every track's tick in this suite is whole
+/// ticks (30000, 90000, 12800 and the audio's 48000 divide it), so that a
+/// source written in it has exact edits on every FFmpeg, as
+/// `mux_video_streams_with_audio`'s file has.
+const EXACT_MOVIE: u32 = 2_880_000;
+
+/// [`written`] in the movie timescale [`EXACT_MOVIE`], with a silent AAC
+/// track at 48 kHz in stereo after the video when `silence`, as long as
+/// the video: the file `synth::insv::write_insv` writes its first lens
+/// and the camera's audio into, but for its exact edits.
+fn written_exact(dir: &Path, src: &Source, silence: bool) -> PathBuf {
+    written_as(dir, src, silence, Some(EXACT_MOVIE))
+}
+
+/// [`written`], with a silent AAC track when `silence` and in the movie
+/// timescale `movie`, or FFmpeg's own for `None`.
+fn written_as(dir: &Path, src: &Source, silence: bool, movie: Option<u32>) -> PathBuf {
+    let settings = video_settings(src);
+    let aac = AudioSettings {
+        encoder: "aac".into(),
+        sample_rate: 48_000,
+        channels: 2,
+        bit_rate: 192_000,
+        options: Vec::new(),
+    };
+    let (name, audio) = if silence {
+        (format!("{}-aac.mp4", src.name), Some(&aac))
+    } else {
+        (format!("{}.mp4", src.name), None)
+    };
+    let path = dir.join(name);
+    let mux = MuxOptions {
+        movie_timescale: movie,
+        ..MuxOptions::default()
+    };
+    let mut w =
+        Mp4Writer::create_with(&path, &settings, audio.map(AudioTrack::Encode), &mux).unwrap();
+    // Frame i's samples are [i·48000/rate, (i + 1)·48000/rate).
+    let r = src.rate.as_rational();
+    let samples_at = |i: u32| i64::from(i) * 48_000 * r.den() / r.num();
+    for i in 0..src.frames {
+        w.push_video(&grey(i)).unwrap();
+        if silence {
+            let n = usize::try_from(samples_at(i + 1) - samples_at(i)).unwrap();
+            w.push_audio(&[vec![0.0; n], vec![0.0; n]]).unwrap();
+        }
+    }
+    w.finish().unwrap()
+}
+
+/// Frame `i` of a source, 64² and its own grey.
+fn grey(i: u32) -> YuvPlanes {
+    let chroma = vec![128; 32 * 32];
+    YuvPlanes::U8([vec![16 + 9 * i as u8; 64 * 64], chroma.clone(), chroma])
+}
+
+/// The encoder's settings for `src`.
+fn video_settings(src: &Source) -> VideoSettings {
+    VideoSettings {
         encoder: src.encoder.into(),
         width: 64,
         height: 64,
@@ -152,19 +216,7 @@ fn written(dir: &Path, src: &Source) -> PathBuf {
         time_base: src.time_base,
         crop_left: 0,
         device: None,
-    };
-    let path = dir.join(format!("{}.mp4", src.name));
-    let mut w = Mp4Writer::create(&path, &settings, None).unwrap();
-    for i in 0..src.frames {
-        let chroma = vec![128; 32 * 32];
-        w.push_video(&YuvPlanes::U8([
-            vec![16 + 9 * i as u8; 64 * 64],
-            chroma.clone(),
-            chroma,
-        ]))
-        .unwrap();
     }
-    w.finish().unwrap()
 }
 
 /// The sources, written once into `dir`.
@@ -207,7 +259,18 @@ fn same_packets_but(
     index: usize,
     durations_differ: bool,
 ) -> Result<(), String> {
-    let (ta, a) = demuxed(src, 0);
+    same_stream_packets(src, 0, out, index, durations_differ)
+}
+
+/// [`same_packets_but`] of stream `from` of `src`, rather than its first.
+fn same_stream_packets(
+    src: &Path,
+    from: usize,
+    out: &Path,
+    index: usize,
+    durations_differ: bool,
+) -> Result<(), String> {
+    let (ta, a) = demuxed(src, from);
     let (tb, b) = demuxed(out, index);
     if a.len() != b.len() {
         return Err(format!("{} packets, then {}", a.len(), b.len()));
@@ -248,6 +311,70 @@ fn to_ms(t: i64, tb: Rational) -> i64 {
     (if num < 0 { -half_up } else { half_up }) as i64
 }
 
+/// Whether two tracks' timing tables agree, or the first field that
+/// doesn't: every field of [`TrackTiming`] as it is, but for the edit
+/// list, whose edits must agree in number, media time and rate, and in
+/// duration in seconds. An edit's duration is in the movie's timescale
+/// (`mvhd`), which the muxer picks for the whole file: FFmpeg 6.1 and
+/// 8.1.3 write the same timescale in a source of one track and in the
+/// mux of three, where 9.0.2 writes each file the least common multiple
+/// of its tracks' (2880000 for 30000, 90000 and 12800), with the same
+/// durations in seconds (PROGRESS's Known issues; the M3 plan's
+/// amendment 7).
+fn same_timing(a: &TrackTiming, b: &TrackTiming) -> Result<(), String> {
+    let differ = |field: &str| Err(format!("{field}: {a:?}, then {b:?}"));
+    if a.timescale != b.timescale {
+        return differ("timescale");
+    }
+    if a.count != b.count {
+        return differ("count");
+    }
+    if a.first_shown != b.first_shown {
+        return differ("first_shown");
+    }
+    if a.first_pts != b.first_pts {
+        return differ("first_pts");
+    }
+    if a.stts != b.stts {
+        return differ("stts");
+    }
+    if a.ctts_hash != b.ctts_hash {
+        return differ("ctts_hash");
+    }
+    if a.stss != b.stss {
+        return differ("stss");
+    }
+    match (&a.edit, &b.edit) {
+        (None, None) => Ok(()),
+        (Some(x), Some(y)) if x.edits.len() == y.edits.len() => {
+            let (tx, ty) = (u128::from(x.movie_timescale), u128::from(y.movie_timescale));
+            // d/tx s equals e/ty s when d·ty = e·tx.
+            let same = x.edits.iter().zip(&y.edits).all(|(d, e)| {
+                d.media_time == e.media_time
+                    && d.rate == e.rate
+                    && u128::from(d.duration) * ty == u128::from(e.duration) * tx
+            });
+            if same { Ok(()) } else { differ("edit") }
+        }
+        _ => differ("edit"),
+    }
+}
+
+/// `t`'s edit list rewritten into the movie timescale `movie`, which its
+/// own must divide, each duration scaled to match: the same edits in
+/// seconds, as FFmpeg 9.0.2's muxer writes them in its own timescale.
+fn in_movie_timescale(t: &TrackTiming, movie: u32) -> TrackTiming {
+    let mut t = t.clone();
+    let list = t.edit.as_mut().expect("an edit list");
+    assert_eq!(movie % list.movie_timescale, 0, "{list:?}");
+    let k = u64::from(movie / list.movie_timescale);
+    for e in &mut list.edits {
+        e.duration *= k;
+    }
+    list.movie_timescale = movie;
+    t
+}
+
 /// The sample entry type of track `index`'s first sample description.
 fn sample_entry(path: &Path, index: usize) -> [u8; 4] {
     let tree = mp4::read_file(path).unwrap();
@@ -283,7 +410,10 @@ fn mp4_output_keeps_each_track_s_tables() {
     assert!(timings[0].ctts_hash.is_none(), "{:?}", timings[0]);
 
     for (k, (src, timing)) in srcs.iter().zip(&timings).enumerate() {
-        assert_eq!(&mp4::track_timing(&out, k).unwrap(), timing, "track {k}");
+        let muxed = mp4::track_timing(&out, k).unwrap();
+        same_timing(&muxed, timing)
+            .map_err(|e| format!("track {k}: {e}"))
+            .unwrap();
         same_packets(src, &out, k).unwrap();
     }
     assert_eq!(sample_entry(&out, 0), *b"hvc1");
@@ -308,8 +438,34 @@ fn mp4_output_keeps_each_track_s_tables() {
     let other = mp4::track_timing(&out, 1).unwrap();
     must_fail(
         "track 1's tables are track 0's source's",
-        other == timings[0],
+        same_timing(&other, &timings[0]),
     );
+
+    // The edits are compared in seconds, whatever the movie's timescale:
+    // each source's edit list rewritten into 9.0.2's 2880000, where every
+    // track's tick is a whole number of the movie's, agrees with the
+    // source, though not field for field; one edit a track tick longer
+    // doesn't.
+    const LCM: u32 = 2_880_000;
+    for (k, timing) in timings.iter().enumerate() {
+        let rescaled = in_movie_timescale(timing, LCM);
+        same_timing(&rescaled, timing)
+            .map_err(|e| format!("source {k} in another movie timescale: {e}"))
+            .unwrap();
+        must_fail(
+            &format!("source {k}'s edit list in another movie timescale, compared whole"),
+            rescaled == *timing,
+        );
+        let mut longer = rescaled.clone();
+        let tick = LCM / timing.timescale;
+        assert_eq!(tick * timing.timescale, LCM);
+        longer.edit.as_mut().unwrap().edits[0].duration += u64::from(tick);
+        let why = must_fail(
+            &format!("source {k}'s first edit a track tick longer"),
+            same_timing(&longer, timing),
+        );
+        assert!(why.starts_with("edit:"), "{why}");
+    }
 }
 
 #[test]
@@ -392,12 +548,219 @@ fn the_destination_s_extension_picks_the_container() {
     must_fail("lenses.MKV kept 29.97's times", same_packets(&src, &mkv, 0));
 }
 
-/// The MP4 mux `synth::insv::write_insv` uses (M3.5) carries a silent
-/// AAC track beside the video tracks, each video track's packets and
-/// times kept as `mux_video_streams` keeps them, and the 2×64² pair files
-/// keep their bytes.
+/// Every sample of the first audio stream of `path`, as FFmpeg decodes
+/// it, its channels interleaved, with its rate and channel count.
+fn decoded_audio(path: &Path) -> (u32, u16, Vec<f32>) {
+    let req = AudioRequest {
+        stream: None,
+        out: AudioOutFormat {
+            rate: 48_000,
+            channels: 2,
+        },
+        origin: None,
+        interrupt: Arc::new(AtomicBool::new(false)),
+    };
+    let mut dec = FfmpegAudio::open_raw(path, &req).unwrap();
+    let (rate, channels) = (dec.info().rate, dec.info().channels);
+    let mut samples = Vec::new();
+    let stop = StopToken::never();
+    loop {
+        match dec.next_chunk(&stop).unwrap() {
+            NextAudio::Chunk(c) => samples.extend(c.data),
+            NextAudio::End => break,
+            NextAudio::Stopped => panic!("stopped"),
+        }
+    }
+    (rate, channels, samples)
+}
+
+/// The MP4 mux `synth::insv::write_insv` uses (M3.5) carries the silent
+/// AAC track of its audio source after the video tracks, packets as they
+/// are, and keeps each video track's tables and packets as
+/// `mux_video_streams` keeps them.
 #[test]
-#[ignore = "M3.5 unit (a)"]
 fn mux_carries_the_silent_audio_track() {
-    todo!()
+    let _t = timed("mux_carries_the_silent_audio_track");
+    let dir = temp_dir("mux-audio");
+    let all = sources();
+    let first = written_exact(&dir.0, &all[0], true);
+    let second = written_exact(&dir.0, &all[2], false);
+    let out = encode::mux_video_streams_with_audio(
+        &[(&first, Time::ZERO), (&second, Time::ZERO)],
+        &first,
+        &dir.0.join("lenses.insv"),
+    )
+    .unwrap();
+
+    let tree = mp4::read_file(&out).unwrap();
+    assert_eq!(tree.tracks().count(), 3);
+    for (k, src) in [&first, &second].into_iter().enumerate() {
+        let source = mp4::track_timing(src, 0).unwrap();
+        same_timing(&mp4::track_timing(&out, k).unwrap(), &source)
+            .map_err(|e| format!("track {k}: {e}"))
+            .unwrap();
+        same_packets(src, &out, k).unwrap();
+    }
+    assert_eq!(sample_entry(&out, 0), *b"hvc1");
+    assert_eq!(sample_entry(&out, 1), *b"hvc1");
+    assert_eq!(sample_entry(&out, 2), *b"mp4a");
+    same_stream_packets(&first, 1, &out, 2, false).unwrap();
+
+    // Silence, at 48 kHz in stereo, as long as the source's.
+    let (rate, channels, samples) = decoded_audio(&out);
+    assert_eq!((rate, channels), (48_000, 2));
+    assert_eq!(samples.len(), decoded_audio(&first).2.len());
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| *s == 0.0));
+
+    // Its control: `mux_video_streams_as`'s file of the same sources has
+    // no audio track.
+    let plain =
+        encode::mux_video_streams_as(&[&first, &second], &dir.0.join("plain.insv"), MuxedAs::Mp4)
+            .unwrap();
+    must_fail(
+        "mux_video_streams_as's file has a third track",
+        mp4::read_file(&plain).unwrap().tracks().count() == 3,
+    );
+    let req = AudioRequest {
+        stream: None,
+        out: AudioOutFormat {
+            rate: 48_000,
+            channels: 2,
+        },
+        origin: None,
+        interrupt: Arc::new(AtomicBool::new(false)),
+    };
+    must_fail(
+        "mux_video_streams_as's file decoded as audio",
+        FfmpegAudio::open_raw(&plain, &req),
+    );
+}
+
+/// Whether `t` starts exactly `ticks` of its timescale late: its edit
+/// list's first edit an empty one of that time in seconds, whatever the
+/// movie's timescale, and its first pts `ticks`.
+fn starts_late_by(t: &TrackTiming, ticks: u32) -> Result<(), String> {
+    let list = t.edit.as_ref().ok_or("no edit list")?;
+    let Some(empty) = list.edits.first().filter(|e| e.media_time == -1) else {
+        return Err(format!("no empty edit first: {list:?}"));
+    };
+    // d/movie s is ticks/timescale s when d·timescale = ticks·movie.
+    if u128::from(empty.duration) * u128::from(t.timescale)
+        != u128::from(ticks) * u128::from(list.movie_timescale)
+    {
+        return Err(format!(
+            "the empty edit isn't {ticks}/{} s: {list:?}",
+            t.timescale
+        ));
+    }
+    if t.first_pts != i64::from(ticks) {
+        return Err(format!("the first pts is {}, not {ticks}", t.first_pts));
+    }
+    Ok(())
+}
+
+/// A video track muxed later than its source by a delay of whole ticks
+/// (M3.5's `InsvFault::StartPtsDiffer`) keeps its source's tables but its
+/// start: an empty edit of exactly the delay, on every FFmpeg, before the
+/// source's media edit, its `stts` the source's to its last frame's
+/// duration. The controls: the same check on a track that starts a frame
+/// late in a movie timescale of 1000, FFmpeg's own before 9, whose empty
+/// edit is rounded down to 33 ms; and the same source muxed with no
+/// delay, which starts at 0. A delay that isn't whole ticks of the
+/// source's time base is refused.
+#[test]
+fn mux_delays_a_track_by_whole_ticks() {
+    let _t = timed("mux_delays_a_track_by_whole_ticks");
+    let dir = temp_dir("mux-delay");
+    let all = sources();
+    let first = written_exact(&dir.0, &all[0], true);
+    let second = written_exact(&dir.0, &all[0], false);
+    let source = mp4::track_timing(&second, 0).unwrap();
+    // A frame at 29.97 in its track's ticks, 1/30000 s.
+    let delay = Time::seconds(Rational::new(1001, 30_000).unwrap());
+    let mux = |name: &str, delay: Time| {
+        let out = dir.0.join(name);
+        encode::mux_video_streams_with_audio(
+            &[(&first, Time::ZERO), (&second, delay)],
+            &first,
+            &out,
+        )
+        .map(|_| mp4::track_timing(&out, 1).unwrap())
+    };
+    let late = mux("late.insv", delay).unwrap();
+
+    // The source's tables, but for the start.
+    let at_zero = TrackTiming {
+        first_pts: 0,
+        edit: None,
+        ..late.clone()
+    };
+    assert_eq!(
+        at_zero,
+        TrackTiming {
+            edit: None,
+            ..source.clone()
+        }
+    );
+    // An empty edit of exactly the delay, then the source's media edit.
+    starts_late_by(&late, 1001).unwrap();
+    let list = late.edit.as_ref().unwrap();
+    let [_, media] = &list.edits[..] else {
+        panic!("{list:?}");
+    };
+    let ours = TrackTiming {
+        edit: Some(mp4::EditList {
+            movie_timescale: list.movie_timescale,
+            edits: vec![*media],
+        }),
+        first_pts: source.first_pts,
+        ..late.clone()
+    };
+    same_timing(&ours, &source).unwrap();
+
+    // Its controls: a track that starts a frame late by its own frames'
+    // times, in the movie timescale FFmpeg wrote before 9, 1000, has an
+    // empty edit of 33 ms, rounded down, and starts 990 ticks late.
+    let rounded = dir.0.join("rounded.mp4");
+    let mut w = Mp4Writer::create_with(
+        &rounded,
+        &video_settings(&all[0]),
+        None,
+        &MuxOptions {
+            movie_timescale: Some(1000),
+            ..MuxOptions::default()
+        },
+    )
+    .unwrap();
+    for i in 0..all[0].frames {
+        w.push_video_at(&grey(i), i64::from(i) + 1).unwrap();
+    }
+    let rounded = mp4::track_timing(&w.finish().unwrap(), 0).unwrap();
+    must_fail(
+        "a track a frame late in a movie timescale of 1000",
+        starts_late_by(&rounded, 1001),
+    );
+    let list = rounded.edit.as_ref().unwrap();
+    assert_eq!(
+        (
+            list.movie_timescale,
+            list.edits[0].duration,
+            rounded.first_pts
+        ),
+        (1000, 33, 990),
+        "{rounded:?}"
+    );
+    // With no delay, the track starts at 0, as its source.
+    let on_time = mux("on-time.insv", Time::ZERO).unwrap();
+    same_timing(&on_time, &source).unwrap();
+    must_fail(
+        "the undelayed track started a frame late",
+        starts_late_by(&on_time, 1001),
+    );
+    assert_eq!(on_time.first_pts, 0);
+
+    // A seventh of a second isn't whole ticks of 1/30000 s.
+    let seventh = Time::seconds(Rational::new(1, 7).unwrap());
+    must_fail("a delay of 1/7 s", mux("seventh.insv", seventh));
 }

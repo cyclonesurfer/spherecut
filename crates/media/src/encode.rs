@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
-use spherecut_core::{FrameRate, Rational, may_block};
+use spherecut_core::{FrameRate, Rational, Time, may_block};
 use thiserror::Error;
 
 use crate::copy::{AudioCopy, Copied};
@@ -1367,13 +1367,122 @@ pub fn mux_video_streams_as(
     dst: &Path,
     muxed: MuxedAs,
 ) -> Result<PathBuf, EncodeError> {
+    let srcs: Vec<(&Path, Time)> = srcs.iter().map(|s| (*s, Time::ZERO)).collect();
+    mux_streams(&srcs, None, dst, muxed, Movie::Ffmpeg)
+}
+
+/// [`mux_video_streams_as`] in MP4, whatever `dst`'s extension, with the
+/// first audio stream of `audio` after the video tracks, its packets as
+/// they are and in its source's time base: a camera's raw file with its
+/// sound (the X5's `.insv` holds an AAC track after its two lenses').
+/// `audio` may be one of `srcs`.
+///
+/// Each source comes with a delay, [`Time::ZERO`] for none: its packets'
+/// timestamps are moved that much later, which must be whole ticks of
+/// its time base and not negative, so that the muxer starts its track
+/// with an empty edit of exactly the delay, and the track keeps its
+/// source's tables to its last frame's duration (a lens that starts
+/// late, M3.5's `StartPtsDiffer`). A source that starts late itself, by
+/// an empty edit of its own, loses its last frame's duration instead:
+/// FFmpeg 6.1's MP4 demuxer gives the last packet of such a track the
+/// track's media duration less its timestamp, which the empty edit has
+/// moved on, so a frame at 29.97 in 1/30000 s that starts 990 ticks late
+/// lasts 11 ticks.
+///
+/// The movie's timescale (`mvhd`), which every edit's duration is in, is
+/// the least common multiple of the tracks' timescales, as FFmpeg 9's
+/// muxer picks it itself, on every FFmpeg: each track's tick is then
+/// whole ticks of the movie's, so that every edit is exact. FFmpeg's own
+/// before 9, 1000, would round a delay of a frame at 29.97 down to 33 ms,
+/// 990 ticks of 1/30000 s. A track's timescale is foreseen as the MP4
+/// muxer sets it: a video track's is its time base's denominator,
+/// doubled until it is at least 10000, and an audio track's its sample
+/// rate. The mux is refused if a track's tick as the muxer sets it isn't
+/// whole ticks of the movie's, or if the multiple passes the muxer's
+/// limit, `i32::MAX`.
+pub fn mux_video_streams_with_audio(
+    srcs: &[(&Path, Time)],
+    audio: &Path,
+    dst: &Path,
+) -> Result<PathBuf, EncodeError> {
+    mux_streams(srcs, Some(audio), dst, MuxedAs::Mp4, Movie::TracksLcm)
+}
+
+/// The movie timescale (`mvhd`) [`mux_streams`] has the MP4 muxer write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Movie {
+    /// FFmpeg's own: 1000 before FFmpeg 9, and from 9 the least common
+    /// multiple of the tracks' timescales.
+    Ffmpeg,
+    /// The least common multiple of the tracks' timescales, on every
+    /// FFmpeg ([`mux_video_streams_with_audio`]).
+    TracksLcm,
+}
+
+/// The timescale FFmpeg's MP4 muxer gives a track whose stream comes in
+/// time base `tb`, of `kind` and at audio sample rate `sample_rate`: a
+/// video track's time base's denominator, doubled until it is at least
+/// 10000, and an audio track's sample rate. `None` for a time base or
+/// rate of 0.
+fn mp4_track_timescale(kind: ff::media::Type, tb: ff::Rational, sample_rate: i32) -> Option<u64> {
+    if kind == ff::media::Type::Audio {
+        return u64::try_from(sample_rate).ok().filter(|r| *r > 0);
+    }
+    let mut ts = u64::try_from(tb.denominator()).ok().filter(|d| *d > 0)?;
+    while ts < 10_000 {
+        ts *= 2;
+    }
+    Some(ts)
+}
+
+/// The least common multiple of `a` and `b`, both above 0, or `None` past
+/// `u64::MAX`.
+fn lcm(a: u64, b: u64) -> Option<u64> {
+    let (mut x, mut y) = (a, b);
+    while y != 0 {
+        (x, y) = (y, x % y);
+    }
+    (a / x).checked_mul(b)
+}
+
+/// The first video stream of each of `srcs`, each moved later by its
+/// delay, then the first audio stream of `audio` when there is one, into
+/// `dst` in the container `muxed`, an MP4 in the movie timescale
+/// `movie`.
+fn mux_streams(
+    srcs: &[(&Path, Time)],
+    audio: Option<&Path>,
+    dst: &Path,
+    muxed: MuxedAs,
+    movie: Movie,
+) -> Result<PathBuf, EncodeError> {
     may_block("muxing files");
     init();
-    let mut inputs = Vec::with_capacity(srcs.len());
-    for src in srcs {
+    // Each source's input and the kind of stream taken from it; `audio`
+    // is opened again even when it is one of `srcs`, so that each input
+    // hands out one stream's packets in order.
+    let wanted = srcs
+        .iter()
+        .map(|&(s, delay)| (s, ff::media::Type::Video, delay))
+        .chain(audio.map(|a| (a, ff::media::Type::Audio, Time::ZERO)));
+    let mut inputs = Vec::with_capacity(srcs.len() + 1);
+    let mut kinds = Vec::with_capacity(srcs.len() + 1);
+    let mut paths = Vec::with_capacity(srcs.len() + 1);
+    let mut delays = Vec::with_capacity(srcs.len() + 1);
+    for (src, kind, delay) in wanted {
+        if delay < Time::ZERO {
+            return Err(EncodeError::Invalid(format!(
+                "{}: a delay of {} s",
+                src.display(),
+                delay.as_rational()
+            )));
+        }
         let ictx = ffi::open_input(src, None)
             .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
         inputs.push(ictx);
+        kinds.push(kind);
+        paths.push(src);
+        delays.push(delay);
     }
     let dest = follow_links(dst).map_err(|error| EncodeError::Io {
         path: dst.to_path_buf(),
@@ -1393,19 +1502,32 @@ pub fn mux_video_streams_as(
         || format!("creating {}", dest.display()),
     )?;
     let name = muxed.name();
-    // Per input: its video stream's index, the output stream's, and the
-    // input's time base.
+    // Per input: its stream's index, the output stream's, the input's
+    // time base and its delay in ticks of it.
     let mut map = Vec::with_capacity(inputs.len());
-    for (ictx, src) in inputs.iter().zip(srcs) {
+    // The least common multiple of the MP4 tracks' timescales so far.
+    let mut tracks_lcm = Some(1u64);
+    for (((ictx, src), kind), delay) in inputs.iter().zip(&paths).zip(&kinds).zip(&delays) {
         let ist = ictx
             .streams()
-            .find(|s| ffi::media_type(&s.parameters()) == ff::media::Type::Video)
-            .ok_or_else(|| EncodeError::Invalid(format!("{} has no video", src.display())))?;
+            .find(|s| ffi::media_type(&s.parameters()) == *kind)
+            .ok_or_else(|| {
+                let what = if *kind == ff::media::Type::Audio {
+                    "audio"
+                } else {
+                    "video"
+                };
+                EncodeError::Invalid(format!("{} has no {what}", src.display()))
+            })?;
         let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
             "adding a stream".into()
         })?;
         let par = ist.parameters();
         let hevc = par.id() == ff::codec::Id::HEVC;
+        let sample_rate = ffi::codecpar_fields(&par).sample_rate;
+        tracks_lcm = tracks_lcm.and_then(|m| {
+            mp4_track_timescale(*kind, ist.time_base(), sample_rate).and_then(|t| lcm(m, t))
+        });
         ost.set_parameters(par);
         ost.set_avg_frame_rate(ist.avg_frame_rate());
         match muxed {
@@ -1419,10 +1541,71 @@ pub fn mux_video_streams_as(
             }
             MuxedAs::Matroska => ffi::clear_codec_tag(&mut ost),
         }
-        map.push((ist.index(), ost.index(), ist.time_base()));
+        let in_tb = ist.time_base();
+        // No delay is no ticks, whatever the time base, so that a mux
+        // without delays is as it was.
+        let ticks = Rational::new(i64::from(in_tb.numerator()), i64::from(in_tb.denominator()))
+            .and_then(|tb| delay.as_rational().checked_div(tb))
+            .ok()
+            .filter(|t| t.den() == 1)
+            .map(|t| t.num())
+            .or((*delay == Time::ZERO).then_some(0))
+            .ok_or_else(|| {
+                EncodeError::Invalid(format!(
+                    "{}: a delay of {} s isn't whole ticks of its time base {}/{}",
+                    src.display(),
+                    delay.as_rational(),
+                    in_tb.numerator(),
+                    in_tb.denominator()
+                ))
+            })?;
+        map.push((ist.index(), ost.index(), in_tb, ticks));
     }
-    ctx(octx.write_header(), || format!("writing {name} header"))?;
+    let movie_timescale = match (movie, muxed) {
+        (Movie::TracksLcm, MuxedAs::Mp4) => Some(
+            tracks_lcm
+                .and_then(|m| i32::try_from(m).ok())
+                .ok_or_else(|| {
+                    EncodeError::Invalid(format!(
+                        "{}: no movie timescale of at most {} holds every track's tick",
+                        dest.display(),
+                        i32::MAX
+                    ))
+                })?,
+        ),
+        _ => None,
+    };
+    match movie_timescale {
+        Some(m) => {
+            let opts = [("movie_timescale".to_string(), m.to_string())];
+            let unused = ctx(octx.write_header_with(dict(&opts)), || {
+                format!("writing {name} header")
+            })?;
+            if let Some((key, _)) = unused.iter().next() {
+                return Err(EncodeError::Invalid(format!(
+                    "this FFmpeg's MP4 muxer has no option `{key}`"
+                )));
+            }
+        }
+        None => {
+            ctx(octx.write_header(), || format!("writing {name} header"))?;
+        }
+    }
     let out_tb: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
+    // The movie's timescale was foreseen from the tracks': each track's
+    // tick, as the muxer has set it, must be whole ticks of the movie's.
+    if let Some(m) = movie_timescale
+        && let Some(tb) = out_tb
+            .iter()
+            .find(|tb| tb.numerator() != 1 || tb.denominator() <= 0 || m % tb.denominator() != 0)
+    {
+        return Err(EncodeError::Invalid(format!(
+            "{}: the MP4 muxer's track timescale {}/{} isn't a whole tick of the movie's 1/{m}",
+            dest.display(),
+            tb.numerator(),
+            tb.denominator()
+        )));
+    }
     let mut packets: Vec<_> = inputs.iter_mut().map(|i| i.packets()).collect();
     let mut open = vec![true; packets.len()];
     while open.iter().any(|o| *o) {
@@ -1430,13 +1613,17 @@ pub fn mux_video_streams_as(
             if !open[i] {
                 continue;
             }
-            let (from, to, in_tb) = map[i];
-            // The next packet of this input's video stream, if any.
+            let (from, to, in_tb, delay) = map[i];
+            // The next packet of this input's stream, if any.
             let next = it.by_ref().find(|(s, _)| s.index() == from);
             let Some((_, mut pkt)) = next else {
                 open[i] = false;
                 continue;
             };
+            if delay != 0 {
+                pkt.set_pts(pkt.pts().map(|t| t + delay));
+                pkt.set_dts(pkt.dts().map(|t| t + delay));
+            }
             pkt.rescale_ts(in_tb, out_tb[to]);
             pkt.set_position(-1);
             pkt.set_stream(to);
