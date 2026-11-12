@@ -228,7 +228,7 @@ fn pats() -> Calibration {
                 8075.730 - 5376.0,
                 2680.350,
                 [0.120, -0.173, 89.112],
-                [0.000637, 0.000001, -0.031525],
+                PATS_T1,
                 CalibTerms::V6 { d: PATS_D[1] },
             ),
         ]),
@@ -1237,7 +1237,7 @@ fn changed(small: Small, ext: Extrinsics, field: usize, pick: usize) -> (Small, 
             );
             e = Extrinsics::Fitted {
                 relative: tilt * DQuat::from_rotation_y(PI),
-                translation_m: DVec3::new(0.000637, 0.000001, -0.031525),
+                translation_m: DVec3::from(PATS_T1),
             };
         }
     }
@@ -1589,8 +1589,10 @@ fn rig_canvas_maps_invert() {
         }
     }
     canvas_maps_invert_cases();
-    // Control: map B's inverse taken of map A's output.
-    let p = DVec2::new(2713.05, 2689.21);
+    // Control: map B's inverse taken of map A's output, at V6 block 0's
+    // stored centre.
+    let block = cal.v6.unwrap()[0];
+    let p = DVec2::new(block.cx, block.cy);
     let back = CanvasMap::B.to_canvas(CanvasMap::A.to_slot(p, SRC, DST, 768), SRC, DST, 768);
     must_fail(
         "B's inverse of A's output",
@@ -1905,7 +1907,7 @@ fn rig_centre_turns_with_lens_0s_tune() {
     assert!(worst <= 1e-15, "{worst:e} m");
     // Untuned, c_1 is t_1 read through lens 0 along −Z: behind lens 0 by
     // 31.5 mm.
-    assert!((untuned - DVec3::new(0.000637, -0.000001, 0.031525)).length() <= 1e-18);
+    assert!((untuned - DVec3::new(t.x, -t.y, -t.z)).length() <= 1e-18);
     // Control: c_1 by lens 0's untuned rotation, with lens 0 yawed.
     must_fail(
         "c_1 by lens 0's untuned rotation",
@@ -3495,11 +3497,11 @@ fn last_digit_changed(s: &str, k: usize) -> String {
 }
 
 /// Whether each of this file's copies of Pat's numbers (`pats()`, with
-/// `PATS_D`, and `PATS_T1`) is exactly its token of `v3` or `v6`, as
-/// `testkit::pats::tokens` reads them, block 1's local cx as its token
-/// less src, and src the canvas's height; or the first that isn't,
-/// named. The strings are `testkit::pats::V3` and `V6` but in the
-/// control.
+/// `PATS_D` and `PATS_T1`, which the file's other uses of them read) is
+/// exactly its token of `v3` or `v6`, as `testkit::pats::tokens` reads
+/// them, block 1's local cx as its token less src, and src the canvas's
+/// height; or the first that isn't, named. The strings are
+/// `testkit::pats::V3` and `V6` but in the control.
 fn copies_match(v3: &str, v6: &str) -> Result<(), String> {
     let cal = pats();
     let (v3, v6) = (tokens(v3), tokens(v6));
@@ -3572,7 +3574,7 @@ fn copies_match(v3: &str, v6: &str) -> Result<(), String> {
 /// depends on sphere, and would bring synth and FFmpeg into their
 /// build).
 ///
-/// Control: against V6 with block 1's tz (token 39) a unit off in its
+/// Control: against V6 with block 1's tz (token 38) a unit off in its
 /// last digit, and V3 with block 1's cx (token 23) so, the copies fail,
 /// naming the field.
 #[test]
