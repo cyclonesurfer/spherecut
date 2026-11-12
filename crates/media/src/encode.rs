@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use spherecut_core::fs::{TempFile, follow_links};
 use spherecut_core::video::ColorCodes;
-use spherecut_core::{FrameRate, Rational, may_block};
+use spherecut_core::{FrameRate, Rational, Time, may_block};
 use thiserror::Error;
 
 use crate::copy::{AudioCopy, Copied};
@@ -1367,7 +1367,8 @@ pub fn mux_video_streams_as(
     dst: &Path,
     muxed: MuxedAs,
 ) -> Result<PathBuf, EncodeError> {
-    mux_streams(srcs, None, dst, muxed)
+    let srcs: Vec<(&Path, Time)> = srcs.iter().map(|s| (*s, Time::ZERO)).collect();
+    mux_streams(&srcs, None, dst, muxed)
 }
 
 /// [`mux_video_streams_as`] in MP4, whatever `dst`'s extension, with the
@@ -1375,18 +1376,31 @@ pub fn mux_video_streams_as(
 /// they are and in its source's time base: a camera's raw file with its
 /// sound (the X5's `.insv` holds an AAC track after its two lenses').
 /// `audio` may be one of `srcs`.
+///
+/// Each source comes with a delay, [`Time::ZERO`] for none: its packets'
+/// timestamps are moved that much later, which must be whole ticks of
+/// its time base and not negative, so that the muxer starts its track
+/// with an empty edit of the delay, rounded down to the movie
+/// timescale's tick, and the track keeps its source's tables to its last
+/// frame's duration (a lens that starts late, M3.5's `StartPtsDiffer`). A
+/// source that starts late itself, by an empty edit of its own, loses its
+/// last frame's duration instead: FFmpeg 6.1's MP4 demuxer gives the
+/// last packet of such a track the track's media duration less its
+/// timestamp, which the empty edit has moved on, so a frame at 29.97 in
+/// 1/30000 s that starts 990 ticks late lasts 11 ticks.
 pub fn mux_video_streams_with_audio(
-    srcs: &[&Path],
+    srcs: &[(&Path, Time)],
     audio: &Path,
     dst: &Path,
 ) -> Result<PathBuf, EncodeError> {
     mux_streams(srcs, Some(audio), dst, MuxedAs::Mp4)
 }
 
-/// The first video stream of each of `srcs`, then the first audio stream
-/// of `audio` when there is one, into `dst` in the container `muxed`.
+/// The first video stream of each of `srcs`, each moved later by its
+/// delay, then the first audio stream of `audio` when there is one, into
+/// `dst` in the container `muxed`.
 fn mux_streams(
-    srcs: &[&Path],
+    srcs: &[(&Path, Time)],
     audio: Option<&Path>,
     dst: &Path,
     muxed: MuxedAs,
@@ -1398,17 +1412,26 @@ fn mux_streams(
     // hands out one stream's packets in order.
     let wanted = srcs
         .iter()
-        .map(|s| (*s, ff::media::Type::Video))
-        .chain(audio.map(|a| (a, ff::media::Type::Audio)));
+        .map(|&(s, delay)| (s, ff::media::Type::Video, delay))
+        .chain(audio.map(|a| (a, ff::media::Type::Audio, Time::ZERO)));
     let mut inputs = Vec::with_capacity(srcs.len() + 1);
     let mut kinds = Vec::with_capacity(srcs.len() + 1);
     let mut paths = Vec::with_capacity(srcs.len() + 1);
-    for (src, kind) in wanted {
+    let mut delays = Vec::with_capacity(srcs.len() + 1);
+    for (src, kind, delay) in wanted {
+        if delay < Time::ZERO {
+            return Err(EncodeError::Invalid(format!(
+                "{}: a delay of {} s",
+                src.display(),
+                delay.as_rational()
+            )));
+        }
         let ictx = ffi::open_input(src, None)
             .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
         inputs.push(ictx);
         kinds.push(kind);
         paths.push(src);
+        delays.push(delay);
     }
     let dest = follow_links(dst).map_err(|error| EncodeError::Io {
         path: dst.to_path_buf(),
@@ -1428,10 +1451,10 @@ fn mux_streams(
         || format!("creating {}", dest.display()),
     )?;
     let name = muxed.name();
-    // Per input: its stream's index, the output stream's, and the
-    // input's time base.
+    // Per input: its stream's index, the output stream's, the input's
+    // time base and its delay in ticks of it.
     let mut map = Vec::with_capacity(inputs.len());
-    for ((ictx, src), kind) in inputs.iter().zip(&paths).zip(&kinds) {
+    for (((ictx, src), kind), delay) in inputs.iter().zip(&paths).zip(&kinds).zip(&delays) {
         let ist = ictx
             .streams()
             .find(|s| ffi::media_type(&s.parameters()) == *kind)
@@ -1461,7 +1484,22 @@ fn mux_streams(
             }
             MuxedAs::Matroska => ffi::clear_codec_tag(&mut ost),
         }
-        map.push((ist.index(), ost.index(), ist.time_base()));
+        let in_tb = ist.time_base();
+        let ticks = Rational::new(i64::from(in_tb.numerator()), i64::from(in_tb.denominator()))
+            .and_then(|tb| delay.as_rational().checked_div(tb))
+            .ok()
+            .filter(|t| t.den() == 1)
+            .map(|t| t.num())
+            .ok_or_else(|| {
+                EncodeError::Invalid(format!(
+                    "{}: a delay of {} s isn't whole ticks of its time base {}/{}",
+                    src.display(),
+                    delay.as_rational(),
+                    in_tb.numerator(),
+                    in_tb.denominator()
+                ))
+            })?;
+        map.push((ist.index(), ost.index(), in_tb, ticks));
     }
     ctx(octx.write_header(), || format!("writing {name} header"))?;
     let out_tb: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
@@ -1472,13 +1510,17 @@ fn mux_streams(
             if !open[i] {
                 continue;
             }
-            let (from, to, in_tb) = map[i];
+            let (from, to, in_tb, delay) = map[i];
             // The next packet of this input's stream, if any.
             let next = it.by_ref().find(|(s, _)| s.index() == from);
             let Some((_, mut pkt)) = next else {
                 open[i] = false;
                 continue;
             };
+            if delay != 0 {
+                pkt.set_pts(pkt.pts().map(|t| t + delay));
+                pkt.set_dts(pkt.dts().map(|t| t + delay));
+            }
             pkt.rescale_ts(in_tb, out_tb[to]);
             pkt.set_position(-1);
             pkt.set_stream(to);

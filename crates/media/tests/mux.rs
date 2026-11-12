@@ -19,7 +19,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use spherecut_core::{FrameRate, Rational, StopToken};
+use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use spherecut_media::audio::FfmpegAudio;
 use spherecut_media::backend::{AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::encode::{
@@ -563,7 +563,7 @@ fn mux_carries_the_silent_audio_track() {
     let first = written_as(&dir.0, &all[0], true);
     let second = written(&dir.0, &all[2]);
     let out = encode::mux_video_streams_with_audio(
-        &[&first, &second],
+        &[(&first, Time::ZERO), (&second, Time::ZERO)],
         &first,
         &dir.0.join("lenses.insv"),
     )
@@ -612,4 +612,82 @@ fn mux_carries_the_silent_audio_track() {
         "mux_video_streams_as's file decoded as audio",
         FfmpegAudio::open_raw(&plain, &req),
     );
+}
+
+/// A video track muxed later than its source by a delay of whole ticks
+/// (M3.5's `InsvFault::StartPtsDiffer`) keeps its source's tables but its
+/// start: an empty edit of the delay, to the movie timescale's tick and
+/// no more, before the source's media edit, its `stts` the source's to
+/// its last frame's duration. The control is the same source muxed with
+/// no delay, which starts at 0; a delay that isn't whole ticks of the
+/// source's time base is refused.
+#[test]
+fn mux_delays_a_track_by_whole_ticks() {
+    let _t = timed("mux_delays_a_track_by_whole_ticks");
+    let dir = temp_dir("mux-delay");
+    let all = sources();
+    let first = written_as(&dir.0, &all[0], true);
+    let second = written(&dir.0, &all[0]);
+    let source = mp4::track_timing(&second, 0).unwrap();
+    // A frame at 29.97 in its track's ticks, 1/30000 s.
+    let delay = Time::seconds(Rational::new(1001, 30_000).unwrap());
+    let mux = |name: &str, delay: Time| {
+        let out = dir.0.join(name);
+        encode::mux_video_streams_with_audio(
+            &[(&first, Time::ZERO), (&second, delay)],
+            &first,
+            &out,
+        )
+        .map(|_| mp4::track_timing(&out, 1).unwrap())
+    };
+    let late = mux("late.insv", delay).unwrap();
+
+    // The source's tables, but for the start.
+    let at_zero = TrackTiming {
+        first_pts: 0,
+        edit: None,
+        ..late.clone()
+    };
+    assert_eq!(
+        at_zero,
+        TrackTiming {
+            edit: None,
+            ..source.clone()
+        }
+    );
+    // An empty edit of the delay, rounded down to the movie's tick, then
+    // the source's media edit.
+    let list = late.edit.as_ref().unwrap();
+    let movie = u128::from(list.movie_timescale);
+    let [empty, media] = &list.edits[..] else {
+        panic!("{list:?}");
+    };
+    assert_eq!(empty.media_time, -1);
+    // d/movie ≤ 1001/30000 < (d + 1)/movie.
+    let d = u128::from(empty.duration);
+    assert!(
+        d * 30_000 <= 1001 * movie && 1001 * movie < (d + 1) * 30_000,
+        "{list:?}"
+    );
+    let ours = TrackTiming {
+        edit: Some(mp4::EditList {
+            movie_timescale: list.movie_timescale,
+            edits: vec![*media],
+        }),
+        first_pts: source.first_pts,
+        ..late.clone()
+    };
+    same_timing(&ours, &source).unwrap();
+    // Its first pts is the empty edit's, in the track's ticks.
+    let ts = u128::from(late.timescale);
+    assert_eq!(u128::try_from(late.first_pts).unwrap() * movie, d * ts);
+
+    // Its control: with no delay, the track starts at 0, as its source.
+    let on_time = mux("on-time.insv", Time::ZERO).unwrap();
+    same_timing(&on_time, &source).unwrap();
+    must_fail("the undelayed track started late", on_time.first_pts != 0);
+
+    // A seventh of a second isn't whole ticks of 1/30000 s.
+    let seventh = Time::seconds(Rational::new(1, 7).unwrap());
+    must_fail("a delay of 1/7 s", mux("seventh.insv", seventh));
 }
