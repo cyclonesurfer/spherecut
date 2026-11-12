@@ -23,6 +23,7 @@
 use std::f64::consts::PI;
 
 use glam::{DQuat, DVec2, DVec3};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Model {
@@ -652,10 +653,17 @@ impl Canonical {
 /// reading is copied or favoured and none is named after one. d0 to d4
 /// are always the radial terms. Both fields `None` is
 /// [`V6Reading::RADIAL_ONLY`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// Both fields are written, a part the reading lacks as null, and
+/// neither may be left out: serde reads a missing `Option` as `None`
+/// unless the field reads through `Option::deserialize`, and a reading
+/// that lost its prism would be a lens model of its own (M3 plan 11.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct V6Reading {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub tangential: Option<Tangential>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub prism: Option<Prism>,
 }
 
@@ -704,7 +712,7 @@ impl V6Reading {
 }
 
 /// V6's tangential pair, and whether it has an r² extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tangential {
     pub pair: PairOrder,
@@ -714,7 +722,7 @@ pub struct Tangential {
 }
 
 /// Which of d5 and d6 is p1. Written `d5_d6` or `d6_d5`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PairOrder {
     /// p1 = d5, p2 = d6.
@@ -731,7 +739,7 @@ impl PairOrder {
 
 /// V6's four thin-prism terms: where they start and how they give s1 to
 /// s4.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prism {
     /// Written `first`: an agent's edit reads a field named `at` as a
@@ -749,7 +757,7 @@ impl Prism {
 }
 
 /// Where the four prism terms start.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrismAt {
     /// d7 to d10, only without a tangential extension, which reads d7
@@ -767,7 +775,7 @@ impl PrismAt {
 
 /// How the four prism terms, first to fourth, give s1 to s4 (x gains
 /// s1 r² + s2 r⁴, y gains s3 r² + s4 r⁴).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrismOrder {
     /// x's from the first and second, y's from the third and fourth.

@@ -13,6 +13,11 @@
 //! Schema 1 has no source, which reads as [`Source::default`], equirect.
 //! Every hash here is 16 lowercase hex digits of [`fnv1a64`], as a media's
 //! [`Fingerprint::head`] is.
+//!
+//! Every field is written, an absent value as null, and none may be left
+//! out, so a damaged file never reads a missing one as none (plan 11.2):
+//! serde reads a missing `Option` as `None` unless the field reads
+//! through `Option::deserialize`, as each optional field here does.
 
 use std::path::PathBuf;
 
@@ -65,6 +70,7 @@ pub struct DualFisheye {
     pub gains: Gains,
     /// The stitch profile the tune came from (plan 17), as provenance: a
     /// later edit of the profile never changes the project.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub profile: Option<ProfileRef>,
 }
 
@@ -91,9 +97,13 @@ impl DualFisheye {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Camera {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub make: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub model: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub firmware: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub serial: Option<String>,
 }
 
@@ -121,8 +131,10 @@ pub struct CalibSnapshot {
     /// source was made.
     pub hash: String,
     /// V3's two blocks, by block, if the file holds them.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v3: Option<[LensCalib; 2]>,
     /// V6's two blocks, by block, if the file holds them.
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v6: Option<[LensCalib; 2]>,
 }
 
@@ -145,9 +157,13 @@ impl CalibSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawStrings {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v1: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v2: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v3: Option<String>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub v6: Option<String>,
 }
 
@@ -310,7 +326,9 @@ pub struct EacLayout {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caps {
+    #[serde(deserialize_with = "Option::deserialize")]
     pub nadir: Option<Box<Cap>>,
+    #[serde(deserialize_with = "Option::deserialize")]
     pub zenith: Option<Box<Cap>>,
 }
 
@@ -476,7 +494,9 @@ mod tests {
     /// every source, sampling and cap kind. Controls: the kind written
     /// `"fisheye"`, and a key beside the kind that no source has, are
     /// refused; so is a key beside `equirect` or `off`, whose variants
-    /// have no fields.
+    /// have no fields; and so is each optional field left out rather than
+    /// written null, so a damaged file never reads a missing one as none
+    /// (11.2).
     #[test]
     fn a_dual_fisheye_source_reads_back() {
         let _time = timed("a_dual_fisheye_source_reads_back");
@@ -519,6 +539,9 @@ mod tests {
         });
         assert_eq!(v, written);
         assert_eq!(serde_json::from_value::<Source>(v.clone()).unwrap(), source);
+        // And from the text, as a project file reads it.
+        let text = serde_json::to_string(&source).unwrap();
+        assert_eq!(serde_json::from_str::<Source>(&text).unwrap(), source);
 
         let mut fisheye = v.clone();
         fisheye["kind"] = json!("fisheye");
@@ -532,6 +555,34 @@ mod tests {
             "a key beside the kind",
             serde_json::from_value::<Source>(extra),
         );
+        // Every field is written, a `None` as null, and each optional one
+        // left out is refused.
+        let left_out = |v: &serde_json::Value, path: &[&str]| {
+            let mut v = v.clone();
+            let (key, parents) = path.split_last().unwrap();
+            let parent = parents.iter().fold(&mut v, |v, p| &mut v[*p]);
+            assert!(parent.as_object_mut().unwrap().remove(*key).is_some());
+            v
+        };
+        for path in [
+            &["profile"][..],
+            &["camera", "make"],
+            &["camera", "model"],
+            &["camera", "firmware"],
+            &["camera", "serial"],
+            &["calibration", "raw", "v1"],
+            &["calibration", "raw", "v2"],
+            &["calibration", "raw", "v3"],
+            &["calibration", "raw", "v6"],
+            &["calibration", "v3"],
+            &["calibration", "v6"],
+            &["geometry", "v6", "prism"],
+        ] {
+            must_fail(
+                &format!("the source without {}", path.join(".")),
+                serde_json::from_value::<Source>(left_out(&v, path)),
+            );
+        }
 
         let equirect = json!({"kind": "equirect"});
         assert_eq!(serde_json::to_value(Source::default()).unwrap(), equirect);
@@ -613,6 +664,12 @@ mod tests {
         };
         let v = serde_json::to_value(&caps).unwrap();
         assert_eq!(v["nadir"]["mode"], json!({"kind": "fill", "ring_deg": 2.0}));
+        for pole in ["nadir", "zenith"] {
+            must_fail(
+                &format!("the caps without {pole}"),
+                serde_json::from_value::<Caps>(left_out(&v, &[pole])),
+            );
+        }
         assert_eq!(serde_json::from_value::<Caps>(v).unwrap(), caps);
         assert_eq!(
             serde_json::to_value(Caps::default()).unwrap(),

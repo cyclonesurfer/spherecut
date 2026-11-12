@@ -3609,7 +3609,8 @@ fn pats_copies_match_testkit_pats() {
 /// which the agents' wire form reads as a time.
 ///
 /// Controls: a sign of 2 and a roll offset of 45 are refused, as is a
-/// key the type doesn't have.
+/// key the type doesn't have, and a V6 reading with its prism or its
+/// tangential pair left out rather than written null.
 #[test]
 fn the_placeholder_writes_the_plans_json() {
     use serde_json::json;
@@ -3658,6 +3659,16 @@ fn the_placeholder_writes_the_plans_json() {
         "evidence": "placeholder until the fit",
     });
     assert_eq!(serde_json::to_value(&x5).unwrap(), written);
+    // A part of the V6 reading left out is refused, not read as none: a
+    // reading without its prism would be a lens model of its own.
+    for key in ["tangential", "prism"] {
+        let mut left_out = written.clone();
+        left_out["v6"].as_object_mut().unwrap().remove(key);
+        must_fail(
+            &format!("the V6 reading without its {key}"),
+            serde_json::from_value::<Geometry>(left_out),
+        );
+    }
     assert_eq!(serde_json::from_value::<Geometry>(written).unwrap(), x5);
 
     // The other forms read back as written.
