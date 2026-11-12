@@ -305,6 +305,9 @@ fn offset(e: &CameraError) -> u64 {
         | CameraError::TokenCount { offset, .. }
         | CameraError::BadToken { offset, .. }
         | CameraError::Io { offset, .. } => *offset,
+        // Strings that parsed but can't be a calibration: no parser of the
+        // bytes gives it, and it has no byte.
+        CameraError::NotCalibration { .. } => panic!("{e}: no parser gives this"),
     }
 }
 

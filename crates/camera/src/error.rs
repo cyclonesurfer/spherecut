@@ -37,11 +37,12 @@ impl fmt::Display for Part {
 
 /// Why a camera's bytes couldn't be read.
 ///
-/// Every error carries the byte it is at: in the file for the readers
-/// (`read_trailer`, `read_record` and `verify_companion`), in the
-/// record's payload for the parsers (`parse_metadata`, `parse_exposure`,
-/// `thumbnail`, `imu_span` and [`crate::pb::Walker`]), and in the string
-/// for `calib::parse`.
+/// Every error but [`CameraError::NotCalibration`] carries the byte it
+/// is at: in the file for the readers (`read_trailer`, `read_record` and
+/// `verify_companion`), in the record's payload for the parsers
+/// (`parse_metadata`, `parse_exposure`, `thumbnail`, `imu_span` and
+/// [`crate::pb::Walker`]), and in the string for `calib::parse`.
+/// `NotCalibration` is about strings that parsed, and names the field.
 #[derive(Debug, Error)]
 pub enum CameraError {
     /// The bytes end before what they say comes next.
@@ -144,6 +145,12 @@ pub enum CameraError {
         why: &'static str,
         offset: u64,
     },
+    /// Calibration strings that parse but can't be a
+    /// `sphere::rig::Calibration` (`insta360::to_calibration`, M3.5):
+    /// `why` says what, and `part` is the field it is in, the string's
+    /// (54 or 111) or field 27's window.
+    #[error("{part} can't be a calibration: {why}")]
+    NotCalibration { part: Part, why: &'static str },
     /// Reading the file failed, in `part`, at the byte the seek or read
     /// was for.
     #[error("I/O error reading {part} at byte {offset}: {error}")]
