@@ -16,7 +16,7 @@ use spherecut_sphere::fisheye::V6Reading;
 use spherecut_sphere::perspective::{LensShape, Morph, Projection};
 use spherecut_sphere::rig::{
     Binding, CalibTerms, CanvasMap, EulerConv, Extrinsics, Generation, Geometry, LensCalib,
-    LensTune, QuarterTurn, Status, TurnAxis, Tune, TzSign,
+    LensTune, QuarterTurn, Status, Tune, TurnAxis, TzSign,
 };
 use spherecut_testkit::control::must_fail;
 
@@ -492,7 +492,8 @@ fn a_misspelt_key_in_tune_is_refused() {
         };
         let key = wrong.trim_end_matches(':');
         assert!(
-            e.to_string().contains(&format!("unknown field `{}`", key.trim_matches('"'))),
+            e.to_string()
+                .contains(&format!("unknown field `{}`", key.trim_matches('"'))),
             "{e}"
         );
         assert!(json.line() > 0 && json.column() > 0, "{e}");
@@ -567,7 +568,14 @@ fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
 
         // The base's rule: the file's folder lexically from the link.
         let lexical = file::lexical(&spherecut_core::fs::follow_links(given).unwrap());
-        let rel = Path::new(text.split("\"path\": \"").nth(1).unwrap().split('"').next().unwrap());
+        let rel = Path::new(
+            text.split("\"path\": \"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap(),
+        );
         let there = file::lexical(&lexical.parent().unwrap().join(rel));
         must_fail(
             &format!("{}'s media found lexically", given.display()),
@@ -610,7 +618,11 @@ fn a_fifo_or_bad_utf8_at_the_path_is_not_a_project() {
     assert!(e.to_string().contains("not a regular file"), "{e}");
     std::fs::remove_file(&path).unwrap();
 
-    std::fs::write(&path, b"{\"format\": \"spherecut.project\", \"name\": \"\xff\"}").unwrap();
+    std::fs::write(
+        &path,
+        b"{\"format\": \"spherecut.project\", \"name\": \"\xff\"}",
+    )
+    .unwrap();
     let e = file::load(&path).unwrap_err();
     assert_eq!(e.code(), "not_project", "{e}");
     assert!(e.to_string().contains("UTF-8"), "{e}");
@@ -982,15 +994,18 @@ fn pointers(v: &serde_json::Value, at: String, out: &mut Vec<String>) {
 
 proptest! {
     /// Files written by agents and by hand: whatever is changed, deleted
-    /// or cut short, loading gives a project that passes `validate` or a
-    /// typed error, never a panic.
+    /// or cut short in either fixture, the schema 1 file or the schema 2
+    /// one with its dual-fisheye source, loading gives a project that
+    /// passes `validate` or a typed error, never a panic.
     #[test]
     fn mangled_files_load_or_are_refused(
         changes in prop::collection::vec((any::<prop::sample::Index>(), junk(), 0u8..4), 1..4),
         cut in any::<prop::sample::Index>(),
         cut_it in prop::bool::weighted(0.1),
+        schema_2 in any::<bool>(),
     ) {
-        let text = std::fs::read_to_string(data_dir().join("schema1.spherecut")).unwrap();
+        let fixture = if schema_2 { "schema2.spherecut" } else { "schema1.spherecut" };
+        let text = std::fs::read_to_string(data_dir().join(fixture)).unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
         for (at, value, how) in changes {
             let mut all = Vec::new();
