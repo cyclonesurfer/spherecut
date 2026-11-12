@@ -1490,6 +1490,10 @@ cores, and twice and four times that on two cores and on one (D65).
 The round trip proves the instrument consistent with synth's camera
 and nothing about a real one; the later rungs (the shader in M3.7, a
 lossless file in M3.5, exports, the viewer, and Pat's footage) take it
-from there. Rung 2 is these planes through the shader, and M3.7 lifts
-the scene's helpers out of `tests/instrument.rs` into `tests/common`
-for it.
+from there. Rung 2 is these planes through the shader. Rung 1's
+camera, far tune, pairs and views are copied in `synth::rung` (M3.5),
+and the boundary and `sphere_rig` are in the boundary crate (M3.5,
+F137), where rung 3 and M3.7's rung 2 reach them; `Scene`, `Masks`,
+the stitches, the ideals and the attribution (`Plant`, `Lands`,
+`attribute_to`, `apart_deg`) stay private to `tests/instrument.rs`
+until M3.7 lifts what rung 2 needs.

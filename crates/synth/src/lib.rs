@@ -24,6 +24,7 @@ pub mod fake;
 pub mod insv;
 pub mod lens;
 pub mod media;
+pub mod rung;
 pub mod yuv;
 
 pub use glam::DVec2;

@@ -48,11 +48,13 @@
 //!
 //! 4.2's "no channel more than 0.1 off the CPU reference" isn't held
 //! here, where the pictures are the CPU reference's: it is rung 2's rule,
-//! the shader against these pictures (M3.7). The camera, the pairs,
-//! [`Scene`], [`Masks`], the stitches and the ideals are private to this
-//! file, and `RenderCache::shared()` is one process's, so rung 2 can't
-//! reach them from another binary: M3.7 lifts them into `tests/common`
-//! before it writes rung 2.
+//! the shader against these pictures (M3.7). Rung 1's camera, far tune,
+//! pairs and views are copied in `synth::rung` (M3.5), and the boundary
+//! and `sphere_rig` are in the boundary crate (M3.5, F137), where rung 3
+//! and M3.7's rung 2 reach them; `tests/rung_copy.rs` ties the copy to
+//! this file's. [`Scene`], [`Masks`], the stitches, the ideals and the
+//! attribution ([`Plant`], [`Lands`], [`attribute_to`], [`apart_deg`])
+//! stay private to this file until M3.7 lifts what rung 2 needs.
 //!
 //! The floors are blessed by D32's rules, as `goldens.rs` keeps them, into
 //! `goldens/instrument.json`: `SPHERECUT_UPDATE_GOLDENS=1 cargo test -p
