@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use spherecut_core::project::{Media, Output, Project, Range, file};
+use spherecut_core::project::{Media, MediaId, Output, Project, Range, file};
 use spherecut_core::{FrameRate, Rounding, Time, TimeSpec};
 use spherecut_export::FramePlan;
 use spherecut_media::backend::SeekMode;
@@ -23,7 +23,6 @@ use crate::contract::Warning;
 use crate::error::{ToolError, codes};
 use crate::roots::Opened;
 use crate::still::{self, Decoded, Failure, Still};
-use crate::text;
 
 /// A project as a render reads it.
 #[derive(Debug)]
@@ -57,15 +56,17 @@ pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
 
 /// The project's media file, opened beneath the roots and checked
 /// against what the project recorded of it (D45, a2-plan amendment 6).
-fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
-    let named = text::field(&m.path.to_string_lossy());
+/// Its errors name it by id, never by its path, whose text is the file's
+/// (F051): `project` gives the path as a field.
+pub(crate) fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
+    let named = media_named(m.id);
     let missing = |why: &str| {
-        ToolError::new(
-            codes::MEDIA_MISSING,
-            format!("the project's media {named} {why}"),
-        )
-        .at(arg)
-        .next("put the file back where the project says, or make a project of the file where it is")
+        ToolError::new(codes::MEDIA_MISSING, format!("{named} {why}"))
+            .at(arg)
+            .next(
+                "put the file back at the path project gives for it, or make a project of the \
+                 file where it is",
+            )
     };
     let opened = match cx.roots.open_file(arg, &m.path) {
         Ok(f) => f,
@@ -78,7 +79,7 @@ fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
     let changed = |why: String| {
         ToolError::new(
             codes::MEDIA_CHANGED,
-            format!("the project's media {named} isn't the file it was made with: {why}"),
+            format!("{named} isn't the file it was made with: {why}"),
         )
         .at(arg)
         .next("make a new project of the file as it is now")
@@ -95,6 +96,12 @@ fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
         Ok(h) if h != m.fingerprint.head => Err(changed("its first MiB is different".into())),
         Ok(_) => Ok(opened),
     }
+}
+
+/// How an error names a project's media: by id, as "the project's media
+/// 1" (F051).
+pub(crate) fn media_named(id: MediaId) -> String {
+    format!("the project's media {id}")
 }
 
 /// The frames a render of a project makes, from `from` to the trim's

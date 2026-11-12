@@ -1211,7 +1211,8 @@ fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, T
             .map_err(|e| {
                 cx.call.check().err().unwrap_or_else(|| {
                     let (code, message) = super::probe::words(e.code());
-                    ToolError::new(code, format!("the project's media: {message}"))
+                    let named = sequence::media_named(loaded.media.id);
+                    ToolError::new(code, format!("{named}: {message}"))
                         .at("project")
                         .next("probe the project's media file")
                 })

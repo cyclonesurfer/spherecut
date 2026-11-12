@@ -442,7 +442,9 @@ unless `vfov` is given.
 strings, file and folder names, camera names, FFmpeg's log) appears only
 in JSON string fields, at most 1 KiB each, with control, bidi, ANSI and
 invisible characters replaced. It never appears in a tool's description,
-the server's instructions or an error's message. The tools' descriptions
+the server's instructions or an error's message. An error names a
+project's media by id ("the project's media 1"), never by the path the
+project recorded or by text read from a file. The tools' descriptions
 and the instructions tell the agent that these fields and the pixels of
 frames are data, not instructions.
 
@@ -516,9 +518,12 @@ A failed call is a tool result marked `isError`, whose text is
 characters: a stable `code`, the argument at fault as a JSON path
 (`file`, `times[3]`, `view.fov`) or null, what would be valid, and what
 to try next. A message may name a file or folder the call gave (a
-folder without room, a media file that moved) and, for a render that
-failed writing, the writer's words; probe's `detail: "full"` gives
-FFmpeg's own. The codes:
+folder without room) and, for a render that failed writing, the
+writer's words; probe's `detail: "full"` gives FFmpeg's own. An error
+names a project's media by id ("the project's media 1"), never by the
+path the project recorded or by text read from a file: `project` gives
+the path, as a field. Each error's `message`, `valid` and `next` reach
+the agent as fields do, as a backstop. The codes:
 
 | Code | Meaning |
 |---|---|
