@@ -10,11 +10,12 @@
 //! the camera, tune, frames and views render's `tests/instrument.rs`
 //! (rung 1) takes from `synth::rung` too, so they are rung 1's own. Each
 //! file is written once a binary, into a folder of this binary's kept
-//! for the run, and synth renders each lens's picture once a binary
-//! through `RenderCache::shared()`, for `write_insv` and `synth::rung`
-//! alike. A test writes the files its controls need, and runs its
-//! controls, beside its own check rather than after it: rung 3's file
-//! alone takes most of the budget to write.
+//! for the run, which a later run removes once this one has ended (as
+//! cli's `frame_insv.rs` does), and synth renders each lens's picture
+//! once a binary through `RenderCache::shared()`, for `write_insv` and
+//! `synth::rung` alike. A test writes the files its controls need, and
+//! runs its controls, beside its own check rather than after it: rung
+//! 3's file alone takes most of the budget to write.
 //!
 //! Budget (4.1 rule 5, 19.6): 2 s of the row's 3 s, rung 1's own render
 //! of its pair included. Each test prints its time and the suite's.
@@ -86,15 +87,41 @@ const UNIT: [[f64; 3]; 2] = [[1.0; 3]; 2];
 
 // The files.
 
-/// A folder of this test binary's, kept for the run.
+/// The name of a run's folder, before the id of its process.
+const RUN: &str = "rung3-";
+
+/// A folder of this test binary's, kept for the run. The folders of
+/// runs that have ended go first, so that they don't pile up.
 fn tmp() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let d =
-            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("rung3-{}", std::process::id()));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        sweep(root);
+        let d = root.join(format!("{RUN}{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         d
     })
+}
+
+/// Removes each folder in `root` named [`RUN`] and the id of a process
+/// that is no longer running: a run that has ended, whose files no test
+/// will read again.
+fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(RUN))
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = pid
+            && !Path::new(&format!("/proc/{pid}")).exists()
+        {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
 }
 
 /// `spec`'s master, written into a folder of its own.
