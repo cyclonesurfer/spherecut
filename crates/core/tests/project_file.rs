@@ -477,9 +477,30 @@ fn a_media_without_source_is_refused_by_path() {
 /// brace, not on the key's own line: the test checks that a position is
 /// given, not which.
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_misspelt_key_in_tune_is_refused() {
-    todo!()
+    let on_disk = std::fs::read_to_string(data_dir().join("schema2.spherecut")).unwrap();
+    for (right, wrong) in [
+        ("\"feather_deg\":", "\"feather_degs\":"),
+        ("\"rgb\":", "\"rgbs\":"),
+        ("\"cap_deg\":", "\"cap_degs\":"),
+    ] {
+        assert_eq!(on_disk.matches(right).count(), 1, "{right}");
+        let text = on_disk.replacen(right, wrong, 1);
+        let e = file::from_json(&text, &data_dir()).unwrap_err();
+        let FileError::Malformed(json) = &e else {
+            panic!("{wrong}: {e}");
+        };
+        let key = wrong.trim_end_matches(':');
+        assert!(
+            e.to_string().contains(&format!("unknown field `{}`", key.trim_matches('"'))),
+            "{e}"
+        );
+        assert!(json.line() > 0 && json.column() > 0, "{e}");
+        assert!(e.to_string().contains(" at line "), "{e}");
+        assert_eq!(e.code(), "malformed");
+    }
+    // The right keys load.
+    file::from_json(&on_disk, &data_dir()).unwrap();
 }
 
 /// A project file in a folder reached through a link with a `../` target
