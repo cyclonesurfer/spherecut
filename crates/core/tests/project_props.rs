@@ -1055,6 +1055,12 @@ fn gains_of(p: &Project, id: MediaId) -> Option<&Gains> {
     }
 }
 
+/// `p` saved as a project file's text in `/clips` and loaded again.
+fn saved_and_loaded(p: &Project) -> Project {
+    let folder = Path::new("/clips");
+    file::from_json(&file::to_json(p, folder).unwrap(), folder).unwrap()
+}
+
 /// The control on the undo check: `set_stitch`'s inverse `inverse`,
 /// applied to `after`, with its gains dropped, must not give back
 /// `before` when the edit changed the gains.
@@ -1086,9 +1092,16 @@ fn dropping_the_gains_is_caught(before: &Project, after: &Project, inverse: &[Ed
     true
 }
 
+/// The stitch property's cases: `PROPTEST_CASES`, or 64 when it is
+/// unset, a quarter of the other properties' 256, since a case saves and
+/// loads a project of two calibrations at each step it takes (about 3 ms
+/// a case in a debug build, 90% of it the file's text). Its gate is a run
+/// at `PROPTEST_CASES=100000`.
+const STITCH_CASES: u32 = 64;
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(
-        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)
+        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(STITCH_CASES)
     ))]
 
     /// Random tunes, gains, sources and caps through `set_source`,
@@ -1096,8 +1109,8 @@ proptest! {
     /// camera file and an equirect one: a step the ops' own rules refuse
     /// changes nothing, and no other is refused; each step's inverse
     /// undoes it exactly; the project saves and loads as itself at every
-    /// step; undoing all gives the first project and redoing all the
-    /// last. No case builds a rig. Control: an inverse of `set_stitch`
+    /// step it takes (one case saving the first); undoing all gives the
+    /// first project and redoing all the last. No case builds a rig. Control: an inverse of `set_stitch`
     /// that drops its gains fails the undo check, on the first project
     /// with Fixed gains of 0.9 on lens B and at each drawn edit that
     /// changes the gains.
@@ -1105,7 +1118,9 @@ proptest! {
     fn stitch_edits_undo_and_save(steps in prop::collection::vec(prop::collection::vec(stitch_draw(), 1..=2), 1..=8)) {
         let (mut p, media) = stitch_project();
         let original = p.clone();
-        let folder = Path::new("/clips");
+        // The first project is every case's, so one case saves it.
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| assert_eq!(saved_and_loaded(&original), original));
 
         let mut fixed = p.clone();
         let applied = fixed
@@ -1145,8 +1160,10 @@ proptest! {
                 (Ok(step), None) => {
                     prop_assert!(undoes(&p, &step.inverse, &before));
                     prop_assert!(p.same_content(&scratch));
+                    prop_assert_eq!(&saved_and_loaded(&p), &p);
                     states.push(p.clone());
                 }
+                // The project is the one before, which saved as itself.
                 (Err(e), Some((i, code))) => {
                     prop_assert_eq!((e.index, e.code()), (i, code), "{}", e);
                     prop_assert_eq!(&p, &before, "a refused step changes nothing");
@@ -1154,8 +1171,6 @@ proptest! {
                 (Ok(_), Some((i, code))) => prop_assert!(false, "edit {} applied where {} was due", i, code),
                 (Err(e), None) => prop_assert!(false, "refused by no rule of the stitch ops: {}", e),
             }
-            let text = file::to_json(&p, folder).unwrap();
-            prop_assert_eq!(&file::from_json(&text, folder).unwrap(), &p);
         }
         for state in states[..states.len() - 1].iter().rev() {
             prop_assert!(h.undo(&mut p).unwrap().is_some());
