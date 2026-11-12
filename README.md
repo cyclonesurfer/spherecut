@@ -378,7 +378,9 @@ spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x
   stitches them on the CPU with the file's calibration and the
   geometry Spherecut's table of cameras gives the model, which for the
   X5 is a placeholder until M3.6 fits it, so seams may show; without
-  `--reference` the run is refused until M3.7 brings the GPU's stitch.
+  `--reference` the run is refused until M3.7 brings the GPU's stitch,
+  and until then the pair decodes in software (`--decoder vaapi` or
+  `vulkan` is refused).
   `--geometry binding=reversed,canvas=b,...` changes the table's
   geometry key by key (binding, canvas, turn, tz, upright,
   generation), `--stitch-distance 1.5m` (or `inf`; 2 m by default) sets

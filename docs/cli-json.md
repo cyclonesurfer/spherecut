@@ -698,8 +698,10 @@ has it. So `--yaw`, `--pitch`, `--roll`, `--fov`, `--projection`,
 `--reference`, the pair's flags (below) and a FILE are usage errors
 with it.
 
-**`--projection equirect`.** The whole sphere, 2:1, turned by
-`--yaw`, `--pitch` and `--roll` (`ViewParams::equirect`), on any file
+**`--projection equirect`.** The whole sphere, turned by `--yaw`,
+`--pitch` and `--roll` (`ViewParams::equirect`) and drawn at `--size`,
+which it doesn't hold to 2:1 (a standard equirect is 2:1, such as
+`--size 2048x1024`; the default 1920x1080 stretches it), on any file
 the run renders: a stitched equirect on the GPU or with `--reference`,
 and a camera's pair. `--fov`, `--morph-to` and `--morph` are usage
 errors with it, and `--morph-to equirect` is one on any projection.
@@ -713,17 +715,17 @@ fisheye (`camera.layout` `insta360_dual_fisheye`), given without
 that `--reference` stitches it on the CPU, that the GPU's stitch
 arrives in M3.7, and that `--equirect` renders its first stream as an
 equirect anyway. With `--reference`, both lens tracks (probe's
-`lenses.tracks`) are decoded in software (`--decoder vaapi` or `vulkan`
-is `internal`), each seeks exactly to the time asked for, the two
-frames must show one time (else `damaged`), and the CPU reference
-stitches them through the view by the trailer's calibration and the
-geometry of the camera's entry in Spherecut's table, at a stitch
-distance of 2 m, with track 0 in front; `result.stitch` says how. A
-trailer that can't be read or holds no calibration fails the run with
-`not_equirect`, naming the record or field at fault, and probe's
-`bad_trailer` warnings are the run's too. The pair's flags, each a
-usage error with `--project`, `--equirect` or `--stream` and on a file
-that is no camera's pair:
+`lenses.tracks`) are decoded in software until M3.7 (`--decoder
+vaapi` or `vulkan` is a usage error), each seeks exactly to the time
+asked for, the two frames must show one time (else `damaged`), and the
+CPU reference stitches them through the view by the trailer's
+calibration and the geometry of the camera's entry in Spherecut's
+table, at a stitch distance of 2 m, with track 0 in front;
+`result.stitch` says how. A trailer that can't be read or holds no
+calibration fails the run with `not_equirect`, naming the record or
+field at fault, and probe's `bad_trailer` warnings are the run's too.
+The pair's flags, each a usage error with `--project`, `--equirect` or
+`--stream` and on a file that is no camera's pair:
 
 - `--geometry key=value,...` changes the table's entry for the file
   (never the table's row alone) key by key: `binding=direct|reversed`,
@@ -739,10 +741,14 @@ that is no camera's pair:
   default.
 - `--seam weights|difference` renders the stitch's debug picture
   through the view instead of the stitch: `weights` paints calibration
-  block 0's weight red and block 1's blue (they sum to 1 at every
-  pixel); `difference` paints |lens 0 − lens 1| × 8 in linear light,
-  the frame's gains applied, where both lenses see, and black
-  elsewhere. That mode is unclamped, so the PNG clips it at 1.
+  block 0's weight red and block 1's blue (they sum to 1 wherever a
+  lens covers, D64; the mask's margin grows as the picture coarsens, so
+  an equirect coarser than about 2.5° a pixel leaves a gap at the seam
+  that no lens covers, black there, which none from 160 pixels wide
+  has: M3 plan amendment 5); `difference` paints |lens 0 − lens 1| × 8
+  in linear light, the frame's gains applied, where both lenses see,
+  and black elsewhere. That mode is unclamped, so the PNG clips it at
+  1.
 - `--lens 0|1` renders one lens's track raw, as it is coded (the flat
   pass, with no view: the view flags go unused, and `view` reports them
   as given), with no stitch and no calibration, on the GPU or with

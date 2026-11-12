@@ -7,10 +7,12 @@
 //! Pat's numbers belong here: a test reads them through [`tokens`] or a
 //! parser of its own, or holds its own copy to these by a drift test.
 //! `spherecut-boundary` builds synth's truths by parsing V3 and V6. The
-//! drift tests for the copies still left in synth, sphere, camera and cli
-//! (one test each that fails when one of their numbers stops being these
-//! strings'), and camera's Tier 2c test that compares these with the
-//! files, are M3.5's units (a), (b) and (d)'s to write.
+//! copies left in synth (`src/lens.rs`) and sphere (`tests/rig.rs`,
+//! `tests/unified.rs`) are each held to these strings by a drift test,
+//! `pats_copies_match_testkit_pats`, that fails when one of their numbers
+//! stops being these strings' (M3.5's units (a) and (b)); camera's and
+//! cli's tests keep no copy, and camera's Tier 2c test
+//! `samples_calibrations_build_rigs` compares these with the files.
 //!
 //! This module holds text, not meaning: which token is which number is
 //! the format notes' §4.1, which each reader applies with its own code.
