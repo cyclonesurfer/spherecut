@@ -21,10 +21,19 @@
 //! **Unmixed** ([`FfmpegAudio::open_unmixed`], for an export's ambiX: m2-plan
 //! amendment 2 item 27) is the same at the output's rate.
 //!
-//! **Timing.** libavcodec removes AAC's priming and the demuxer applies
-//! edit lists, so frames carry their presentation time. Samples before
-//! clip time 0 are dropped, and audio that starts after 0 (or after a
-//! seek's time) is preceded by silence, so that chunks follow each other
+//! **Timing.** The demuxer applies edit lists, and libavcodec removes a
+//! codec's priming where the demuxer says how much it is, so frames carry
+//! their presentation time. The stream starts at the first sample its
+//! open decodes ([`AudioStreamInfo::start`]), and nothing from before
+//! that is handed out, even when a seek decodes it: a demuxer may take
+//! the priming away at open and not after a seek, as FFmpeg's Matroska
+//! demuxer does a CodecDelay's (8.1's and 9.0's do; 6.1's takes nothing
+//! away, and the priming is the stream's first samples), so what a frame
+//! holds from before the stream's first sample is dropped before the
+//! resampler sees it, and a run after a seek starts where the open's did.
+//! The open hands out samples from clip time 0 and a seek from its time;
+//! audio that starts later (the stream's first sample, after a seek to
+//! before it) is preceded by silence, so that chunks follow each other
 //! without a gap.
 //!
 //! **Resampling** runs on a grid: the resampler is only ever started at
@@ -148,6 +157,24 @@ struct Run {
     next_out: i64,
 }
 
+/// What a test changes in how an [`FfmpegAudio`] opens and seeks
+/// ([`FfmpegAudio::open_faulted`]; the `fault-injection` feature, which
+/// only tests turn on).
+#[cfg(feature = "fault-injection")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioFault {
+    /// Decoded frames the open drops before the one that places the
+    /// stream, and no seek drops: as a demuxer that takes a codec's
+    /// priming away at open and not after a seek has them dropped
+    /// (FFmpeg's Matroska demuxer a CodecDelay's: 8.1's and 9.0's do,
+    /// 6.1's doesn't), on any FFmpeg.
+    pub frames_dropped_at_open: u32,
+    /// Hand out what a seek decodes from before the stream's first
+    /// sample, rather than drop it (the module docs' Timing): the decoder
+    /// as it was before M3.5, for a control.
+    pub keeps_samples_before_first: bool,
+}
+
 /// One audio stream, decoded with FFmpeg (see the module docs).
 pub struct FfmpegAudio {
     path: PathBuf,
@@ -160,6 +187,10 @@ pub struct FfmpegAudio {
     out: AudioOutFormat,
     /// Clip time 0, in seconds of the stream's time.
     origin: Rational,
+    /// The stream's first sample, in seconds of the stream's time, where
+    /// its open found it: nothing before it is handed out (the module
+    /// docs' Timing).
+    first_at: Rational,
     in_rate: u32,
     mix: Mix,
     /// Every channel, unmixed ([`open_raw`](Self::open_raw),
@@ -187,6 +218,8 @@ pub struct FfmpegAudio {
     frame: ff::frame::Audio,
     /// Interleaved resampler output, reused.
     scratch: Vec<f32>,
+    #[cfg(feature = "fault-injection")]
+    fault: AudioFault,
 }
 
 impl std::fmt::Debug for FfmpegAudio {
@@ -234,7 +267,29 @@ impl FfmpegAudio {
         Self::open_with(path, req, Some(Unmixed::AtOutputRate))
     }
 
+    /// As [`open`](Self::open), with `fault`'s changes (the
+    /// `fault-injection` feature, for tests).
+    #[cfg(feature = "fault-injection")]
+    pub fn open_faulted(
+        path: &Path,
+        req: &AudioRequest,
+        fault: AudioFault,
+    ) -> Result<Self, MediaError> {
+        let mut a = Self::opened(path, req, None)?;
+        a.fault = fault;
+        Self::placed(a, req, None)
+    }
+
     fn open_with(
+        path: &Path,
+        req: &AudioRequest,
+        unmixed: Option<Unmixed>,
+    ) -> Result<Self, MediaError> {
+        Self::placed(Self::opened(path, req, unmixed)?, req, unmixed)
+    }
+
+    /// The stream's demuxer and decoder, opened, and nothing decoded.
+    fn opened(
         path: &Path,
         req: &AudioRequest,
         unmixed: Option<Unmixed>,
@@ -304,7 +359,7 @@ impl FfmpegAudio {
         let ambisonic = fields.channels == 4
             && crate::probe::spatial_audio(path, index, id)
                 .is_some_and(|s| s.is_ambix() && s.ambisonic_order == 1);
-        let mut a = FfmpegAudio {
+        Ok(FfmpegAudio {
             path: path.to_path_buf(),
             ictx,
             dec,
@@ -321,6 +376,7 @@ impl FfmpegAudio {
             },
             out: req.out,
             origin: req.origin.map_or(Rational::ZERO, Time::as_rational),
+            first_at: Rational::ZERO,
             in_rate: u32::try_from(fields.sample_rate).unwrap_or(0),
             mix: Mix::Stereo,
             raw,
@@ -340,11 +396,31 @@ impl FfmpegAudio {
             errors: 0,
             frame: ff::frame::Audio::empty(),
             scratch: Vec::new(),
-        };
+            #[cfg(feature = "fault-injection")]
+            fault: AudioFault::default(),
+        })
+    }
+
+    /// Decode `a`'s first frame, which places the stream on the clip's
+    /// axis, and queue what it gives.
+    fn placed(
+        mut a: Self,
+        req: &AudioRequest,
+        unmixed: Option<Unmixed>,
+    ) -> Result<Self, MediaError> {
+        let rate_given = unmixed != Some(Unmixed::AtStreamRate);
         let never = StopToken::never();
-        if !a.receive(&never)? {
-            return Err(err(path, "decoding audio", "the stream has no samples"));
+        #[cfg(not(feature = "fault-injection"))]
+        let frames = 1;
+        #[cfg(feature = "fault-injection")]
+        let frames = 1 + a.fault.frames_dropped_at_open;
+        for _ in 0..frames {
+            if !a.receive(&never)? {
+                return Err(err(&a.path, "decoding audio", "the stream has no samples"));
+            }
         }
+        let path = a.path.clone();
+        let path = path.as_path();
         let f = ffi::audio_frame_fields(&a.frame);
         if f.rate == 0 || f.channels == 0 {
             return Err(err(
@@ -357,7 +433,7 @@ impl FfmpegAudio {
         a.slack = a.tick_samples();
         a.info.rate = f.rate;
         a.info.channels = u16::try_from(f.channels).unwrap_or(u16::MAX);
-        if raw {
+        if a.raw {
             a.out = AudioOutFormat {
                 rate: if rate_given { req.out.rate } else { f.rate },
                 channels: a.info.channels,
@@ -365,9 +441,10 @@ impl FfmpegAudio {
         }
         a.mix = a.mix_of(f.channels);
         let first = a.input_position(f.pts.unwrap_or(0))?;
+        a.first_at =
+            Rational::new(first, i64::from(f.rate)).map_err(|e| err(path, "audio timing", e))?;
         if req.origin.is_none() {
-            a.origin = Rational::new(first, i64::from(f.rate))
-                .map_err(|e| err(path, "audio timing", e))?;
+            a.origin = a.first_at;
         }
         let g = gcd(i64::from(f.rate), i64::from(a.out.rate));
         let out_first = a.output_position(first)?;
@@ -378,13 +455,13 @@ impl FfmpegAudio {
             out_first,
         };
         a.info.start = Time::seconds(
-            Rational::new(first, i64::from(f.rate))
-                .and_then(|t| t.checked_sub(a.origin))
+            a.first_at
+                .checked_sub(a.origin)
                 .map_err(|e| err(path, "audio timing", e))?,
         );
         tracing::debug!(
             path = %path.display(),
-            stream = index,
+            stream = a.index,
             codec = %a.info.codec,
             rate = f.rate,
             channels = f.channels,
@@ -411,6 +488,19 @@ impl FfmpegAudio {
         let rate = self.in_rate.max(1);
         Time::from_pts(pts, self.tb)
             .and_then(|t| t.to_pts(Rational::new(1, i64::from(rate))?, Rounding::Nearest))
+            .map_err(|e| err(&self.path, "audio timing", e))
+    }
+
+    /// The stream's first sample ([`first_at`](Self::first_at)) at the
+    /// input rate, rounded up: where a run may start at the earliest.
+    fn first_sample(&self) -> Result<i64, MediaError> {
+        #[cfg(feature = "fault-injection")]
+        if self.fault.keeps_samples_before_first {
+            return Ok(i64::MIN);
+        }
+        self.first_at
+            .checked_mul(Rational::from_integer(i64::from(self.in_rate)))
+            .map(|r| r.round(Rounding::Ceil))
             .map_err(|e| err(&self.path, "audio timing", e))
     }
 
@@ -596,7 +686,12 @@ impl FfmpegAudio {
         let skip = match &self.run {
             Some(_) => 0,
             None => {
-                let (start, out) = self.grid.at_or_after(pos);
+                // Not before the stream's first sample: a frame a seek
+                // decodes from before it (a priming the demuxer took away
+                // at open only) is dropped, and one that straddles it
+                // starts the run where the open's started.
+                let first = self.first_sample()?;
+                let (start, out) = self.grid.at_or_after(pos.max(first));
                 if start >= pos + n {
                     return Ok(());
                 }
