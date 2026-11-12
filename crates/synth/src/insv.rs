@@ -929,6 +929,8 @@ pub struct InsvFiles {
 /// Writes `spec`'s master into `dir`, and its LRV beside it when the spec
 /// has one, each whole or not at all: each lens's track coded on its own
 /// from [`InsvSpec::planes`] into a folder of its own beside the files,
+/// the two tracks and the LRV side by side on threads of their own, each
+/// to the bytes it would have alone (its encoder runs one thread), then
 /// the two muxed with a silent AAC stream
 /// ([`mux_video_streams_with_audio`]), the muxer's `free` box
 /// after `ftyp` renamed `wide` as the X5 has it, and the trailer appended
@@ -988,9 +990,24 @@ pub fn write_insv(spec: &InsvSpec, dir: &Path) -> Result<InsvFiles, SynthError> 
             error,
         })?;
         let lenses = [work.join("lens0.mp4"), work.join("lens1.mp4")];
-        for (plan, path) in plans.iter().zip(&lenses) {
-            write_track(spec, plan, path)?;
-        }
+        let lrv_path = work.join("lrv.mp4");
+        // The two tracks and the LRV are coded side by side, each into a
+        // file of its own by an encoder of one thread (`x5_settings`), so
+        // each file's bytes are those it has coded alone; their errors
+        // are taken in the order they were coded in one after another.
+        let (tracks, lrv_coded) = std::thread::scope(|s| {
+            let tracks: Vec<_> = plans
+                .iter()
+                .zip(&lenses)
+                .map(|(plan, path)| s.spawn(move || write_track(spec, plan, path)))
+                .collect();
+            let lrv_coded = lrv
+                .as_ref()
+                .map(|plan| s.spawn(|| write_lrv(spec, plan, &lrv_path)));
+            let tracks: Vec<Result<(), SynthError>> = tracks.into_iter().map(joined).collect();
+            (tracks, lrv_coded.map(joined))
+        });
+        tracks.into_iter().collect::<Result<Vec<()>, _>>()?;
         let muxed = work.join("master.mp4");
         let srcs: Vec<(&Path, Time)> = lenses
             .iter()
@@ -999,14 +1016,13 @@ pub fn write_insv(spec: &InsvSpec, dir: &Path) -> Result<InsvFiles, SynthError> 
             .collect();
         mux_video_streams_with_audio(&srcs, &lenses[0], &muxed)?;
         mark_wide(&muxed)?;
-        let lrv_mp4 = match &lrv {
-            Some(plan) => {
-                let path = work.join("lrv.mp4");
-                write_lrv(spec, plan, &path)?;
-                mark_wide(&path)?;
-                Some((plan, path))
+        let lrv_mp4 = match (&lrv, lrv_coded) {
+            (Some(plan), Some(coded)) => {
+                coded?;
+                mark_wide(&lrv_path)?;
+                Some((plan, lrv_path))
             }
-            None => None,
+            _ => None,
         };
         let master = dir.join(&spec.name);
         let layout = append_trailer(&muxed, &master, &spec.records, spec.fault)?;
@@ -1027,6 +1043,13 @@ pub fn write_insv(spec: &InsvSpec, dir: &Path) -> Result<InsvFiles, SynthError> 
     })();
     let _ = std::fs::remove_dir_all(&work);
     written
+}
+
+/// What a scoped thread gave, or its panic, resumed on this thread.
+fn joined<T>(thread: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    thread
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 /// The X5's colour (3.1): full range, BT.709 primaries, transfer and
