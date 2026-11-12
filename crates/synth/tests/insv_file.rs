@@ -260,12 +260,13 @@ const X5_COLOR: ColorCodes = ColorCodes {
 /// The master is the X5's container (3.1, 7.2): two square `hvc1`
 /// tracks coded as the X5 codes them (full range, BT.709, chroma left,
 /// an IDR every `keyint` frames, no B-frames; the X5's own GOP is
-/// [`write_insv_codes_the_x5s_gop`]'s), one silent AAC track, `ftyp wide mdat moov`, and the `inst` box holding synth's
-/// trailer where `InsvFiles::layout` says, whose serial probe reads. Both
-/// tracks' tables are the same, read by the box reader and by the backend
-/// the frame lock asks, and their edits are exact in the movie's
-/// timescale. The control is `write_pair`'s file, which has no `wide`, no
-/// audio and no trailer, and FFmpeg's movie timescale.
+/// [`write_insv_codes_the_x5s_gop`]'s), one silent AAC track,
+/// `ftyp wide mdat moov`, and the `inst` box holding synth's trailer
+/// where `InsvFiles::layout` says, whose serial probe reads. Both
+/// tracks' tables are the same, read by the box reader and by the
+/// backend the frame lock asks, and their edits are exact in the
+/// movie's timescale. The control is `write_pair`'s file, which has no
+/// `wide`, no audio and no trailer, and FFmpeg's movie timescale.
 #[test]
 fn write_insv_writes_the_x5s_container() {
     let _t = timed("write_insv_writes_the_x5s_container");
@@ -463,12 +464,20 @@ fn write_insv_refuses_the_specs_it_documents() {
     }
 }
 
-/// Whether track `track` of `path` holds an IDR every `gop` frames from
-/// its first, by its `stss` and by the decoder's key flags, or the first
-/// way it doesn't.
-fn idr_every(path: &Path, track: usize, gop: u64) -> Result<(), String> {
+/// Whether track `track` of `path` holds `frames` frames with an IDR
+/// every `gop` from its first, by its `stss` and by the decoder's key
+/// flags, or the first way it doesn't. The count comes first: a track
+/// too short to reach its second IDR would pass for one coded at any
+/// longer GOP.
+fn idr_every(path: &Path, track: usize, frames: u64, gop: u64) -> Result<(), String> {
     let t = mp4::track_timing(path, track).unwrap();
-    let want: Vec<u64> = (1..=t.count).step_by(gop as usize).collect();
+    if t.count != frames {
+        return Err(format!(
+            "track {track} holds {} frames, not {frames}",
+            t.count
+        ));
+    }
+    let want: Vec<u64> = (1..=frames).step_by(gop as usize).collect();
     let stss: Option<Vec<u64>> = t.stss.map(|s| s.into_iter().map(u64::from).collect());
     if stss.as_ref() != Some(&want) {
         return Err(format!("track {track}'s stss is {stss:?}, not {want:?}"));
@@ -485,32 +494,40 @@ fn idr_every(path: &Path, track: usize, gop: u64) -> Result<(), String> {
 /// in a file long enough to hold each track's second IDR: 61 frames at
 /// 29.97, the master's tracks an IDR every 60 frames (2 s, frames 1 and
 /// 61) and the LRV's every 30 (1 s, frames 1, 31 and 61), by `stss` and
-/// by the decoder's key flags. The controls hold each track to the
-/// other's GOP: the LRV, coded at another GOP, to the master's, and the
-/// master's tracks to the LRV's.
+/// by the decoder's key flags, each track holding all 61 frames. The
+/// controls hold each track to the other's GOP (the LRV, coded at
+/// another GOP, to the master's, and the master's tracks to the LRV's),
+/// and the master to a frame fewer than it holds.
 #[test]
 fn write_insv_codes_the_x5s_gop() {
     let _t = timed("write_insv_codes_the_x5s_gop");
     let dir = temp_dir("gop");
+    let frames = 61;
     let s = InsvSpec {
         lrv: Some(LrvSpec {
             side: 64,
             quality: Quality::Lossless,
         }),
-        ..spec(102, 128, 61, FrameRate::FPS_29_97)
+        ..spec(102, 128, frames, FrameRate::FPS_29_97)
     };
     assert_eq!(s.keyint, None);
     let files = write_insv(&s, &dir.0).unwrap();
     let lrv = files.lrv.unwrap();
+    let n = u64::from(frames);
     for k in 0..2 {
-        assert_eq!(idr_every(&files.master, k, 60), Ok(()));
+        assert_eq!(idr_every(&files.master, k, n, 60), Ok(()));
         must_fail(
             &format!("the master's track {k} at the LRV's GOP"),
-            idr_every(&files.master, k, 30),
+            idr_every(&files.master, k, n, 30),
         );
     }
-    assert_eq!(idr_every(&lrv, 0, 30), Ok(()));
-    let why = must_fail("the LRV at the master's GOP", idr_every(&lrv, 0, 60));
+    let why = must_fail(
+        "the master held to a frame fewer",
+        idr_every(&files.master, 0, n - 1, 60),
+    );
+    assert_eq!(why, "track 0 holds 61 frames, not 60");
+    assert_eq!(idr_every(&lrv, 0, n, 30), Ok(()));
+    let why = must_fail("the LRV at the master's GOP", idr_every(&lrv, 0, n, 60));
     assert!(why.contains("[1, 31, 61]"), "{why}");
 }
 
