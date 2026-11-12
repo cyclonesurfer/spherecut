@@ -909,6 +909,7 @@ fn frame_insv_trailer_faults_are_clear_errors() {
         let (r, out) = &ran[k];
         clear_error(r, out, names).unwrap_or_else(|e| panic!("{fault:?}: {e}"));
         assert_eq!(r.code(), "not_equirect", "{fault:?}: {}", r.doc);
+        eprintln!("{fault:?}: {}", r.message());
         // The controls: the file without a fault.
         let (r, out) = &ran[unfaulted];
         must_fail(
@@ -929,6 +930,7 @@ fn frame_insv_trailer_faults_are_clear_errors() {
     clear_error(r, out, &[]).unwrap();
     assert_eq!(r.code(), "not_equirect", "{}", r.doc);
     assert!(r.warnings().contains(&"bad_trailer"), "{}", r.doc);
+    eprintln!("BadMagic: {}", r.message());
     must_fail(
         "BadMagic's warning, unfaulted",
         if ran[unfaulted].0.warnings().contains(&"bad_trailer") {
@@ -940,6 +942,7 @@ fn frame_insv_trailer_faults_are_clear_errors() {
     // NoCalibration.
     let (r, out) = &ran[k + 1];
     clear_error(r, out, &["no calibration"]).unwrap();
+    eprintln!("NoCalibration: {}", r.message());
     must_fail(
         "NoCalibration's check, unfaulted",
         clear_error(&ran[unfaulted].0, &ran[unfaulted].1, &["no calibration"]),
