@@ -32,7 +32,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -620,6 +620,18 @@ impl ProjectFolder {
         identity: &Identity,
         project_tmp: &TempFile,
     ) -> Result<(TempFile, usize), FolderError> {
+        let side = side(name, "history");
+        // A link where the history goes is refused, as one at the
+        // project's name or the lock's is: the rename would replace the
+        // link and leave its target as it was (F036). Anything else there
+        // that isn't a file the temporary file's own checks refuse.
+        if let Ok(st) = rustix::fs::statat(&self.fd, &side, AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(st.st_mode) == FileType::Symlink
+        {
+            return Err(FolderError::Link {
+                path: self.path_of(&side),
+            });
+        }
         let mut history = history.clone();
         // Room for the envelope around the history.
         let dropped = history.keep_bytes(MAX_HISTORY_BYTES - 256);
@@ -630,7 +642,6 @@ impl ProjectFolder {
             project_hash: format!("{:016x}", identity.hash),
             history: &history,
         };
-        let side = side(name, "history");
         let io = |source| FolderError::Io {
             path: self.path_of(&side),
             source,
@@ -1110,8 +1121,57 @@ mod tests {
     /// target is left as it was. Control: a regular history file there is read
     /// and replaced.
     #[test]
-    #[ignore = "M3.9 unit (a)"]
     fn a_link_at_the_history_name_is_refused() {
-        todo!()
+        use spherecut_testkit::control::must_fail;
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        let saved = folder.create(name, &p, &h).unwrap();
+        let history = dir.join(".a.spherecut.history");
+        let target = dir.join("kept.txt");
+        std::fs::write(&target, b"someone's file").unwrap();
+        std::fs::remove_file(&history).unwrap();
+        std::os::unix::fs::symlink("kept.txt", &history).unwrap();
+        let is_link = |e: &FolderError| {
+            matches!(e, FolderError::Link { path } if path.ends_with(".a.spherecut.history"))
+        };
+
+        // Read: no history, saying why.
+        let loaded = folder.load(name).unwrap();
+        let Kept::Unreadable(why) = &loaded.history else {
+            panic!("{:?}", loaded.history)
+        };
+        assert!(why.contains("symbolic link"), "{why}");
+        // Saved: refused before anything is written.
+        rename(&mut p, &mut h, "b");
+        let e = folder
+            .save(name, &p, &h, Some(&saved.identity))
+            .unwrap_err();
+        assert!(is_link(&e), "{e}");
+        assert_eq!(folder.identity(name).unwrap(), Some(saved.identity.clone()));
+        // A new project beside such a link is refused too, and isn't made.
+        std::fs::rename(dir.join(name), dir.join("moved.spherecut")).unwrap();
+        let e = folder.create(name, &p, &h).unwrap_err();
+        assert!(is_link(&e), "{e}");
+        assert!(!dir.join(name).exists());
+        // The link and its target are as they were.
+        assert!(std::fs::symlink_metadata(&history).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone's file");
+
+        // A regular history file there is read, and replaced by a save.
+        std::fs::rename(dir.join("moved.spherecut"), dir.join(name)).unwrap();
+        std::fs::remove_file(&history).unwrap();
+        let (p0, h0) = (project(), History::new());
+        let again = folder.save(name, &p0, &h0, None).unwrap();
+        assert_eq!(folder.load(name).unwrap().history, Kept::Kept(h0));
+        let saved = folder.save(name, &p, &h, Some(&again.identity));
+        must_fail(
+            "a regular history file refused as a link",
+            saved.as_ref().is_err_and(is_link),
+        );
+        saved.unwrap();
+        assert_eq!(folder.load(name).unwrap().history, Kept::Kept(h));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
