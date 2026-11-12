@@ -252,11 +252,49 @@ fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
 
 /// `file::load` behaves as `ProjectFolder::load` does (F034): it opens
 /// without blocking, refuses what isn't a regular file (a FIFO at the
-/// path), and calls a file that isn't UTF-8 `not_project`.
+/// path), and calls a file that isn't UTF-8 `not_project`. The FIFO is
+/// loaded on a thread held to a deadline, so a load that waits for a
+/// writer fails the test rather than hanging it.
+///
+/// Control: a regular UTF-8 project at the same path loads.
+#[cfg(unix)]
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_fifo_or_bad_utf8_at_the_path_is_not_a_project() {
-    todo!()
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let dir = TempDir::new("fifo");
+    let path = dir.0.join("p.spherecut");
+    mknodat(CWD, &path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let fifo = path.clone();
+    std::thread::spawn(move || {
+        tx.send(file::load(&fifo).map(drop)).ok();
+    });
+    let e = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(r) => r.unwrap_err(),
+        Err(_) => {
+            // Let the stuck open go before failing.
+            std::fs::OpenOptions::new().write(true).open(&path).ok();
+            panic!("loading a FIFO waited for a writer for 5 s");
+        }
+    };
+    assert_eq!(e.code(), "not_project", "{e}");
+    assert!(e.to_string().contains("not a regular file"), "{e}");
+    std::fs::remove_file(&path).unwrap();
+
+    std::fs::write(&path, b"{\"format\": \"spherecut.project\", \"name\": \"\xff\"}").unwrap();
+    let e = file::load(&path).unwrap_err();
+    assert_eq!(e.code(), "not_project", "{e}");
+    assert!(e.to_string().contains("UTF-8"), "{e}");
+
+    std::fs::write(&path, sample()).unwrap();
+    assert!(file::load(&path).is_ok());
+    must_fail(
+        "a regular UTF-8 project refused as not a project",
+        file::load(&path).is_err_and(|e| e.code() == "not_project"),
+    );
 }
 
 #[test]

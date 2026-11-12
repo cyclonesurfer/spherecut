@@ -18,10 +18,12 @@
 //! `ypr_deg` are written for readers; a hand edit that changes one without
 //! the exact value beside it is refused, saying which to edit.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
+use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -213,14 +215,29 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
         source,
     };
     let path = std::path::absolute(path).map_err(io)?;
-    let file = File::open(&path).map_err(io)?;
-    let mut text = String::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_string(&mut text)
+    // Without waiting: a pipe at the path would hold the open until a
+    // writer came, and a folder or a device is no project (F034).
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NONBLOCK.bits() as i32)
+        .open(&path)
         .map_err(io)?;
-    if text.len() as u64 > MAX_FILE_BYTES {
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err(FileError::NotProject(
+            "it is not a regular file (a folder, a pipe or a device, say)".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::TooLarge { path });
     }
+    // Text that isn't UTF-8 is no project, as `ProjectFolder::load` says,
+    // not an I/O error (F034).
+    let text = String::from_utf8(bytes)
+        .map_err(|_| FileError::NotProject("it isn't UTF-8 text".into()))?;
     // The real folder of the file itself, a link's target, as save
     // takes it (F031).
     let real = crate::fs::real_file(&path).map_err(io)?;
