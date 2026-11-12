@@ -369,8 +369,9 @@ A report:
 | `streams` | array | One per FFmpeg stream, below |
 | `mp4` | object, or null | For MP4/MOV files: `brand` (string or null), `top_level` (the first 64 top-level boxes, as `[type, size]` pairs in file order), `top_level_omitted` (how many more there are; a fragmented recording has thousands), `trailing_bytes` (after the last whole box, where some cameras put vendor data), `truncated` (the top-level box cut off by the end of the file: `fourcc` (string or null), `offset`, `header_len`, `size` (or null), `present`; or null), `warnings` (the box reader's own, as strings; each is also in `damage`) |
 | `camera` | object, or null | `vendor`, `model`, `firmware`, `serial` (strings or null; an Insta360 file's model, firmware and serial are its trailer's), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
-| `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order). Null for any other file, an LRV among them, whose one picture holds both lenses |
+| `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order); `binding`, which track each calibration block describes, as Spherecut's table of cameras has it for the file's model and firmware (`direct`: block b, track b; `reversed`: block b, track 1 − b, the X5's); `evidence` (how the table knows: `placeholder until the fit` for the X5 until M3.6 fits it); and `screen_side` (the FFmpeg index of the lens on the screen's side, once a take settles it; null until then). `binding` and `evidence` are null when the trailer has no calibration a stitch reads (see `geometry`). Null for any other file, an LRV among them, whose one picture holds both lenses |
 | `calibration` | object, or null | The calibration an Insta360 file's trailer holds, when a string of it parses: `generations` (those whose working string parses, oldest first, of `v1`, `v2`, `v3` and `v6`), `in_use` (the one the camera says it uses, when its string parses: `v6` on the X5; or null), `canvas` (`[width, height]` of the side-by-side picture the strings are in: the one in use's, else the newest's), `window` (the part of each lens's square the tracks show: `src` (the square on the canvas), `dst` (the track's) and `offset`, each a pair; or null), `hash` (16 hex digits: FNV-1a 64 over the working strings of `v1`, `v2`, `v3` and `v6` in that order, each followed by a NUL byte, a missing one by the NUL alone; a project's snapshot of the calibration records the same hash, M3 plan 11.1) |
+| `geometry` | object, or null | How sure the lenses' geometry is, from the entry for the file's camera in Spherecut's table of cameras (M3 plan 5.3): `status` (`provisional`, `settled`, `fitted` or `user`) and `evidence` (a sentence from the table, never the file's text: `placeholder until the fit` for the X5; on firmware the entry wasn't measured on, or a model with no entry, which gets the X5's, it is provisional and says so). On an Insta360 master and its LRV, which holds the master's strings. Null when the trailer holds no V3 or V6 calibration that a stitch reads: none; a V3 or V6 string that doesn't parse (a `bad_trailer` warning says which); field 136 missing, or naming none of them, or one the trailer doesn't hold (`calibration.in_use` null); or what a stitch can't hold, such as a window that isn't square or field 136 naming V1 or V2 (a `bad_trailer` warning, `the Insta360 trailer's calibration can't be stitched: ...`, says why) |
 | `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's; records that are empty in both, or of more than 64 MiB, aren't compared), `why` (when not verified, why: the two are paired by name only, and a record that can't be read is named by its file, master or LRV; else null). Null when there is no such file, the file has no trailer, its name isn't an Insta360 camera's, or it is lens 1's file (`_10_`) of a camera that writes one file a lens; the agent's `probe` also leaves it out when the other file isn't beneath a root |
 | `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first. Null when the file has no trailer, its trailer no exposure record, or the record can't be read (a `bad_trailer` warning says why) |
 | `records` | array, or null | The records an Insta360 trailer's index lists that lie inside the trailer: `id` and `size` (the record's bytes, without its footer). A slot whose record runs into the index or past the file is left out, with a `bad_trailer` warning. Null when the file has no trailer or its trailer can't be read (a `bad_trailer` warning says why) |
@@ -475,7 +476,7 @@ indented:
             "vendor": null, "model": null, "firmware": null, "serial": null, "layout": "equirect_tagged",
             "evidence": ["spherical video metadata present", "encoder = Lavf60.16.100"]
           },
-          "lenses": null, "calibration": null, "companion": null, "exposure_entries": null, "records": null,
+          "lenses": null, "calibration": null, "geometry": null, "companion": null, "exposure_entries": null, "records": null,
           "structure": {"check": "full"},
           "damage": [],
           "warnings": [],
@@ -509,21 +510,16 @@ hidden:
   "vendor": "Insta360", "model": "Insta360 X5", "firmware": "v1.1.22_build1", "serial": "<serial>", "layout": "insta360_dual_fisheye",
   "evidence": ["Insta360 trailer magic at end of file, inside an `inst` box", "the trailer's metadata (record 1) gives model Insta360 X5, firmware v1.1.22_build1, its serial"]
 },
-"lenses": {"tracks": [0, 1]},
+"lenses": {"tracks": [0, 1], "binding": "reversed", "evidence": "placeholder until the fit", "screen_side": null},
 "calibration": {
   "generations": ["v1", "v2", "v3", "v6"], "in_use": "v6", "canvas": [10752, 5376],
   "window": {"src": [5376, 5376], "dst": [5312, 5312], "offset": [0, 0]}, "hash": "840fcc4eb186a389"
 },
+"geometry": {"status": "provisional", "evidence": "placeholder until the fit"},
 "companion": {"path": "LRV_20261022_165451_01_004.lrv", "verified": true, "why": null},
 "exposure_entries": 122,
 "records": [{"id": 1, "size": 3965}, {"id": 2, "size": 1228840}, {"id": 3, "size": 81280}, {"id": 4, "size": 1952}, {"id": 9, "size": 5520}, {"id": 10, "size": 35}, {"id": 11, "size": 30705}, {"id": 22, "size": 8306836}, {"id": 28, "size": 12793}, {"id": 29, "size": 189}]
 ```
-
-Which stream holds which lens, how sure that is and which side of the
-picture each lens is on (`lenses.binding`, `lenses.evidence`,
-`lenses.screen_side`), and the lenses' geometry (`geometry`), are fields
-still to come within `spherecut.probe/1`, with Spherecut's own table of
-cameras (M3 plan 5.3).
 
 A file cut short, which FFmpeg still opens, has both its report and its
 error; parts of that entry:
@@ -622,11 +618,11 @@ Video, on a discrete GPU where it works. Without `--file` there is no `file`.
 | `path` | string | The file, as given |
 | `camera` | string or null | The camera as probe names it: its model, with the vendor in front when the model doesn't start with it (`Insta360 X5`) |
 | `firmware` | string or null | The firmware the file names, as written (`v1.1.22_build1`) |
-| `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, and in its trailer the calibration the camera says it uses |
+| `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, and in its trailer the calibration the camera says it uses, one a stitch can read |
 | `calibration` | string or null | That calibration's generation (`v6` on the X5), as probe's `calibration.in_use` |
 | `lenses` | array | Each lens stream (probe's `lenses.tracks`; the first video stream alone for a file without them, and none for a file with no video stream): `stream` (FFmpeg's index), `decodes` (whether its first frame decoded), `source` and `decode` (as frame's, below; null when it wasn't opened or decoded), `error` (why not, an error as in the envelope; or null) |
-| `geometry` | string | How sure the lenses' geometry is: `provisional` until Spherecut's own table of cameras gives the model and firmware theirs (M3 plan 5.3) |
-| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does. A trailer that is there but can't be read says so with probe's `bad_trailer` message, and a calibration the camera names (field 136) that doesn't parse is told apart from one it doesn't name |
+| `geometry` | string | How sure the lenses' geometry is: the `status` of the entry for the file's camera in Spherecut's table of cameras (M3 plan 5.3), as probe's `geometry` gives it, or for a file without one (no calibration a stitch reads) the entry for the model and firmware the file names, the X5's for a file that names none. `provisional` for every camera until M3.6 fits the X5's |
+| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does. A trailer that is there but can't be read says so with probe's `bad_trailer` message, a calibration the camera names (field 136) that doesn't parse is told apart from one it doesn't name, and one that parses but that a stitch can't read says why (`a calibration a stitch can read: ...`) |
 | `summary` | string | One line for people: the camera, its firmware and the geometry, such as `Insta360 X5 v1.1.22, geometry provisional` |
 | `warnings` | array of warnings | What probing the file warned of (its damage, and its warnings with `bad_trailer` among them, each naming the file) and what decoding its lenses warned of, each once, as frame's warnings |
 

@@ -1564,8 +1564,18 @@ mod text {
         if let Some(l) = &f.lenses {
             let _ = writeln!(
                 s,
-                "  lenses     streams #{} and #{} (which lens each holds isn't read yet)",
-                l.tracks[0], l.tracks[1]
+                "  lenses     streams #{} and #{}, {}",
+                l.tracks[0],
+                l.tracks[1],
+                match (l.binding, &l.evidence) {
+                    (Some(b), Some(e)) => format!(
+                        "binding {b} ({e}){}",
+                        l.screen_side
+                            .map(|k| format!(", screen side #{k}"))
+                            .unwrap_or_default()
+                    ),
+                    _ => "not bound: no calibration a stitch reads".into(),
+                }
             );
         }
         if let Some(c) = &f.calibration {
@@ -1587,6 +1597,9 @@ mod text {
                     .unwrap_or_default(),
                 c.hash
             );
+        }
+        if let Some(g) = &f.geometry {
+            let _ = writeln!(s, "  geometry   {}: {}", g.status, g.evidence);
         }
         if let Some(c) = &f.companion {
             let _ = writeln!(

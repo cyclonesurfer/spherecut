@@ -20,6 +20,7 @@ mod lavapipe;
 use lavapipe::lavapipe_icd;
 use spherecut_synth::insv::{self as synth_insv, InsvFault};
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats;
 
 fn missing_node() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -589,9 +590,160 @@ fn blank_track(path: &Path, track: usize) {
 
 /// `spherecut doctor --file` on a synthetic `.insv` says whether it can
 /// be stitched and names the camera and its geometry's status, as
-/// "Insta360 X5 v1.1.22, geometry provisional" (M3 plan 5.4).
+/// "Insta360 X5 v1.1.22, geometry provisional" (M3 plan 5.4): the status
+/// of the file's entry in the geometry table (`camera::insta360::known`),
+/// as probe's `geometry` gives it, on the X5's firmware and on another;
+/// and for a master whose calibration parses but that a stitch can't
+/// read (field 27's window oblong; or V1 and V2 strings alone, as an
+/// older camera writes), that it can't be stitched, and why.
+///
+/// The control: the master's tracks without its trailer, a plain MP4,
+/// have no `geometry` in probe's report.
 #[test]
-#[ignore = "M3.5 unit (b)"]
 fn doctor_file_reports_the_known_geometry() {
-    todo!()
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("doctor-geometry-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let master = insv::master(&dir, insv::MASTER, None);
+    // The master's tracks with its metadata's field `n` set to `value`.
+    let with = |name: &str, n: u32, value: synth_insv::Field| {
+        let mut records = insv::records();
+        let field = records.metadata.iter_mut().find(|f| f.number == n).unwrap();
+        *field = value;
+        insv::retrailed(&dir, insv::MASTER, name, &records, None).path
+    };
+    let firmware = with(
+        "VID_20261022_101500_00_002.insv",
+        3,
+        synth_insv::Field::string(3, "v9.9.9"),
+    );
+    let window = [5376, 5376, 5312, 5000, 0, 0]
+        .into_iter()
+        .zip(1..)
+        .map(|(v, n)| synth_insv::Field::varint(n, v))
+        .collect();
+    let oblong = with(
+        "VID_20261022_101500_00_003.insv",
+        27,
+        synth_insv::Field::message(27, window),
+    );
+    // Pat's V1 and V2 strings in place of the V3 and V6, field 136
+    // naming V2.
+    let mut records = insv::records();
+    records
+        .metadata
+        .retain(|f| ![54, 56, 111, 112, 136].contains(&f.number));
+    records.metadata.extend([
+        synth_insv::Field::string(5, pats::V1),
+        synth_insv::Field::string(53, pats::V2),
+        synth_insv::Field::varint(136, 2),
+    ]);
+    records.metadata.sort_by_key(|f| f.number);
+    let older = insv::retrailed(
+        &dir,
+        insv::MASTER,
+        "VID_20261022_101500_00_004.insv",
+        &records,
+        None,
+    )
+    .path;
+    let plain = insv::tracks(&dir, insv::MASTER);
+    // doctor's `file`, and probe's report, of the file at `path`.
+    let file = |path: &Path| {
+        let v = document::document(&doctor(&["--json", "--file", path.to_str().unwrap()]).stdout);
+        assert_eq!(v["ok"], true, "{v}");
+        v["result"]["file"].clone()
+    };
+    let probed = |path: &Path| {
+        let out = Command::new(env!("CARGO_BIN_EXE_spherecut"))
+            .args(["probe", "--json"])
+            .arg(path)
+            .env_remove("SPHERECUT_LOG")
+            .output()
+            .unwrap();
+        let v = document::document(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{v}");
+        v["result"]["files"][0]["report"].clone()
+    };
+
+    // The X5's entry, on its firmware and on another: the word is the
+    // geometry's status that probe reports.
+    for (path, summary) in [
+        (&master.path, "Insta360 X5 v1.1.22, geometry provisional"),
+        (&firmware, "Insta360 X5 v9.9.9, geometry provisional"),
+    ] {
+        let (f, r) = (file(path), probed(path));
+        assert_eq!(r["geometry"]["status"], "provisional", "{r}");
+        assert_eq!(f["geometry"], r["geometry"]["status"], "{f:#}");
+        assert_eq!(f["summary"], summary, "{f:#}");
+        assert_eq!(f["stitchable"], true, "{f:#}");
+        assert_eq!(f["missing"], json!([]), "{f:#}");
+    }
+    let t = String::from_utf8_lossy(&doctor(&["--file", firmware.to_str().unwrap()]).stdout)
+        .into_owned();
+    assert!(
+        t.contains("\n  Insta360 X5 v9.9.9, geometry provisional\n  can be stitched: yes, with its v6 calibration\n"),
+        "{t}"
+    );
+
+    // The oblong window: the calibration parses and is the one in use,
+    // but no stitch reads it.
+    let f = file(&oblong);
+    assert_eq!(f["calibration"], "v6", "{f:#}");
+    assert_eq!(f["stitchable"], false, "{f:#}");
+    let why = "the metadata's field 27 can't be a calibration: its window isn't square";
+    assert_eq!(
+        f["missing"],
+        json!([format!("a calibration a stitch can read: {why}")]),
+        "{f:#}"
+    );
+    assert_eq!(
+        f["geometry"], "provisional",
+        "the table's word for the X5: {f:#}"
+    );
+    let warned: Vec<&str> = f["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        warned,
+        [format!(
+            "{}: the Insta360 trailer's calibration can't be stitched: {why}",
+            oblong.display()
+        )],
+        "{f:#}"
+    );
+
+    // V1 and V2 alone: they parse, and V2 is the one in use, but a
+    // stitch reads V3 or V6. Nothing is wrong with the trailer.
+    let r = probed(&older);
+    assert_eq!(r["calibration"]["in_use"], "v2", "{r}");
+    assert_eq!(r["geometry"], Value::Null, "{r}");
+    assert_eq!(r["lenses"]["binding"], Value::Null, "{r}");
+    assert_eq!(r["warnings"], json!([]), "{r}");
+    let f = file(&older);
+    assert_eq!(f["stitchable"], false, "{f:#}");
+    assert_eq!(
+        f["missing"],
+        json!([
+            "a calibration a stitch can read: the trailer holds neither a V3 nor a V6 \
+             calibration string"
+        ]),
+        "{f:#}"
+    );
+    assert_eq!(f["geometry"], "provisional", "{f:#}");
+
+    // The control: the tracks alone have no geometry block, and doctor
+    // says the table's word for a camera it doesn't know.
+    let r = probed(&plain);
+    must_fail(
+        "the tracks without the trailer, with a geometry",
+        r["geometry"] != Value::Null,
+    );
+    let f = file(&plain);
+    assert_eq!(f["geometry"], "provisional", "{f:#}");
+    assert_eq!(f["stitchable"], false, "{f:#}");
+    std::fs::remove_dir_all(&dir).ok();
 }
