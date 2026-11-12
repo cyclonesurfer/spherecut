@@ -152,6 +152,22 @@ impl CalibSnapshot {
     }
 }
 
+/// Rules of [`Project::validate`] a control turns off, to show that the
+/// test it controls fails without them (M3 plan 4.1 rule 1). Each is off
+/// (`false`) by default, which is `validate` as built.
+///
+/// [`Project::validate`]: super::Project::validate
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidateTest {
+    /// No sum rule: ξ plus a lens's `xi_delta` may reach −1, and
+    /// [`Rig::build`] is left to refuse it.
+    pub no_xi_sum: bool,
+    /// The coverage rule takes the lenses' axes as opposite, whatever
+    /// angle the geometry and the tune put between them.
+    pub axes_opposite: bool,
+}
+
 /// Each generation's working calibration string as the trailer stores it
 /// (record 1's fields 5, 53, 54 and 111), or none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
