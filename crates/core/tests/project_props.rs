@@ -702,26 +702,50 @@ fn coverage_slack(rig: &Rig) -> f64 {
     (reach(a) + reach(b) - (TAU - apart)).to_degrees()
 }
 
+/// Each lens's own corner of the frame's bands, at θ_max
+/// `theta_max_deg`, where its min(θ_max, θ_frame) is least on `d`'s
+/// calibration and geometry. A lens's θ_frame reads only its own block
+/// and tune, so the two lenses' worst corners are found together, each
+/// lens on its own; that the bands move neither lens's axis nor its
+/// centre is checked at each corner.
+fn worst_frames(d: &DualFisheye, theta_max_deg: f64) -> [LensTune; 2] {
+    let still = d.rig([768; 2]).unwrap();
+    let mut least = [(f64::INFINITY, LensTune::default()); 2];
+    for corner in frame_corners(band::RADIUS_SCALE, theta_max_deg) {
+        let mut d = d.clone();
+        d.tune.lenses = [corner; 2];
+        let rig = d.rig([768; 2]).unwrap();
+        for (b, (lens, still)) in rig.lenses.iter().zip(&still.lenses).enumerate() {
+            assert_eq!(lens.lens_from_rig, still.lens_from_rig);
+            assert_eq!(lens.centre_m, still.centre_m);
+            let reach = lens.theta_max.min(lens.theta_frame);
+            if reach < least[b].0 {
+                least[b] = (reach, corner);
+            }
+        }
+    }
+    least.map(|(_, corner)| corner)
+}
+
 /// The least [`coverage_slack`] over both generations, both bindings and
 /// every corner of the two lenses' yaw, pitch and roll bands of ±`ypr`
-/// degrees, at q `q`, θ_max `theta_max_deg` and each lens's frame bands
-/// at `frame`, the corner where its θ_frame is least. The axes and the
-/// lenses' centres don't move with the frame's bands, nor θ_frame with
-/// the turn, which the loop checks at each corner, so the least over the
-/// product of the two sets of corners is here.
-fn least_coverage(ypr: f64, q: f64, theta_max_deg: f64, frame: LensTune) -> f64 {
+/// degrees, at q `q` and θ_max `theta_max_deg`, each lens at its own
+/// worst corner of the frame's bands ([`worst_frames`]). A lens's reach
+/// reads its own θ_frame, which only its frame bands move, and its
+/// centre, which neither they nor the turns move; the angle between the
+/// axes reads only the turns, which move no θ_frame (the loop checks
+/// both). So each lens's reach is least at its worst frame corner
+/// whatever the other's corner and the turns, and the least over every
+/// pair of frame corners and every corner of the turns is here.
+fn least_coverage(ypr: f64, q: f64, theta_max_deg: f64) -> f64 {
     let ends = [-ypr, ypr];
     let mut least = f64::INFINITY;
     for generation in [Generation::V3, Generation::V6] {
         for binding in [Binding::Direct, Binding::Reversed] {
             let mut d = base_source(generation);
             d.geometry.binding = binding;
-            let lens = LensTune {
-                theta_max_deg,
-                ..frame
-            };
             d.tune = Tune {
-                lenses: [lens; 2],
+                lenses: worst_frames(&d, theta_max_deg),
                 feather_deg: band::FEATHER_DEG,
                 q_per_m: q,
             };
@@ -761,7 +785,7 @@ fn the_drawn_tunes_clear_the_frame() {
         Some(true),
         "the frame leaves {room:.3}° at {worst:?}"
     );
-    let slack = least_coverage(band::YPR_DEG, band::Q_PER_M, band::THETA_MAX_DEG[0], worst);
+    let slack = least_coverage(band::YPR_DEG, band::Q_PER_M, band::THETA_MAX_DEG[0]);
     eprintln!("the coverage's least slack: {slack:.3}°");
     assert_eq!(at_least(slack, 0.0).passes(), Some(true), "{slack:.3}°");
 
@@ -1068,14 +1092,18 @@ fn saved_and_loaded(p: &Project) -> Project {
     file::from_json(&file::to_json(p, folder).unwrap(), folder).unwrap()
 }
 
-/// The control on the undo check: `set_stitch`'s inverse `inverse`,
-/// applied to `after`, with its gains dropped, must not give back
-/// `before` when the edit changed the gains.
+/// The control on the undo check: `set_stitch`'s inverse `inverse` with
+/// its gains dropped, applied to `after`, must not give back `before`'s
+/// content when the edit changed the gains. It runs only on an inverse
+/// that holds a tune beside its gains, whose dropped form still applies,
+/// so that it is the comparison that tells the two apart: without the
+/// tune it would hold neither, which `set_stitch` refuses. Returns
+/// whether it ran.
 fn dropping_the_gains_is_caught(before: &Project, after: &Project, inverse: &[Edit]) -> bool {
     let [
         Edit::SetStitch {
             media,
-            tune,
+            tune: Some(tune),
             gains: Some(_),
             profile,
         },
@@ -1086,29 +1114,25 @@ fn dropping_the_gains_is_caught(before: &Project, after: &Project, inverse: &[Ed
     if gains_of(before, *media) == gains_of(after, *media) {
         return false;
     }
-    let dropped = Edit::SetStitch {
-        media: *media,
-        tune: *tune,
-        gains: None,
-        profile: profile.clone(),
-    };
+    let mut undone = after.clone();
+    undone
+        .apply(&[Edit::SetStitch {
+            media: *media,
+            tune: Some(*tune),
+            gains: None,
+            profile: profile.clone(),
+        }])
+        .unwrap_or_else(|e| panic!("the inverse without its gains is refused: {e}"));
     must_fail(
         "set_stitch's inverse without its gains undoes it",
-        undoes(after, &[dropped], before),
+        undone.same_content(before),
     );
     true
 }
 
-/// The stitch property's cases: `PROPTEST_CASES`, or 64 when it is
-/// unset, a quarter of the other properties' 256, since a case saves and
-/// loads a project of two calibrations at each step it takes (about 3 ms
-/// a case in a debug build, 90% of it the file's text). Its gate is a run
-/// at `PROPTEST_CASES=100000`.
-const STITCH_CASES: u32 = 64;
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(
-        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(STITCH_CASES)
+        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)
     ))]
 
     /// Random tunes, gains, sources and caps through `set_source`,
@@ -1117,10 +1141,12 @@ proptest! {
     /// changes nothing, and no other is refused; each step's inverse
     /// undoes it exactly; the project saves and loads as itself at every
     /// step it takes (one case saving the first); undoing all gives the
-    /// first project and redoing all the last. No case builds a rig. Control: an inverse of `set_stitch`
-    /// that drops its gains fails the undo check, on the first project
-    /// with Fixed gains of 0.9 on lens B and at each drawn edit that
-    /// changes the gains.
+    /// first project and redoing all the last. No case builds a rig. Its
+    /// gate is a run at `PROPTEST_CASES=100000`. Control: an inverse of
+    /// `set_stitch` that drops its gains, and still applies, fails the
+    /// undo check: on the first project, whose tune and Fixed gains of
+    /// 0.9 on lens B every case sets, and at each drawn edit that sets a
+    /// tune and changes the gains.
     #[test]
     fn stitch_edits_undo_and_save(steps in prop::collection::vec(prop::collection::vec(stitch_draw(), 1..=2), 1..=8)) {
         let (mut p, media) = stitch_project();
@@ -1129,11 +1155,13 @@ proptest! {
         static FIRST: std::sync::Once = std::sync::Once::new();
         FIRST.call_once(|| assert_eq!(saved_and_loaded(&original), original));
 
+        // A tune and Fixed gains, so that the inverse holds both and the
+        // control's form of it, the tune alone, applies.
         let mut fixed = p.clone();
         let applied = fixed
             .apply(&[Edit::SetStitch {
                 media: media[0],
-                tune: None,
+                tune: Some(Tune { q_per_m: 1.0 / 1.5, ..Tune::default() }),
                 gains: Some(Gains::Fixed { rgb: [[1.0; 3], [0.9; 3]] }),
                 profile: None,
             }])

@@ -86,8 +86,9 @@ pub fn fixture_tune() -> Tune {
 /// projects a `set_source` labelled [`PLANTED_BINDING`] (the source with
 /// its geometry's binding made Direct and its status User, and nothing
 /// else changed) and a `set_stitch` labelled [`STITCH`] (the tune, and
-/// the Fixed or the Auto gains), each by the user. An error when the file can't be written or read back as
-/// a camera file, or when an edit is refused.
+/// the Fixed or the Auto gains), each by the user. An error when the
+/// file can't be written or read back as a camera file, or when an edit
+/// is refused.
 pub fn stitch_fixture(dir: &Path) -> Result<StitchFixture, SynthError> {
     let spec = InsvSpec::rung3();
     let files = write_insv(&spec, dir)?;
