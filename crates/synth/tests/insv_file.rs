@@ -374,13 +374,15 @@ fn refused_as(spec: &InsvSpec, dir: &Path, why: &str) -> Result<(), String> {
     }
 }
 
-/// `write_insv` refuses each spec its doc refuses, as invalid, naming
-/// the spec and why, before it makes `dir`: no frames, an IDR every 0
-/// frames, `LensOneFrameShort` or `StssDiffer` on one frame,
-/// `RateDiffer` at a rate neither n/1001 nor whole (12.5), an LRV of a
-/// master not named as the X5 names it, and an LRV at a rate it takes no
-/// whole number of frames of (24 fps, against the LRV's 29.97). The
-/// controls hold each refusal to the next one's message.
+/// `write_insv` refuses each spec its doc refuses for its frames, IDRs,
+/// fault, rate or LRV, as invalid, naming the spec and why, before it
+/// makes `dir`: no frames, an IDR every 0 frames, `LensOneFrameShort` or
+/// `StssDiffer` on one frame, `RateDiffer` at a rate neither n/1001 nor
+/// whole (12.5), an LRV of a master not named as the X5 names it, and an
+/// LRV at a rate it takes no whole number of frames of (24 fps, against
+/// the LRV's 29.97). The doc's last refusal, a corner code reaching the
+/// image circle, is `check_clear`'s, which `code.rs` tests. The controls
+/// hold each refusal to the next one's message.
 #[test]
 fn write_insv_refuses_the_specs_it_documents() {
     let _t = timed("write_insv_refuses_the_specs_it_documents");
