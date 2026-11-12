@@ -3184,6 +3184,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spherecut-sphere",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]

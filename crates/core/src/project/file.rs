@@ -4,7 +4,7 @@
 //! ```json
 //! {
 //!   "format": "spherecut.project",
-//!   "schema": 1,
+//!   "schema": 2,
 //!   "saved_by": "spherecut 0.1.0",
 //!   "project": { "revision": 41, "next_id": 97, "media": [...], ... }
 //! }
@@ -36,8 +36,9 @@ use crate::time::Rational;
 /// The `format` every project file names. A rename of the product after
 /// files are out would have to read the old name too.
 pub const FORMAT: &str = concat!(crate::brand::slug!(), ".project");
-/// The schema this build writes, and the newest it reads.
-pub const SCHEMA: u64 = 1;
+/// The schema this build writes, and the newest it reads: 2 since M3,
+/// whose media have a source (M3 plan 11, D68).
+pub const SCHEMA: u64 = 2;
 /// A project file's extension.
 pub const EXTENSION: &str = APP_SLUG;
 /// The largest project file read: 10,000 keys on each track are a few MB.
@@ -161,8 +162,10 @@ pub fn from_json(text: &str, folder: &Path) -> Result<Project, FileError> {
     };
     match schema {
         Some(s) if s > SCHEMA => return Err(FileError::NewerSchema { found: s }),
-        // Migrations from older schemas go here (migrate_1_to_2, ...).
-        Some(SCHEMA) => {}
+        // Schema 1's media have no source, which reads as equirect (M3
+        // plan 11.2), so it needs no migration of its own; a later schema's
+        // migrations go here.
+        Some(1 | SCHEMA) => {}
         _ => {
             return Err(FileError::NotProject(
                 "its \"schema\" is not a schema number".into(),

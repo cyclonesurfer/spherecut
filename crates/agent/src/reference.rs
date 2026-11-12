@@ -8,7 +8,8 @@
 
 use serde_json::{Value, json};
 use spherecut_core::project::{
-    Edit, Fingerprint, History, INITIAL_VIEW, Media, MediaId, MediaVideo, Origin, Project,
+    Caps, Edit, Fingerprint, History, INITIAL_VIEW, Media, MediaId, MediaVideo, Origin, Project,
+    Source,
 };
 use spherecut_core::{FrameRate, Time};
 
@@ -218,5 +219,7 @@ pub fn media(path: &std::path::Path) -> Media {
             rate: FrameRate::FPS_30,
             duration: Time::from_secs(10),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     }
 }

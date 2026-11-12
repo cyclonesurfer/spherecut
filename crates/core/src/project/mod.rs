@@ -20,6 +20,7 @@ pub mod edit;
 pub mod file;
 pub mod folder;
 pub mod history;
+pub mod source;
 mod validate;
 
 use std::fmt;
@@ -39,6 +40,10 @@ pub use folder::{
     By, FolderError, Holder, Identity, Kept, Loaded, ProjectFolder, ProjectLock, Saved,
 };
 pub use history::{Gesture, History, Origin, Step};
+pub use source::{
+    Analysed, AnalysisInput, CalibSnapshot, Camera, Cap, CapMode, Caps, DualFisheye, EacLayout,
+    EacPair, Gains, ProfileRef, RawStrings, Sampling, Source, gains_basis,
+};
 pub use validate::{Code, Problem};
 
 /// The limits [`Project::validate`] holds a project to.
@@ -136,7 +141,17 @@ pub struct Media {
     pub path: PathBuf,
     /// What the file was when it was added, to say when it has changed.
     pub fingerprint: Fingerprint,
+    /// The stream a clip's timing follows: for a camera's file, the
+    /// first lens track.
     pub video: MediaVideo,
+    /// What the pixels are (M3 plan 11.1). A schema 1 media has none,
+    /// which reads as equirect; schema 2 always writes it.
+    #[serde(default)]
+    pub source: Source,
+    /// The caps over the poles (M3.20). Absent reads as none; always
+    /// written.
+    #[serde(default)]
+    pub caps: Caps,
 }
 
 /// What identifies a media file's contents cheaply (M2 plan section 5.3):

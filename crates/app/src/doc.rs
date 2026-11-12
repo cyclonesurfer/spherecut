@@ -944,7 +944,7 @@ fn moved<V: Clone>(
 
 #[cfg(test)]
 mod tests {
-    use spherecut_core::project::{Fingerprint, MediaId, MediaVideo};
+    use spherecut_core::project::{Caps, Fingerprint, MediaId, MediaVideo, Source};
     use spherecut_sphere::orient::Ypr;
     use spherecut_sphere::perspective::Projection;
 
@@ -965,6 +965,8 @@ mod tests {
                 rate: FrameRate::FPS_30,
                 duration: Time::from_secs(10),
             },
+            source: Source::default(),
+            caps: Caps::default(),
         };
         Doc::untitled(media, INITIAL_VIEW).unwrap()
     }

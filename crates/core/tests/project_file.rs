@@ -1,6 +1,6 @@
-//! The project file (M2 plan sections 5 and 11): save and load, the
-//! checked-in schema 1 file, refusals, relative paths, and media that has
-//! moved or changed.
+//! The project file (M2 plan sections 5 and 11, M3 plan 11.2): save and
+//! load, the checked-in schema 1 file, frozen, refusals, relative paths,
+//! and media that has moved or changed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,6 +13,7 @@ use proptest::prelude::*;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
 use spherecut_core::project::*;
 use spherecut_sphere::perspective::{LensShape, Morph, Projection};
+use spherecut_testkit::control::must_fail;
 
 /// The checked-in file, and where its media is said to be.
 fn data_dir() -> PathBuf {
@@ -106,6 +107,10 @@ fn rich() -> Project {
 }
 
 /// `text` without its `saved_by` line, which names the build.
+#[expect(
+    dead_code,
+    reason = "M3.9 unit (a)'s schema 2 fixture compares saves without it"
+)]
 fn without_saved_by(text: &str) -> String {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("\"saved_by\""))
@@ -113,21 +118,25 @@ fn without_saved_by(text: &str) -> String {
         .join("\n")
 }
 
+/// The schema 1 file M2 checked in loads, unchanged, as the project it
+/// was saved from, its media equirect with no caps (M3 plan 11.2). It is
+/// frozen (F063): no switch rewrites it, and a change to the format is a
+/// new schema with its own fixture, not an edit of this one.
+///
+/// Control: the same text with one media number changed doesn't load as
+/// that project.
 #[test]
-fn the_checked_in_schema_1_file_loads_and_saves_the_same() {
+fn the_checked_in_schema_1_file_loads_unchanged() {
     let path = data_dir().join("schema1.spherecut");
-    let text = file::to_json(&rich(), &data_dir()).unwrap();
-    if std::env::var_os("SPHERECUT_BLESS_PROJECT").is_some() {
-        std::fs::write(&path, &text).unwrap();
-    }
     let loaded = file::load(&path).unwrap();
     assert_eq!(loaded, rich());
     let on_disk = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        without_saved_by(&text),
-        without_saved_by(&on_disk),
-        "the format changed: a new schema needs a migration, not an edit of this file \
-         (SPHERECUT_BLESS_PROJECT=1 rewrites it)"
+    assert_eq!(file::from_json(&on_disk, &data_dir()).unwrap(), rich());
+    let changed = on_disk.replacen("\"bytes\": 1000000", "\"bytes\": 1000001", 1);
+    assert_ne!(changed, on_disk);
+    must_fail(
+        "the file with its media's size changed loads as the project",
+        file::from_json(&changed, &data_dir()).is_ok_and(|p| p == rich()),
     );
     // Media paths are written relative to the file's folder.
     assert!(
@@ -136,6 +145,51 @@ fn the_checked_in_schema_1_file_loads_and_saves_the_same() {
     );
     assert!(on_disk.starts_with("{\n  \"format\": \"spherecut.project\",\n  \"schema\": 1,\n"));
     assert!(on_disk.ends_with("}\n"));
+}
+
+/// The schema 2 fixture, `schema2.spherecut` (M3 plan 11.2), holds a
+/// dual-fisheye source and loads and saves the same; it alone may be
+/// blessed, through F055's `testkit::bless` once M3.7 has merged (F063).
+#[test]
+#[ignore = "M3.9 unit (a)"]
+fn the_checked_in_schema_2_file_loads_and_saves_the_same() {
+    todo!()
+}
+
+/// A schema 2 media without a `source` is refused, naming its path, so a
+/// damaged file never defaults to equirect silently (11.2); a schema 1
+/// media without one reads as equirect.
+#[test]
+#[ignore = "M3.9 unit (a)"]
+fn a_media_without_source_is_refused_by_path() {
+    todo!()
+}
+
+/// `deny_unknown_fields` still refuses a misspelt key in a source's
+/// `tune` (11.5), with its line and column.
+#[test]
+#[ignore = "M3.9 unit (a)"]
+fn a_misspelt_key_in_tune_is_refused() {
+    todo!()
+}
+
+/// A project file in a folder reached through a link with a `../` target
+/// finds its media from the file's real folder, while media paths stay
+/// lexical as D47 intends (F031; the CLI's half is cli's
+/// `a_project_in_a_linked_folder_renders_its_media`).
+#[test]
+#[ignore = "M3.9 unit (a)"]
+fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
+    todo!()
+}
+
+/// `file::load` behaves as `ProjectFolder::load` does (F034): it opens
+/// without blocking, refuses what isn't a regular file (a FIFO at the
+/// path), and calls a file that isn't UTF-8 `not_project`.
+#[test]
+#[ignore = "M3.9 unit (a)"]
+fn a_fifo_or_bad_utf8_at_the_path_is_not_a_project() {
+    todo!()
 }
 
 #[test]
@@ -223,13 +277,13 @@ fn refusals() {
     let e = read(r#"{"format": "something.else", "schema": 1}"#).unwrap_err();
     assert_eq!(e.code(), "not_project");
     assert!(e.to_string().contains("something.else"), "{e}");
-    let e = read(&s.replace("\"schema\": 1", "\"schema\": 3")).unwrap_err();
+    let e = read(&s.replace("\"schema\": 2", "\"schema\": 3")).unwrap_err();
     assert_eq!(e.code(), "newer_schema");
     assert_eq!(
         e.to_string(),
-        "saved by a newer Spherecut (schema 3); this one reads schemas up to 1"
+        "saved by a newer Spherecut (schema 3); this one reads schemas up to 2"
     );
-    let e = read(&s.replace("\"schema\": 1", "\"schema\": \"1\"")).unwrap_err();
+    let e = read(&s.replace("\"schema\": 2", "\"schema\": \"2\"")).unwrap_err();
     assert_eq!(e.code(), "not_project");
     // A typo in a hand edit is caught, with where it is.
     let e = read(&s.replace("\"short_side\"", "\"shortside\"")).unwrap_err();

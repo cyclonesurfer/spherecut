@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use spherecut_core::project::{Fingerprint, Media, MediaId, MediaVideo, file};
+use spherecut_core::project::{self, Fingerprint, Media, MediaId, MediaVideo, file};
 
 use crate::Source;
 use crate::backend::{Timing, VideoStreamInfo};
@@ -36,5 +36,7 @@ pub fn project_media(
             rate,
             duration,
         },
+        source: project::Source::Equirect {},
+        caps: project::Caps::default(),
     })
 }

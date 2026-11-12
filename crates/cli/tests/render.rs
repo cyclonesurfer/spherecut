@@ -37,9 +37,9 @@ use spherecut_core::FrameRate;
 use spherecut_core::StopToken;
 use spherecut_core::project::file::{self, head_hash};
 use spherecut_core::project::{
-    AnyKeys, Aspect, AudioChoice, Codec, Ease, Edit, EncoderChoice, ExportSettings, Fingerprint,
-    InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output, Project,
-    Quality,
+    AnyKeys, Aspect, AudioChoice, Caps, Codec, Ease, Edit, EncoderChoice, ExportSettings,
+    Fingerprint, InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output,
+    Project, Quality, Source,
 };
 use spherecut_core::time::{Rational, Time};
 use spherecut_core::video::VideoPlanes;
@@ -123,6 +123,8 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
             rate: info.frame_rate().unwrap(),
             duration: info.duration.unwrap(),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     };
     let view = InitialView {
         orientation: Orientation::IDENTITY,

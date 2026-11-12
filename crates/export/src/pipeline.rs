@@ -1353,8 +1353,8 @@ fn file_or(stage: Stage, at: Option<Time>, e: EncodeError) -> ExportError {
 mod tests {
     use spherecut_core::project::file::head_hash;
     use spherecut_core::project::{
-        Aspect, AudioChoice, Edit, EncoderChoice, ExportSettings, Fingerprint, InitialView, Media,
-        MediaId, MediaVideo, Orientation, Project, Quality, Range,
+        Aspect, AudioChoice, Caps, Edit, EncoderChoice, ExportSettings, Fingerprint, InitialView,
+        Media, MediaId, MediaVideo, Orientation, Project, Quality, Range, Source,
     };
     use spherecut_core::time::{FrameRate, Rational};
     use spherecut_media::hw::NodeChoice;
@@ -1588,6 +1588,8 @@ mod tests {
                 rate: info.frame_rate().unwrap(),
                 duration: info.duration.unwrap(),
             },
+            source: Source::default(),
+            caps: Caps::default(),
         };
         let view = InitialView {
             orientation: Orientation::from_ypr(Ypr::from_degrees(0.0, 0.0, 0.0)).unwrap(),
