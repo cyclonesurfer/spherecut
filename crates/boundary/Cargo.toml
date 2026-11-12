@@ -1,0 +1,19 @@
+[package]
+name = "spherecut-boundary"
+description = "Test code only: Pat's calibration as synth's truths, and synth's truth converted to sphere's types field by field"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Only ever a dev-dependency (the project review's F137): synth's library
+# shares no code with sphere (M3 plan 4.1 rule 2), and this crate, which
+# depends on both, is where their tests meet.
+[dependencies]
+spherecut-sphere.workspace = true
+spherecut-synth.workspace = true
+spherecut-testkit.workspace = true
+
+[lints]
+workspace = true

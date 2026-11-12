@@ -3072,6 +3072,7 @@ dependencies = [
  "rustix 1.1.6",
  "serde",
  "serde_json",
+ "spherecut-boundary",
  "spherecut-camera",
  "spherecut-core",
  "spherecut-export",
@@ -3079,6 +3080,7 @@ dependencies = [
  "spherecut-render",
  "spherecut-sphere",
  "spherecut-synth",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -3124,11 +3126,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "spherecut-boundary"
+version = "0.1.0"
+dependencies = [
+ "spherecut-sphere",
+ "spherecut-synth",
+ "spherecut-testkit",
+]
+
+[[package]]
 name = "spherecut-camera"
 version = "0.1.0"
 dependencies = [
  "proptest",
+ "spherecut-boundary",
  "spherecut-core",
+ "spherecut-sphere",
  "spherecut-synth",
  "spherecut-testkit",
  "thiserror 2.0.21",
@@ -3147,6 +3160,7 @@ dependencies = [
  "serde_json",
  "spherecut-agent",
  "spherecut-app",
+ "spherecut-boundary",
  "spherecut-core",
  "spherecut-export",
  "spherecut-media",
@@ -3203,6 +3217,7 @@ dependencies = [
  "serde",
  "spherecut-camera",
  "spherecut-core",
+ "spherecut-sphere",
  "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
@@ -3237,6 +3252,7 @@ dependencies = [
  "pollster",
  "proptest",
  "serde_json",
+ "spherecut-boundary",
  "spherecut-core",
  "spherecut-media",
  "spherecut-sphere",
@@ -3263,6 +3279,7 @@ name = "spherecut-synth"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "spherecut-boundary",
  "spherecut-core",
  "spherecut-media",
  "spherecut-sphere",

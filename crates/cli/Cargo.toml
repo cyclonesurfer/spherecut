@@ -34,6 +34,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 glam.workspace = true
+spherecut-boundary.workspace = true
 spherecut-synth.workspace = true
 spherecut-testkit.workspace = true
 

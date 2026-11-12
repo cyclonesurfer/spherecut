@@ -29,6 +29,11 @@
 //! Every check has a control that must fail, run on every run
 //! ([`control::must_fail`]): a control that stops failing fails the test.
 //!
+//! # Pat's calibration
+//!
+//! [`pats`] holds the four calibration strings of Pat's X5 files as text,
+//! the one copy every test of Pat's numbers reads or is held to.
+//!
 //! # Memory
 //!
 //! [`memory::peak_rss_growth_kib`] is how far the process's peak resident
@@ -43,6 +48,7 @@
 
 pub mod control;
 pub mod memory;
+pub mod pats;
 pub mod samples;
 
 /// FNV-1a, 64 bits, fed in pieces: the planes of a frame row by row, say,

@@ -10,6 +10,9 @@ publish.workspace = true
 [dependencies]
 spherecut-camera.workspace = true
 spherecut-core.workspace = true
+# The binding and status of the geometry camera's built-in table gives,
+# which probe reports (M3 plan 5.4). camera depends on it already.
+spherecut-sphere.workspace = true
 ffmpeg-next.workspace = true
 ffmpeg-sys-next.workspace = true
 libc.workspace = true

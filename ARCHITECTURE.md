@@ -12,14 +12,15 @@ level  crate     what it holds                                 depends on
   5    agent     the MCP server, its tools, the JSON contract  camera core export media render sphere
   4    playback  Player: decode workers, cache, slots, lock    audio core media render
   4    export    an export: decode, render, encode, checks     core media render
-  3    media     FFmpeg, MediaBackend, probe, MP4, doctor      camera core
+  3    media     FFmpeg, MediaBackend, probe, MP4, doctor      camera core sphere
   2    render    wgpu on Vulkan, WGSL, the CPU reference       core sphere
-  2    camera    cameras' raw files, read from their bytes     core
+  2    camera    cameras' raw files, read from their bytes     core sphere
   2    audio     cpal output, chunk ring, audio clock          core
   1    core      time, frames, clocks, the project model       sphere
   0    sphere    projection maths, lenses, the rig, splines    nothing
 
 test support, used only by tests and xtask:
+       boundary  Pat's truths, synth's truth as sphere's types sphere synth testkit
        synth     test patterns and media, the lens truth       core media sphere
        testkit   Tier 2 gates, controls, benches, samples      nothing
        xtask     check, compat, gen-media, hw-test             synth testkit
@@ -29,21 +30,26 @@ A crate depends only on crates at a lower level. The last column is its
 dependencies among ours as `cargo metadata --offline` lists them,
 dev-dependencies left out: playback and export sit side by side, and
 neither depends on the other. `synth` (test patterns and media, and
-backends that stand in for FFmpeg), `testkit` (test helpers) and
-`xtask` sit beside this stack: the crates above take synth and testkit
-as dev-dependencies only, so nothing that ships links them. `motion`
-(IMU, stabilization; M4) is planned and not yet a crate.
+backends that stand in for FFmpeg), `testkit` (test helpers),
+`boundary` (since M3.5: Pat's calibration as synth's truths, and synth's
+lens truth converted to sphere's types field by field, the one copy of
+each that the stitching tests share; the project review's F137) and
+`xtask` sit beside this stack: the crates above take synth, testkit and
+boundary as dev-dependencies only, so nothing that ships links them.
+`motion` (IMU, stabilization; M4) is planned and not yet a crate.
 
 core depends on sphere (since M2.1, D48), whose projections and
 quaternions the project model holds; sphere depends on no other crate
 of ours.
 
 camera (M3.2, D61) reads cameras' raw files from their bytes, with no
-FFmpeg, and depends on core alone (sphere joins in M3.5). media depends
-on camera, never the reverse, so that probe and doctor read a trailer
-(M3.2's unit (c) adds that edge). M3's lens maths and rig go in sphere
-and its blending, seam instrument and fit in render: there is no
-`stitch` crate.
+FFmpeg, and depends on core and, since M3.5, on sphere, whose
+`Calibration` and `Geometry` it fills from a file's strings and its
+built-in table. media depends on camera, never the reverse, so that
+probe and doctor read a trailer (M3.2's unit (c) adds that edge), and
+since M3.5 on sphere too, to name the binding and status of the geometry
+probe reports. M3's lens maths and rig go in sphere and its blending,
+seam instrument and fit in render: there is no `stitch` crate.
 
 agent depends on export (since M2.5): the JSON contract it holds for
 the CLI lists the export's codes and turns its errors and fallbacks
@@ -66,7 +72,8 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models (`fisheye`, with M3.3's stitching models, `Unified` and `KbLens`, and the one `Canonical` distortion every reading of a camera's terms maps onto, D63), view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers, keyed lens shapes (`LensShape`), and the keyframe splines (`spline`: the scalar spline with eases and spin, Free's SO(3) spline, `follow_spin`'s maths), grabbing the picture and zooming about the cursor for the viewer (`grab`), and a stitched lens pair (`rig`: the conventions a camera's files leave open, as data in `Geometry`, and the `Rig` built from a calibration, a geometry and a tune; M3 plan 6.2) | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph`; slice 7: `grab`; M2.2: `spline`, `LensShape`; M3.3: `rig` and `fisheye`'s stitching models |
 | `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks, a video track's timing tables read from its boxes (`mp4::track_timing`, and `MediaBackend::track_timing` whatever the decoder, which M3.8's lock opens on), and what probe reads of a camera's own records through the camera crate (`camera`: an Insta360 file's trailer) | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6; M3.0: `track_timing`; M3.2: `camera` |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend`; for M3's camera files, the lens truth synth plants (`lens`: one calibration's stored numbers, `CalibTruth`, and `Planted`, synth's own enums for the conventions a camera's files leave open), the frame codes in a lens image's corners (`code`) and the two-track pair clips with their coding read back (`media::write_pair`, `track_coding`), and the Insta360-like trailer writer (`insv`: the X5's records for a master and its LRV, `Records::x5_like` and `x5_lrv`, laid out by `inst_box` and appended by `append_trailer`, with the trailer faults of `InsvFault` planted on request) and the calibration-string printer (`insv::print`, at the X5's precision), which share no code with camera's reader and parser (M3 plan 4.1 rule 2) | M0; M1 slices 2a, 2b and 3b; M3.0: `lens`; M3.1: `code`, the pair clips; M3.2: `insv` |
-| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker): Tier 2h's gates, `require_audio_device` among them, which call `require_hw_run` first and so skip unless hw-test set `SPHERECUT_TIER2`, and Tier 2c's `require_samples_cpu`, which needs only `SPHERECUT_SAMPLES` (M3 plan 4.4, D60); the control every check runs beside it, which must fail (`control::must_fail`, D32, D60); Pat's takes by role (`samples::role`, from `samples-roles.toml`); how far a test's code raises the process's peak resident set (`memory::peak_rss_growth_kib`, M3 plan 4.3's K3); benchmark recording (`bench`, with latency percentiles, into the file hw-test names in `SPHERECUT_BENCH_OUT`, else to stderr) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4); M3.0: `control`, `samples`, `require_samples_cpu`; M3.1: `memory` |
+| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker): Tier 2h's gates, `require_audio_device` among them, which call `require_hw_run` first and so skip unless hw-test set `SPHERECUT_TIER2`, and Tier 2c's `require_samples_cpu`, which needs only `SPHERECUT_SAMPLES` (M3 plan 4.4, D60); the control every check runs beside it, which must fail (`control::must_fail`, D32, D60); Pat's takes by role (`samples::role`, from `samples-roles.toml`); how far a test's code raises the process's peak resident set (`memory::peak_rss_growth_kib`, M3 plan 4.3's K3); benchmark recording (`bench`, with latency percentiles, into the file hw-test names in `SPHERECUT_BENCH_OUT`, else to stderr), FNV-1a hashing (`fnv64`), and Pat's four calibration strings as text, the one copy every test of Pat's numbers reads or is held to (`pats`, with `pats::tokens`; the project review's F137) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4); M3.0: `control`, `samples`, `require_samples_cpu`; M3.1: `memory`; M3.5: `pats` |
+| `spherecut-boundary` | Test code only, and only ever a dev-dependency (the project review's F137): Pat's X5 calibration as synth's truths (`pats`, parsed from `testkit::pats` by the format notes' token layout with its own code, never camera's parser), and the boundary where synth's lens truth meets sphere's lens maths, field by field (`calibration`, `geometry`, `quarter_turn`, `euler_conv`, `v6_reading`, `lens_model`, and `sphere_rig`, `Rig::build` through them). synth's library shares no code with sphere (M3 plan 4.1 rule 2); this crate depends on both, and synth's `lens_against_sphere`, render's stitching tests, rung 3 and camera's tests share it instead of keeping copies | M3.5 |
 | `spherecut-camera` | Cameras' raw files, read from their bytes with no FFmpeg (D61, and the M3 plan's D62): the Insta360 trailer and its records (`insta360::read_trailer`, `read_record`, under the limits in `insta360::limits`), the metadata record (`parse_metadata`, through the schema-less protobuf walker `pb::Walker`), the thumbnail, IMU span and exposure records, the calibration strings parsed into named tokens and printed back byte for byte (`insta360::calib`), and a recording's files, by name (`companions`) and by bytes (`verify_companion`). Every reader takes `impl Read + Seek` and calls `may_block` first. Later in M3, the conversion to sphere's rig and other cameras | M3.2: the types, then its units (a) to (d) |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics, and since M3.4 their weighted forms), from testkit so that agent can use it (amendment 2 item 32); for stitching (D65), the CPU reference's stitch of a lens pair (`reference::render_rig`, with debug modes 4 to 7, and `render_rig_of` on a `LensPair` made ready once) and the seam instrument (`seam`: the masks, the strips about the seam, a bin's shifts and the signature with each term's standard error), held to synth's lens pictures by rung 1 and the attribution matrix (`tests/instrument.rs`); later the shader's stitch, the fit and scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare`; M3.4: `seam`, `render_rig` |
