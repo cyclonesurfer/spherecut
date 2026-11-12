@@ -5,11 +5,17 @@
 #   scripts/build-ffmpeg.sh n8.1.3 ~/ffmpeg      # gives ~/ffmpeg/n8.1.3-full
 #   cargo xtask compat ~/ffmpeg/n8.1.3-full --test ~/ffmpeg/n8.1.3-full
 #
-# n7.1.3 and n8.1.3 have been built with it on Ubuntu 24.04 (PROGRESS.md).
+# n7.1.3, n8.1.3 and n9.0.2 have been built with it on Ubuntu 24.04
+# (PROGRESS.md).
 #
 # The build has what Pat's Fedora FFmpeg uses (D2): VA-API and Vulkan
 # with libdrm, libx264, libx265, libdav1d, libsvtav1, libopus and
-# libvorbis, and libshaderc for the Vulkan filters. Shared libraries, no
+# libvorbis, and libshaderc for the Vulkan filters where the tag's
+# configure lists --enable-libshaderc. FFmpeg 9 has none: it compiles
+# its Vulkan shaders at build time with glslc (configure's --glslc). The
+# n9.0.2 build was made without glslc, so its spirv_compiler is off and
+# with it the Vulkan parts of ffv1, prores, apv and dpx; H.264, HEVC and
+# AV1 Vulkan decode don't use it and are built. Shared libraries, no
 # programs or docs. The configure line and logs are kept next to the
 # prefix, and the source is deleted after. `make install` writes into
 # <dest>/stage-<tag>, which becomes the prefix only once all of it is in:
@@ -96,8 +102,13 @@ rm -rf "$src"
 git -c advice.detachedHead=false clone -q --depth 1 --branch "$tag" https://github.com/FFmpeg/FFmpeg.git "$src"
 set -- --prefix="$prefix" --enable-shared --disable-static --disable-programs \
     --disable-doc --enable-gpl --enable-vaapi --enable-libx264 --enable-libx265 \
-    --enable-libdav1d --enable-vulkan --enable-libshaderc --enable-libdrm \
+    --enable-libdav1d --enable-vulkan --enable-libdrm \
     --enable-libopus --enable-libvorbis --enable-libsvtav1
+# FFmpeg 9 has no --enable-libshaderc (see the top), and its configure
+# refuses an option it doesn't know.
+if (cd "$src" && ./configure --help | grep -q -e --enable-libshaderc); then
+    set -- "$@" --enable-libshaderc
+fi
 if [ -n "$vk_cflags" ]; then
     set -- "$@" --extra-cflags="$vk_cflags"
 fi
