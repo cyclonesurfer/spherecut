@@ -36,7 +36,8 @@ pub struct Stitching {
 /// block with a radius for its focal, a term count that isn't the
 /// generation's, a canvas that isn't two squares side by side, or a V6
 /// canvas other than V3's (the string's field, 54 or 111); a window that
-/// isn't square, or whose src isn't the canvas's square (field 27).
+/// isn't square, is empty (a dst of 0, which a rig can't build on), or
+/// whose src isn't the canvas's square (field 27).
 pub fn to_calibration(
     v3: Option<&Calib>,
     v6: Option<&Calib>,
@@ -221,12 +222,15 @@ fn blocks(c: &Calib, generation: rig::Generation, src: u32) -> Result<[LensCalib
     Ok([block(0, l0)?, block(1, l1)?])
 }
 
-/// dst, field 27's window's side, if the window is square and its src
-/// the calibration's square of `src`.
+/// dst, field 27's window's side, if the window is square and not
+/// empty, and its src the calibration's square of `src`.
 fn window_side(w: &Window, src: u32) -> Result<u32, CameraError> {
     let [dst, dst_h] = w.dst;
     if dst != dst_h {
         return Err(not_calibration(Part::Field(27), "its window isn't square"));
+    }
+    if dst == 0 {
+        return Err(not_calibration(Part::Field(27), "its window is empty"));
     }
     if w.src != [src; 2] {
         return Err(not_calibration(

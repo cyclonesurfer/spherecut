@@ -31,8 +31,8 @@ pub struct Known {
     /// provisional, with evidence that says so.
     pub measured_on: &'static [&'static str],
     /// The conventions, with their status and evidence. Its generation
-    /// is the table's; [`super::stitching`] sets it from the file's field
-    /// 136.
+    /// is the table's from a bare [`lookup`]; [`super::stitching`] sets
+    /// it from the file's field 136.
     pub geometry: Geometry,
     /// The track each half of the LRV shows, left half first: `[1, 0]` on
     /// the X5, whose left half is track 1 (plan 3.1).
@@ -65,8 +65,9 @@ struct Row {
     turn: TurnAxis,
     tz: TzSign,
     upright: QuarterTurn,
-    /// The generation the row reads when a file doesn't say;
-    /// [`super::stitching`] reads field 136's.
+    /// The generation a bare [`lookup`] gives. [`super::stitching`]
+    /// always replaces it with the one field 136 names, and refuses a
+    /// file without field 136, so it never reaches a stitch.
     generation: Generation,
     v6: V6Reading,
     status: Status,

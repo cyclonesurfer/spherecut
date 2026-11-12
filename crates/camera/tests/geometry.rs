@@ -335,7 +335,8 @@ type Case = (
 /// radius for its focal, a term count that isn't the generation's, a
 /// canvas that isn't two squares side by side, a V6 canvas other than
 /// V3's, a string in the other generation's place, and a field 27 window
-/// that isn't square or whose src isn't the canvas's square.
+/// that isn't square, is empty (a dst of 0, which a rig can't build on),
+/// or whose src isn't the canvas's square.
 ///
 /// Control: the good strings, alone and together, are a calibration.
 #[test]
@@ -368,6 +369,7 @@ fn to_calibration_refuses_what_it_cant_hold() {
         dst: [5312, 5300],
         ..w
     };
+    let empty = Window { dst: [0; 2], ..w };
     let other_src = Window {
         src: [5760; 2],
         ..w
@@ -458,6 +460,13 @@ fn to_calibration_refuses_what_it_cant_hold() {
             v3s.clone(),
             None,
             Some(skewed),
+            Part::Field(27),
+        ),
+        (
+            "an empty window",
+            None,
+            v6s.clone(),
+            Some(empty),
             Part::Field(27),
         ),
         (
