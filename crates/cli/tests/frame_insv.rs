@@ -759,11 +759,13 @@ fn warned_once(ran: &Ran, code: &str, what: &str) -> Result<(), String> {
 /// a lens, and its notice is null.
 #[test]
 fn frame_insv_warns_of_damage_and_an_assumed_geometry() {
+    /// A run: its name, the file it renders and its flags.
+    type Case = (&'static str, fn() -> &'static Path, &'static [&'static str]);
     let _t = timed("frame_insv_warns_of_damage_and_an_assumed_geometry");
     let dir = outputs("warns");
-    let stitched: &[&str] = &["--reference", "--size", "64x32"];
-    let lens: &[&str] = &["--reference", "--lens", "0", "--size", "64x64"];
-    let cases: [(&str, fn() -> &'static Path, &[&str]); 5] = [
+    let stitched: &'static [&'static str] = &["--reference", "--size", "64x32"];
+    let lens: &'static [&'static str] = &["--reference", "--lens", "0", "--size", "64x64"];
+    let cases: [Case; 5] = [
         ("damaged", damaged_pair, stitched),
         ("damaged-lens", damaged_pair, lens),
         ("unlisted", unlisted_pair, stitched),
@@ -780,7 +782,6 @@ fn frame_insv_warns_of_damage_and_an_assumed_geometry() {
     let notice = "geometry assumed from the X5";
     for (name, ran) in [("--reference", damaged), ("--lens 0", damaged_lens)] {
         warned_once(ran, "damaged", damage).unwrap_or_else(|e| panic!("{name}: {e}"));
-        eprintln!("{name}: {}", ran.doc["warnings"]);
     }
     warned_once(unlisted, "geometry_assumed", notice).unwrap();
     assert_eq!(unlisted.ok()["stitch"]["geometry"]["notice"], notice);
