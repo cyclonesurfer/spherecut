@@ -1079,7 +1079,7 @@ mod tests {
         let saved = folder
             .create_with(name, &p, &h, |tmp| {
                 temp = Some(tmp.file().metadata()?);
-                tmp.persist_new_with(no_flag, no_links)
+                tmp.persist_new_with(no_flag, no_links, crate::fs::sync_folder)
             })
             .unwrap();
         let published = folder.identity(name).unwrap().unwrap();

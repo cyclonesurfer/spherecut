@@ -232,22 +232,31 @@ impl TempFile {
     }
 
     /// Flush to disk and rename onto `dest`, replacing the regular file
-    /// there, if any (D16).
-    pub fn persist_replace(mut self) -> io::Result<()> {
+    /// there, if any, then flush the folder (D16).
+    pub fn persist_replace(self) -> io::Result<()> {
+        self.persist_replace_with(sync_folder)
+    }
+
+    /// [`TempFile::persist_replace`], syncing the folder with `sync`,
+    /// which tests count.
+    pub(crate) fn persist_replace_with(
+        mut self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
         // Something may have turned up at `dest` while the file was written.
         replaceable(&self.dest)?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;
-        Ok(())
+        self.synced(sync)
     }
 
     /// Flush to disk and publish as `dest` only if nothing is there, not
     /// even a dangling symlink: an error of kind
     /// [`AlreadyExists`](io::ErrorKind::AlreadyExists) otherwise, which
     /// leaves what is there alone, whenever it turned up. The temp file is
-    /// gone either way.
+    /// gone either way. Once published, the folder is flushed too (D16).
     pub fn persist_new(self) -> io::Result<()> {
         self.publish_new().map(drop)
     }
@@ -257,15 +266,21 @@ impl TempFile {
     /// copy's where it was copied, which is another file (the project
     /// review's F032).
     pub(crate) fn publish_new(self) -> io::Result<std::fs::Metadata> {
-        self.persist_new_with(rename_new, |from, to| std::fs::hard_link(from, to))
+        self.persist_new_with(
+            rename_new,
+            |from, to| std::fs::hard_link(from, to),
+            sync_folder,
+        )
     }
 
     /// [`TempFile::publish_new`], publishing with `rename` or else `link`,
-    /// which tests make refuse as filesystems without them do.
+    /// which tests make refuse as filesystems without them do, and
+    /// syncing the folder with `sync`, which tests count.
     pub(crate) fn persist_new_with(
         mut self,
         rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<std::fs::Metadata> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
@@ -274,6 +289,7 @@ impl TempFile {
         match rename(&self.path, &self.dest) {
             Ok(()) => {
                 self.persisted = true;
+                self.synced(sync)?;
                 return self.file.metadata();
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
@@ -305,9 +321,32 @@ impl TempFile {
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!("could not remove {}: {e}", self.path.display());
         }
+        self.synced(sync)?;
         match copy {
             Some(meta) => Ok(meta),
             None => self.file.metadata(),
+        }
+    }
+
+    /// After a publish, flush the folder `dest` is in with `sync`, so that
+    /// the name survives a crash as the bytes do (the project review's
+    /// F033). Best effort: what says the folder can't be synced here
+    /// ([`cannot_sync`]) passes, logged; a failed sync is the publish's
+    /// error, though the file is in place.
+    fn synced(&self, sync: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+        if sync_left_out() {
+            return Ok(());
+        }
+        let folder = match self.dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        match sync(folder) {
+            Err(e) if cannot_sync(&e) => {
+                tracing::debug!("{} can't be synced here: {e}", folder.display());
+                Ok(())
+            }
+            done => done,
         }
     }
 
@@ -338,6 +377,58 @@ impl TempFile {
         }
         copied
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests' switch that leaves a publish's folder sync out, for the
+    /// control that shows the count of syncs sees one go missing.
+    static LEAVE_SYNC_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a test has left the folder sync out.
+fn sync_left_out() -> bool {
+    #[cfg(test)]
+    {
+        LEAVE_SYNC_OUT.get()
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Flush `folder` to disk: `fsync` on the folder, which makes the names
+/// in it durable as the file's own `fsync` makes its bytes (D16).
+pub(crate) fn sync_folder(folder: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::DIRECTORY.bits() as i32)
+        .open(folder)?
+        .sync_all()
+}
+
+/// Whether `e`, from [`sync_folder`], says this folder can't be synced
+/// here rather than that its sync failed, so that the publish stands:
+/// `EINVAL`, `EOPNOTSUPP` and `ENOSYS` (a filesystem without `fsync` on a
+/// folder, as some FUSE and network ones are), `EBADF` (one that won't
+/// sync a folder opened only for reading), and `EACCES` and `EPERM` (a
+/// folder that may be written but not opened, mode 0300 say). Anything
+/// else (`EIO`, `ENOSPC`, `EDQUOT`) says the name may not be on disk.
+fn cannot_sync(e: &io::Error) -> bool {
+    use rustix::io::Errno;
+    // EOPNOTSUPP is ENOTSUP on Linux.
+    matches!(
+        Errno::from_io_error(e),
+        Some(
+            Errno::INVAL
+                | Errno::OPNOTSUPP
+                | Errno::NOSYS
+                | Errno::BADF
+                | Errno::ACCESS
+                | Errno::PERM
+        )
+    )
 }
 
 /// Rename `from` to `to` unless something is at `to`, even a dangling
@@ -628,7 +719,7 @@ mod tests {
 
         let out = dir.join("linked.png");
         let tmp = written(&out, b"linked");
-        tmp.persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
+        tmp.persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to), sync_folder)
             .unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
         // One name left: the temp name was removed after the link.
@@ -636,7 +727,7 @@ mod tests {
         assert_eq!(listing(&dir), ["linked.png", "out.png"]);
         let tmp = written(&out, b"again");
         let e = tmp
-            .persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
+            .persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to), sync_folder)
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
@@ -706,14 +797,14 @@ mod tests {
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let tmp = written(&out, &big);
         let made = mode(tmp.path());
-        tmp.persist_new_with(no_flag, refuse).unwrap();
+        tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(mode(&out), made);
         assert_eq!(listing(&dir), ["out.png"]);
 
         // The exclusive create still refuses an output that turned up.
         let tmp = written(&out, b"ours");
-        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
+        let e = tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(listing(&dir), ["out.png"]);
@@ -721,7 +812,7 @@ mod tests {
         // And a refusal the create meets too is reported, leaving nothing.
         let nowhere = dir.join("no-such-dir").join("out.png");
         let tmp = written(&out, b"ours").aimed_at(&nowhere);
-        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
+        let e = tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert_eq!(listing(&dir), ["out.png"]);
     }
@@ -831,8 +922,69 @@ mod tests {
     /// folder that can't be synced (EINVAL) still publishes. Control: with the
     /// sync left out the count is 0.
     #[test]
-    #[ignore = "M3.9 unit (a)"]
     fn publish_syncs_its_folder() {
-        todo!()
+        use std::cell::RefCell;
+
+        use spherecut_testkit::control::must_fail;
+        let dir = tmpdir("sync");
+        let seen = &RefCell::new(Vec::<PathBuf>::new());
+        // A sync that notes the folder and answers with `errno`, if any.
+        let sync = |errno: Option<i32>| {
+            move |folder: &Path| -> io::Result<()> {
+                seen.borrow_mut().push(folder.to_path_buf());
+                errno.map_or(Ok(()), |e| Err(io::Error::from_raw_os_error(e)))
+            }
+        };
+        let link = |from: &Path, to: &Path| std::fs::hard_link(from, to);
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(1));
+        let out = |name: &str| dir.join(name);
+
+        // Each way to publish: a rename over, a rename without replacing,
+        // a link, a copy. One sync each, of the output's folder.
+        written(&out("a.png"), b"a")
+            .persist_replace_with(sync(None))
+            .unwrap();
+        written(&out("b.png"), b"b")
+            .persist_new_with(rename_new, link, sync(None))
+            .unwrap();
+        written(&out("c.png"), b"c")
+            .persist_new_with(no_flag, link, sync(None))
+            .unwrap();
+        written(&out("d.png"), b"d")
+            .persist_new_with(no_flag, no_links, sync(None))
+            .unwrap();
+        assert_eq!(*seen.borrow(), vec![dir.to_path_buf(); 4]);
+
+        // A folder that can't be synced here: published all the same.
+        written(&out("a.png"), b"a2")
+            .persist_replace_with(sync(Some(22)))
+            .unwrap();
+        written(&out("e.png"), b"e")
+            .persist_new_with(rename_new, link, sync(Some(95)))
+            .unwrap();
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a2");
+        assert_eq!(std::fs::read(out("e.png")).unwrap(), b"e");
+        // A sync that failed (EIO) is the publish's error, with the file
+        // in place and no temporary file left.
+        let e = written(&out("a.png"), b"a3")
+            .persist_replace_with(sync(Some(5)))
+            .unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(5));
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a3");
+        assert_eq!(listing(&dir), ["a.png", "b.png", "c.png", "d.png", "e.png"]);
+        assert_eq!(seen.borrow().len(), 7);
+        // The real sync, on a real folder.
+        written(&out("a.png"), b"a4").persist_replace().unwrap();
+        sync_folder(&dir).unwrap();
+
+        seen.borrow_mut().clear();
+        LEAVE_SYNC_OUT.set(true);
+        let left_out = written(&out("a.png"), b"a5").persist_replace_with(sync(None));
+        LEAVE_SYNC_OUT.set(false);
+        left_out.unwrap();
+        must_fail(
+            "a publish with its folder's sync left out",
+            seen.borrow().len() == 1,
+        );
     }
 }
