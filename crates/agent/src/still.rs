@@ -15,6 +15,14 @@
 //! Each step fails with D27's [`ErrorBody`], in the words frame has
 //! always used; what a caller adds to them (frame's flags, look's `next`)
 //! it adds itself. Warnings go to the list the caller passes.
+//!
+//! A file of two lenses, an Insta360 `.insv` (M3.5), opens with
+//! [`Still::open_pair`] in place of steps 4's choice and 6: from
+//! [`probe_report`]'s report, not a [`Probed`], since [`probed`] picks
+//! one stream and refuses the layout unless [`Options::equirect`]. Its
+//! [`StillPair`] seeks both lenses to one time and stitches them through
+//! a view on the CPU reference (`render::reference::render_rig`), which
+//! M3.7 joins with the GPU.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,11 +43,13 @@ use spherecut_media::seek::{FrameAddress, frame_address};
 use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
 use spherecut_media::{HwDevice, MediaError, Source};
 use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::reference::RigOptions;
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
     AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
     StillOptions, StillRenderer, ViewParams, reference, upload, wgpu,
 };
+use spherecut_sphere::rig::{Geometry, Rig, Tune};
 
 use crate::contract::{
     DecodeInfo, ErrorBody, FallbackInfo, GpuInfo, Size, SourceInfo, Warning, codes,
@@ -1185,6 +1195,125 @@ fn decode_info(
                 reason: reason.to_string(),
             }),
         },
+    }
+}
+
+// A pair of lenses (M3.5).
+
+/// How a two-lens file is stitched for a still.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PairOptions {
+    /// The geometry, whole, or `None` for the file's own: the table's
+    /// entry as `camera::insta360::stitching` gives it, its generation the
+    /// one field 136 names. A `Some` replaces that entry whole, so a caller
+    /// that changes one field starts from `stitching`'s entry, never from
+    /// `known::lookup`'s row, which reads V6 and which `Rig::build`
+    /// refuses on a trailer with only V3 (`RigError::NoGeneration`).
+    pub geometry: Option<Geometry>,
+    pub tune: Tune,
+    /// How the stitch renders: its debug mode (`RigDebug`'s 4 to 7) and
+    /// level 0 alone. M3.7 reaches the GPU through this field and
+    /// `RigOptions::mode`.
+    pub rig: RigOptions,
+}
+
+/// Both lenses' frames of one time, by track, and what was asked for.
+#[derive(Debug, Clone)]
+pub struct DecodedPair {
+    /// Track t's decoded frame, whose planes ([`VideoPlanes`]) a test
+    /// hashes.
+    pub frames: [Arc<VideoFrame>; 2],
+    pub requested: FrameTime,
+    /// The time both frames show.
+    pub shown: FrameTime,
+}
+
+/// A two-lens file open for stills: each track's decoder and the rig its
+/// calibration and geometry build. Each [`seek`](Self::seek) decodes
+/// both lenses' frames of one time, which [`render`](Self::render)
+/// stitches through a view.
+#[allow(
+    dead_code,
+    reason = "M3.5 unit (c)'s open_pair, seek and render read them; remove once they do"
+)]
+pub struct StillPair<'g> {
+    /// The path messages name the file by.
+    name: PathBuf,
+    gpu: Option<&'g Gpu>,
+    /// By track.
+    decs: [Box<dyn VideoDecode>; 2],
+    streams: [StreamInfo; 2],
+    rig: Rig,
+    opts: Options,
+    pair: PairOptions,
+    stop: Stop,
+}
+
+impl std::fmt::Debug for StillPair<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StillPair")
+            .field("name", &self.name)
+            .field("streams", &self.streams.each_ref().map(|s| s.index))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'g> Still<'g> {
+    /// Steps 4 and 6 for a file of two lenses: `report`'s two video
+    /// tracks of `src`, each with its own decoder on the render node of
+    /// `gpu` as [`Still::open`] chooses it, and the rig
+    /// `sphere::rig::Rig::build` makes of the file's calibration
+    /// (`camera::insta360::stitching`), `pair`'s geometry or the file's
+    /// own, and `pair`'s tune. A file with no calibration to stitch by, or
+    /// whose rig can't be built, fails.
+    #[expect(
+        unused_variables,
+        clippy::ptr_arg,
+        reason = "M3.5 unit (c) writes the body"
+    )]
+    pub fn open_pair(
+        src: Source<'_>,
+        report: &ProbeReport,
+        gpu: Option<&'g Gpu>,
+        opts: &Options,
+        pair: &PairOptions,
+        stop: &Stop,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<StillPair<'g>, Failure> {
+        todo!("M3.5 unit (c)")
+    }
+}
+
+impl StillPair<'_> {
+    /// Step 7 for both lenses: the frame `when` names on each track,
+    /// exactly, both at one time, or with [`SeekMode::Keyframe`] the
+    /// keyframe a seek to it lands on.
+    #[expect(
+        unused_variables,
+        clippy::ptr_arg,
+        reason = "M3.5 unit (c) writes the body"
+    )]
+    pub fn seek(
+        &mut self,
+        when: TimeSpec,
+        mode: SeekMode,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<DecodedPair, Failure> {
+        todo!("M3.5 unit (c)")
+    }
+
+    /// Step 8: `decoded` stitched through the view, `size` pixels large,
+    /// on the CPU reference (`render::reference::render_rig`, with the
+    /// pair's `RigOptions`), as [`Still::render`] draws one view there.
+    #[expect(unused_variables, reason = "M3.5 unit (c) writes the body")]
+    pub fn render(
+        &mut self,
+        decoded: &DecodedPair,
+        views: &[ViewParams],
+        size: (u32, u32),
+        look: Look,
+    ) -> Result<Image, Failure> {
+        todo!("M3.5 unit (c)")
     }
 }
 
