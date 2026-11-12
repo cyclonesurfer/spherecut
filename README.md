@@ -58,9 +58,11 @@ What works today:
   be stitched and whether both its lenses decode.
 - `spherecut frame <file> -o out.png` renders one frame of a stitched
   equirect through a virtual camera (yaw, pitch, roll, field of view,
-  rectilinear, fisheye or stereographic, and a morph between two) into a
-  PNG, headless, on the GPU's Vulkan driver or Mesa's lavapipe. The frame
-  is exactly the one asked for, by time or by number.
+  rectilinear, fisheye or stereographic, and a morph between two), or
+  the whole sphere as an equirect, into a PNG, headless, on the GPU's
+  Vulkan driver or Mesa's lavapipe. With `--reference` it stitches an
+  Insta360 camera's two lenses on the CPU (the GPU's stitch comes in
+  M3.7). The frame is exactly the one asked for, by time or by number.
 - `spherecut render <project> -o out.mp4` exports a project's sequence
   as an MP4, encoded on the GPU through VA-API or in software. Every
   export, the window's too, is read back before it is put in place, by
@@ -343,6 +345,10 @@ spherecut frame clip.mp4 -o out.png --morph-to stereographic --morph 0.5 --fov 1
 spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
 spherecut frame two-views.mkv -o out.png --stream 2 --equirect   # the video stream FFmpeg numbers 2, rendered as an equirect
 spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence at 2.5 s, as render writes it
+spherecut frame clip.mp4 -o out.png --projection equirect --yaw 90 --size 2048x1024   # the whole sphere, turned
+spherecut frame VID_20261022_165829_00_008.insv -o out.png --reference --projection equirect --size 2048x1024 --time 1   # an X5 file, stitched
+spherecut frame VID_20261022_165829_00_008.insv -o out.png --reference --seam weights --projection equirect --size 2048x1024   # where each lens counts
+spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x1024   # lens 1 as it was coded
 ```
 
 - **When**: `--time` takes seconds (`12`, `12.5`), `m:s` or `h:m:s`
@@ -358,16 +364,28 @@ spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence 
 - **The camera**: `--yaw` (degrees right), `--pitch` (up) and `--roll`
   (clockwise, seen from behind the camera), all 0 by default;
   `--fov`, horizontal, at most 170 rectilinear, 360 fisheye and 340
-  stereographic; `--size WxH`, 16 to 16384 a side and within the GPU's
-  limit; `--depth 8|16` for the PNG.
+  stereographic; `--projection equirect` is the whole sphere, turned,
+  and takes no `--fov` or morph; `--size WxH`, 16 to 16384 a side and
+  within the GPU's limit; `--depth 8|16` for the PNG.
 - **The file** must be tagged as an equirect (Spherical Video V1 or V2
   metadata in an MP4 or MOV file, its projection in a Matroska or WebM
   file); `--equirect` renders an untagged one as an equirect anyway. `--stream
   N` picks a video stream by FFmpeg's index; the first is the default.
-  Dual fisheye files from the cameras wait for stitching in M3. Stereo
-  files render the left eye, a cropped picture shows black where it
-  doesn't cover the sphere, and a pose in the metadata isn't applied
+  Stereo files render the left eye, a cropped picture shows black where
+  it doesn't cover the sphere, and a pose in the metadata isn't applied
   yet; each says so in a warning.
+- **A camera's two lenses** (an Insta360 `.insv` master): `--reference`
+  stitches them on the CPU with the file's calibration and the
+  geometry Spherecut's table of cameras gives the model, which for the
+  X5 is a placeholder until M3.6 fits it, so seams may show; without
+  `--reference` the run is refused until M3.7 brings the GPU's stitch.
+  `--geometry binding=reversed,canvas=b,...` changes the table's
+  geometry key by key (binding, canvas, turn, tz, upright,
+  generation), `--stitch-distance 1.5m` (or `inf`; 2 m by default) sets
+  where the lenses meet, and `--seam weights|difference` shows where
+  each lens counts and how far they disagree. `--lens 0|1` shows one
+  lens's picture as it was coded, on the GPU too, with no calibration
+  needed. The JSON's `stitch` says what the stitch used.
 - **The GPU**: `--adapter auto` (the default, or `$SPHERECUT_ADAPTER`)
   takes a GPU and falls back to lavapipe; `cpu` is lavapipe, and other
   text picks an adapter by part of its name or its PCI bus id.

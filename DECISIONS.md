@@ -7,7 +7,7 @@ questions last. M1's plan reserved D27 to D37 (`docs/design/m1-plan.md`,
 section 0), so each of those lands in its place with its slice, and D38
 came before some of them. M3's plan reserves D60 to D76 for M3's slices
 (`docs/design/m3-plan.md`, section 23), so a number there with no
-heading belongs to a slice not yet built (D64 is M3.5's, D66 M3.7's);
+heading belongs to a slice not yet built (D66 is M3.7's);
 D77 came from M3.8 and D78 from the review-fix slice. Superseded
 entries stay and say so.
 
@@ -76,6 +76,7 @@ Index:
 - D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
 - D62. Our own trailer reader: a hand-written walker, D15's limits, no telemetry-parser
 - D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
+- D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
 - D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 - D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
 - D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
@@ -10010,6 +10011,123 @@ ranks V3 against V6. So the order bears only on plan 3.2's U7 (V3 or
 V6), and a misread V3 scores worse, which pushes towards V6, U7's
 default. Revisit if: take 14 scores V3 within a few pixels of V6; then
 score both V3 orders.
+
+*Updated 2026-11-12 (M3.5):* the weights rule in the note of 2026-11-10
+is the rig's, not the lens model's, and D64 now holds it; the note stays
+here for its measurements and controls.
+
+## D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
+
+*2026-11-12, M3 slice M3.5. A draft: M3.6 completes it with what its
+fit on clips 8 to 10 finds, and M3.12 makes it final. The M3 plan,
+`docs/design/m3-plan.md` sections 3.2, 5.3, 6.2, 8.6 and 11.4, has the
+detail; this is what M3.3 and M3.5 built and why. It takes over the
+weights rule from D63's note of 2026-11-10.*
+
+What:
+
+- **The conventions are values.** `sphere::rig::Geometry` holds one
+  value of each convention a camera's files leave open, 3.2's U2 to U7:
+  which calibration block reads which track, the canvas map, how the
+  stored angles compose (`Extrinsics`), the axis of the 180° turn
+  between the lenses, the sign of tz, `upright`, the generation (V3 or
+  V6) and what V6's d5 to d12 mean. U1, the lens on the screen's side,
+  is `Known.screen_side_track`. A `Geometry` carries its `Status`
+  (provisional, settled, fitted or user) and its evidence, a sentence
+  and a docs path. Settling a convention changes a table row, never the
+  rig's code or the shader.
+- **Our own spaces.** `EulerConv` is a generic space of 1152 values: 6
+  axis assignments, 6 orders, 8 sign patterns and 4 quarter-turn roll
+  offsets. It has no direction field: the inverse of a composition is
+  the reversed order with every sign flipped, which the space already
+  holds, so a direction field would list every value twice
+  (`euler_space_has_1152_distinct_values`). `fisheye::V6Reading` is
+  D63's space of 21. No value is named after a reader in the wild or
+  copied from one: telemetry-parser's composition comes from Studio
+  (4.1 rule 7).
+- **Twins are one class.** The seam sees only the relative rotation, so
+  values that predict the same one are twins, whose lens frames differ
+  by a rotation common to both lenses. Stage G (8.4, M3.6) keeps only
+  values that put block 0's lens within 5° of −Z. Among those, twins
+  differ by a common quarter turn about Z, which `upright`, a quarter
+  turn about −Z (0, +90°, −90° or 180°), undoes; 8.6's up-and-down rule
+  sets it for the member a class reports. sphere's
+  `euler_twins_are_quarter_turns` (M3.3) holds that.
+- **Two compositions.** `spherecut_synth::lens::compose` builds the
+  same rig from 6.2's text with its own code, sharing none with
+  `sphere::rig` (4.1 rule 2), and rung 0 checks one against the other.
+- **The table.** `camera::insta360::known::lookup(model, firmware)`
+  finds the entry by the model a file's field 2 names and the firmware
+  field 3 names. A firmware the entry's `measured_on` doesn't list gets
+  the entry as provisional, with evidence that says so; a model with no
+  row gets the X5's, provisional, with the notice "geometry assumed from
+  the X5". `stitching` takes the generation from field 136. The X5's
+  row is 3.2's Meanwhile column with a placeholder for the extrinsics,
+  the identity `EulerConv` with the −90° roll offset: provisional, with
+  the evidence "placeholder until the fit", and `stitchable: true`.
+  probe's `geometry {status, evidence}` and doctor `--file`'s "geometry
+  provisional" show it.
+- **A user's values.** `spherecut frame <insv> --reference --geometry
+  binding=…,canvas=…` (and turn, tz, upright and generation) applies its
+  values over the table's entry with the status `user` and evidence that
+  names what was given beside the entry's own; frame's JSON reports it
+  as `stitch.geometry`. The Euler and V6 spaces and fitted values have
+  no key: choosing among them is the fit's (M3.6's `rig-fit`).
+- **The weights where no feather weighs.** 6.2's weight for a lens, 1 −
+  smoothstep(90° − h, 90° + h, θ) inside its mask, is 0 past 90° + h,
+  and the other lens can weigh nothing there either: where parallax or
+  a tilt puts the seam's plane further past 90° on both lenses than the
+  feather is wide (Pat's baseline puts it 0.46° past at q = 0.5 m⁻¹ and
+  3.1° at 3.34), or where one lens's θ_max is so near 90° that its mask
+  ends short of the other's band. Normalised, the two zeros left such a
+  direction black though a lens covered it. `Rig::weights` gives it
+  whole to the covering lens with the smaller θ on its own
+  parallax-corrected ray, at a weight of 1, and ½ to each at equal θ.
+  Wherever a feather weighs the weights are what they were, to the bit,
+  and a direction no lens covers stays at (0, 0), so the weights sum to
+  1 wherever a lens covers and a stitch is black only where none does.
+  Where `feather_at` shrinks one lens's h and the θ meet inside the
+  wider band, the switch falls on that band's end, not where the θ
+  meet, and that is kept. M3.7's WGSL (10.3, D66) copies the rule as
+  built, comparing θ (cos θ will do), not θ − h, held to sphere's
+  mirror-pair test of the tie. D63's note of 2026-11-10 has the
+  measurements (3304 of a 512 × 256 equirect's 131,072 pixels black
+  under the old rule at a feather of 0 and q = 0.5 m⁻¹), the controls,
+  and what was considered: refusing such a tune in `Rig::build`, and
+  leaving the ring black and saying so.
+
+What later slices add:
+
+- M3.6 always replaces the placeholder with what clips 8 to 10 show,
+  whatever 8.6's rules decide (the decisive value, the redirect's, or
+  the best candidate as "best of N, not decisive"), and keeps the
+  placeholder, with `stitchable: false`, only if clips 8 and 10 fail
+  the gross rule; the app then shows such files as lenses (13.2). It
+  adds the fit's stages, its evidence and the X5's row here.
+- Projects store their geometry (schema 2, D68, M3.9), and only an edit
+  changes it (11.4), so an old project renders the same bytes until Pat
+  accepts a newer entry.
+- M3.12 settles the X5's row on takes 14 and 15, and this entry is then
+  final.
+
+Why: seven things are unknown (3.2's U1 to U7) and the readings in the
+wild conflict (`docs/formats/insta360.md` §4.5). Our own spaces keep
+provenance clean, and two compositions written from 6.2's text check
+each other. Storing keeps old projects' bytes. A placeholder that
+outlived the fit could show Pat a lens upside down, so M3.6 always
+writes an entry, and what is stitched before then says "placeholder
+geometry".
+
+Considered and not done: a direction field on `EulerConv` (every value
+twice); values named after readers in the wild (it would favour one,
+and some come from a vendor's internals); geometry as code for each
+camera (a firmware update or a later body would need a release, not a
+row); `--geometry` keys for the Euler and V6 spaces before the fit has
+ranked them (a user would choose among 1152 values by eye).
+
+Revisit if: a camera composes its angles outside the Euler space (it
+lands as `Extrinsics::Fitted`, 8.7); clips 8 and 10 fail the gross
+rule; or takes 14 and 15 contradict what clips 8 to 10 showed.
 
 ## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 
