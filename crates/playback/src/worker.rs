@@ -83,7 +83,7 @@ use std::time::{Duration, Instant};
 use spherecut_core::{Clock, StopToken, Time, may_block};
 use spherecut_media::backend::{
     DecodeMode, DecodeStats, DecoderEvent, Exactness, HwKind, HwOutput, MediaBackend, NextFrame,
-    SeekMode, SeekOutcome, VideoDecode, VideoFrame, VideoRequest,
+    SeekMode, SeekOutcome, VaapiDrain, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::hw::GpuIds;
 use spherecut_media::mp4::TrackTiming;
@@ -136,6 +136,9 @@ pub(crate) struct OpenJob {
     /// Vulkan Video streams decode on the renderer's device, shared so
     /// (path B): zero copy is on and the device was made shared.
     pub(crate) shared_video: Option<Arc<SharedVideo>>,
+    /// Whether VA-API decoders wait for the pictures queued on their
+    /// device ([`PlayerConfig::vaapi_drain`](crate::PlayerConfig::vaapi_drain)).
+    pub(crate) vaapi_drain: VaapiDrain,
     /// How the two streams are locked, for a pair opened with
     /// [`Player::open_locked`](crate::Player::open_locked).
     pub(crate) lock: Option<LockSpec>,
@@ -256,6 +259,7 @@ impl OpenJob {
                 asked,
                 mode,
                 output,
+                vaapi_drain: self.vaapi_drain,
                 rx,
                 clock: clock.clone(),
                 token: self.token.clone(),
@@ -414,6 +418,8 @@ struct Worker {
     mode: DecodeMode,
     /// What a device decoder hands frames out as.
     output: HwOutput,
+    /// The VA-API drain its decoder is asked for.
+    vaapi_drain: VaapiDrain,
     rx: Receiver<Command>,
     clock: Arc<dyn Clock>,
     /// The latest request's token: decoding ahead after it stops with it.
@@ -496,11 +502,15 @@ impl Worker {
             stream: self.asked,
             decode: self.mode.clone(),
             output: self.output,
+            vaapi_drain: self.vaapi_drain,
             interrupt: self.shared.stop.shutdown_flag(),
             ..VideoRequest::default()
         };
         match self.backend.open_video(&self.path, &req) {
             Ok(mut dec) => {
+                if self.vaapi_drain != VaapiDrain::Off && dec.stats().drain_unavailable {
+                    self.shared.perf.add(Counter::DrainUnavailable, 1);
+                }
                 let info = dec.info().clone();
                 let path = dec.decode_path().clone();
                 self.frame_length = info.frame_rate().map(|r| r.frame_duration());
@@ -1057,6 +1067,27 @@ impl Worker {
         }
         if stats.last_convert_ms > 0.0 {
             perf.record(Stage::Convert, stats.last_convert_ms as f32);
+        }
+        // A VA-API decoder's drains since the frame before; none with the
+        // drain off.
+        if stats.drains > self.seen.drains {
+            if stats.last_drain_ms > 0.0 {
+                perf.record(Stage::Drain, stats.last_drain_ms as f32);
+                perf.record_drain_waits(stats.last_drain_waited);
+            }
+            let since = |now: u64, then: u64| now.saturating_sub(then);
+            perf.add(
+                Counter::DrainWaited,
+                since(stats.drain_waited, self.seen.drain_waited),
+            );
+            perf.add(
+                Counter::DrainErrors,
+                since(stats.drain_errors, self.seen.drain_errors),
+            );
+            perf.add(
+                Counter::DrainOverflow,
+                since(stats.drain_overflow, self.seen.drain_overflow),
+            );
         }
         self.seen = stats;
         let cleared = std::mem::take(&mut self.reported);

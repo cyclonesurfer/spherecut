@@ -41,11 +41,13 @@ pub use decoder::{
     DecoderChoice, DecoderPreference, HwDecodeCheck, HwKeeper, HwPromise, HwSupport, StreamFormat,
 };
 pub use lock::{LockSnapshot, LockSpec, LockStatus, LockTest};
-pub use perf::{Counter, MemoryStats, PerfSnapshot, PerfStats, Stage, StageSummary};
+pub use perf::{
+    Counter, DrainWaits, MemoryStats, PerfSnapshot, PerfStats, Stage, StageSummary, WAIT_BUCKETS,
+};
 pub use player::{
     PREROLL_FRAMES, PlaySpan, PlayState, Player, PlayerConfig, PlayerError, PlayerEvent,
-    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, ShutdownReport, ZERO_COPY_ENV,
-    ZeroCopy, zero_copy_from_env,
+    PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, ShutdownReport,
+    VAAPI_DRAIN_ENV, VaapiDrain, ZERO_COPY_ENV, ZeroCopy, vaapi_drain_from_env, zero_copy_from_env,
 };
 pub use shared::{BudgetStatus, Landed, Repaint, SeekCounts, StreamStatus};
 pub use slots::{SlotFrame, SlotRing, SlotState, SlotStats, SlotView};
