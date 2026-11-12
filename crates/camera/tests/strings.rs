@@ -750,17 +750,27 @@ fn strings_round_trip() {
             2 * block_names(g).len() - if g == Generation::V1 { 0 } else { 6 }
         );
     }
-    // A few of Pat's tokens by name (insta360.md, "Pat's X5 samples").
+    // A few of Pat's tokens by name (insta360.md, "Pat's X5 samples"),
+    // each the text of the token the format puts it at: V3's block 1 cx
+    // (token 23) and tz (30) and block 0's p1 (15), V6's block 1 d12
+    // (51) and word (55), and V1's word (15) and block 1 roll (12).
+    let nth = |s: &'static str, k: usize| s.split('_').nth(k).unwrap();
     let v3 = calib::parse(Generation::V3, V3).unwrap();
-    assert_eq!(v3.lenses[1].cx.text(), "8069.000");
-    assert_eq!(v3.lenses[1].t.as_ref().unwrap()[2].text(), "-0.031920");
-    assert_eq!(v3.lenses[0].coefficients[3].text(), "-0.00143576");
+    assert_eq!(v3.lenses[1].cx.text(), nth(V3, 23));
+    assert_eq!(v3.lenses[1].t.as_ref().unwrap()[2].text(), nth(V3, 30));
+    assert_eq!(v3.lenses[0].coefficients[3].text(), nth(V3, 15));
     let v6 = calib::parse(Generation::V6, V6).unwrap();
     assert_eq!(v6.lenses[1].coefficients.len(), 13);
-    assert_eq!(v6.lenses[1].coefficients[12].text(), "0.00888746");
-    assert_eq!(v6.word, 0x60400);
+    assert_eq!(v6.lenses[1].coefficients[12].text(), nth(V6, 51));
+    assert_eq!(v6.word.to_string(), nth(V6, 55));
     let v1 = calib::parse(Generation::V1, V1).unwrap();
-    assert_eq!((v1.word, v1.lenses[1].ypr[2].text()), (0x471, "89.107"));
+    assert_eq!(v1.word.to_string(), nth(V1, 15));
+    assert_eq!(v1.lenses[1].ypr[2].text(), nth(V1, 12));
+    // Their control: block 1's cx held to block 0's token (4).
+    must_fail(
+        "V3's block 1 cx read as block 0's",
+        v3.lenses[1].cx.text() == nth(V3, 4),
+    );
     // The control: printed from its values alone, V3 isn't itself
     // ("2.000000" prints as "2"): the identity is the tokens' text.
     let from_values = {
@@ -1302,9 +1312,10 @@ fn each_bad_token_is_an_error_at_its_byte() {
     // V2's in V1, and codes 4 (0x40400) and 0x104.
     let other = "is a packed word of another generation";
     let none = "is a packed word of none of the four generations";
-    let (s, at) = replaced(V3, 39, "394240");
+    let word = |s: &'static str| s.rsplit('_').next().unwrap();
+    let (s, at) = replaced(V3, 39, word(V6));
     bad(Generation::V3, &s, other, at);
-    let (s, at) = replaced(V1, 15, "132096");
+    let (s, at) = replaced(V1, 15, word(V2));
     bad(Generation::V1, &s, other, at);
     for word in ["263168", "17040384"] {
         let (s, at) = replaced(V3, 39, word);
@@ -1317,7 +1328,7 @@ fn each_bad_token_is_an_error_at_its_byte() {
         );
     }
     // The control: V6's word in V3 isn't worded as a word of none.
-    let (s, at) = replaced(V3, 39, "394240");
+    let (s, at) = replaced(V3, 39, word(V6));
     let e = calib::parse(Generation::V3, &s).unwrap_err();
     must_fail(
         "V6's word in V3 worded as a word of none",

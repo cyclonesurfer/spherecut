@@ -378,11 +378,14 @@ fn check_strings(name: &str, m: &Metadata) -> Vec<Calib> {
     // The controls: testkit's V6 with block 0's fx (token 2) a unit off in
     // its last digit, and its V1 with block 1's radius (token 7) so, aren't
     // the file's; nor is the V3 string a V6 one.
+    let changed = last_digit_changed(pats::V6, 2);
     let e = must_fail(
         &format!("{name}'s V6 string against testkit's with token 2 changed"),
-        same_tokens(working(Generation::V6), &last_digit_changed(pats::V6, 2)),
+        same_tokens(working(Generation::V6), &changed),
     );
-    assert_eq!(e, "token 2 is 4277.520, not 4277.521", "{name}");
+    let fx = |s: &str| s.split('_').nth(2).unwrap().to_owned();
+    let (was, now) = (fx(pats::V6), fx(&changed));
+    assert_eq!(e, format!("token 2 is {was}, not {now}"), "{name}");
     must_fail(
         &format!("{name}'s V1 string against testkit's with token 7 changed"),
         working(Generation::V1) == last_digit_changed(pats::V1, 7),

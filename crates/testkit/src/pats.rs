@@ -10,9 +10,21 @@
 //! copies left in synth (`src/lens.rs`) and sphere (`tests/rig.rs`,
 //! `tests/unified.rs`) are each held to these strings by a drift test,
 //! `pats_copies_match_testkit_pats`, that fails when one of their numbers
-//! stops being these strings' (M3.5's units (a) and (b)); camera's and
-//! cli's tests keep no copy, and camera's Tier 2c test
-//! `samples_calibrations_build_rigs` compares these with the files.
+//! stops being these strings' (M3.5's units (a) and (b)). camera's and
+//! cli's tests keep no copy of a lens's numbers: each one camera's tests
+//! name, they read from these strings at its token, and camera's Tier 2c
+//! test `samples_calibrations_build_rigs` compares these with the files.
+//!
+//! What camera's tests do still write out is the X5's own format, which
+//! all 14 files share and insta360.md documents for the camera, not the
+//! unit: the canvas (10752 × 5376), the lens type (113) and each
+//! generation's packed word (`0x471`, `0x20400`, `0x30400` and
+//! `0x60400`), in `strings.rs`, `synth_insv.rs` and `tier2_samples.rs`.
+//! Each sits in an exact assertion on a string from here, or on a file,
+//! which fails loudly if they change. Two lens numbers are left as
+//! samples whose value nothing depends on: `-0.198`, a token's text in
+//! camera's `Token::new` doc and `strings.rs`'s grammar test, and
+//! 8075.73, a worked example in sphere's `rig.rs` doc.
 //!
 //! This module holds text, not meaning: which token is which number is
 //! the format notes' §4.1, which each reader applies with its own code.

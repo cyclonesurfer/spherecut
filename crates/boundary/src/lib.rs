@@ -27,9 +27,12 @@
 //! `x5_like`'s focal lengths and terms) and sphere (`tests/rig.rs`,
 //! `tests/unified.rs`), each held to `testkit::pats` by a drift test of
 //! its own (M3.5's units (a) and (b)). synth's `src/insv.rs` tests and
-//! camera's tests parse `testkit::pats` or take [`pats`], and cli's
-//! keep none: `tests/insv/mod.rs` takes Pat's calibrations from
-//! [`pats`] (M3.5's unit (d)).
+//! camera's tests parse `testkit::pats`, take [`pats`], or read the
+//! text of the token they name from `testkit::pats`, and cli's keep
+//! none: `tests/insv/mod.rs` takes Pat's calibrations from [`pats`]
+//! (M3.5's unit (d)). What camera's tests still write out is the X5's
+//! canvas, lens type and packed words, the camera's format rather than
+//! Pat's unit, in exact assertions (`testkit::pats` lists them).
 
 #![forbid(unsafe_code)]
 

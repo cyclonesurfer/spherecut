@@ -43,6 +43,7 @@ use spherecut_sphere::rig::{
 use spherecut_synth::insv::{self, Field, InsvFault, Records};
 use spherecut_synth::lens::{self as truth, CalibTruth};
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats::{V2, V6, tokens};
 use spherecut_testkit::samples;
 use spherecut_testkit::tier2;
 
@@ -310,7 +311,9 @@ fn to_calibration_gives_the_truths_numbers() {
         "block 1's cx left on the canvas",
         close(&on_canvas, &want, to_1e12),
     );
-    assert!(e.starts_with("V6 block 1's cx is 8075.73"), "{e}");
+    // Block 1's cx on the canvas is the string's (token 31).
+    let cx = tokens(V6)[31];
+    assert!(e.starts_with(&format!("V6 block 1's cx is {cx}")), "{e}");
     let as_src = Calibration {
         dst: got.src,
         ..got
@@ -352,8 +355,10 @@ fn to_calibration_refuses_what_it_cant_hold() {
         CameraError::NotCalibration { part, .. } => Some(*part),
         _ => None,
     };
+    // Pat's V2 block 1 radius (token 17).
     let radius = |mut c: Calib, b: usize| {
-        c.lenses[b].focal = Focal::Radius(Token::new("2670.937").unwrap());
+        let r = V2.split('_').nth(17).unwrap();
+        c.lenses[b].focal = Focal::Radius(Token::new(r).unwrap());
         c
     };
     let terms = |mut c: Calib, n: usize| {
@@ -807,7 +812,8 @@ fn samples_calibrations_build_rigs() {
         "Pat's V6 block 0's fx a unit off in its last digit, against a file's",
         close(&cal, &off, printed),
     );
-    assert!(e.starts_with("V6 block 0's fx is 4277.52"), "{e}");
+    let fx = tokens(V6)[2];
+    assert!(e.starts_with(&format!("V6 block 0's fx is {fx}")), "{e}");
     eprintln!(
         "samples_calibrations_build_rigs: {files} files in {:.3} s",
         started.elapsed().as_secs_f64()

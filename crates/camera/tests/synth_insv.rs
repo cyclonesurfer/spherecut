@@ -45,6 +45,7 @@ use spherecut_synth::lens::{
     TruthCanvas, TruthEuler, TruthTurn, TruthTz, TruthV6,
 };
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats::tokens;
 use spherecut_testkit::{Fnv64, fnv64};
 
 /// The suite's budget in seconds, at the default number of cases: all of
@@ -1194,26 +1195,42 @@ fn calib_parses_synths_print() {
     }
     let v3 = pats_v3();
     let s = insv::print(&v3, &p);
+    // Block 0's fx as printed (token 2), and the string with another
+    // text in its place.
+    let fx = s.split('_').nth(2).unwrap();
+    let with_fx = |text: &str| {
+        let mut t: Vec<&str> = s.split('_').collect();
+        t[2] = text;
+        t.join("_")
+    };
     let mut swapped = v3;
     swapped.blocks.swap(0, 1);
     let e = must_fail(
         "each block held to the other's truth",
         cross_parses(&swapped, &s),
     );
+    // Off by the gap between block 1's fx (token 21) and block 0's.
+    let gap = (tokens(&s)[21] - tokens(&s)[2]).abs();
     assert!(
-        matches!(&e, Miss::Off { block: 0, name, off, .. } if name == "fx" && (off - 6.41).abs() < 1e-9),
+        matches!(&e, Miss::Off { block: 0, name, off, .. } if name == "fx" && (off - gap).abs() < 1e-9),
         "{e:?}"
     );
-    let unit_off = s.replacen("_4284.620_", "_4284.621_", 1);
+    // A unit off in its last digit (9 going to 8), a decimal short, and
+    // with a zero more.
+    let (short, last) = fx.split_at(fx.len() - 1);
+    let last: u8 = last.parse().unwrap();
+    let unit_off = with_fx(&format!("{short}{}", if last == 9 { 8 } else { last + 1 }));
     let e = must_fail("fx a unit off", cross_parses(&pats_v3(), &unit_off));
     assert!(
         matches!(&e, Miss::Off { block: 0, name, off, bound } if name == "fx" && *off > 1.9 * bound),
         "{e:?}"
     );
-    let short = s.replacen("_4284.620_", "_4284.62_", 1);
-    let e = must_fail("fx a decimal short", cross_parses(&pats_v3(), &short));
+    let e = must_fail(
+        "fx a decimal short",
+        cross_parses(&pats_v3(), &with_fx(short)),
+    );
     assert!(
-        matches!(&e, Miss::Decimals { block: 0, name, text } if name == "fx" && text == "4284.62"),
+        matches!(&e, Miss::Decimals { block: 0, name, text } if name == "fx" && text == short),
         "{e:?}"
     );
     let e = must_fail(
@@ -1238,7 +1255,7 @@ fn calib_parses_synths_print() {
         matches!(&e, Miss::Read(why) if why == "((10752, 5376), 113, 197632), not ((10752, 5376), 113, 197888)"),
         "{e:?}"
     );
-    let padded = s.replacen("_4284.620_", "_4284.6200_", 1);
+    let padded = with_fx(&format!("{fx}0"));
     let e = must_fail(
         "fx with a zero more, reprinted",
         reprints(&pats_v3(), &padded, &s),
@@ -1280,9 +1297,9 @@ fn the_calibration_hash_is_over_the_working_strings() {
     // each other's generations, V3's string held as V2's, and the strings
     // hashed with no NULs, each another hash.
     let mut changed = calib.clone();
-    changed.v6.working = Some(v6.replacen("4277.52", "4277.53", 1));
+    changed.v6.working = Some(format!("3{}", &v6[1..]));
     must_fail(
-        "a working string with a byte changed",
+        "a working string with its first byte changed",
         changed.hash() == want,
     );
     let swapped = Calibrations {
