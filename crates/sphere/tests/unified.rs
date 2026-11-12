@@ -1799,13 +1799,54 @@ fn kb_lens_applies_its_base_after_the_polynomial() {
 }
 
 /// `Unified::limit_theta` is total when its scan has no steps (the
-/// project review's F038): at ξ = −1 and −2 on Pat's terms it returns
-/// rather than overflow, and `Rig::build` refuses ξ + `xi_delta` ≤ −1 as
-/// `NotPositive`. Its control, ξ = −0.9999, builds.
+/// project review's F038). For ξ ≤ −1 the model images no direction:
+/// z + ξ > 0 would need z > 1. So its end is 0°, the scan has no step,
+/// and with a negative radial term, which leaves the slope's floor
+/// below 0 so that the scan isn't skipped, it once counted its steps
+/// down past 0. At ξ = −1.5 with a negative k1, and at ξ = −1 and −2 on
+/// Pat's V3 and V6 terms, it returns the end. `Rig::build` refuses
+/// ξ + `xi_delta` ≤ −1 (`tests/rig.rs`).
+///
+/// Control: just above, at ξ = −0.9999, the end is 0.81° and the scan
+/// has steps, so the limit isn't 0; it returns there too, at most at
+/// the end.
 #[test]
-#[ignore = "M3.5 unit (b)"]
 fn limit_theta_is_total_below_xi_minus_one() {
-    todo!()
+    let _time = timed("limit_theta_is_total_below_xi_minus_one");
+    let lens = |xi: f64, k: [f64; 5]| Unified {
+        xi,
+        fx: 1.0,
+        fy: 1.0,
+        cx: 0.0,
+        cy: 0.0,
+        dist: Canonical {
+            k,
+            ..Canonical::NONE
+        },
+    };
+    let k1 = [-0.1, 0.0, 0.0, 0.0, 0.0];
+    let mut lenses = vec![("ξ −1.5, k1 −0.1".to_owned(), lens(-1.5, k1))];
+    for xi in [-1.0, -2.0] {
+        for (name, l) in pats_lenses() {
+            lenses.push((format!("{name} at ξ {xi}"), Unified { xi, ..l }));
+        }
+    }
+    for (name, l) in &lenses {
+        assert_eq!(l.limit_theta(), 0.0, "{name}");
+    }
+    // Control: ξ = −0.9999, whose end is acos(0.9999).
+    let end = 0.9999f64.acos();
+    let above = pats_lenses()
+        .map(|(name, l)| (name.to_owned(), Unified { xi: -0.9999, ..l }))
+        .into_iter()
+        .chain([("k1 −0.1".to_owned(), lens(-0.9999, k1))]);
+    for (name, l) in above {
+        let limit = must_fail(
+            &format!("{name} at ξ −0.9999, limited at 0°"),
+            at_most(l.limit_theta(), 0.0),
+        );
+        assert!(limit <= end, "{name}: {}°", limit.to_degrees());
+    }
 }
 
 /// Each of Pat's numbers this file copies is `testkit::pats`'s (the

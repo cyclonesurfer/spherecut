@@ -2267,6 +2267,51 @@ fn rig_build_refuses_what_it_cannot_build() {
         "a canvas scale just above 0, refused",
         at(4, 0, 1e-6).is_err(),
     );
+    // ξ plus the tune's ξ delta at −1 or below, where the model images no
+    // direction (the project review's F038): ξ −1 and −2 on Pat's V3 and
+    // V6 terms, and ξ 0 with a ξ delta of −1.5, each refused by
+    // `Rig::build` and `theta_frame` with the block and the lens's ξ delta
+    // named. Control: ξ −0.9999, which the model still images a little
+    // of, isn't refused as `NotPositive` (its θ_max is past the limit).
+    let xi_names = [
+        "1 + block 0's ξ + lens 0's ξ delta",
+        "1 + block 1's ξ + lens 1's ξ delta",
+    ];
+    let with_xi = |generation: Generation, b: usize, xi: f64, delta: f64| {
+        let (mut c, mut t) = (cal, tune);
+        let blocks = match generation {
+            Generation::V3 => c.v3.as_mut(),
+            Generation::V6 => c.v6.as_mut(),
+        };
+        if let Some(blocks) = blocks {
+            blocks[b].xi = xi;
+        }
+        t.lenses[b].xi_delta = delta;
+        (c, t)
+    };
+    for (generation, g) in [(Generation::V3, &v3), (Generation::V6, &geo)] {
+        for (b, name) in xi_names.into_iter().enumerate() {
+            for (xi, delta) in [(-1.0, 0.0), (-2.0, 0.0), (0.0, -1.5)] {
+                let (c, t) = with_xi(generation, b, xi, delta);
+                let want = RigError::NotPositive(name);
+                let what = format!("{generation:?} block {b}, ξ {xi}, ξ delta {delta}");
+                assert_eq!(refuse(&c, g, &t, 0, [768; 2]), want, "{what}");
+                assert_eq!(theta_frame(&c, g, &t), Err(want), "{what}");
+            }
+            let (c, t) = with_xi(generation, b, -0.9999, 0.0);
+            must_fail(
+                &format!("{generation:?} block {b} at ξ −0.9999, refused as NotPositive"),
+                matches!(
+                    Rig::build(&c, g, &t, 0, [768; 2]),
+                    Err(RigError::NotPositive(_))
+                ),
+            );
+            must_fail(
+                &format!("{generation:?} block {b} at ξ −0.9999, θ_frame refused"),
+                theta_frame(&c, g, &t).is_err(),
+            );
+        }
+    }
     for (name, c, one) in [
         (
             "the calibration's src",
