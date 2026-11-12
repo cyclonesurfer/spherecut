@@ -33,6 +33,10 @@
 //! run of the same check, with software in the hardware's place, and a
 //! different frame, which must fail it.
 //!
+//! `samples_frame_clip8_renders` is Tier 2c (M3.5): Pat's clip 8,
+//! stitched by `frame --reference` on the CPU alone, so it runs wherever
+//! `SPHERECUT_SAMPLES` names the samples, the cloud included.
+//!
 //! Run with `cargo xtask hw-test`; plain `cargo test` lists them as
 //! ignored.
 
@@ -43,18 +47,24 @@ mod document;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use serde_json::Value;
+use spherecut_agent::still::{self, Look, Options, PairOptions, Still, Stop};
+use spherecut_core::cancel::StopSource;
 use spherecut_core::{FrameRate, StopToken};
 use spherecut_media::backend::{
-    DecodeMode, Fallback, FfmpegBackend, HwKind, MediaBackend, VideoRequest,
+    DecodeMode, Fallback, FfmpegBackend, HwKind, MediaBackend, SeekMode, VideoRequest,
 };
 use spherecut_media::decode::open_vulkan_device;
-use spherecut_media::{HwError, MediaError, capture_hw_decode_log};
-use spherecut_render::{Image, Pixels};
+use spherecut_media::{HwError, MediaError, Source, capture_hw_decode_log};
+use spherecut_render::reference::{RigDebug, RigOptions};
+use spherecut_render::{Image, Pixels, ViewParams};
+use spherecut_sphere::orient::Ypr;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Codec, Spec};
-use spherecut_testkit::tier2;
+use spherecut_testkit::control::must_fail;
+use spherecut_testkit::{samples, tier2};
 
 use document::document;
 
@@ -661,11 +671,156 @@ fn the_check_runs_on_lavapipe_with_software_standing_in() {
     );
 }
 
+/// The darkest mean luma, from 0 to 1, that either lens's side of a
+/// stitched clip 8 may show: the scene is a lit carport and garden, and
+/// a side that only a mask's edge reaches is black.
+const CLIP8_FLOOR: f64 = 0.2;
+
+/// Rec. 709 luma of `img`'s pixel `i`, from 0 to 1, on the stored values
+/// as `look`'s labels read them.
+fn luma(img: &Image, i: usize) -> f64 {
+    let Pixels::Rgb8(p) = &img.pixels else {
+        panic!("an 8-bit PNG was expected")
+    };
+    let [r, g, b] = [p[3 * i], p[3 * i + 1], p[3 * i + 2]].map(f64::from);
+    (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+}
+
+/// Clip 8's rule: over the pixels where `weights` (`--seam weights` of
+/// the same view) is redder than blue, calibration block 0's side, and
+/// over those where it is bluer, block 1's, `stitched`'s mean luma is
+/// above [`CLIP8_FLOOR`]: each lens fills its own side with the scene.
+/// The two means, as found.
+fn both_sides_lit(stitched: &Image, weights: &Image) -> Result<[f64; 2], String> {
+    if (stitched.width, stitched.height) != (weights.width, weights.height) {
+        return Err("the pictures' sizes differ".into());
+    }
+    let Pixels::Rgb8(w) = &weights.pixels else {
+        return Err("--seam weights wasn't an 8-bit PNG".into());
+    };
+    let mut sums = [(0.0, 0usize); 2];
+    for (i, px) in w.chunks_exact(3).enumerate() {
+        let side = match px[0].cmp(&px[2]) {
+            std::cmp::Ordering::Greater => 0,
+            std::cmp::Ordering::Less => 1,
+            std::cmp::Ordering::Equal => continue,
+        };
+        sums[side].0 += luma(stitched, i);
+        sums[side].1 += 1;
+    }
+    let mut means = [0.0; 2];
+    for (b, (sum, n)) in sums.into_iter().enumerate() {
+        if n == 0 {
+            return Err(format!("--seam weights paints no pixel of block {b}"));
+        }
+        means[b] = sum / n as f64;
+    }
+    if means.iter().all(|&m| m > CLIP8_FLOOR) {
+        Ok(means)
+    } else {
+        Err(format!(
+            "the sides' mean luma is {:.3} (block 0) and {:.3} (block 1), and the floor {CLIP8_FLOOR}",
+            means[0], means[1]
+        ))
+    }
+}
+
 /// Tier 2c: `spherecut frame --reference` of clip 8 (`tripod_seam`,
 /// take 008) renders, stitched with the file's calibration and the
-/// `Known` geometry (M3 plan 22.1's M3.5 row).
+/// `Known` geometry (M3 plan 22.1's M3.5 row): the whole sphere at
+/// 1024 × 512 at 1 s, both lenses at one pts, under the X5's provisional
+/// geometry; and over each lens's side, as `--seam weights` paints it,
+/// the picture is lit ([`both_sides_lit`]). The control: the library's
+/// render of the same pair with `RigDebug::Lens0`, block 0's lens alone,
+/// fails that check. The three renders run one after another, each a
+/// 3840² pair decoded in software and made ready on the CPU, so that
+/// the peak is one pair's.
 #[test]
-#[ignore = "M3.5 unit (d)"]
+#[ignore = "tier2: Pat's X5 samples (Tier 2c: SPHERECUT_SAMPLES and the CPU only)"]
 fn samples_frame_clip8_renders() {
-    todo!()
+    let started = Instant::now();
+    tier2::require_samples_cpu();
+    let clip8 = samples::role("tripod_seam");
+    let dir = TempDir::new("clip8");
+    let (size, time) = ((1024, 512), "1");
+    let common = [
+        "--reference",
+        "--projection",
+        "equirect",
+        "--size",
+        "1024x512",
+        "--time",
+        time,
+    ];
+    let load = |p: &Path| Image::from_png(&std::fs::read(p).unwrap()).unwrap();
+
+    let out = dir.join("stitched.png");
+    let ran = frame(&clip8, &out, &common);
+    assert_eq!(ran.status, Some(0), "{} {}", ran.doc, ran.stderr);
+    let r = &ran.doc["result"];
+    assert_eq!(r["renderer"], "reference", "{r}");
+    assert_eq!(r["stitch"]["geometry"]["status"], "provisional", "{r}");
+    let lenses = r["stitch"]["lenses"].as_array().unwrap();
+    assert_eq!(lenses.len(), 2, "{r}");
+    assert_eq!(lenses[0]["pts"], lenses[1]["pts"], "{r}");
+    assert_eq!(lenses[0]["pts"], r["frame"]["pts"], "{r}");
+    let stitched = load(&out);
+
+    let out = dir.join("weights.png");
+    let mut args = common.to_vec();
+    args.extend(["--seam", "weights"]);
+    let ran = frame(&clip8, &out, &args);
+    assert_eq!(ran.status, Some(0), "{} {}", ran.doc, ran.stderr);
+    let weights = load(&out);
+    let means = both_sides_lit(&stitched, &weights).unwrap();
+    eprintln!(
+        "clip 8 at {time} s: mean luma {:.3} over block 0's side, {:.3} over block 1's",
+        means[0], means[1]
+    );
+
+    // The control: block 0's lens alone, as the library renders it.
+    let lens0 = {
+        let src = Source::path(&clip8);
+        let stop = Stop::of(&StopSource::new());
+        let mut warnings = Vec::new();
+        let report = still::probe_report(src, &stop).unwrap();
+        let pair = PairOptions {
+            rig: RigOptions {
+                debug: RigDebug::Lens0,
+                ..RigOptions::default()
+            },
+            ..PairOptions::default()
+        };
+        let mut opened = Still::open_pair(
+            src,
+            &report,
+            None,
+            &Options::default(),
+            &pair,
+            &stop,
+            &mut warnings,
+        )
+        .unwrap();
+        let decoded = opened
+            .seek(time.parse().unwrap(), SeekMode::Exact, &mut warnings)
+            .unwrap();
+        let turn = Ypr::from_degrees(0.0, 0.0, 0.0).to_quat();
+        opened
+            .render(
+                &decoded,
+                &[ViewParams::equirect(turn)],
+                size,
+                Look::default(),
+            )
+            .unwrap()
+    };
+    let control = both_sides_lit(&lens0, &weights);
+    if let Err(e) = &control {
+        eprintln!("RigDebug::Lens0: {e}");
+    }
+    must_fail("RigDebug::Lens0", control);
+    eprintln!(
+        "samples_frame_clip8_renders: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
 }
