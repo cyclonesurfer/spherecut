@@ -4,39 +4,547 @@
 //! planes synth coded and to rung 1's render of them, within 3 s
 //! (amendment 5), and `StillPair`'s seek and refusals.
 //!
-//! M3.5's types stage names the tests; unit (c) writes them and the
-//! suite's budget.
+//! Rung 1's picture is made here from `synth::rung`'s pair, synth's
+//! planes with no file between, and the boundary crate's `sphere_rig`;
+//! render's `tests/rung_copy.rs` holds that copy to rung 1's own. Each
+//! file is written once a binary, into a folder of this binary's kept
+//! for the run, and synth renders each lens's picture once a binary
+//! through `RenderCache::shared()`, for `write_insv` and `synth::rung`
+//! alike. A test writes the files its controls need, and runs its
+//! controls, beside its own check rather than after it: rung 3's file
+//! alone takes most of the budget to write.
+//!
+//! Budget (4.1 rule 5, 19.6): 2 s of the row's 3 s, rung 1's own render
+//! of its pair included. Each test prints its time and the suite's.
 
-/// The planes `StillPair::seek` decodes for each track and frame hash
-/// equal to `InsvSpec::planes`: the decode is lossless.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Instant;
+
+use spherecut_agent::still::{
+    self, DecodedPair, Failure, Look, Options, PairOptions, Still, StillPair, Stop,
+};
+use spherecut_boundary::sphere_rig;
+use spherecut_core::TimeSpec;
+use spherecut_core::cancel::StopSource;
+use spherecut_core::video::VideoPlanes;
+use spherecut_media::Source;
+use spherecut_media::backend::SeekMode;
+use spherecut_render::reference::{self, RigOptions};
+use spherecut_render::{AdapterChoice, Depth, Image, ViewParams};
+use spherecut_sphere::rig::{Binding, Generation, Geometry, Rig, Tune};
+use spherecut_synth::Pattern;
+use spherecut_synth::code::{CornerCode, Luma, read_corner_code};
+use spherecut_synth::insv::{InsvFault, InsvSpec, Quality, write_insv};
+use spherecut_synth::media::{pairs_64, write_pair};
+use spherecut_synth::rung::{self, Shot};
+use spherecut_synth::yuv::YuvPlanes;
+use spherecut_testkit::control::must_fail;
+use spherecut_testkit::{Fnv64, fnv64};
+
+/// The suite's budget in seconds (amendment 5, 19.6).
+const BUDGET_S: f64 = 2.0;
+
+/// When the suite's first test began.
+static BEGAN: OnceLock<Instant> = OnceLock::new();
+
+/// A test's clock, which prints as the test ends how long it took and
+/// how long the suite has run, against the suite's budget. The tests run
+/// side by side, so none of them can time the rest: the last line
+/// printed is the suite's time.
+struct Timed {
+    name: &'static str,
+    began: Instant,
+}
+
+fn timed(name: &'static str) -> Timed {
+    BEGAN.get_or_init(Instant::now);
+    Timed {
+        name,
+        began: Instant::now(),
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let suite = BEGAN.get_or_init(Instant::now).elapsed().as_secs_f64();
+        eprintln!(
+            "{}: {:.3} s; the suite {suite:.3} s so far, of its {BUDGET_S} s budget",
+            self.name,
+            self.began.elapsed().as_secs_f64()
+        );
+    }
+}
+
+/// Unit gains, as `StillPair::render` stitches with.
+const UNIT: [[f64; 3]; 2] = [[1.0; 3]; 2];
+
+// The files.
+
+/// A folder of this test binary's, kept for the run.
+fn tmp() -> &'static Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let d =
+            Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("rung3-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    })
+}
+
+/// `spec`'s master, written into a folder of its own.
+fn written(spec: &InsvSpec, folder: &str) -> PathBuf {
+    write_insv(spec, &tmp().join(folder)).unwrap().master
+}
+
+/// Rung 3's file: 8 lossless frames of 2 × 768².
+fn rung3_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| written(&InsvSpec::rung3(), "rung3"))
+}
+
+/// The file the other tests open: 30 lossless frames of 2 × 384².
+fn small_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| written(&InsvSpec::small(), "small"))
+}
+
+/// `small()` with `fault` planted.
+fn faulty(fault: InsvFault, folder: &str) -> PathBuf {
+    let spec = InsvSpec {
+        fault: Some(fault),
+        ..InsvSpec::small()
+    };
+    written(&spec, folder)
+}
+
+/// `small()` with lens 1 a frame late from the start
+/// (`InsvFault::StartPtsDiffer`).
+fn late_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| faulty(InsvFault::StartPtsDiffer, "start-pts"))
+}
+
+/// `small()` with no calibration (`InsvFault::NoCalibration`).
+fn uncalibrated_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| faulty(InsvFault::NoCalibration, "no-calibration"))
+}
+
+/// Rung 3's file coded as a camera codes, at crf 28, two frames long.
+fn lossy_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let spec = InsvSpec {
+            quality: Quality::CameraLike { crf: 28 },
+            frames: 2,
+            ..InsvSpec::rung3()
+        };
+        written(&spec, "rung3-crf28")
+    })
+}
+
+/// Two lens tracks with no trailer: `write_pair`'s matched 64² pair.
+fn plain_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| write_pair(&pairs_64()[0], &tmp().join("plain")).unwrap())
+}
+
+/// A stop nobody sets.
+fn stop() -> Stop {
+    Stop::of(&StopSource::new())
+}
+
+/// `path` probed and opened as a pair with no GPU, or the failure of
+/// either; and the warnings.
+fn open(path: &Path, pair: &PairOptions) -> (Result<StillPair<'static>, Failure>, Vec<String>) {
+    open_on(path, None, pair)
+}
+
+fn open_on<'g>(
+    path: &Path,
+    gpu: Option<&'g spherecut_render::Gpu>,
+    pair: &PairOptions,
+) -> (Result<StillPair<'g>, Failure>, Vec<String>) {
+    let src = Source::path(path);
+    let stop = stop();
+    let mut warnings = Vec::new();
+    let opened = still::probe_report(src, &stop).and_then(|report| {
+        Still::open_pair(
+            src,
+            &report,
+            gpu,
+            &Options::default(),
+            pair,
+            &stop,
+            &mut warnings,
+        )
+    });
+    let said = warnings.iter().map(|w| w.message.clone()).collect();
+    (opened, said)
+}
+
+/// Both lenses at frame `n`, exactly.
+fn seek(pair: &mut StillPair<'_>, n: u64) -> Result<DecodedPair, Failure> {
+    pair.seek(TimeSpec::Frame(n), SeekMode::Exact, &mut Vec::new())
+}
+
+// Hashes.
+
+/// FNV-1a of each of a decoded picture's planes, row by row without the
+/// rows' padding.
+fn decoded_hashes(picture: &dyn VideoPlanes) -> Vec<u64> {
+    (0..picture.layout().planes.len())
+        .map(|i| {
+            let plane = picture.plane(i).unwrap();
+            let mut h = Fnv64::new();
+            for y in 0..plane.height {
+                h.write(plane.row(y, plane.width as usize).unwrap());
+            }
+            h.finish()
+        })
+        .collect()
+}
+
+/// FNV-1a of each of synth's 8-bit planes, which hold their rows without
+/// padding.
+fn planes_hashes(planes: &YuvPlanes) -> Vec<u64> {
+    let YuvPlanes::U8(p) = planes else {
+        panic!("not 8-bit");
+    };
+    p.iter().map(|plane| fnv64(plane)).collect()
+}
+
+/// Whether two sets of hashes are the same, saying which plane differs.
+fn same_hashes(got: &[u64], want: &[u64]) -> Result<(), String> {
+    match (0..got.len().max(want.len())).find(|&i| got.get(i) != want.get(i)) {
+        Some(i) => Err(format!("plane {i}")),
+        None => Ok(()),
+    }
+}
+
+// Pictures.
+
+/// Rung 1's view as render's type.
+fn view_of(shot: &Shot) -> ViewParams {
+    match shot.lens {
+        None => ViewParams::equirect(shot.turn),
+        Some(lens) => ViewParams::new(shot.turn, lens),
+    }
+}
+
+/// Whether two pictures are the same, byte for byte, saying how many
+/// values differ and the first.
+fn same_picture(got: &Image, want: &Image) -> Result<(), String> {
+    if (got.width, got.height) != (want.width, want.height) {
+        return Err(format!(
+            "{}x{} against {}x{}",
+            got.width, got.height, want.width, want.height
+        ));
+    }
+    let (spherecut_render::Pixels::Rgb8(a), spherecut_render::Pixels::Rgb8(b)) =
+        (&got.pixels, &want.pixels)
+    else {
+        return Err("not both 8-bit".into());
+    };
+    let differ: Vec<usize> = (0..a.len()).filter(|&i| a[i] != b[i]).collect();
+    match differ.first() {
+        None => Ok(()),
+        Some(&i) => Err(format!(
+            "{} of {} values differ, the first at pixel {} channel {}: {} against {}",
+            differ.len(),
+            a.len(),
+            i / 3,
+            i % 3,
+            a[i],
+            b[i]
+        )),
+    }
+}
+
+/// The geometry `rung3()` planted: the entry stitching gives the file
+/// (its generation field 136's, V3), read by the binding
+/// `x5_like_planted` has, Direct, where the X5's row has Reversed.
+fn planted_geometry(path: &Path) -> Geometry {
+    let entry = still::pair_stitching(Source::path(path)).unwrap();
+    assert_eq!(entry.known.geometry.generation, Generation::V3);
+    assert_eq!(entry.known.geometry.binding, Binding::Reversed);
+    Geometry {
+        binding: Binding::Direct,
+        ..entry.known.geometry
+    }
+}
+
+/// The decoded planes of each of rung 3's 8 frames, on both tracks, hash
+/// equal to `InsvSpec::planes` for that track and frame: the decode is
+/// lossless.
 #[test]
-#[ignore = "M3.5 unit (c)"]
 fn rung3_planes_hash_equal() {
-    todo!()
+    let _t = timed("rung3_planes_hash_equal");
+    let spec = InsvSpec::rung3();
+    std::thread::scope(|s| {
+        let lossy = s.spawn(lossy_file);
+        // synth's planes, a thread a track, beside the decode.
+        let synth = [0, 1].map(|t| {
+            let spec = &spec;
+            s.spawn(move || {
+                (0..spec.frames)
+                    .map(|k| planes_hashes(&spec.planes(t, k).unwrap()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        let (opened, _) = open(rung3_file(), &PairOptions::default());
+        let mut pair = opened.unwrap();
+        let mut got = Vec::new();
+        for k in 0..spec.frames {
+            let decoded = seek(&mut pair, u64::from(k)).unwrap();
+            got.push(
+                decoded
+                    .frames
+                    .each_ref()
+                    .map(|f| decoded_hashes(f.as_ref())),
+            );
+        }
+        let [synth0, synth1] = synth.map(|h| h.join().unwrap());
+        let want: Vec<[Vec<u64>; 2]> = synth0
+            .into_iter()
+            .zip(synth1)
+            .map(|(a, b)| [a, b])
+            .collect();
+        held_to_planes(&got, &want, lossy.join().unwrap());
+    });
+}
+
+/// `got`'s hashes, by frame and track, are `want`'s; and the controls:
+/// each frame against the next's planes, track 0 against track 1's, and
+/// the first frame of `lossy`, rung 3's file coded at crf 28, against
+/// frame 0's.
+fn held_to_planes(got: &[[Vec<u64>; 2]], want: &[[Vec<u64>; 2]], lossy: &Path) {
+    for (k, (got, want)) in got.iter().zip(want).enumerate() {
+        for t in 0..2 {
+            same_hashes(&got[t], &want[t]).unwrap_or_else(|e| panic!("frame {k}, track {t}: {e}"));
+        }
+    }
+    for k in 0..got.len() {
+        for t in 0..2 {
+            if k + 1 < got.len() {
+                must_fail(
+                    &format!("frame {k} of track {t} against frame {}", k + 1),
+                    same_hashes(&got[k][t], &want[k + 1][t]),
+                );
+            }
+        }
+        must_fail(
+            &format!("frame {k} of track 0 against track 1's"),
+            same_hashes(&got[k][0], &want[k][1]),
+        );
+    }
+    let (opened, _) = open(lossy, &PairOptions::default());
+    let mut twin = opened.unwrap();
+    let decoded = seek(&mut twin, 0).unwrap();
+    for (t, (frame, want)) in decoded.frames.iter().zip(&want[0]).enumerate() {
+        must_fail(
+            &format!("track {t} of the crf 28 twin"),
+            same_hashes(&decoded_hashes(frame.as_ref()), want),
+        );
+    }
 }
 
 /// `StillPair::render` of the file equals rung 1's `render_rig` of the
 /// same planes and rig, the one through the file and the camera crate,
 /// the other through synth and the boundary.
 #[test]
-#[ignore = "M3.5 unit (c)"]
 fn rung3_render_equals_rung1() {
-    todo!()
+    let _t = timed("rung3_render_equals_rung1");
+    let shots = [rung::equirect(), rung::whole_view(0)];
+    // Rung 1's: synth's planes, no file, through Rig::build of the
+    // boundary's Calibration and Geometry, stitched infinitely far.
+    let camera = rung::camera();
+    let rig = |tune: &Tune| -> Rig {
+        sphere_rig(
+            &camera.cal,
+            &camera.planted,
+            tune,
+            rung::FRONT_TRACK,
+            rung::SIDES,
+        )
+        .unwrap()
+    };
+    let rung1_rig = rig(&rung::far());
+    let frames = rung::pair(Pattern::SeamLines);
+    let ready = reference::LensPair::new([&frames[0], &frames[1]]).unwrap();
+    let rung1: Vec<Image> = shots
+        .iter()
+        .map(|shot| {
+            let picture = reference::render_rig_of(
+                &ready,
+                &rung1_rig,
+                UNIT,
+                &view_of(shot),
+                shot.size,
+                &RigOptions::default(),
+            )
+            .unwrap();
+            still::quantize(&picture, Depth::Eight)
+        })
+        .collect();
+
+    // The file's, under the geometry it planted and the same tune.
+    let planted = planted_geometry(rung3_file());
+    let options = |geometry: Option<Geometry>, tune: Tune| PairOptions {
+        geometry,
+        tune,
+        rig: RigOptions::default(),
+    };
+    let render = |pair: &mut StillPair<'_>, decoded: &DecodedPair, shot: &Shot| {
+        pair.render(decoded, &[view_of(shot)], shot.size, Look::default())
+            .unwrap()
+    };
+    let rung1 = &rung1;
+    std::thread::scope(|s| {
+        // Control: the entry stitching gives, unchanged (Reversed),
+        // builds and renders, and isn't rung 1's picture.
+        let as_stored = s.spawn(|| {
+            let (opened, _) = open(rung3_file(), &options(None, rung::far()));
+            let mut as_stored = opened.unwrap();
+            assert_eq!(as_stored.geometry().binding, Binding::Reversed);
+            let decoded = seek(&mut as_stored, 0).unwrap();
+            must_fail(
+                "the X5 row's binding, Reversed",
+                same_picture(&render(&mut as_stored, &decoded, &shots[0]), &rung1[0]),
+            );
+        });
+        // Control: the default tune, stitched at 2 m.
+        let at_2m = s.spawn(|| {
+            let (opened, _) = open(
+                rung3_file(),
+                &options(Some(planted.clone()), Tune::default()),
+            );
+            let mut at_2m = opened.unwrap();
+            must_fail("the default tune's rig", at_2m.rig() == &rung1_rig);
+            let decoded = seek(&mut at_2m, 0).unwrap();
+            must_fail(
+                "the default tune's picture",
+                same_picture(&render(&mut at_2m, &decoded, &shots[0]), &rung1[0]),
+            );
+        });
+        let (opened, _) = open(rung3_file(), &options(Some(planted.clone()), rung::far()));
+        let mut pair = opened.unwrap();
+        assert_eq!(pair.rig(), &rung1_rig);
+        let decoded = seek(&mut pair, 0).unwrap();
+        // The decoded frames carry the colour synth's frames do, as the
+        // reference reads it.
+        let colour = |p: &dyn VideoPlanes| {
+            let c = p.color();
+            (c.range, c.matrix, c.transfer, c.siting)
+        };
+        for (t, frame) in decoded.frames.iter().enumerate() {
+            assert_eq!(colour(frame.as_ref()), colour(&frames[t]), "track {t}");
+        }
+        for (shot, want) in shots.iter().zip(rung1) {
+            same_picture(&render(&mut pair, &decoded, shot), want)
+                .unwrap_or_else(|e| panic!("{shot:?}: {e}"));
+        }
+        as_stored.join().unwrap();
+        at_2m.join().unwrap();
+    });
 }
 
 /// `StillPair::seek` lands both lenses on the frame asked for, at one
 /// time with equal pts, from any frame before or after it.
 #[test]
-#[ignore = "M3.5 unit (c)"]
 fn open_pair_seeks_both_lenses_to_one_time() {
-    todo!()
+    let _t = timed("open_pair_seeks_both_lenses_to_one_time");
+    let late = std::thread::spawn(late_file);
+    let (opened, _) = open(small_file(), &PairOptions::default());
+    let mut pair = opened.unwrap();
+    // From the start, from after frame 5 and from before it.
+    for from in [None, Some(20), Some(1)] {
+        if let Some(from) = from {
+            seek(&mut pair, from).unwrap();
+        }
+        let decoded = seek(&mut pair, 5).unwrap();
+        assert_eq!(
+            decoded.frames[0].pts, decoded.frames[1].pts,
+            "from {from:?}"
+        );
+        assert_eq!(decoded.shown.frame, Some(5));
+        for (t, frame) in decoded.frames.iter().enumerate() {
+            let code = read_corner_code(&Luma::of_picture(frame.as_ref()).unwrap()).unwrap();
+            assert_eq!(code, CornerCode::of(t, 5), "track {t}, from {from:?}");
+        }
+    }
+    // Control: lens 1 a frame late from the start, so that its frame 5
+    // is at pts 6006 where lens 0's is at 5005 (1/30000 s).
+    let (opened, _) = open(late.join().unwrap(), &PairOptions::default());
+    let mut late = opened.unwrap();
+    let e = must_fail("lens 1 a frame late", seek(&mut late, 5));
+    assert_eq!(e.code, "damaged", "{e:?}");
+    for pts in ["5005", "6006"] {
+        assert!(e.message.contains(pts), "{pts}: {}", e.message);
+    }
 }
 
 /// `Still::open_pair` refuses a file it can't stitch, each with a clear
-/// failure: one with no calibration (`InsvFault::NoCalibration`), and a
-/// geometry `Rig::build` refuses.
+/// failure: one with no calibration (`InsvFault::NoCalibration`), a pair
+/// of tracks with no trailer, and a geometry `Rig::build` refuses; and
+/// it refuses a GPU until M3.7, and `render` more than one view.
 #[test]
-#[ignore = "M3.5 unit (c)"]
 fn open_pair_refuses_a_file_it_cant_stitch() {
-    todo!()
+    let _t = timed("open_pair_refuses_a_file_it_cant_stitch");
+    let refused = |(opened, _): (Result<StillPair<'_>, Failure>, Vec<String>)| match opened {
+        Ok(p) => panic!("opened {p:?}"),
+        Err(e) => e,
+    };
+    let files = [uncalibrated_file, plain_file].map(std::thread::spawn);
+    let gpu = std::thread::spawn(|| still::gpu(&AdapterChoice::Cpu, &Options::default()));
+    small_file();
+    let [uncalibrated, plain] = files.map(|f| f.join().unwrap());
+    // No calibration.
+    let e = refused(open(uncalibrated, &PairOptions::default()));
+    assert_eq!(e.code, "not_equirect", "{e:?}");
+    assert!(e.message.contains("no calibration"), "{}", e.message);
+    // Two lens tracks with no trailer: no camera's pair.
+    let e = refused(open(plain, &PairOptions::default()));
+    assert_eq!(e.code, "not_equirect", "{e:?}");
+    assert!(e.message.contains("pair"), "{}", e.message);
+    // V6 on a trailer of V3 alone: no rig.
+    let entry = still::pair_stitching(Source::path(small_file())).unwrap();
+    let v6 = Geometry {
+        generation: Generation::V6,
+        ..entry.known.geometry
+    };
+    let e = refused(open(
+        small_file(),
+        &PairOptions {
+            geometry: Some(v6),
+            ..PairOptions::default()
+        },
+    ));
+    assert_eq!(e.code, "not_equirect", "{e:?}");
+    assert!(e.message.contains("no rig"), "{}", e.message);
+    // A GPU: the stitch is the CPU reference's until M3.7.
+    let gpu = gpu.join().unwrap().unwrap();
+    let e = refused(open_on(small_file(), Some(&gpu), &PairOptions::default()));
+    assert_eq!(e.code, "internal", "{e:?}");
+    assert!(e.message.contains("M3.7"), "{}", e.message);
+    // Two views.
+    let (opened, warnings) = open(small_file(), &PairOptions::default());
+    let mut pair = opened.unwrap();
+    assert_eq!(warnings, Vec::<String>::new());
+    let decoded = seek(&mut pair, 0).unwrap();
+    let shot = rung::equirect();
+    let view = view_of(&shot);
+    let e = pair
+        .render(&decoded, &[view, view], (64, 32), Look::default())
+        .unwrap_err();
+    assert_eq!(e.code, "internal", "{e:?}");
+    assert!(e.message.contains("one view"), "{}", e.message);
+    // Control: the same file renders through one view.
+    let image = pair
+        .render(&decoded, &[view], (64, 32), Look::default())
+        .unwrap();
+    assert_eq!((image.width, image.height), (64, 32));
 }
