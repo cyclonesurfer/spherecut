@@ -304,12 +304,14 @@ pub struct EacLayout {
     pub size: [u32; 2],
 }
 
-/// The caps over the poles (plan 18.3, M3.20): none by default.
+/// The caps over the poles (plan 18.3, M3.20): none by default. Each is
+/// boxed, which serde writes as the cap itself, so a media without caps
+/// stays small in memory.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caps {
-    pub nadir: Option<Cap>,
-    pub zenith: Option<Cap>,
+    pub nadir: Option<Box<Cap>>,
+    pub zenith: Option<Box<Cap>>,
 }
 
 /// One pole's cap, anchored to the rig.
@@ -590,13 +592,13 @@ mod tests {
         assert_eq!(v, json!({"kind": "keyframes"}));
         assert_eq!(serde_json::from_value::<Sampling>(v).unwrap(), keyframes);
         let caps = Caps {
-            nadir: Some(Cap {
+            nadir: Some(Box::new(Cap {
                 mode: CapMode::Fill { ring_deg: 2.0 },
                 cap_deg: 20.0,
                 edge_deg: 2.5,
                 rotation_deg: 0.0,
-            }),
-            zenith: Some(Cap {
+            })),
+            zenith: Some(Box::new(Cap {
                 mode: CapMode::Patch {
                     path: PathBuf::from("/home/me/logo.png"),
                     fingerprint: Fingerprint {
@@ -607,7 +609,7 @@ mod tests {
                 cap_deg: 10.0,
                 edge_deg: 1.0,
                 rotation_deg: 45.0,
-            }),
+            })),
         };
         let v = serde_json::to_value(&caps).unwrap();
         assert_eq!(v["nadir"]["mode"], json!({"kind": "fill", "ring_deg": 2.0}));
