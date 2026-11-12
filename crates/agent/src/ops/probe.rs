@@ -257,7 +257,7 @@ fn video_streams(r: &ProbeReport) -> Vec<&StreamInfo> {
 }
 
 /// A file's summary into `entry`: about 300 bytes for a plain file, and
-/// about 1 KB for a camera's with its trailer (an X5 master's is 1098).
+/// about 1 KB for a camera's with its trailer (an X5 master's is 1112).
 fn summary(entry: &mut Map<String, Value>, r: &ProbeReport) {
     let video = video_streams(r);
     let v = video.first().copied();
