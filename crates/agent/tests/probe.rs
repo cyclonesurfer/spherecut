@@ -562,7 +562,11 @@ fn probe_summary_carries_binding_and_geometry() {
         "evidence": "placeholder until the fit",
         "screen_side": null,
     });
-    let geometry = json!({"status": "provisional", "evidence": "placeholder until the fit"});
+    let geometry = json!({
+        "status": "provisional",
+        "evidence": "placeholder until the fit",
+        "notice": null,
+    });
     // The pinned check: the summary's lenses and geometry are the X5's.
     let pinned = |s: &Value| s["lenses"] == lenses && s["geometry"] == geometry;
     assert!(pinned(m), "{m}");

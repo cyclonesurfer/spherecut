@@ -10078,8 +10078,13 @@ What:
   row is 3.2's Meanwhile column with a placeholder for the extrinsics,
   the identity `EulerConv` with the −90° roll offset: provisional, with
   the evidence "placeholder until the fit", and `stitchable: true`.
-  probe's `geometry {status, evidence}` and doctor `--file`'s "geometry
-  provisional" show it.
+  probe's `geometry {status, evidence, notice}` and doctor `--file`'s
+  "geometry provisional" show it. The notice reaches a user: probe's
+  `geometry.notice`, frame's `stitch.geometry.notice`, and a
+  `geometry_assumed` warning on a pair frame stitches. A row with
+  `stitchable: false` is refused in one set of words
+  (`Known::refusal`), frame's `not_equirect` and a `missing` line of
+  doctor `--file`'s, which is then not stitchable.
 - **A user's values.** `spherecut frame <insv> --reference --geometry
   binding=…,canvas=…` (and turn, tz, upright and generation) applies its
   values over the table's entry with the status `user` and evidence that

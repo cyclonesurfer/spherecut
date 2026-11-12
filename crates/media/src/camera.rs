@@ -101,6 +101,10 @@ pub struct GeometryInfo {
     pub status: &'static str,
     /// A sentence: why, from the entry, never the file's own text.
     pub evidence: String,
+    /// What a user is told of the entry, as the table words it: "geometry
+    /// assumed from the X5" for a model with no entry of its own, which
+    /// gets the X5's (M3 plan 5.3); None when there is nothing to say.
+    pub notice: Option<&'static str>,
 }
 
 /// A geometry's status as probe and `doctor --file` word it.
@@ -314,8 +318,8 @@ pub(crate) fn read(
 }
 
 /// The table's entry `known` into `out`: the lenses' binding, its
-/// evidence and the screen side, the geometry, and the table's refusal
-/// of the camera's files, if it gives one.
+/// evidence and the screen side, the geometry with its notice, and the
+/// table's refusal of the camera's files, if it gives one.
 fn bind(out: &mut CameraFile, known: &Known) {
     let g = &known.geometry;
     if let Some(l) = out.lenses.as_mut() {
@@ -328,6 +332,7 @@ fn bind(out: &mut CameraFile, known: &Known) {
     out.geometry = Some(GeometryInfo {
         status: status_word(g.status),
         evidence: g.evidence.clone(),
+        notice: known.notice,
     });
     out.table_refusal = known.refusal();
 }

@@ -193,15 +193,23 @@ pub fn probed(
     if !opts.equirect {
         check_equirect(&report, &stream)?;
     }
+    damage_warnings(&report, warnings);
+    stop.go_on()?;
+    Ok(Probed { report, stream })
+}
+
+/// The damage probe found in `report`, each a warning naming the file,
+/// added to `warnings`: damage the seek may not reach, which fails the
+/// run only if the seek does reach it. [`probed`] and
+/// [`Still::open_pair`] give it, once the file is one they go on with.
+pub fn damage_warnings(report: &ProbeReport, warnings: &mut Vec<Warning>) {
     for d in &report.damage {
         warn(
             warnings,
             d.code,
-            format!("{} is damaged: {}", file.display(), d.message),
+            format!("{} is damaged: {}", report.path.display(), d.message),
         );
     }
-    stop.go_on()?;
-    Ok(Probed { report, stream })
 }
 
 /// Why `probed` may not be a stitched equirect, as [`probe()`] without
@@ -1223,9 +1231,9 @@ pub struct PairOptions {
     /// (`RigError::NoGeneration`).
     pub geometry: Option<Geometry>,
     pub tune: Tune,
-    /// How the stitch renders: its debug mode (`RigDebug`'s 4 to 7) and
-    /// level 0 alone. M3.7 reaches the GPU through this field and
-    /// `RigOptions::mode`.
+    /// How the stitch renders: its debug mode (`RigOptions::debug`,
+    /// `RigDebug`'s 4 to 7) and level 0 alone (`RigOptions::level0`).
+    /// M3.7 reaches the GPU's stitch through this field.
     pub rig: RigOptions,
 }
 
@@ -1376,6 +1384,11 @@ impl<'g> Still<'g> {
     /// lens's own failure to open, naming its track. The tables' open
     /// checks are the player's (M3.8's lock), not this one's: a pair whose
     /// lenses don't show one time fails at [`StillPair::seek`].
+    ///
+    /// Once those checks pass, before the lenses open, `warnings` gains
+    /// probe's damage ([`damage_warnings`], as [`probed`] gives it) and,
+    /// for a model the table has no entry for, `geometry_assumed` with
+    /// the table's notice ("geometry assumed from the X5").
     pub fn open_pair(
         src: Source<'_>,
         report: &ProbeReport,
@@ -1447,6 +1460,14 @@ impl<'g> Still<'g> {
                 codes::NOT_EQUIRECT,
                 format!("{file} can't be stitched: {why}"),
             ));
+        }
+        damage_warnings(report, warnings);
+        if let Some(notice) = stitched.known.notice {
+            warn(
+                warnings,
+                codes::warnings::GEOMETRY_ASSUMED,
+                format!("{file}: {notice} ({})", stitched.known.geometry.evidence),
+            );
         }
         stop.go_on()?;
         let lens_opts = Options {

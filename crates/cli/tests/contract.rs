@@ -56,6 +56,7 @@ const CODES: &[&str] = &[
     "encode_failed",
     "files_failed",
     "free_space_unknown",
+    "geometry_assumed",
     "gpu_failed",
     "h264_level_6",
     "hw_failed",
@@ -1874,8 +1875,11 @@ fn probe_pins_the_camera_shapes() {
         "evidence": "placeholder until the fit",
         "screen_side": null,
     });
-    let geometry =
-        serde_json::json!({"status": "provisional", "evidence": "placeholder until the fit"});
+    let geometry = serde_json::json!({
+        "status": "provisional",
+        "evidence": "placeholder until the fit",
+        "notice": null,
+    });
     assert_eq!(m["lenses"], lenses);
     must_fail("the LRV's lenses", l["lenses"] == lenses);
     assert_eq!(l["lenses"], Value::Null, "{l}");
@@ -2301,12 +2305,13 @@ fn the_readme_shows_how_to_run_every_command() {
 }
 
 /// `spherecut probe` of a synthetic `.insv` reports `lenses.binding` and
-/// the `geometry` block (`status`, `evidence`) of the file's `Known`
-/// entry (M3 plan 5.3, 5.4), as `docs/cli-json.md` documents them: the
-/// X5's row on the firmware it was measured on; the row, provisional
-/// and saying why, on other firmware and for a model with no row of its
-/// own; and neither for a master whose calibration parses but can't be
-/// stitched, which a `bad_trailer` warning says. The text says the
+/// the `geometry` block (`status`, `evidence`, `notice`) of the file's
+/// `Known` entry (M3 plan 5.3, 5.4), as `docs/cli-json.md` documents
+/// them: the X5's row on the firmware it was measured on; the row,
+/// provisional and saying why, on other firmware and for a model with
+/// no row of its own, which alone has the notice "geometry assumed from
+/// the X5"; and neither for a master whose calibration parses but can't
+/// be stitched, which a `bad_trailer` warning says. The text says the
 /// same. Each master is the first's tracks with another trailer.
 ///
 /// The control: those tracks without a trailer, a plain MP4, have
@@ -2358,22 +2363,31 @@ fn probe_reports_binding_and_geometry() {
             "screen_side": null,
         })
     };
-    let geometry =
-        |evidence: &str| serde_json::json!({"status": "provisional", "evidence": evidence});
+    let geometry = |evidence: &str, notice: Option<&str>| serde_json::json!({"status": "provisional", "evidence": evidence, "notice": notice});
     // The pinned check: a report's lenses and geometry are the entry's,
-    // with its evidence.
-    let pinned = |r: &Value, evidence: &str| {
-        r["lenses"] == lenses(evidence) && r["geometry"] == geometry(evidence)
+    // with its evidence and notice.
+    let pinned = |r: &Value, evidence: &str, notice: Option<&str>| {
+        r["lenses"] == lenses(evidence) && r["geometry"] == geometry(evidence, notice)
     };
     let placeholder = "placeholder until the fit";
     let other_firmware =
         "placeholder until the fit; measured on firmware v1.1.22_build1, not this file's";
     let no_row = "placeholder until the fit; the X5's row, as no row is for this file's model";
-    for (k, evidence) in [(0, placeholder), (1, other_firmware), (2, no_row)] {
+    let assumed = Some("geometry assumed from the X5");
+    for (k, evidence, notice) in [
+        (0, placeholder, None),
+        (1, other_firmware, None),
+        (2, no_row, assumed),
+    ] {
         let r = report(k);
-        assert!(pinned(r, evidence), "{evidence}: {r}");
+        assert!(pinned(r, evidence, notice), "{evidence}: {r}");
         assert_eq!(r["warnings"], serde_json::json!([]), "{r}");
     }
+    // The notice is the model's with no row, not the firmware's.
+    must_fail(
+        "the X5's report, with the notice",
+        pinned(report(0), placeholder, assumed),
+    );
     assert_eq!(report(1)["camera"]["firmware"], "v9.9.9");
     assert_eq!(report(2)["camera"]["model"], "Insta360 X9");
 
@@ -2408,7 +2422,7 @@ fn probe_reports_binding_and_geometry() {
     assert_eq!(p["geometry"], Value::Null, "{p}");
     must_fail(
         "the pinned lenses and geometry, of the master's tracks without its trailer",
-        pinned(p, placeholder),
+        pinned(p, placeholder, None),
     );
 
     // The text: the binding beside the tracks, and the geometry.
@@ -2426,6 +2440,10 @@ fn probe_reports_binding_and_geometry() {
         assert!(t.contains(want), "no {want:?} in:\n{t}");
     }
     assert!(!t.contains("isn't read yet"), "{t}");
+    assert!(!t.contains("geometry assumed"), "{t}");
+    let t = probe_text(&model);
+    let want = format!("\n  geometry   provisional: {no_row} (geometry assumed from the X5)\n");
+    assert!(t.contains(&want), "no {want:?} in:\n{t}");
     let t = probe_text(&oblong);
     assert!(
         t.contains("\n  lenses     streams #0 and #1, not bound: no calibration a stitch reads\n"),
@@ -2456,9 +2474,10 @@ fn stitch_shape(s: &Value) -> Result<(), String> {
     let shaped = s.is_object()
         && has_keys(s, &["geometry", "calibration", "distance_m", "lenses"])
         && s["geometry"].is_object()
-        && has_keys(&s["geometry"], &["status", "evidence"])
+        && has_keys(&s["geometry"], &["status", "evidence", "notice"])
         && s["geometry"]["status"].is_string()
         && s["geometry"]["evidence"].is_string()
+        && (s["geometry"]["notice"].is_string() || s["geometry"]["notice"].is_null())
         && s["calibration"]
             .as_str()
             .is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
@@ -2530,7 +2549,11 @@ fn frame_pins_the_stitch_object() {
     stitch_shape(stitch).unwrap();
     assert_eq!(
         stitch["geometry"],
-        serde_json::json!({"status": "provisional", "evidence": "placeholder until the fit"})
+        serde_json::json!({
+            "status": "provisional",
+            "evidence": "placeholder until the fit",
+            "notice": null,
+        })
     );
     let (_, probed) = probe_json(&[&master]);
     let report = &probed["result"]["files"][0]["report"];

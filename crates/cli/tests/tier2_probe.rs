@@ -141,7 +141,11 @@ fn samples_probe_names_the_camera() {
         assert_eq!(l["lenses"], Value::Null, "the LRV's one picture");
         // The X5's entry, on the firmware it was measured on; the LRV,
         // which holds the master's strings, has it too.
-        let geometry = json!({"status": "provisional", "evidence": "placeholder until the fit"});
+        let geometry = json!({
+            "status": "provisional",
+            "evidence": "placeholder until the fit",
+            "notice": null,
+        });
         assert_eq!(m["geometry"], geometry);
         assert_eq!(l["geometry"], geometry);
         // The master's strings are its LRV's, so the snapshot is one.

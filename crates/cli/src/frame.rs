@@ -1297,6 +1297,9 @@ impl Job {
             geometry: GeometryInfo {
                 status: status_word(geometry.status),
                 evidence: geometry.evidence.clone(),
+                // The table's notice for the file's entry, which
+                // --geometry's edits start from.
+                notice: report.camera_file.geometry.as_ref().and_then(|g| g.notice),
             },
             calibration: calibration.hash.clone(),
             distance_m: self.args.distance_m(),

@@ -1599,7 +1599,13 @@ mod text {
             );
         }
         if let Some(g) = &f.geometry {
-            let _ = writeln!(s, "  geometry   {}: {}", g.status, g.evidence);
+            let _ = writeln!(
+                s,
+                "  geometry   {}: {}{}",
+                g.status,
+                g.evidence,
+                g.notice.map(|n| format!(" ({n})")).unwrap_or_default()
+            );
         }
         if let Some(c) = &f.companion {
             let _ = writeln!(

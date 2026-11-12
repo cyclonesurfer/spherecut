@@ -34,15 +34,15 @@ use spherecut_agent::still::{self, Look, Options, PairOptions, Still, Stop};
 use spherecut_cli::contract::frame_exit;
 use spherecut_core::TimeSpec;
 use spherecut_core::cancel::StopSource;
-use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
+use spherecut_media::{Source, mp4};
 use spherecut_render::reference::{self, RigOptions};
 use spherecut_render::{Depth, Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::rig::{Binding, Geometry, Tune};
 use spherecut_synth::Pattern;
 use spherecut_synth::code::{CornerCode, Luma, Samples, read_corner_code};
-use spherecut_synth::insv::{InsvFault, InsvSpec, write_insv};
+use spherecut_synth::insv::{Field, InsvFault, InsvSpec, write_insv};
 use spherecut_synth::media::{self, Codec, Spec};
 use spherecut_testkit::control::must_fail;
 
@@ -164,6 +164,52 @@ fn pair(fault: Option<InsvFault>) -> &'static Path {
 /// The CLI's 2 × 128² master.
 fn pair_file() -> &'static Path {
     pair(None)
+}
+
+/// The CLI's master with its silent AAC track's `mdhd` timescale set to
+/// 0: damage outside the lens tracks, which probe finds ("track #2: its
+/// `mdhd` gives timescale 0") and FFmpeg opens past, taking 1. The
+/// trailer is the master's, intact.
+fn damaged_pair() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let clean = insv::tracks(pair_file().parent().unwrap(), insv::MASTER);
+        let mut bytes = std::fs::read(&clean).unwrap();
+        let tree = mp4::read_file(&clean).unwrap();
+        let mdhd = tree
+            .tracks()
+            .find(|t| mp4::handler_type(t).is_some_and(|h| h.0 == *b"soun"))
+            .and_then(|t| t.path(&[b"mdia", b"mdhd"]))
+            .expect("the AAC track's mdhd");
+        // After the version, flags, and creation and modification times.
+        let times = if mdhd.payload.first() == Some(&1) {
+            16
+        } else {
+            8
+        };
+        let at = usize::try_from(mdhd.offset + mdhd.header_len).unwrap() + 4 + times;
+        bytes[at..at + 4].fill(0);
+        let dir = tmp().join("pair-damaged");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(insv::tracks(&dir, insv::MASTER), &bytes).unwrap();
+        insv::retrailed(&dir, insv::MASTER, insv::MASTER, &insv::records(), None).path
+    })
+}
+
+/// The CLI's master on the same tracks, its trailer naming a model the
+/// table has no entry for: field 2 "Insta360 X9".
+fn unlisted_pair() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let mut records = insv::records();
+        let model = records.metadata.iter_mut().find(|f| f.number == 2);
+        *model.unwrap() = Field::string(2, "Insta360 X9");
+        let dir = tmp().join("pair-unlisted");
+        std::fs::create_dir_all(&dir).unwrap();
+        let tracks = insv::tracks(pair_file().parent().unwrap(), insv::MASTER);
+        std::fs::copy(&tracks, insv::tracks(&dir, insv::MASTER)).unwrap();
+        insv::retrailed(&dir, insv::MASTER, insv::MASTER, &records, None).path
+    })
 }
 
 /// A stitched equirect, tagged so: synth's grid, 256 × 128, one
@@ -470,10 +516,7 @@ fn frame_insv_reference_matches_the_library() {
             &["--geometry", "binding=direct", "--stitch-distance", "inf"],
         ),
         ("without --geometry", &["--stitch-distance", "inf"]),
-        (
-            "at 2 m",
-            &["--geometry", "binding=direct", "--stitch-distance", "2m"],
-        ),
+        ("at the default distance", &["--geometry", "binding=direct"]),
     ];
     let (want, ran) = std::thread::scope(|s| {
         let want = s.spawn(|| {
@@ -516,7 +559,8 @@ fn frame_insv_reference_matches_the_library() {
     assert_eq!(r["frame"]["time"]["frame"], 5, "{r}");
     same_picture(&load(out), &want).unwrap();
     // The controls: the file's own geometry (the X5 row's Reversed), and
-    // the default distance, each a picture of its own.
+    // the default distance, 2 m, with no --stitch-distance, each a
+    // picture of its own.
     for (k, (name, _)) in runs.iter().enumerate().skip(1) {
         let (ran, out) = &ran[k];
         let r = ran.ok();
@@ -663,9 +707,82 @@ fn frame_insv_shows_a_lens_and_the_seam() {
     );
 }
 
+/// Whether a run rendered with one `code` warning, whose message holds
+/// `what`.
+fn warned_once(ran: &Ran, code: &str, what: &str) -> Result<(), String> {
+    if ran.status != Some(0) || ran.doc["ok"] != true {
+        return Err(format!("it failed: {} / {}", ran.doc, ran.stderr));
+    }
+    let of_code: Vec<&Value> = ran.doc["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|w| w["code"] == code)
+        .collect();
+    match &of_code[..] {
+        [w] if w["message"].as_str().is_some_and(|m| m.contains(what)) => Ok(()),
+        _ => Err(format!(
+            "not one {code} warning with {what:?}: {}",
+            ran.doc["warnings"]
+        )),
+    }
+}
+
+/// Probe's damage is a warning on a camera's pair as on any file,
+/// whether the pair is stitched (`--reference`) or a lens is shown
+/// (`--lens 0`): a master whose AAC track is damaged, its trailer
+/// intact, renders with one `damaged` warning naming that track. A pair
+/// whose model has no entry in the table is stitched by the X5's, with
+/// one `geometry_assumed` warning giving the table's notice, which
+/// `stitch.geometry.notice` gives too. The controls: the same master
+/// without the damage, the X5's, gives neither warning, stitched or as
+/// a lens, and its notice is null.
+#[test]
+fn frame_insv_warns_of_damage_and_an_assumed_geometry() {
+    let _t = timed("frame_insv_warns_of_damage_and_an_assumed_geometry");
+    let dir = outputs("warns");
+    let stitched: &[&str] = &["--reference", "--size", "64x32"];
+    let lens: &[&str] = &["--reference", "--lens", "0", "--size", "64x64"];
+    let cases: [(&str, fn() -> &'static Path, &[&str]); 5] = [
+        ("damaged", damaged_pair, stitched),
+        ("damaged-lens", damaged_pair, lens),
+        ("unlisted", unlisted_pair, stitched),
+        ("clean", pair_file, stitched),
+        ("clean-lens", pair_file, lens),
+    ];
+    let ran = each(&cases, |(name, file, args)| {
+        frame(file(), &dir.join(format!("{name}.png")), args)
+    });
+    let [damaged, damaged_lens, unlisted, clean, clean_lens] = &ran[..] else {
+        unreachable!()
+    };
+    let damage = "track #2: its `mdhd` gives timescale 0";
+    let notice = "geometry assumed from the X5";
+    for (name, ran) in [("--reference", damaged), ("--lens 0", damaged_lens)] {
+        warned_once(ran, "damaged", damage).unwrap_or_else(|e| panic!("{name}: {e}"));
+        eprintln!("{name}: {}", ran.doc["warnings"]);
+    }
+    warned_once(unlisted, "geometry_assumed", notice).unwrap();
+    assert_eq!(unlisted.ok()["stitch"]["geometry"]["notice"], notice);
+    assert_eq!(clean.ok()["stitch"]["geometry"]["notice"], Value::Null);
+    // The controls: the master without the damage, the X5's.
+    for (name, ran) in [("--reference", clean), ("--lens 0", clean_lens)] {
+        must_fail(
+            &format!("{name}'s damage, undamaged"),
+            warned_once(ran, "damaged", damage),
+        );
+    }
+    must_fail(
+        "the X5's geometry, assumed",
+        warned_once(clean, "geometry_assumed", notice),
+    );
+}
+
 /// `--geometry` takes each of `Geometry`'s fields by its enum's names,
 /// and `--stitch-distance` metres or `inf`; a bad key or value is a usage
-/// error naming it; and each of `--lens`, `--seam`, `--geometry` and
+/// error naming it in Spherecut's words, which clap's echo of the value
+/// doesn't hold (the control: each one's words against the next one's
+/// message); and each of `--lens`, `--seam`, `--geometry` and
 /// `--stitch-distance` is a usage error with `--project`, `--equirect`
 /// or `--stream`, or on a file that isn't a camera's pair, as `--lens`
 /// is with any of the other three; and a pair under `--reference` with
@@ -702,19 +819,36 @@ fn frame_insv_takes_geometry_and_distance() {
         ],
         &["--geometry", "upright=half", "--stitch-distance", "12.5m"],
     ];
-    // Each bad one, and the words its message must name.
+    // Each bad one, and the words its message must hold: Spherecut's,
+    // naming the key or value, which clap's message, quoting the value
+    // whole, doesn't hold unless they are there.
     let bad: [(&[&str], &[&str]); 8] = [
         (
             &["--geometry", "binding=sideways"],
-            &["binding", "sideways"],
+            &["binding=sideways: binding is one of direct, reversed"],
         ),
-        (&["--geometry", "colour=red"], &["colour"]),
-        (&["--geometry", "binding"], &["binding"]),
-        (&["--geometry", "canvas=d,binding=direct"], &["canvas", "d"]),
-        (&["--geometry", "turn=y,turn=x"], &["turn"]),
-        (&["--stitch-distance", "2"], &["--stitch-distance", "2"]),
-        (&["--stitch-distance", "0.1m"], &["0.3"]),
-        (&["--stitch-distance", "-2m"], &["-2m"]),
+        (
+            &["--geometry", "colour=red"],
+            &["no key colour: the keys are"],
+        ),
+        (&["--geometry", "binding"], &["binding: expected key=value"]),
+        (
+            &["--geometry", "canvas=d,binding=direct"],
+            &["canvas=d: canvas is one of a, b, c"],
+        ),
+        (&["--geometry", "turn=y,turn=x"], &["turn is given twice"]),
+        (
+            &["--stitch-distance", "2"],
+            &["expected metres such as 2m, or inf, not 2"],
+        ),
+        (
+            &["--stitch-distance", "0.1m"],
+            &["0.1m is nearer than the stitch reaches: give 0.3m or more"],
+        ),
+        (
+            &["--stitch-distance", "-2m"],
+            &["-2m is nearer than the stitch reaches"],
+        ),
     ];
     // The conflicts: every new flag with each flag it can't go with.
     let new: [&[&str]; 4] = [
@@ -805,16 +939,20 @@ fn frame_insv_takes_geometry_and_distance() {
             ran.stderr
         );
     }
-    for ((args, names), ran) in bad.iter().zip(&bad_runs) {
+    for (k, ((args, names), ran)) in bad.iter().zip(&bad_runs).enumerate() {
         assert_eq!(ran.status, Some(2), "{args:?}: {}", ran.doc);
         assert_eq!(ran.code(), "usage", "{args:?}: {}", ran.doc);
+        // Words the command line holds would be in clap's echo of it.
         for name in *names {
-            assert!(
-                ran.message().contains(name),
-                "{args:?}: no {name:?} in {:?}",
-                ran.message()
-            );
+            assert!(!args.join(" ").contains(name), "{args:?}: {name:?}");
         }
+        names_in(ran.message(), names).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        // The control: the next bad value's message.
+        let next = &bad_runs[(k + 1) % bad.len()];
+        must_fail(
+            &format!("{args:?}'s words in the next bad value's message"),
+            names_in(next.message(), names),
+        );
     }
     for (args, ran) in conflicts
         .iter()
@@ -868,28 +1006,67 @@ fn refuses_decoder(ran: &Ran) -> Result<(), String> {
     }
 }
 
-/// Whether a run is a clear error for a trailer at fault: the exit the
-/// exit table gives its code, no picture or temporary file, no panic,
-/// and `names` in its message.
-fn clear_error(ran: &Ran, out: &Path, names: &[&str]) -> Result<(), String> {
+// A clear error, check by check, each with a control of its own.
+
+/// Whether a run was refused: no picture, and `ok` false.
+fn refused(ran: &Ran) -> Result<(), String> {
     if ran.status == Some(0) || ran.doc["ok"] != false {
         return Err(format!("it rendered: {}", ran.doc));
     }
+    Ok(())
+}
+
+/// Whether a run exits as the exit table says for its code, which isn't
+/// `internal`, Spherecut's own failure.
+fn exits_by_table(ran: &Ran) -> Result<(), String> {
     if ran.status != Some(frame_exit(ran.code()) as i32) || ran.code() == "internal" {
         return Err(format!("exit {:?} for {}", ran.status, ran.doc));
     }
+    Ok(())
+}
+
+/// Whether a run's stderr shows no panic.
+fn no_panic(ran: &Ran) -> Result<(), String> {
     if ran.stderr.contains("panicked") {
         return Err(format!("a panic: {}", ran.stderr));
     }
+    Ok(())
+}
+
+/// Whether nothing was written to `out` or beside it.
+fn wrote_nothing(out: &Path) -> Result<(), String> {
     if out.exists() || !temp_files(out.parent().unwrap()).is_empty() {
         return Err("something was written".into());
     }
+    Ok(())
+}
+
+/// Whether `message` holds each of `names`.
+fn names_in(message: &str, names: &[&str]) -> Result<(), String> {
     for name in names {
-        if !ran.message().contains(name) {
-            return Err(format!("no {name:?} in {:?}", ran.message()));
+        if !message.contains(name) {
+            return Err(format!("no {name:?} in {message:?}"));
         }
     }
     Ok(())
+}
+
+/// Whether a run is a clear error for a trailer at fault: refused, by
+/// the exit table, with no panic, nothing written, and `names` in its
+/// message, which names `file` first, so that the names are looked for
+/// in the rest.
+fn clear_error(ran: &Ran, file: &Path, out: &Path, names: &[&str]) -> Result<(), String> {
+    refused(ran)?;
+    exits_by_table(ran)?;
+    no_panic(ran)?;
+    wrote_nothing(out)?;
+    names_in(&said(ran, file), names)
+}
+
+/// A run's error message without the path of `file`, which it names.
+fn said(ran: &Ran, file: &Path) -> String {
+    ran.message()
+        .replace(file.to_string_lossy().as_ref(), "FILE")
 }
 
 /// Whether probe's report warns `bad_trailer`.
@@ -905,26 +1082,36 @@ fn warns_bad_trailer(report: &Value) -> Result<(), String> {
 }
 
 /// Each trailer `InsvFault` (5.5) on `write_insv`'s files: probe warns
-/// `bad_trailer`, and `frame --reference` fails by the exit table with
-/// no picture and no panic, its message naming the record or field at
-/// fault. Under `BadMagic` probe doesn't call the file Insta360's, so
-/// frame never reads the trailer, and its refusal carries probe's
-/// warning; under `NoCalibration` it says "no calibration". The control:
-/// the file without a fault fails each check.
+/// `bad_trailer`, and `frame --reference` is a clear error ([`clear_error`]):
+/// refused, by the exit table, with no panic, nothing written, and a
+/// message naming the record or field at fault. Under `BadMagic` probe
+/// doesn't call the file Insta360's, so frame never reads the trailer,
+/// and its refusal carries probe's warning; under `NoCalibration` it
+/// says "no calibration".
+///
+/// Each check has a control that reaches it and fails it: the file
+/// without a fault, which renders, for `refused`, for `wrote_nothing`
+/// (its picture is there) and for the probe's and BadMagic's warnings;
+/// a fault's own refusal said to exit 2, where the table gives 1, and
+/// one said to be `internal`, for `exits_by_table`; a run that panics
+/// (`SPHERECUT_DEBUG_PANIC=main`, a debug build's switch) for
+/// `no_panic`; and for `names_in`, each fault's names against a sibling
+/// fault's message, which names another part.
 #[test]
 fn frame_insv_trailer_faults_are_clear_errors() {
     let _t = timed("frame_insv_trailer_faults_are_clear_errors");
     let dir = outputs("faults");
-    // Each fault, and the words that name what is at fault.
-    let faults: [(InsvFault, &[&str]); 4] = [
-        (InsvFault::TruncatedTrailer, &["tail"]),
-        (InsvFault::IndexSlotPastEnd, &["record 1"]),
-        (InsvFault::WrongTokenCount, &["calibration", "tokens"]),
-        (InsvFault::VarintOverflow, &["record 1", "varint"]),
+    // Each fault, the words that name what is at fault, and the sibling
+    // whose message lacks them.
+    let faults: [(InsvFault, &[&str], usize); 4] = [
+        (InsvFault::TruncatedTrailer, &["tail"], 3),
+        (InsvFault::IndexSlotPastEnd, &["record 1"], 2),
+        (InsvFault::WrongTokenCount, &["calibration", "tokens"], 1),
+        (InsvFault::VarintOverflow, &["record 1", "varint"], 0),
     ];
     let all: Vec<Option<InsvFault>> = faults
         .iter()
-        .map(|(f, _)| Some(*f))
+        .map(|(f, ..)| Some(*f))
         .chain([
             Some(InsvFault::BadMagic),
             Some(InsvFault::NoCalibration),
@@ -932,56 +1119,100 @@ fn frame_insv_trailer_faults_are_clear_errors() {
         ])
         .collect();
     let files = each(&all, |f| pair(*f));
-    let ran = each(&files, |file| {
-        let name = file.parent().unwrap().file_name().unwrap().to_owned();
-        let out = dir.join(&name).join("out.png");
-        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
-        (frame(file, &out, &["--reference", "--size", "64x32"]), out)
+    let (ran, panicked) = std::thread::scope(|s| {
+        // The run that panics, of the file without a fault.
+        let panicked = s.spawn(|| {
+            let out = dir.join("panicked.png");
+            let o = spherecut()
+                .env("SPHERECUT_DEBUG_PANIC", "main")
+                .arg("frame")
+                .arg(files[files.len() - 1])
+                .arg("-o")
+                .arg(&out)
+                .args(["--json", "--reference", "--size", "64x32"])
+                .output()
+                .unwrap();
+            Ran {
+                status: o.status.code(),
+                doc: document(&o.stdout),
+                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+            }
+        });
+        let ran = each(&files, |file| {
+            let name = file.parent().unwrap().file_name().unwrap().to_owned();
+            let out = dir.join(&name).join("out.png");
+            std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+            (frame(file, &out, &["--reference", "--size", "64x32"]), out)
+        });
+        (ran, panicked.join().unwrap())
     });
     let reports = probe(&files);
     let unfaulted = all.len() - 1;
-    for (k, (fault, names)) in faults.iter().enumerate() {
+    for (k, (fault, names, sibling)) in faults.iter().enumerate() {
         warns_bad_trailer(&reports[k]).unwrap_or_else(|e| panic!("{fault:?}: {e}"));
         let (r, out) = &ran[k];
-        clear_error(r, out, names).unwrap_or_else(|e| panic!("{fault:?}: {e}"));
+        clear_error(r, files[k], out, names).unwrap_or_else(|e| panic!("{fault:?}: {e}"));
         assert_eq!(r.code(), "not_equirect", "{fault:?}: {}", r.doc);
         eprintln!("{fault:?}: {}", r.message());
-        // The controls: the file without a fault.
-        let (r, out) = &ran[unfaulted];
+        // The control for the names: the sibling's message.
         must_fail(
-            &format!("{fault:?}'s probe check, unfaulted"),
-            warns_bad_trailer(&reports[unfaulted]),
-        );
-        must_fail(
-            &format!("{fault:?}'s frame check, unfaulted"),
-            clear_error(r, out, names),
+            &format!("{fault:?}'s names in {:?}'s message", faults[*sibling].0),
+            names_in(&said(&ran[*sibling].0, files[*sibling]), names),
         );
     }
+    // The controls for the rest.
+    let (clean, clean_out) = &ran[unfaulted];
+    must_fail(
+        "the probe check, unfaulted",
+        warns_bad_trailer(&reports[unfaulted]),
+    );
+    must_fail("refused, unfaulted", refused(clean));
+    must_fail("nothing written, unfaulted", wrote_nothing(clean_out));
+    let faulted = &ran[0].0;
+    let said_so = |status: i32, code: &str| {
+        let mut doc = faulted.doc.clone();
+        doc["error"]["code"] = code.into();
+        Ran {
+            status: Some(status),
+            doc,
+            stderr: faulted.stderr.clone(),
+        }
+    };
+    must_fail(
+        "the exit table, a refusal that exits 2",
+        exits_by_table(&said_so(2, faulted.code())),
+    );
+    must_fail(
+        "the exit table, internal",
+        exits_by_table(&said_so(1, "internal")),
+    );
+    assert_eq!(panicked.code(), "internal", "{}", panicked.doc);
+    must_fail("no panic, of a run that panicked", no_panic(&panicked));
     // BadMagic: not Insta360's to probe, which warns; frame's refusal
     // carries the warning.
     let k = faults.len();
     warns_bad_trailer(&reports[k]).unwrap();
     assert_ne!(reports[k]["camera"]["layout"], "insta360_dual_fisheye");
     let (r, out) = &ran[k];
-    clear_error(r, out, &[]).unwrap();
+    clear_error(r, files[k], out, &[]).unwrap();
     assert_eq!(r.code(), "not_equirect", "{}", r.doc);
     assert!(r.warnings().contains(&"bad_trailer"), "{}", r.doc);
     eprintln!("BadMagic: {}", r.message());
     must_fail(
         "BadMagic's warning, unfaulted",
-        if ran[unfaulted].0.warnings().contains(&"bad_trailer") {
+        if clean.warnings().contains(&"bad_trailer") {
             Ok(())
         } else {
             Err(())
         },
     );
-    // NoCalibration.
+    // NoCalibration, and its names in TruncatedTrailer's message.
     let (r, out) = &ran[k + 1];
-    clear_error(r, out, &["no calibration"]).unwrap();
+    clear_error(r, files[k + 1], out, &["no calibration"]).unwrap();
     eprintln!("NoCalibration: {}", r.message());
     must_fail(
-        "NoCalibration's check, unfaulted",
-        clear_error(&ran[unfaulted].0, &ran[unfaulted].1, &["no calibration"]),
+        "NoCalibration's names in TruncatedTrailer's message",
+        names_in(&said(&ran[0].0, files[0]), &["no calibration"]),
     );
 }
 

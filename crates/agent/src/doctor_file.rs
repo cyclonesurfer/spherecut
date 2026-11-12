@@ -420,6 +420,7 @@ mod tests {
                 geometry: Some(GeometryInfo {
                     status: status_word(known.geometry.status),
                     evidence: known.geometry.evidence.clone(),
+                    notice: known.notice,
                 }),
                 records: Some(Vec::new()),
                 table_refusal: known.refusal(),
@@ -470,6 +471,7 @@ mod tests {
             geometry: Some(GeometryInfo {
                 status: "settled",
                 evidence: "settled by a test".into(),
+                notice: None,
             }),
             ..CameraFile::default()
         };

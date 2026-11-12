@@ -137,7 +137,8 @@ pub mod codes {
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with
-    /// the file's spherical metadata, and the filter it could use.
+    /// the file's spherical metadata, the filter it could use, and the
+    /// geometry it stitched a camera's pair by.
     pub mod warnings {
         /// A stereo source: its left eye is rendered.
         pub const STEREO_LEFT_EYE: &str = "stereo_left_eye";
@@ -155,6 +156,11 @@ pub mod codes {
         /// render: the clip's media file is there but isn't the one added
         /// (its size or first MiB differs); it is exported anyway.
         pub const MEDIA_CHANGED: &str = "media_changed";
+        /// A camera's pair whose model has no entry in the built-in
+        /// table: it is stitched by the X5's, provisional, and the
+        /// message gives the table's notice ("geometry assumed from the
+        /// X5") and evidence.
+        pub const GEOMETRY_ASSUMED: &str = "geometry_assumed";
 
         pub const ALL: &[&str] = &[
             STEREO_LEFT_EYE,
@@ -163,6 +169,7 @@ pub mod codes {
             POSE_NOT_APPLIED,
             ANISOTROPY_UNAVAILABLE,
             MEDIA_CHANGED,
+            GEOMETRY_ASSUMED,
         ];
     }
 }
@@ -353,7 +360,8 @@ pub struct FrameResult {
 /// How `frame` stitched a camera's pair of lenses.
 #[derive(Debug, Clone, Serialize)]
 pub struct StitchInfo {
-    /// The table's geometry, or `--geometry`'s over it (status `user`).
+    /// The table's geometry, or `--geometry`'s over it (status `user`),
+    /// with the table's notice for the file's entry either way.
     pub geometry: GeometryInfo,
     /// The trailer's calibration, by the hash probe prints.
     pub calibration: String,
