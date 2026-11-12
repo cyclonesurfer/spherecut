@@ -3598,3 +3598,141 @@ fn pats_copies_match_testkit_pats() {
         "{e}"
     );
 }
+
+/// The geometry and the tune as a project file writes them (plan 11.1,
+/// M3.9): the placeholder extrinsics are 11.1's worked JSON word for
+/// word, the small enums snake_case words, a quarter turn and a sign
+/// whole numbers, the tz sign as `TzSign` stands (F021: "as_stored", until
+/// M3.6's translation convention takes its place), and every field reads
+/// back as it was written, the fitted forms and a V6 reading with both
+/// parts included. V6's prism names its first term `first`, not `at`,
+/// which the agents' wire form reads as a time.
+///
+/// Controls: a sign of 2 and a roll offset of 45 are refused, as is a
+/// key the type doesn't have.
+#[test]
+fn the_placeholder_writes_the_plans_json() {
+    use serde_json::json;
+    let _time = timed("the_placeholder_writes_the_plans_json");
+    let plan = json!({"stored": {"axes": ["y", "x", "z"], "order": ["yaw", "pitch", "roll"],
+        "signs": [1, 1, 1], "roll_offset": -90}});
+    let placeholder = Extrinsics::Stored(EulerConv::PLACEHOLDER);
+    assert_eq!(serde_json::to_value(placeholder).unwrap(), plan);
+    assert_eq!(
+        serde_json::from_value::<Extrinsics>(plan.clone()).unwrap(),
+        placeholder
+    );
+    let mut two = plan.clone();
+    two["stored"]["signs"][1] = json!(2);
+    must_fail("a sign of 2", serde_json::from_value::<Extrinsics>(two));
+    let mut offset = plan.clone();
+    offset["stored"]["roll_offset"] = json!(45);
+    must_fail(
+        "a roll offset of 45",
+        serde_json::from_value::<Extrinsics>(offset),
+    );
+    let mut extra = plan.clone();
+    extra["stored"]["twist"] = json!(0);
+    must_fail(
+        "a key EulerConv doesn't have",
+        serde_json::from_value::<Extrinsics>(extra),
+    );
+
+    // The X5's row (5.3) as written, word for word.
+    let x5 = Geometry {
+        binding: Binding::Reversed,
+        canvas: CanvasMap::C,
+        extrinsics: placeholder,
+        turn: TurnAxis::Y,
+        tz: TzSign::AsStored,
+        upright: QuarterTurn::Zero,
+        generation: Generation::V6,
+        v6: V6Reading::RADIAL_ONLY,
+        status: Status::Provisional,
+        evidence: "placeholder until the fit".into(),
+    };
+    let written = json!({
+        "binding": "reversed", "canvas": "c", "extrinsics": plan, "turn": "y",
+        "tz": "as_stored", "upright": 0, "generation": "v6",
+        "v6": {"tangential": null, "prism": null}, "status": "provisional",
+        "evidence": "placeholder until the fit",
+    });
+    assert_eq!(serde_json::to_value(&x5).unwrap(), written);
+    assert_eq!(serde_json::from_value::<Geometry>(written).unwrap(), x5);
+
+    // The other forms read back as written.
+    let fitted = Geometry {
+        binding: Binding::Direct,
+        canvas: CanvasMap::Fitted { scale: 1.0125 },
+        extrinsics: Extrinsics::Fitted {
+            relative: DQuat::from_rotation_y(PI) * DQuat::from_rotation_z(0.01),
+            translation_m: DVec3::new(-0.0045, 0.0006, -0.0315),
+        },
+        turn: TurnAxis::X,
+        tz: TzSign::Negated,
+        upright: QuarterTurn::Minus90,
+        generation: Generation::V6,
+        v6: V6Reading {
+            tangential: Some(Tangential {
+                pair: PairOrder::D6D5,
+                extension: true,
+            }),
+            prism: Some(Prism {
+                at: PrismAt::D9,
+                order: PrismOrder::Interleaved,
+            }),
+        },
+        status: Status::Fitted,
+        evidence: "a fit of the test's own".into(),
+    };
+    let v = serde_json::to_value(&fitted).unwrap();
+    assert_eq!(v["tz"], "negated");
+    assert_eq!(v["upright"], -90);
+    assert_eq!(v["canvas"], json!({"fitted": {"scale": 1.0125}}));
+    assert_eq!(
+        v["v6"],
+        json!({"tangential": {"pair": "d6_d5", "extension": true},
+            "prism": {"first": "d9", "order": "interleaved"}})
+    );
+    assert_eq!(serde_json::from_value::<Geometry>(v).unwrap(), fitted);
+    for turn in QuarterTurn::all() {
+        let v = serde_json::to_value(turn).unwrap();
+        assert_eq!(v, json!(turn.degrees() as i32));
+        assert_eq!(serde_json::from_value::<QuarterTurn>(v).unwrap(), turn);
+    }
+
+    // The tune, with q as 11.1 writes it, and a calibration block of each
+    // generation.
+    let tune = Tune::default();
+    let v = serde_json::to_value(tune).unwrap();
+    assert_eq!(v["q_per_m"], json!(0.5));
+    assert_eq!(
+        v["lenses"][1],
+        json!({"ypr_deg": [0.0, 0.0, 0.0], "centre_px": [0.0, 0.0], "radius_scale": 1.0,
+            "xi_delta": 0.0, "theta_max_deg": 100.0})
+    );
+    assert_eq!(serde_json::from_value::<Tune>(v).unwrap(), tune);
+    let block = |terms| LensCalib {
+        xi: 1.75,
+        fx: 2100.5,
+        fy: 2101.25,
+        cx: 2690.0,
+        cy: 2686.5,
+        ypr_deg: [0.25, -0.5, 90.125],
+        t_m: [-0.004, 0.0005, -0.0315],
+        terms,
+    };
+    for terms in [
+        CalibTerms::V3 {
+            k: [0.01, -0.002, 0.0003],
+            p: [0.0001, -0.0002],
+        },
+        CalibTerms::V6 {
+            d: std::array::from_fn(|i| i as f64 * 0.001 - 0.005),
+        },
+    ] {
+        let b = block(terms);
+        let v = serde_json::to_value(b).unwrap();
+        assert_eq!(serde_json::from_value::<LensCalib>(v).unwrap(), b);
+    }
+}
