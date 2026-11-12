@@ -22,6 +22,20 @@ use spherecut_synth::insv::{self as synth_insv, InsvFault};
 use spherecut_testkit::control::must_fail;
 use spherecut_testkit::pats;
 
+/// The pixel format doctor's text `t` names after `prefix` (`stream #0
+/// hevc 128x128 ` and the like): `write_insv`'s full-range 4:2:0, which
+/// FFmpeg 6.1's decoders call `yuvj420p` and an FFmpeg that drops the
+/// `yuvj` formats `yuv420p`, its range apart.
+fn full_range_420<'t>(t: &'t str, prefix: &str) -> &'t str {
+    let at = t
+        .find(prefix)
+        .unwrap_or_else(|| panic!("no {prefix:?} in:\n{t}"));
+    let rest = &t[at + prefix.len()..];
+    let pix = &rest[..rest.find(',').unwrap()];
+    assert!(pix == "yuvj420p" || pix == "yuv420p", "{pix:?} in:\n{t}");
+    pix
+}
+
 fn missing_node() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("no-such-dri")
@@ -250,10 +264,11 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
         "decodes on software, not on vaapi: no VA-API device: no render node at {}",
         missing_node().display()
     );
+    let pix = full_range_420(&t, "stream #0  hevc 128x128 ");
     let want = format!(
         "\nFile {}\n  Insta360 X5 v1.1.22, geometry provisional\n  can be stitched: yes, \
-         with its v6 calibration\n  stream #0  h264 128x128 yuv420p, {software}\n  \
-         stream #1  h264 128x128 yuv420p, {software}\n",
+         with its v6 calibration\n  stream #0  hevc 128x128 {pix}, {software}\n  \
+         stream #1  hevc 128x128 {pix}, {software}\n",
         master.path.display()
     );
     assert!(t.ends_with(&want), "no {want:?} at the end of:\n{t}");
@@ -271,15 +286,16 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
     for want in [
         "  can be stitched: no\n".to_string(),
         "  missing: a calibration: the trailer holds none that parses\n".into(),
-        format!("  stream #1  h264 128x128 yuv420p, {software}\n"),
+        format!("  stream #1  hevc 128x128 {pix}, {software}\n"),
     ] {
         assert!(t.contains(&want), "no {want:?} in:\n{t}");
     }
     let t = text(&lrv);
     must_fail("an LRV, stitchable", t.contains("can be stitched: yes"));
+    let lrv_pix = full_range_420(&t, "stream #0  h264 256x128 ");
     for want in [
         "  Insta360 X5 v1.1.22, geometry provisional\n  can be stitched: no\n".to_string(),
-        format!("  stream #0  h264 256x128 yuv420p, {software}\n"),
+        format!("  stream #0  h264 256x128 {lrv_pix}, {software}\n"),
         "  missing: two lens streams: an LRV holds both lenses in one picture, so stitch its \
          master\n"
             .into(),
@@ -359,7 +375,7 @@ fn doctor_file_says_whether_an_insv_can_be_stitched() {
     );
     for want in [
         "  can be stitched: no\n".to_string(),
-        format!("  stream #0  h264 128x128 yuv420p, {software}\n"),
+        format!("  stream #0  hevc 128x128 {pix}, {software}\n"),
         format!("  stream #1  not opened, doesn't decode: {error}\n"),
         format!("  missing: stream #1's pictures: {error}\n"),
     ] {

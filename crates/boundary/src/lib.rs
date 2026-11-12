@@ -23,12 +23,13 @@
 //! strings, through `testkit::pats::tokens` by the format notes' token
 //! layout (`docs/formats/insta360.md` §4.1), with its own code and never
 //! camera's parser, which these truths check (4.1 rule 2). Copies of
-//! Pat's numbers are left in synth (`src/insv.rs`'s tests and
-//! `src/lens.rs`: `PATS_V6_D`, `x5_like`'s focal lengths and terms),
-//! sphere (`tests/rig.rs`, `tests/unified.rs`), camera (`tests/strings.rs`,
-//! `tests/synth_insv.rs`, `tests/tier2_samples.rs`) and cli
-//! (`tests/insv/mod.rs`), each held to `testkit::pats` by a drift test of
-//! its own (M3.5's units (a), (b) and (d)).
+//! Pat's numbers are left in synth (`src/lens.rs`: `PATS_V6_D`,
+//! `x5_like`'s focal lengths and terms) and sphere (`tests/rig.rs`,
+//! `tests/unified.rs`), each held to `testkit::pats` by a drift test of
+//! its own (M3.5's units (a) and (b)). synth's `src/insv.rs` tests and
+//! camera's tests parse `testkit::pats` or take [`pats`], and cli's
+//! keep none: `tests/insv/mod.rs` takes Pat's calibrations from
+//! [`pats`] (M3.5's unit (d)).
 
 #![forbid(unsafe_code)]
 
