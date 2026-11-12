@@ -20,7 +20,7 @@ use spherecut_core::project::{
     Project, Source, file,
 };
 use spherecut_core::{Rational, Time};
-use spherecut_sphere::rig::{CanvasMap, Generation, LensTune, Rig, theta_frame};
+use spherecut_sphere::rig::{CanvasMap, Generation, LensTune, Rig, Tune, theta_frame};
 use spherecut_testkit::control::must_fail;
 
 /// When the suite's first test began.
@@ -711,7 +711,10 @@ fn both_at_85() -> Media {
 fn validate_at_each_bound_and_just_past() {
     let _time = timed("validate_at_each_bound_and_just_past");
     let rows = rows();
-    let began = Instant::now();
+    // The time spent in `validate`, over every row and over the rows that
+    // validate: only those run every rule and build the rig, as each edit
+    // of a camera project that passes does.
+    let (mut spent, mut spent_valid, mut valid) = (0.0, 0.0, 0);
     let mut wrong = Vec::new();
     for Row {
         name,
@@ -719,7 +722,14 @@ fn validate_at_each_bound_and_just_past() {
         expect,
     } in &rows
     {
+        let began = Instant::now();
         let got = validate(media.clone());
+        let took = began.elapsed().as_secs_f64();
+        spent += took;
+        if matches!(expect, Expect::Valid) {
+            spent_valid += took;
+            valid += 1;
+        }
         let right = match (expect, &got) {
             (Expect::Valid, Ok(())) => true,
             (Expect::Refused { code, field, rule }, Err(p)) => {
@@ -734,8 +744,12 @@ fn validate_at_each_bound_and_just_past() {
             wrong.push(format!("{name}: expected {expect:?}, got {got:?}"));
         }
     }
-    let each = began.elapsed().as_secs_f64() / rows.len() as f64;
-    eprintln!("{} rows, validate {:.3} ms a call", rows.len(), each * 1e3);
+    eprintln!(
+        "{} rows, validate {:.3} ms a call; the {valid} that validate {:.3} ms a call",
+        rows.len(),
+        spent / rows.len() as f64 * 1e3,
+        spent_valid / f64::from(valid) * 1e3
+    );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     assert_eq!(rows.len(), 159, "a row was added or dropped");
 
@@ -1017,9 +1031,11 @@ fn holes(rig: &Rig) -> usize {
 
 /// A tune under which some direction is covered by neither lens at the
 /// project's q is refused (the coverage rule): `Rig::weights` about the
-/// seam is never (0, 0) at tunes the rule passes, and is somewhere at
-/// tunes it refuses. Control: the rule with the angle between the lenses'
-/// axes left out passes a yawed tune whose hole the grid finds.
+/// seam is never (0, 0) at tunes the rule passes (the default, the
+/// fixture's, one lens at θ_max 85° and a 5° yaw at q 3.34), and is
+/// somewhere at tunes it refuses. Control: the rule with the angle
+/// between the lenses' axes left out passes a yawed tune whose hole the
+/// grid finds.
 #[test]
 fn the_coverage_rule_finds_the_holes() {
     let _time = timed("the_coverage_rule_finds_the_holes");
@@ -1032,7 +1048,12 @@ fn the_coverage_rule_finds_the_holes() {
             df.tune.q_per_m = 3.34;
         })
     };
-    let tunes: [(&str, Media, bool); 5] = [
+    let tunes: [(&str, Media, bool); 6] = [
+        (
+            "the default tune",
+            changed(|df| df.tune = Tune::default()),
+            true,
+        ),
         ("the fixture's tune", camera(), true),
         (
             "lens 0 at θ_max 85°",
