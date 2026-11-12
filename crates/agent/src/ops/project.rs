@@ -10,8 +10,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use spherecut_core::project::file::FileError;
 use spherecut_core::project::{
-    By, Clip, FolderError, History, INITIAL_VIEW, Kept, Key, Loaded, Media, Origin, Project,
-    ProjectFolder, ProjectLock, Step, file,
+    By, Clip, DualFisheye, FolderError, Gains, History, INITIAL_VIEW, Kept, Key, Loaded, Media,
+    Origin, Project, ProjectFolder, ProjectLock, Source, Step, file,
 };
 use spherecut_core::{FrameRate, Time, TimeSpec};
 
@@ -163,6 +163,12 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
 /// the GUI's, it takes footage whatever its metadata says, with a
 /// `not_equirect` warning in `doubts` when it isn't tagged a stitched
 /// equirect: looking at the project shows what a render makes of it.
+///
+/// A camera's two-lens file (M3 plan 11.5) is a `dual_fisheye` source of
+/// the calibration its trailer holds, with no such doubt, its `video` its
+/// first lens's stream. One with no calibration a stitch reads stays an
+/// equirect, with the doubt and a `no_calibration` warning: it shows as
+/// its lenses.
 pub(crate) fn probe_media(
     arg: &str,
     path: &Path,
@@ -172,7 +178,7 @@ pub(crate) fn probe_media(
     let opened = cx.roots.open_file(arg, path)?;
     let named = cx.roots.named(arg, path)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
-    let opts = still::Options {
+    let mut opts = still::Options {
         decoder: Decoder::Software,
         equirect: true,
         ..still::Options::default()
@@ -190,20 +196,69 @@ pub(crate) fn probe_media(
             e
         }
     };
-    let probed =
-        still::probe(opened.source(), &opts, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    let report = still::probe_report(opened.source(), &stop).map_err(|f| failed(&f))?;
+    // A camera's media is its first lens's stream, whose timing the clip
+    // follows.
+    opts.stream = report.camera_file.lenses.as_ref().map(|l| l.tracks[0]);
+    let probed = still::probed(report, &opts, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    let open = Still::open(opened.source(), &probed, None, &opts, &stop, &mut warnings)
+        .map_err(|f| failed(&f))?;
+    let info = open.info().clone();
+    drop(open);
+    let mut media = spherecut_media::project::project_media(opened.source(), &named, &info)
+        .map_err(|why| ToolError::new(codes::NO_VIDEO, why).at(arg))?;
+    cx.call.check()?;
+    let camera = camera_source(&opened, &probed.report);
+    if let Ok(Some(d)) = &camera
+        && d.tracks[0] != media.video.stream
+    {
+        return Err(ToolError::internal(format!(
+            "the camera's first lens is stream {}, not the {} opened",
+            d.tracks[0], media.video.stream
+        )));
+    }
+    match camera {
+        Ok(Some(d)) => {
+            media.source = Source::DualFisheye(Box::new(d));
+            return Ok(media);
+        }
+        Ok(None) if probed.report.camera_file.lenses.is_some() => {
+            doubts.push(no_calibration(None));
+        }
+        Ok(None) => {}
+        Err(why) => doubts.push(no_calibration(Some(&why))),
+    }
     if let Some(why) = still::equirect_doubt(&probed) {
         doubts.push(Warning::new(
             codes::NOT_EQUIRECT,
             format!("{why}; the project renders it as a stitched equirect all the same"),
         ));
     }
-    let open = Still::open(opened.source(), &probed, None, &opts, &stop, &mut warnings)
-        .map_err(|f| failed(&f))?;
-    let info = open.info().clone();
-    drop(open);
-    spherecut_media::project::project_media(opened.source(), &named, &info)
-        .map_err(|why| ToolError::new(codes::NO_VIDEO, why).at(arg))
+    Ok(media)
+}
+
+/// The two-lens source of the file `opened`, which `report` probed:
+/// media's [`camera_source`](spherecut_media::project::camera_source),
+/// its words for why not without the file's name, which begins them.
+fn camera_source(
+    opened: &crate::roots::Opened,
+    report: &spherecut_media::probe::ProbeReport,
+) -> Result<Option<DualFisheye>, String> {
+    let source = opened.source();
+    spherecut_media::project::camera_source(source, report).map_err(|why| {
+        let name = format!("{}: ", source.name.display());
+        why.strip_prefix(&name).map_or(why.clone(), str::to_owned)
+    })
+}
+
+/// The warning for a camera's file with no calibration a stitch reads,
+/// and camera's words for why when it has one that can't be read.
+fn no_calibration(why: Option<&str>) -> Warning {
+    let message = match why {
+        None => "no calibration: shown as its lenses".to_owned(),
+        Some(why) => format!("no calibration: shown as its lenses ({})", text::field(why)),
+    };
+    Warning::new("no_calibration", message)
 }
 
 /// The lock on `name` for one call: another call's is waited for
@@ -500,6 +555,7 @@ fn summary(folder: &ProjectFolder, name: &OsString, loaded: &Loaded, cx: &Ctx) -
                     "duration": time(m.video.duration),
                 },
                 "status": status,
+                "source": source(&m.source),
             });
             if let Some(why) = why {
                 v["why"] = json!(why);
@@ -570,6 +626,47 @@ fn summary(folder: &ProjectFolder, name: &OsString, loaded: &Loaded, cx: &Ctx) -
         Err(e) => tracing::warn!("mcp: the project's lock couldn't be read: {e}"),
     }
     out
+}
+
+/// A media's source as the summary gives it: its kind and, for a
+/// camera's two lenses, the camera (no serial: PLAN's A1 leaves it out
+/// unless asked), the calibration's hash, the geometry's binding, status
+/// and evidence with what the built-in table has since superseded it
+/// with (11.4), the tune, the gains' mode and the profile's name. Never
+/// the raw strings or an analysis's samples, and the camera's words and
+/// the project's text only as fields.
+fn source(s: &Source) -> Value {
+    let d = match s {
+        Source::Equirect {} => return json!({"kind": "equirect"}),
+        Source::EacPair(_) => return json!({"kind": "eac_pair"}),
+        Source::DualFisheye(d) => d,
+    };
+    let field = |t: &Option<String>| t.as_deref().map(text::field);
+    let g = &d.geometry;
+    let superseded = spherecut_media::project::superseded_by_table(d)
+        .map(|s| json!({"status": value(&s.status), "evidence": text::field(&s.evidence)}));
+    json!({
+        "kind": "dual_fisheye",
+        "camera": {
+            "make": field(&d.camera.make),
+            "model": field(&d.camera.model),
+            "firmware": field(&d.camera.firmware),
+        },
+        "calibration": {"hash": text::field(&d.calibration.hash)},
+        "geometry": {
+            "binding": value(&g.binding),
+            "status": value(&g.status),
+            "evidence": text::field(&g.evidence),
+            "superseded": superseded,
+        },
+        "tune": value(&d.tune),
+        "gains": {"mode": match d.gains {
+            Gains::Off {} => "off",
+            Gains::Fixed { .. } => "fixed",
+            Gains::Auto { .. } => "auto",
+        }},
+        "profile": d.profile.as_ref().map(|p| text::field(&p.name)),
+    })
 }
 
 /// Whether media `m` is there and the same, through the roots: a file

@@ -342,15 +342,15 @@ when a call gives `output` and `project` when it gives `create`, as are
 - **`project`**: a project (`.spherecut`, D47): with `file` alone, its
   summary (the `file` path the other calls name it by, `revision`, the
   sequence's `rate`, `output` and `export`, each media file with its
-  `status`, the clip's trim and its view tracks' key counts, the first
+  `status` and `source` (Projects), the clip's trim and its view tracks' key counts, the first
   markers, the targets, and the history's `undo` and `redo`, each with
   `agent_may` and why not). `part` gives one part: `sequence`, `view`
   (a clip's keys, at most 200 a track from `from`; `more` and
   `next_from` say where to go on), `markers`, `targets`, `history` (the
   last 50 steps, who made each), or `edits` (every op with what it does
   and an example that applies to the ids it names). `create: {media}`
-  makes a new project of one equirect video, refused `output_exists` if
-  anything is at `file`. A relative `file` is read under the first read
+  makes a new project of one video, an equirect or a camera's two
+  lenses (Projects), refused `output_exists` if anything is at `file`. A relative `file` is read under the first read
   root but made under the write root: the summary's `file` is the path
   to go on with.
 - **`edit`**: `edits` (up to 1000) applied in order to the project at
@@ -359,7 +359,8 @@ when a call gives `output` and `project` when it gives `create`, as are
   it as the agent's. Ops and fields are the project file's, ids are
   `project`'s, and times are as above, frames at the clip's media's rate
   (a target's own media for its path, the sequence's for `add_clip`'s
-  `at`). `add_media` takes only `path`, probed beneath the roots. The
+  `at`). `add_media` takes only `path`, probed beneath the roots, as
+  `set_source`'s camera form reads its media's file (Projects). The
   result gives the new `revision`, the ids each edit made, and whether
   the agent may undo it; `if_revision` refuses the edit
   (`stale_revision`) unless the project is still at that revision, and
@@ -490,6 +491,32 @@ is `not_top`: theirs to undo, in the window. The summary's `undo` and
 Edit menu names the client an agent's step came from ("Undo Set trim
 (claude-code)").
 
+**A camera's two lenses.** Each media in `project`'s summary has its
+`source`: `{"kind": "equirect"}` for a stitched video, or for a
+camera's file of two fisheye lenses (an Insta360 `.insv`)
+`{"kind": "dual_fisheye"}` with the `camera` (`make`, `model` and
+`firmware`, never the serial), the `calibration`'s `hash`, the
+`geometry`'s `binding`, `status` and `evidence` with `superseded` (the
+built-in table's `status` and `evidence` when the table now knows
+better than the project, else null), the `tune`, the `gains`' `mode`
+(`off`, `fixed` or `auto`) and the `profile`'s name or null. The
+calibration's raw strings and an `auto` gains' samples stay in the
+file, and the camera's words reach a result only as fields (Untrusted
+text). `create`, and `edit`'s `add_media`, make a camera's file a
+`dual_fisheye` source of the calibration its trailer holds; a file
+with none a stitch reads stays an equirect, shown as its lenses, with
+`not_equirect` and `no_calibration` warnings. Three ops change a
+source: `set_source`, `set_stitch` (the tune, the gains or both) and
+`set_caps` (the nadir and zenith caps). `set_source` takes
+`{"kind": "equirect"}`; the camera form
+`{"kind": "camera", "binding": "direct"}`, which the server makes
+whole from the media's file beneath the roots, as `create` would, with
+the geometry's binding the one given and its status `user` (`binding`
+may be left out); or a whole `dual_fisheye` source as the project file
+holds one, whose `calibration` must be the one its media's file holds
+(`calibration_mismatch` names the parts that differ). An agent never
+reads a calibration itself: the server does.
+
 **The window's actions that aren't edits**, and what an agent does
 instead:
 
@@ -615,7 +642,8 @@ and says what it left out or doubts. The tools' own codes:
 | `damaged` | `analyze` | The stream or its audio can't be read past the time the message gives; what comes after isn't measured |
 | `untimed_packets` | `analyze` | `timing`: packets without a timestamp, which aren't counted |
 | `result_cut` | `check` | Passed rules' messages, then advice, left out to fit 2 KiB (`CHECK_BYTES`) |
-| `not_equirect` | `project` | `create` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
+| `not_equirect` | `project`, `edit` | `create` or `add_media` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
+| `no_calibration` | `project`, `edit` | `create` or `add_media` with a camera's two-lens file that holds no calibration a stitch reads (or one camera can't read, its words after, in parentheses): the media stays an equirect, shown as its lenses |
 | `history_not_saved` | `edit`, `undo` | The project was saved but its history wasn't: `undo` can't take the step back |
 | `outside_trim` | `edit` | Keys or markers the edits left outside the clip's trim, which no render shows |
 | `sheet_left_out` | `compare` | `sheet` was asked for, but the video's shape leaves its tiles too small to label |
