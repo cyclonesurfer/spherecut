@@ -1091,6 +1091,20 @@ fn every_op_is_named_as_serde_writes_it() {
             id: 2,
             name: "x".into(),
         },
+        Edit::SetSource {
+            media: MediaId(1),
+            source: Source::default(),
+        },
+        Edit::SetStitch {
+            media: MediaId(1),
+            tune: Some(spherecut_sphere::rig::Tune::default()),
+            gains: Some(Gains::Off {}),
+            profile: None,
+        },
+        Edit::SetCaps {
+            media: MediaId(1),
+            caps: Caps::default(),
+        },
     ];
     assert_eq!(samples.len(), Edit::OPS.len());
     for (e, op) in samples.iter().zip(Edit::OPS) {

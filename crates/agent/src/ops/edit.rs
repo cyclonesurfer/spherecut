@@ -530,17 +530,20 @@ mod tests {
     use crate::reference;
 
     fn project() -> Project {
-        reference::project(reference::media(Path::new("/m/a.mp4")))
+        reference::project(reference::media(Path::new("/m/a.mp4")), None)
             .unwrap()
             .0
     }
 
-    /// Every example in the reference, in the file's form.
+    /// Every example in the reference, in the file's form, but those the
+    /// server expands by reading a file: `add_media`, probed by its path,
+    /// and `set_source`, whose camera form reads the file's calibration
+    /// (M3 plan 11.3).
     fn wired() -> Vec<(&'static str, Value)> {
         let p = project();
         reference::OPS
             .iter()
-            .filter(|o| o.op != "add_media")
+            .filter(|o| o.op != "add_media" && o.op != "set_source")
             .map(|o| {
                 let e = wire("edits[0]", reference::example(o), &p)
                     .unwrap_or_else(|e| panic!("{}: {e}", o.op));
@@ -559,6 +562,24 @@ mod tests {
         // And each variant serializes to the op it is listed as.
         for (op, v) in wired() {
             assert_eq!(v["op"], op);
+        }
+    }
+
+    /// The camera media the reference adds last is media 12, after
+    /// target 10 and its one key 11, and the stitch ops' examples name it;
+    /// without one, the project's one media is 1.
+    #[test]
+    fn the_stitch_examples_name_the_reference_camera() {
+        let camera = reference::media(Path::new("/m/cam.insv"));
+        let (p, _) =
+            reference::project(reference::media(Path::new("/m/a.mp4")), Some(camera)).unwrap();
+        let ids: Vec<u64> = p.media().iter().map(|m| m.id.0).collect();
+        assert_eq!(ids, [1, 12]);
+        assert_eq!(project().media().len(), 1);
+        for o in reference::OPS {
+            if matches!(o.op, "set_source" | "set_stitch" | "set_caps") {
+                assert_eq!(reference::example(o)["media"], 12, "{}", o.op);
+            }
         }
     }
 

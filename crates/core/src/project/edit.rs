@@ -9,13 +9,14 @@
 
 use serde::{Deserialize, Serialize};
 use spherecut_sphere::perspective::LensShape;
+use spherecut_sphere::rig::Tune;
 use thiserror::Error;
 
 use super::anim::{AimDir, Ease, Key, KeyTrack, Orient, OrientMode, Orientation, Target};
 use super::validate::{Code, Problem, check_fov};
 use super::{
-    Clip, ClipId, ExportSettings, KeyId, Marker, MarkerId, Media, MediaId, Output, Project,
-    SequenceId, TargetId, TrackId,
+    Caps, Clip, ClipId, ExportSettings, Gains, KeyId, Marker, MarkerId, Media, MediaId, Output,
+    ProfileRef, Project, SequenceId, Source, TargetId, TrackId,
 };
 use crate::time::{FrameRate, Time};
 
@@ -139,6 +140,30 @@ pub enum Edit {
         id: u64,
         name: String,
     },
+    /// Replace a media's whole source (M3 plan 11.3): stitching a camera
+    /// file that was added as equirect, a binding swapped, a measured
+    /// geometry taken, or a file tagged as equirect.
+    SetSource {
+        media: MediaId,
+        source: Source,
+    },
+    /// Replace a dual-fisheye media's whole tune, its whole gains, or
+    /// both (at least one), as `set_export` replaces the export settings;
+    /// `profile` names the stitch profile the tune came from.
+    SetStitch {
+        media: MediaId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tune: Option<Tune>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gains: Option<Gains>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<ProfileRef>,
+    },
+    /// Set a media's nadir and zenith caps (M3.20).
+    SetCaps {
+        media: MediaId,
+        caps: Caps,
+    },
 }
 
 /// A key for one of a view's three tracks.
@@ -250,11 +275,14 @@ impl Edit {
             Edit::SetTarget { .. } => "set_target",
             Edit::RemoveTarget { .. } => "remove_target",
             Edit::Rename { .. } => "rename",
+            Edit::SetSource { .. } => "set_source",
+            Edit::SetStitch { .. } => "set_stitch",
+            Edit::SetCaps { .. } => "set_caps",
         }
     }
 
     /// Every `op` name, in the enum's order.
-    pub const OPS: [&'static str; 21] = [
+    pub const OPS: [&'static str; 24] = [
         "add_media",
         "remove_media",
         "add_clip",
@@ -276,6 +304,9 @@ impl Edit {
         "set_target",
         "remove_target",
         "rename",
+        "set_source",
+        "set_stitch",
+        "set_caps",
     ];
 }
 
@@ -785,6 +816,9 @@ impl Project {
                 let id = *id;
                 let old = self.rename(id, name)?;
                 vec![Edit::Rename { id, name: old }]
+            }
+            Edit::SetSource { .. } | Edit::SetStitch { .. } | Edit::SetCaps { .. } => {
+                todo!("M3.9 unit (b)")
             }
         })
     }
