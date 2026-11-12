@@ -1288,9 +1288,13 @@ impl std::fmt::Debug for StillPair<'_> {
 /// calibration", and a trailer, record or string that can't be read says
 /// "can't be stitched" with probe's words and camera's, which name the
 /// part at fault.
+///
+/// It calls [`spherecut_core::may_block`] first, before it opens the
+/// file, so on the UI thread it panics in a debug build.
 pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
     /// The trailer's metadata record.
     const METADATA: u8 = 1;
+    spherecut_core::may_block("reading an Insta360 file's trailer");
     let file = src.name.display();
     let refuse = |code, message: String| about(failure(code, message), src.name);
     let none = |why: &str| {

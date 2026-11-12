@@ -2,7 +2,8 @@
 //! lossless synthetic `.insv` (`InsvSpec::rung3()`) through probe, the
 //! camera crate and `Still::open_pair` to the CPU reference, held to the
 //! planes synth coded and to rung 1's render of them, within 3 s
-//! (amendment 5), and `StillPair`'s seek and refusals.
+//! (amendment 5), and `StillPair`'s seek and refusals, and
+//! `pair_stitching`'s guard against the UI thread.
 //!
 //! Rung 1's picture is made here from `synth::rung`'s pair, synth's
 //! planes with no file between, and the boundary crate's `sphere_rig`;
@@ -28,6 +29,7 @@ use spherecut_agent::still::{
 };
 use spherecut_boundary::sphere_rig;
 use spherecut_core::TimeSpec;
+use spherecut_core::blocking::{OnBlock, mark_ui_thread_with};
 use spherecut_core::cancel::StopSource;
 use spherecut_core::video::VideoPlanes;
 use spherecut_media::Source;
@@ -565,4 +567,46 @@ fn open_pair_refuses_a_file_it_cant_stitch() {
         .render(&decoded, &[view], (64, 32), Look::default())
         .unwrap();
     assert_eq!((image.width, image.height), (64, 32));
+}
+
+/// What `f` panicked with, run on a thread of its own, marked as the UI
+/// thread when `marked`; `None` if it returned.
+fn panics_on(marked: bool, f: impl FnOnce() + Send + 'static) -> Option<String> {
+    std::thread::spawn(move || {
+        if marked {
+            mark_ui_thread_with(OnBlock::Panic);
+        }
+        f();
+    })
+    .join()
+    .err()
+    .map(|e| e.downcast_ref::<String>().cloned().unwrap_or_default())
+}
+
+/// `pair_stitching` calls `may_block` before it opens the file: on a
+/// thread marked as the UI thread it panics, even for a path that
+/// doesn't exist, which it would answer without reading a byte.
+#[test]
+fn pair_stitching_panics_on_the_ui_thread() {
+    let _t = timed("pair_stitching_panics_on_the_ui_thread");
+    let missing = tmp().join("missing.insv");
+    let call = |marked| {
+        let missing = missing.clone();
+        panics_on(marked, move || {
+            drop(still::pair_stitching(Source::path(&missing)));
+        })
+    };
+    let m = call(true).expect("pair_stitching returned on the UI thread");
+    assert!(
+        m.starts_with("reading an Insta360 file's trailer would block the UI thread"),
+        "{m}"
+    );
+    // The control: unmarked, the same call returns, media's failure for
+    // a file that isn't there.
+    must_fail(
+        "pair_stitching on a thread not marked",
+        call(false).is_some(),
+    );
+    let e = still::pair_stitching(Source::path(&missing)).unwrap_err();
+    assert_eq!(e.code, "not_found", "{e:?}");
 }
