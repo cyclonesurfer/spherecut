@@ -582,6 +582,13 @@ FFmpeg's warnings and errors about each file whatever it is set to.
   `--cache-mb`.
 - `SPHERECUT_ZERO_COPY`: `1` keeps VA-API's frames on the GPU too, `0`
   copies every frame (Rendering a frame, Decoding).
+- `SPHERECUT_VAAPI_DRAIN`: a diagnostic of the copy path's stall on AMD
+  GPUs, until a run on odin picks the default. With `download`, a
+  VA-API decoder that copies its frames to memory first waits for every
+  picture queued on the GPU, so that freeing the copy's staging buffer
+  stalls nothing else; with `picture` it waits after every packet too,
+  zero copy's decoders included. `off` or `0`, or unset, the default,
+  waits for nothing. The viewer and the playback benchmarks read it.
 - `SPHERECUT_EXPORT_DEVICE`: where the window's exports render. By
   default on a device of their own on the window's GPU (M2.10,
   DECISIONS D56); `window` puts them on the viewer's own device, as

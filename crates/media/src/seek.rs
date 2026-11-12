@@ -36,12 +36,13 @@ use spherecut_core::{FrameRate, Rational, Rounding, StopToken, Time};
 use crate::backend::{
     DamageCause, DecodePath, DecodeStats, DecoderEvent, Exactness, FallbackReason, HwKind,
     HwOutput, NextFrame, SeekCost, SeekMode, SeekOutcome, SourceMapping, Timing, Transfer,
-    VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo, ZERO_COPY_SURFACES, match_layers,
+    VaapiDrain, VideoDecode, VideoFrame, VideoRequest, VideoStreamInfo, ZERO_COPY_SURFACES,
+    match_layers,
 };
 #[cfg(feature = "fault-injection")]
 use crate::backend::{Fault, FaultPlan};
 use crate::color::{self, ColorContext};
-use crate::decode::{ErrorPlace, Received, VideoDecoder};
+use crate::decode::{Drained, ErrorPlace, Received, VideoDecoder};
 use crate::ffi::{self, FrameFields, Scaler};
 use crate::mp4::{self, FirstBox};
 use crate::spherical::{self, Projection, StereoMode};
@@ -382,6 +383,9 @@ pub struct FfmpegVideo {
     events: Vec<DecoderEvent>,
     stats: DecodeStats,
     decode_ms_total: f64,
+    /// What the decoder's VA-API drains had done when the last frame was
+    /// handed out, for that frame's share ([`DecodeStats::last_drain_ms`]).
+    drained: Drained,
     /// Frames are exported as DMA-BUFs rather than downloaded
     /// ([`HwOutput::DrmPrime`] on VA-API), or left on the Vulkan device
     /// ([`HwOutput::Vulkan`]), and why the last one that wasn't, once
@@ -510,6 +514,11 @@ impl FfmpegVideo {
                 DecodePath::Hardware { kind: *kind },
             ),
         };
+        let device = match &on {
+            On::Device { kind, .. } => Some(*kind),
+            _ => None,
+        };
+        dec.set_vaapi_drain(drain_on(req.vaapi_drain, device, drm_prime));
         // A fault is injected where a device decodes, or stands in.
         #[cfg(feature = "fault-injection")]
         let mut injection = match (&decode_path, req.fault) {
@@ -670,6 +679,7 @@ impl FfmpegVideo {
             events,
             stats: DecodeStats::default(),
             decode_ms_total: 0.0,
+            drained: Drained::default(),
             drm_prime,
             vulkan_out,
             not_exported: None,
@@ -755,9 +765,12 @@ impl FfmpegVideo {
         #[cfg(feature = "fault-injection")]
         self.inject(None, None)?;
         loop {
+            let drained = self.dec.drained().ms;
             let started = Instant::now();
             let got = self.dec.receive(Some(stop));
-            let ms = started.elapsed().as_secs_f64() * 1000.0;
+            // Without the drains after the packets sent.
+            let ms = (started.elapsed().as_secs_f64() * 1000.0 - (self.dec.drained().ms - drained))
+                .max(0.0);
             // A device that can't open another decoder has failed; its
             // stand-in fails so.
             #[cfg(feature = "fault-injection")]
@@ -1176,6 +1189,7 @@ impl FfmpegVideo {
         self.inject(Some(raw.made), Some(Fault::Download))?;
         // Only now off the device: what a seek decoded on the way stayed
         // there. Exported, it stays on it.
+        let drained = self.dec.drained().ms;
         let started = Instant::now();
         let mapped = match raw.on_device && self.drm_prime {
             true => self.export(&raw.frame),
@@ -1287,7 +1301,10 @@ impl FfmpegVideo {
             let picture = match raw.on_device {
                 true => {
                     let down = self.dec.download(&picture)?;
-                    self.stats.last_download_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    // The copy alone, without the drain before it.
+                    self.stats.last_download_ms = (started.elapsed().as_secs_f64() * 1000.0
+                        - (self.dec.drained().ms - drained))
+                        .max(0.0);
                     down
                 }
                 false => picture,
@@ -1323,6 +1340,11 @@ impl FfmpegVideo {
         self.current_anchored = raw.anchored;
         self.current_last_tie = next_pts.is_some_and(|n| n != raw.pts);
         self.stats.frames_returned += 1;
+        // The drains since the frame before.
+        let drained = self.dec.drained();
+        self.stats.last_drain_ms = drained.ms - self.drained.ms;
+        self.stats.last_drain_waited = drained.waited - self.drained.waited;
+        self.drained = drained;
         let frame = Arc::new(out);
         self.current = Some(frame.clone());
         Ok(frame)
@@ -2223,6 +2245,7 @@ impl VideoDecode for FfmpegVideo {
 
     fn stats(&self) -> DecodeStats {
         let frames = self.dec.frames_decoded();
+        let drained = self.dec.drained();
         DecodeStats {
             frames_decoded: frames,
             mean_decode_ms: if frames > 0 {
@@ -2232,6 +2255,11 @@ impl VideoDecode for FfmpegVideo {
             },
             download_buffers: self.dec.download_buffers(),
             reopens: self.dec.reopens(),
+            drains: drained.drains,
+            drain_waited: drained.waited,
+            drain_errors: drained.errors,
+            drain_overflow: drained.overflow,
+            drain_unavailable: drained.unavailable,
             ..self.stats
         }
     }
@@ -2372,6 +2400,19 @@ impl StreamFacts {
         rate.and_then(|r| r.frame_duration().to_pts(tb, Rounding::Nearest).ok())
             .filter(|&t| t > 0)
             .unwrap_or(1)
+    }
+}
+
+/// The drain a decoder on `device` (`None` in software) runs when
+/// `mode` is asked for: only a VA-API device drains, and on path A
+/// (`exported`: its frames exported as DMA-BUFs, [`HwOutput::DrmPrime`])
+/// only [`VaapiDrain::Picture`] does, since an exported frame isn't
+/// downloaded.
+fn drain_on(mode: VaapiDrain, device: Option<HwKind>, exported: bool) -> VaapiDrain {
+    match (mode, device) {
+        (VaapiDrain::Download, Some(HwKind::VaApi)) if exported => VaapiDrain::Off,
+        (mode, Some(HwKind::VaApi)) => mode,
+        _ => VaapiDrain::Off,
     }
 }
 
@@ -2610,6 +2651,8 @@ pub fn seek_frame(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use spherecut_testkit::control::must_fail;
+
     use super::*;
     use crate::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
     use crate::ff::ffi::AVPixelFormat as P;
@@ -2796,5 +2839,41 @@ mod tests {
         assert_eq!(snap(r(30, 1)), Some(FrameRate::FPS_30));
         assert_eq!(snap(r(125, 2)), None);
         assert_eq!(snap(r(5994, 100)), None);
+    }
+
+    /// A drain runs only on a VA-API device, and on path A (frames
+    /// exported as DMA-BUFs) only per picture: an exported frame isn't
+    /// downloaded, so there is no download to drain before.
+    ///
+    /// Control: a rule that keeps `Download` on path A fails the table.
+    #[test]
+    fn a_drain_runs_only_on_vaapi_and_on_path_a_only_per_picture() {
+        use VaapiDrain::{Download, Off, Picture};
+        let (va, vk) = (Some(HwKind::VaApi), Some(HwKind::Vulkan));
+        let table = [
+            (Off, va, false, Off),
+            (Off, va, true, Off),
+            (Download, va, false, Download),
+            (Download, va, true, Off),
+            (Picture, va, false, Picture),
+            (Picture, va, true, Picture),
+            (Download, vk, false, Off),
+            (Picture, vk, false, Off),
+            (Download, None, false, Off),
+            (Picture, None, false, Off),
+        ];
+        let holds = |rule: fn(VaapiDrain, Option<HwKind>, bool) -> VaapiDrain| {
+            table
+                .iter()
+                .all(|&(mode, device, exported, want)| rule(mode, device, exported) == want)
+        };
+        assert!(holds(drain_on));
+        must_fail(
+            "a rule that drains before downloads on path A",
+            holds(|mode, device, _| match device {
+                Some(HwKind::VaApi) => mode,
+                _ => Off,
+            }),
+        );
     }
 }

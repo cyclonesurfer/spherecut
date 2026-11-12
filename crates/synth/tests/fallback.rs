@@ -21,15 +21,16 @@ use spherecut_core::FrameRate;
 use spherecut_core::video::VideoPlanes;
 use spherecut_core::{StopSource, StopToken, Time};
 use spherecut_media::backend::{
-    AudioRequest, DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, FallbackReason, Fault,
-    FaultPlan, FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoDecode,
-    VideoFrame, VideoRequest,
+    AudioRequest, DecodeMode, DecodePath, DecodeStats, DecoderEvent, Exactness, Fallback,
+    FallbackReason, Fault, FaultPlan, FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode,
+    SeekOutcome, VaapiDrain, VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::decode::{VideoDecoder, open_hw_device};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_media::{HwDevice, HwRefusal, MediaError};
 use spherecut_synth::media::{self, Codec, Gop, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// A test's own directory, removed with what it holds when dropped, so
 /// also when the test fails.
@@ -765,5 +766,69 @@ fn a_render_node_that_is_not_there_falls_back_with_the_reason() {
     assert_eq!(
         backend.render_node().path,
         Path::new("/nonexistent/renderD128")
+    );
+}
+
+/// Whether `s` holds nothing of a VA-API drain.
+fn no_drain(s: &DecodeStats) -> bool {
+    s.last_drain_ms == 0.0
+        && s.last_drain_waited == 0
+        && s.drains == 0
+        && s.drain_waited == 0
+        && s.drain_errors == 0
+        && s.drain_overflow == 0
+        && !s.drain_unavailable
+}
+
+/// A decode asked to drain VA-API's queue drains nothing where no VA-API
+/// device decodes: in software, on the software stand-in for VA-API, and
+/// on lavapipe's Vulkan device (which falls back to software at open). It
+/// hands out the frames a decode not asked to does.
+///
+/// Control: the stats of a decode that drained fail the same check.
+#[test]
+fn a_drain_asked_where_no_vaapi_device_decodes_does_nothing() {
+    let dir = TempDir::new("drain");
+    let path = clip(&dir, "h264.mp4", Codec::H264);
+    let want = sequential(&path);
+    let never = StopToken::never();
+    for mode in [VaapiDrain::Download, VaapiDrain::Picture] {
+        let req = VideoRequest {
+            vaapi_drain: mode,
+            ..VideoRequest::default()
+        };
+        let stand_in = FaultBackend::stand_in(u64::MAX, Fault::Decode, Fallback::Software);
+        let lavapipe = VideoRequest {
+            vaapi_drain: mode,
+            ..on_lavapipe(Fallback::Software)
+        };
+        let decoders = [
+            ("software", FfmpegBackend::new().open_video(&path, &req)),
+            ("the stand-in", stand_in.open_video(&path, &req)),
+            (
+                "lavapipe",
+                FfmpegBackend::new().open_video(&path, &lavapipe),
+            ),
+        ];
+        for (on, d) in decoders {
+            let mut d = d.unwrap();
+            let mut got = Vec::new();
+            while let NextFrame::Frame(f) = d.next_frame(&never).unwrap() {
+                got.push(Seen::of(&f));
+                let stats = d.stats();
+                assert!(no_drain(&stats), "{on}, {mode:?}: {stats:?}");
+            }
+            assert_eq!(got, want, "{on}, {mode:?}");
+        }
+    }
+    must_fail(
+        "the stats of a decode that drained",
+        no_drain(&DecodeStats {
+            last_drain_ms: 0.2,
+            last_drain_waited: 1,
+            drains: 1,
+            drain_waited: 1,
+            ..DecodeStats::default()
+        }),
     );
 }

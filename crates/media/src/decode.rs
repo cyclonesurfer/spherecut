@@ -38,9 +38,11 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{Rational, StopToken, Time};
 
-use crate::backend::DamageCause;
+use crate::backend::{DamageCause, VaapiDrain};
 use crate::doctor::{VulkanDevice, VulkanDeviceType};
-use crate::ffi::{self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError};
+use crate::ffi::{
+    self, DownloadPool, HwDevice, HwError, HwRefusal, OpenDecoderError, SurfaceSet, VaSyncSurface,
+};
 use crate::hwprobe::{self, VkDevice, device_label, vk_device_type};
 use crate::nal::NalFormat;
 use crate::{MediaError, TooLarge, ff, init};
@@ -245,6 +247,38 @@ pub struct VideoDecoder {
     skip_sent: u64,
     /// What device frames are downloaded into.
     pool: DownloadPool,
+    /// The VA-API drain this decoder runs, once
+    /// [`set_vaapi_drain`](Self::set_vaapi_drain) has set one up.
+    drain: Option<Drain>,
+    /// What its drains have done since opening.
+    drained: Drained,
+}
+
+/// A VA-API decoder's drain ([`VaapiDrain`]): the surfaces of the frames
+/// it has handed out, which each drain syncs with libva's `sync`.
+#[derive(Debug)]
+struct Drain {
+    /// [`VaapiDrain::Download`] or [`VaapiDrain::Picture`].
+    mode: VaapiDrain,
+    sync: VaSyncSurface,
+    surfaces: SurfaceSet,
+}
+
+/// What a decoder's VA-API drains have done since it was opened, summed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Drained {
+    /// Drains run.
+    pub drains: u64,
+    /// Milliseconds they took.
+    pub ms: f64,
+    /// Surfaces found not yet ready ([`ffi::WAITED`]).
+    pub waited: u64,
+    /// Syncs that failed.
+    pub errors: u64,
+    /// Surfaces forgotten to keep [`ffi::MAX_SURFACES`].
+    pub overflow: u64,
+    /// A drain was asked for, and libva's `vaSyncSurface` isn't loaded.
+    pub unavailable: bool,
 }
 
 /// How [`VideoDecoder::with_options`] sets up the decoder.
@@ -542,7 +576,60 @@ impl VideoDecoder {
             skip_before: None,
             skip_sent: 0,
             pool: DownloadPool::default(),
+            drain: None,
+            drained: Drained::default(),
         })
+    }
+
+    /// Run `mode`'s drain from now on, when this decoder is on a VA-API
+    /// device and `mode` isn't [`VaapiDrain::Off`]: before each download
+    /// the decoder waits for the pictures queued on the device, by
+    /// syncing every surface it has handed out a frame of; with
+    /// [`VaapiDrain::Picture`], after each packet sent too. Otherwise, and
+    /// when libva's `vaSyncSurface` isn't loaded (said in
+    /// [`drained`](Self::drained)), nothing drains; with `Off` nothing is
+    /// even looked up.
+    pub(crate) fn set_vaapi_drain(&mut self, mode: VaapiDrain) {
+        self.drain = None;
+        if mode == VaapiDrain::Off || !self.hw.as_ref().is_some_and(|h| h.is_vaapi()) {
+            return;
+        }
+        match ffi::va_sync_surface() {
+            Some(sync) => {
+                self.drain = Some(Drain {
+                    mode,
+                    sync,
+                    surfaces: SurfaceSet::default(),
+                });
+            }
+            None => self.drained.unavailable = true,
+        }
+    }
+
+    /// What its VA-API drains have done since opening.
+    pub(crate) fn drained(&self) -> Drained {
+        Drained {
+            overflow: self.drain.as_ref().map_or(0, |d| d.surfaces.overflow()),
+            ..self.drained
+        }
+    }
+
+    /// Drain, when a drain is set up: before a download, or with
+    /// `packet` after a packet sent, which only
+    /// [`VaapiDrain::Picture`] drains at.
+    fn run_drain(&mut self, packet: bool) {
+        let Some(d) = &mut self.drain else {
+            return;
+        };
+        if packet && d.mode != VaapiDrain::Picture {
+            return;
+        }
+        let out = ffi::drain_vaapi(&mut d.surfaces, d.sync);
+        let sum = &mut self.drained;
+        sum.drains += 1;
+        sum.ms += out.ms;
+        sum.waited += out.waited;
+        sum.errors += out.errors;
     }
 
     pub fn width(&self) -> u32 {
@@ -614,6 +701,11 @@ impl VideoDecoder {
                     self.first_key
                         .get_or_insert_with(|| ffi::frame_fields(&frame).key);
                     self.check_on_device(&frame)?;
+                    if let Some(d) = &mut self.drain
+                        && let Some(s) = ffi::vaapi_surface(&frame)
+                    {
+                        d.surfaces.note(&s);
+                    }
                     return Ok(Received::Frame(frame));
                 }
                 Err(ff::Error::Eof) => {
@@ -669,7 +761,8 @@ impl VideoDecoder {
                     self.errors_since_sent = 0;
                     self.dec
                         .send_packet(&pkt)
-                        .map_err(|e| self.decode_error(e))?
+                        .map_err(|e| self.decode_error(e))?;
+                    self.run_drain(true);
                 }
                 None => {
                     if let Err(e) = self.dec.send_eof() {
@@ -819,6 +912,10 @@ impl VideoDecoder {
             .ok_or_else(|| err(&self.path, "reopening the decoder", "the stream is gone"))?;
         self.dec = open_codec(&self.path, par, self.hw.as_deref(), self.options)?;
         ffi::skip_nonref(&mut self.dec, self.skip_before.is_some());
+        // The new decoder's surfaces are another frames context's.
+        if let Some(d) = &mut self.drain {
+            d.surfaces.clear();
+        }
         self.sent = false;
         self.reopens += 1;
         tracing::debug!(
@@ -1091,6 +1188,7 @@ impl VideoDecoder {
         &mut self,
         frame: &ff::frame::Video,
     ) -> Result<ff::frame::Video, MediaError> {
+        self.run_drain(false);
         ffi::download_into_pool(&mut self.pool, frame)
             .map_err(|e| self.fail_device(&format!("copying a frame from it: {e}")))
     }

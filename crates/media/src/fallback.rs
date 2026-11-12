@@ -123,6 +123,11 @@ struct Before {
     decode_ms_total: f64,
     download_buffers: u64,
     reopens: u64,
+    drains: u64,
+    drain_waited: u64,
+    drain_errors: u64,
+    drain_overflow: u64,
+    drain_unavailable: bool,
 }
 
 /// A hardware decode that falls back to software if the device fails on
@@ -161,6 +166,11 @@ impl FallbackVideo {
                 + s.mean_decode_ms * s.frames_decoded as f64,
             download_buffers: self.before.download_buffers + s.download_buffers,
             reopens: self.before.reopens + s.reopens,
+            drains: self.before.drains + s.drains,
+            drain_waited: self.before.drain_waited + s.drain_waited,
+            drain_errors: self.before.drain_errors + s.drain_errors,
+            drain_overflow: self.before.drain_overflow + s.drain_overflow,
+            drain_unavailable: self.before.drain_unavailable || s.drain_unavailable,
         };
         self.inner = sw;
         Ok(())
@@ -219,6 +229,11 @@ impl VideoDecode for FallbackVideo {
             mean_decode_ms: if frames > 0 { ms / frames as f64 } else { 0.0 },
             download_buffers: self.before.download_buffers + s.download_buffers,
             reopens: self.before.reopens + s.reopens,
+            drains: self.before.drains + s.drains,
+            drain_waited: self.before.drain_waited + s.drain_waited,
+            drain_errors: self.before.drain_errors + s.drain_errors,
+            drain_overflow: self.before.drain_overflow + s.drain_overflow,
+            drain_unavailable: self.before.drain_unavailable || s.drain_unavailable,
             ..s
         }
     }
