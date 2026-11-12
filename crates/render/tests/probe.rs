@@ -47,13 +47,33 @@ fn timed(r: &ProbeReport) -> (Comparison<usize>, Comparison<f64>) {
     )
 }
 
+/// Clears of a 64 MiB buffer to a submission that takes `busy` or more
+/// on this host: one submission of 16 timed after one of a clear, which
+/// faults the buffer's pages in.
+fn clears_for(gpu: &Gpu, big: &wgpu::Buffer, busy: Duration) -> u32 {
+    let submit = |clears: u32| {
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        for _ in 0..clears {
+            enc.clear_buffer(big, 0, None);
+        }
+        let t = Instant::now();
+        gpu.queue.submit([enc.finish()]);
+        gpu.wait_for_submitted().unwrap();
+        t.elapsed()
+    };
+    submit(1);
+    let each = submit(16) / 16;
+    (busy.as_secs_f64() / each.as_secs_f64().max(1e-6)).ceil() as u32
+}
+
 /// Every 4 ms for 2 s on an idle queue: 300 jobs or more, each submitted
 /// within the run and listed in order, all done by the stop, and the
 /// p99 under 100 ms.
 ///
 /// Controls: every 20 ms, the same 2 s times too few jobs; and with
-/// another thread keeping the queue busy with large clears, which the
-/// probe's jobs wait behind, the same p99 is 100 ms or more.
+/// another thread keeping the queue busy with clears sized to take
+/// 300 ms a submission on this host, which the probe's jobs wait behind,
+/// the same p99 is 100 ms or more.
 #[test]
 fn the_probe_times_a_tiny_job_every_period() {
     let gpu = common::gpu();
@@ -92,25 +112,26 @@ fn the_probe_times_a_tiny_job_every_period() {
     assert!(n > 50, "{n} jobs every 20 ms");
 
     // Control: the queue kept busy by another thread, a submission at a
-    // time, each clearing 64 MiB 48 times over (100 ms or more on
-    // lavapipe, which runs a submission on the thread that submits it,
-    // so the probe's submit waits there too).
+    // time, each clearing 64 MiB as many times over as takes 300 ms on
+    // this host (lavapipe runs a submission on the thread that submits
+    // it, so the probe's submit waits there too).
+    let big = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("busy"),
+        size: 64 << 20,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let clears = clears_for(gpu, &big, Duration::from_millis(300));
     let stop = Arc::new(AtomicBool::new(false));
     let busy = {
         let gpu = gpu.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let big = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("busy"),
-                size: 64 << 20,
-                usage: wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
             let mut jobs = 0u32;
             let mut job_took = Duration::ZERO;
             while !stop.load(Ordering::Acquire) {
                 let mut enc = gpu.device.create_command_encoder(&Default::default());
-                for _ in 0..48 {
+                for _ in 0..clears {
                     enc.clear_buffer(&big, 0, None);
                 }
                 let t = Instant::now();
@@ -126,11 +147,15 @@ fn the_probe_times_a_tiny_job_every_period() {
     stop.store(true, Ordering::Release);
     let (jobs, job_took) = busy.join().unwrap();
     eprintln!(
-        "behind {jobs} busy jobs (the longest {job_took:?}): {} jobs, p50 {:.2} ms, p99 {:.2} \
-         ms",
+        "behind {jobs} busy jobs of {clears} clears (the longest {job_took:?}): {} jobs, p50 \
+         {:.2} ms, p99 {:.2} ms",
         loaded.samples.len(),
         quantile_ms(&loaded, 0.5),
         quantile_ms(&loaded, 0.99)
+    );
+    assert!(
+        job_took >= Duration::from_millis(150),
+        "the busy jobs took at most {job_took:?}: too short to hold the probe up"
     );
     let held = must_fail("a probe behind a busy queue", timed(&loaded).1);
     assert!(held >= 100.0, "{held}");
