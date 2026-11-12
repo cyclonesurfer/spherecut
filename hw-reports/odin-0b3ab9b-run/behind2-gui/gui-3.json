@@ -1,0 +1,240 @@
+{
+  "schema": "spherecut.smoke/1",
+  "ok": true,
+  "result": {
+    "version": "0.1.0",
+    "clip": "/home/pat/spherecut/target/hw-gui/media/sync-flash-beep-2997.mp4",
+    "seconds": 20.0,
+    "played_s": 10.204380013,
+    "ended": true,
+    "asked": {
+      "decoder": null,
+      "decode_floor_ms": null,
+      "control_ui_waits": false
+    },
+    "adapter": {
+      "name": "AMD Radeon RX 7600 (RADV NAVI33)",
+      "vendor": 4098,
+      "device": 29824,
+      "device_type": "DiscreteGpu",
+      "driver": "radv",
+      "driver_info": "Mesa 26.2.5",
+      "cpu": false
+    },
+    "surface_format": "Bgra8Unorm",
+    "scale": 1.5,
+    "native_scale": 1.0,
+    "window": [
+      1912,
+      1016
+    ],
+    "viewer": [
+      1412,
+      755
+    ],
+    "refresh_hz": 60.0,
+    "raw_view": false,
+    "streams": [
+      {
+        "format": "h264 1024×512 nv12 limited/709",
+        "fps": 29.97002997002997,
+        "decoder": "vulkan",
+        "fell_back_from": null,
+        "decode": "Vulkan"
+      }
+    ],
+    "lock": null,
+    "ui": {
+      "frames": 610,
+      "passes": 610,
+      "expected": 612.26280078,
+      "presented": 0.9963042001292299,
+      "p50": 16.663973,
+      "p95": 16.90672,
+      "p99": 17.914965,
+      "max": 29.822247,
+      "hitches": 2,
+      "work": {
+        "samples": 610,
+        "missed": 0,
+        "p50": 1.005178,
+        "p95": 1.280697,
+        "p99": 1.4471189,
+        "max": 2.7459
+      }
+    },
+    "frames": {
+      "shown": 299,
+      "dropped": 0,
+      "skipped": 0,
+      "decode_dropped": 0,
+      "unpaired": 0,
+      "pair_resyncs": 0,
+      "expected": 305.8255748151848
+    },
+    "settled": {
+      "from_s": 1.016320727,
+      "to_s": 10.204380013,
+      "ui": {
+        "frames": 549,
+        "passes": 549,
+        "expected": 551.28355716,
+        "presented": 0.9958577448386743,
+        "p50": 16.663973,
+        "p95": 16.909883,
+        "p99": 18.084911,
+        "max": 29.822247
+      },
+      "frames": {
+        "shown": 274,
+        "dropped": 0,
+        "skipped": 0,
+        "decode_dropped": 0,
+        "unpaired": 0,
+        "pair_resyncs": 0,
+        "expected": 275.36641216783215
+      }
+    },
+    "late": [
+      {
+        "at_s": 3.235020671,
+        "interval_ms": 27.644314,
+        "work_ms": 1.1402539,
+        "slowest": {}
+      },
+      {
+        "at_s": 8.217175187,
+        "interval_ms": 29.861961,
+        "work_ms": 1.0658429,
+        "slowest": {
+          "decode": 0.076584,
+          "download": 0.000531,
+          "render_gpu": 0.15456,
+          "upload_cpu": 0.49422798,
+          "upload_gpu": 0.21224
+        }
+      }
+    ],
+    "stages": {
+      "convert": {
+        "samples": 0,
+        "missed": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "decode": {
+        "samples": 283,
+        "missed": 0,
+        "p50": 0.102663,
+        "p95": 0.195507,
+        "p99": 0.241214,
+        "max": 0.29762
+      },
+      "download": {
+        "samples": 283,
+        "missed": 0,
+        "p50": 0.001112,
+        "p95": 0.002735,
+        "p99": 0.003526,
+        "max": 0.017393
+      },
+      "pair_wait": {
+        "samples": 0,
+        "missed": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null,
+        "max": null
+      },
+      "render_cpu": {
+        "samples": 301,
+        "missed": 0,
+        "p50": 0.022181999,
+        "p95": 0.028233001,
+        "p99": 0.060213,
+        "max": 0.193614
+      },
+      "render_gpu": {
+        "samples": 300,
+        "missed": 0,
+        "p50": 0.15556,
+        "p95": 0.15828,
+        "p99": 0.16,
+        "max": 0.17028
+      },
+      "shown_interval": {
+        "samples": 298,
+        "missed": 0,
+        "p50": 33.331593,
+        "p95": 33.56894,
+        "p99": 35.72606,
+        "max": 48.21404
+      },
+      "ui_frame": {
+        "samples": 610,
+        "missed": 0,
+        "p50": 16.663973,
+        "p95": 16.90672,
+        "p99": 17.914965,
+        "max": 29.822247
+      },
+      "upload_cpu": {
+        "samples": 297,
+        "missed": 0,
+        "p50": 0.519957,
+        "p95": 1.032531,
+        "p99": 3.8999178,
+        "max": 4.0946937
+      },
+      "upload_gpu": {
+        "samples": 297,
+        "missed": 0,
+        "p50": 0.20204,
+        "p95": 0.23184,
+        "p99": 0.51776,
+        "max": 0.536
+      }
+    },
+    "av": {
+      "median_ms": 0.0,
+      "p95_abs_ms": 0.0,
+      "samples": 608
+    },
+    "audio": {
+      "host": "PulseAudio",
+      "device": "EDIFIER R1700BTs",
+      "rate": 48000,
+      "latency_ms": 181.867,
+      "underruns": 0,
+      "on_system_clock": false
+    },
+    "cache": {
+      "budget": 8589934592,
+      "bytes": 0,
+      "frames": 16
+    },
+    "slots": {
+      "active": 4,
+      "dead": 0
+    },
+    "memory": {
+      "rss": 162226176,
+      "gpu_allocated": 20056304,
+      "gpu_reserved": 268435456
+    },
+    "blocked_on_ui_thread": 0,
+    "submit_gate": {
+      "waits": 6,
+      "longest_ms": 2.116647
+    },
+    "screenshot": "/home/pat/spherecut/target/hw-gui/gui-3.png",
+    "screenshot_size": [
+      960,
+      510
+    ],
+    "export": null
+  },
+  "warnings": []
+}

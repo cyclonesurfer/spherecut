@@ -1,0 +1,19 @@
+{
+  "env": [
+    "WAYLAND_DISPLAY=wayland-0"
+  ],
+  "locked": false,
+  "not_run": [],
+  "runs": [
+    {
+      "document": "/home/pat/spherecut/target/hw-gui/gui-proto-0.json",
+      "failed": [],
+      "label": "egui zoom 1",
+      "n": 0,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-proto-0.png",
+      "zoom": 1.0
+    }
+  ],
+  "seconds": 20.0,
+  "session": "WAYLAND_DISPLAY set"
+}

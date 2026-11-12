@@ -1,0 +1,17 @@
+===== idle check 2026-11-11T17:45:22-08:00
+pgrep -a firefox: 167062 /usr/lib64/firefox/firefox --dbus-service /usr/bin/firefox
+ 17:45:22 up 31 days, 22:42,  1 user,  load average: 2.77, 5.15, 3.64
+top - 17:45:22 up 31 days, 22:42,  1 user,  load average: 2.77, 5.15, 3.64
+Tasks: 589 total, 1 running, 588 sleep, 0 d-sleep, 0 stopped, 0 zombie
+%Cpu(s):  0.0 us,  0.8 sy,  0.0 ni, 98.9 id,  0.3 wa,  0.0 hi,  0.0 si,  0.0 st 
+MiB Mem :  64197.8 total,  36878.4 free,  10577.5 used,  17564.1 buff/cache     
+MiB Swap:   8192.0 total,   3292.9 free,   4899.1 used.  53620.4 avail Mem 
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 124453 pat       20   0 1461.2g 577028  51720 S   4.7   0.9  56:12.89 claude-+
+4105097 pat       20   0  236284   6344   4128 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14344   9524 S   0.0   0.0   1:51.96 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.84 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      5 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+

@@ -1,0 +1,19 @@
+# audio output: host PulseAudio, device EDIFIER R1700BTs, f32 at 48000 Hz, 2 channels, buffer asked 1024 frames, last period 1024 frames, latency 181.9 ms (median; 181.8 to 182.2), 94 callbacks, 0 host xruns
+audio clock over 2 s of Instant	1.9999922740151777	s	1.9999922740151777	1.9999922740151777	1
+audio latency (median)	181.872	ms	181.872	181.872	1
+audio callback gap, worst (× its buffer)	1.004274375	x	1.004274375	1.004274375	1
+# export on AMD Radeon RX 7600 (RADV NAVI33)
+# export 4k30 h264_vaapi high: 300 frames at 3840x2160 through h264_vaapi, decoded on vaapi
+export 4k30 h264_vaapi high	32.57396347596332	fps	32.022579809295515	33.7142490259904	3
+export 4k30 h264_vaapi high: decode	29.760812343333335	ms/frame	28.68874257333333	30.31378043	3
+export 4k30 h264_vaapi high: render	10.60898476	ms/frame	10.122169533333333	10.700123183333334	3
+export 4k30 h264_vaapi high: readback	3.50828078	ms/frame	3.1165070666666668	3.602667536666667	3
+export 4k30 h264_vaapi high: encode	7.814314543333333	ms/frame	6.996186613333334	14.902665976666666	3
+export 4k30 h264_vaapi high: finish	0.37513341666666666	ms/frame	0.36599875666666665	0.38464314666666666	3
+# export 4k30 hevc_vaapi high: 300 frames at 3840x2160 through hevc_vaapi, decoded on vaapi
+export 4k30 hevc_vaapi high	38.26873924326252	fps	37.640315256681255	39.41764763142515	3
+export 4k30 hevc_vaapi high: decode	25.567961763333333	ms/frame	24.82618643	26.015305763333334	3
+export 4k30 hevc_vaapi high: render	11.87824222	ms/frame	11.450441126666666	12.144441876666667	3
+export 4k30 hevc_vaapi high: readback	3.6638868233333333	ms/frame	3.4916850999999998	3.6741492866666667	3
+export 4k30 hevc_vaapi high: encode	15.694535089999999	ms/frame	14.483962393333334	15.741638243333334	3
+export 4k30 hevc_vaapi high: finish	0.19063411666666666	ms/frame	0.17860378666666668	0.19836568	3

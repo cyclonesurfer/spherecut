@@ -1,0 +1,7 @@
+==> recording environment
+==> checking prerequisites
+==> building (release)
+==> listing Tier 2 tests
+==> running Tier 2 tests
+==> report written to hw-reports/odin-0b3ab9b-zc/zc-06.md
+==> Tier 2: 1 passed, 0 failed, 0 skipped, 57 left out by `--only`, 0 did not run (58 tests)
