@@ -1485,11 +1485,14 @@ fn mux_streams(
             MuxedAs::Matroska => ffi::clear_codec_tag(&mut ost),
         }
         let in_tb = ist.time_base();
+        // No delay is no ticks, whatever the time base, so that a mux
+        // without delays is as it was.
         let ticks = Rational::new(i64::from(in_tb.numerator()), i64::from(in_tb.denominator()))
             .and_then(|tb| delay.as_rational().checked_div(tb))
             .ok()
             .filter(|t| t.den() == 1)
             .map(|t| t.num())
+            .or((*delay == Time::ZERO).then_some(0))
             .ok_or_else(|| {
                 EncodeError::Invalid(format!(
                     "{}: a delay of {} s isn't whole ticks of its time base {}/{}",
