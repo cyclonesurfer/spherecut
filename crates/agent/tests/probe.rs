@@ -15,8 +15,12 @@ use spherecut_agent::limits::{FIELD_BYTES, FULL_PER_CALL, RESULT_CHARS};
 use spherecut_agent::rpc::{CallCx, Tools};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError, text};
+use spherecut_boundary::pats;
 use spherecut_core::FrameRate;
-use spherecut_synth::media::{self, Audio, Codec, Spec};
+use spherecut_synth::insv::{Records, append_trailer};
+use spherecut_synth::lens::{Generation, x5_like_planted};
+use spherecut_synth::media::{self, Audio, Codec, PairSpec, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// The test's own directory, removed with what it holds when dropped.
 struct TempDir(PathBuf);
@@ -513,9 +517,63 @@ fn the_largest_results_fit() {
 
 /// The probe tool's summary of a synthetic `.insv` carries
 /// `lenses.binding` and `geometry` (`status`, `evidence`) as the CLI's
-/// report does (M3 plan 5.4).
+/// report does (M3 plan 5.4): two 64² lens tracks of 2 frames
+/// (`write_pair`) with the X5-like trailer of Pat's V3 and V6
+/// (`Records::x5_like`), which the X5's entry in the geometry table
+/// binds as reversed, a placeholder until the fit.
+///
+/// The control: the same tracks without the trailer, a plain MP4, have
+/// neither, so the pinned check fails on them.
 #[test]
-#[ignore = "M3.5 unit (b)"]
 fn probe_summary_carries_binding_and_geometry() {
-    todo!()
+    let t = TempDir::new("binding");
+    let lens = |k: usize| Spec {
+        name: format!("lens{k}"),
+        width: 64,
+        height: 64,
+        frames: 2,
+        ..Spec::default()
+    };
+    let tracks = media::write_pair(
+        &PairSpec {
+            name: "tracks".into(),
+            lenses: [lens(0), lens(1)],
+            corner_codes: false,
+            threaded: false,
+        },
+        &t.0,
+    )
+    .unwrap();
+    let records = Records::x5_like(
+        &[pats(Generation::V3), pats(Generation::V6)],
+        &x5_like_planted(),
+        2,
+        Spec::default().rate,
+    );
+    let master = "VID_20261022_101500_00_001.insv";
+    append_trailer(&tracks, &t.path(master), &records, None).unwrap();
+
+    let r = probe(&t.tools(), json!({"files": [master, "tracks.mp4"]})).unwrap();
+    assert_eq!(r["complete"], true, "{r}");
+    let (m, p) = (&r["files"][0], &r["files"][1]);
+    let lenses = json!({
+        "tracks": [0, 1],
+        "binding": "reversed",
+        "evidence": "placeholder until the fit",
+        "screen_side": null,
+    });
+    let geometry = json!({"status": "provisional", "evidence": "placeholder until the fit"});
+    // The pinned check: the summary's lenses and geometry are the X5's.
+    let pinned = |s: &Value| s["lenses"] == lenses && s["geometry"] == geometry;
+    assert!(pinned(m), "{m}");
+    assert_eq!(m["calibration"]["in_use"], "v6", "{m}");
+    assert_eq!(p["file"], "tracks.mp4", "{p}");
+    assert!(
+        p.get("lenses").is_none() && p.get("geometry").is_none(),
+        "{p}"
+    );
+    must_fail(
+        "the pinned lenses and geometry, of the tracks without the trailer",
+        pinned(p),
+    );
 }

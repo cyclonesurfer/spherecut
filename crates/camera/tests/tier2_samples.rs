@@ -14,7 +14,9 @@
 //! ffprobe read (M3's understanding pass, and insta360.md's "Pat's X5
 //! samples"): the tracks' frame counts, field 98's count beside them,
 //! field 27's window and the four generations' strings, byte-identical
-//! in all 14 files, whose tokens are insta360.md's. Pat's serial is
+//! in all 14 files, whose tokens are insta360.md's and
+//! `spherecut_testkit::pats`'s (the one copy of them the tests read,
+//! which these tie to the files). Pat's serial is
 //! checked for its form and its sameness and never printed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -33,6 +35,7 @@ use spherecut_camera::insta360::{
 use spherecut_camera::pb::{Value, Walker};
 use spherecut_camera::{CameraError, Part};
 use spherecut_testkit::control::{at_most, must_fail};
+use spherecut_testkit::pats;
 use spherecut_testkit::samples::{self, Mode, Role};
 use spherecut_testkit::tier2;
 
@@ -259,102 +262,6 @@ fn aligned(offset: u64) -> bool {
     offset.is_multiple_of(ALIGN)
 }
 
-/// Pat's X5's V3 and V6 calibrations as insta360.md's "Pat's X5 samples"
-/// lays them out: each lens's tokens in the order written, the canvas and
-/// lens type aside (ξ, fx, fy, cx, cy, yaw, pitch, roll, tx, ty, tz and
-/// the terms).
-const PAT_V3: [[&str; 16]; 2] = [
-    [
-        "2.000000",
-        "4284.620",
-        "4284.280",
-        "2701.130",
-        "2692.130",
-        "-0.198",
-        "0.211",
-        "90.280",
-        "0.000000",
-        "0.000000",
-        "0.000000",
-        "0.18632051",
-        "2.04984355",
-        "-3.24446917",
-        "-0.00143576",
-        "-0.00339240",
-    ],
-    [
-        "2.000000",
-        "4291.030",
-        "4291.030",
-        "8069.000",
-        "2684.950",
-        "0.239",
-        "0.113",
-        "89.107",
-        "-0.004460",
-        "0.000017",
-        "-0.031920",
-        "0.18940836",
-        "2.07073069",
-        "-3.24103332",
-        "0.00013831",
-        "-0.00299873",
-    ],
-];
-const PAT_V6: [[&str; 24]; 2] = [
-    [
-        "2.000000",
-        "4277.520",
-        "4277.270",
-        "2713.050",
-        "2689.210",
-        "-0.310",
-        "-0.271",
-        "90.255",
-        "0.000000",
-        "0.000000",
-        "0.000000",
-        "0.28032997",
-        "0.89045405",
-        "2.04927588",
-        "-8.05179787",
-        "0.00000000",
-        "0.00120200",
-        "-0.00259487",
-        "0.02324706",
-        "0.00533920",
-        "-0.01560208",
-        "0.00019357",
-        "-0.04580523",
-        "0.00197187",
-    ],
-    [
-        "2.000000",
-        "4284.400",
-        "4284.760",
-        "8075.730",
-        "2680.350",
-        "0.120",
-        "-0.173",
-        "89.112",
-        "0.000637",
-        "0.000001",
-        "-0.031525",
-        "0.27665332",
-        "0.98522973",
-        "1.83605266",
-        "-7.99374485",
-        "0.00000000",
-        "0.00021056",
-        "-0.00147626",
-        "0.01940425",
-        "0.00331838",
-        "-0.01330665",
-        "0.00074511",
-        "-0.02859299",
-        "0.00888746",
-    ],
-];
 /// The packed words, V1 to V6: each generation's code, body code 4, and
 /// in V1 the lens type 113 (`0x71`).
 const WORDS: [u32; 4] = [0x471, 0x20400, 0x30400, 0x60400];
@@ -401,10 +308,35 @@ fn same_bits(a: &Calib, b: &Calib) -> bool {
     a == b && bits(a) == bits(b)
 }
 
+/// Whether `s`'s tokens are `want`'s, text for text; or the first that
+/// isn't, by its place.
+fn same_tokens(s: &str, want: &str) -> Result<(), String> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (s.split('_').collect(), want.split('_').collect());
+    if a.len() != b.len() {
+        return Err(format!("{} tokens, not {}", a.len(), b.len()));
+    }
+    match a.iter().zip(&b).position(|(x, y)| x != y) {
+        Some(k) => Err(format!("token {k} is {}, not {}", a[k], b[k])),
+        None => Ok(()),
+    }
+}
+
+/// `s` with token `k`'s last digit one more, 9 going to 0.
+fn last_digit_changed(s: &str, k: usize) -> String {
+    let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
+    let token = &mut tokens[k];
+    let last = token.pop().and_then(|c| c.to_digit(10)).unwrap();
+    token.push(char::from_digit((last + 1) % 10, 10).unwrap());
+    tokens.join("_")
+}
+
 /// The four generations' strings in `m`, parsed and checked: each there,
 /// its original copy the same, of its generation, on the X5's canvas
-/// with its lens type and word; V3's and V6's tokens Pat's; V1 and V2
-/// with V3's centres and angles, and V2 with its translations and c0 = 1.
+/// with its lens type and word; V3's and V6's tokens `testkit::pats`'s,
+/// token for token, and V1's and V2's its bytes (the project review's
+/// F137: Tier 2c ties the one copy of Pat's strings to Pat's files); V1
+/// and V2 with V3's centres and angles, and V2 with its translations and
+/// c0 = 1.
 fn check_strings(name: &str, m: &Metadata) -> Vec<Calib> {
     let parsed: Vec<Calib> = Generation::ALL
         .iter()
@@ -426,10 +358,15 @@ fn check_strings(name: &str, m: &Metadata) -> Vec<Calib> {
             c
         })
         .collect();
-    let [v1, v2, v3, v6] = [&parsed[0], &parsed[1], &parsed[2], &parsed[3]];
+    let working = |g: Generation| m.calib.get(g).working.as_deref().unwrap_or_default();
+    for (g, pats) in [(Generation::V3, pats::V3), (Generation::V6, pats::V6)] {
+        same_tokens(working(g), pats).unwrap_or_else(|e| panic!("{name}'s {g} string: {e}"));
+    }
+    for (g, pats) in [(Generation::V1, pats::V1), (Generation::V2, pats::V2)] {
+        assert!(working(g) == pats, "{name}'s {g} string isn't testkit's");
+    }
+    let [v1, v2, v3] = [&parsed[0], &parsed[1], &parsed[2]];
     for lens in 0..2 {
-        assert_eq!(texts(v3, lens), PAT_V3[lens], "{name}: V3 lens {lens}");
-        assert_eq!(texts(v6, lens), PAT_V6[lens], "{name}: V6 lens {lens}");
         // Centres and angles: V1 and V2 after their radius, V3 after ξ, fx
         // and fy.
         let shared = |c: &Calib, from: usize| texts(c, lens)[from..from + 5].join("_");
@@ -438,11 +375,17 @@ fn check_strings(name: &str, m: &Metadata) -> Vec<Calib> {
         assert_eq!(v2.lenses[lens].t, v3.lenses[lens].t, "{name}: lens {lens}");
         assert_eq!(v2.lenses[lens].coefficients[0].text(), "1.00000000");
     }
-    // The controls: lens 1's tokens aren't lens 0's, nor is the V3
-    // string a V6 one.
+    // The controls: testkit's V6 with block 0's fx (token 2) a unit off in
+    // its last digit, and its V1 with block 1's radius (token 7) so, aren't
+    // the file's; nor is the V3 string a V6 one.
+    let e = must_fail(
+        &format!("{name}'s V6 string against testkit's with token 2 changed"),
+        same_tokens(working(Generation::V6), &last_digit_changed(pats::V6, 2)),
+    );
+    assert_eq!(e, "token 2 is 4277.520, not 4277.521", "{name}");
     must_fail(
-        &format!("{name}'s V3 lens 1 held to lens 0's tokens"),
-        texts(v3, 1) == PAT_V3[0],
+        &format!("{name}'s V1 string against testkit's with token 7 changed"),
+        working(Generation::V1) == last_digit_changed(pats::V1, 7),
     );
     let v3_string = m.calib.v3.working.as_deref().unwrap_or_default();
     let e = must_fail(

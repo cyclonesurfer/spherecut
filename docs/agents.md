@@ -284,8 +284,10 @@ true, `idempotentHint` false).
   and `recorded`. A camera's file adds what it names (`camera_detail`:
   `vendor`, `model`, `firmware`, `serial`) and, for an Insta360 file,
   what its trailer holds, as `docs/cli-json.md`'s probe report has
-  them: `lenses` (a master's two lens streams), `calibration` (its
-  generations, the one in use, canvas, window and hash), `companion`
+  them: `lenses` (a master's two lens streams, and their `binding`,
+  its `evidence` and `screen_side`), `calibration` (its generations,
+  the one in use, canvas, window and hash), `geometry` (`status` and
+  `evidence`, from Spherecut's table of cameras), `companion`
   (the master's LRV or the LRV's master beneath the roots, `verified`
   when their exposure records agree byte for byte, else `why`),
   `exposure_entries` and `records`.

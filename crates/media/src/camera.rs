@@ -4,20 +4,23 @@
 //!
 //! The reads run where probe already reads, on its caller's thread and
 //! never the UI's: camera's readers call `may_block` (D34). Which lens
-//! each track holds, the geometry and the screen side wait for M3.5's
-//! built-in table (plan 5.3), so the report has none of them yet.
+//! each track holds, the geometry and the screen side are the built-in
+//! table's entry for the file's camera (plan 5.3), through
+//! [`spherecut_camera::insta360::stitching`], the one entry the stitch
+//! reads too (M3.5).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use spherecut_camera::CameraError;
 use spherecut_camera::insta360::calib::{self, Generation};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
-    Metadata, NameRole, Pairing, Trailer, companions, parse_exposure, parse_metadata, read_record,
-    read_trailer,
+    Metadata, NameRole, Pairing, Stitching, Trailer, companions, parse_exposure, parse_metadata,
+    read_record, read_trailer, stitching,
 };
+use spherecut_camera::{CameraError, Part};
+use spherecut_sphere::rig::{Binding, Status};
 
 use crate::Source;
 use crate::detect::{CameraGuess, Layout};
@@ -40,6 +43,10 @@ pub struct CameraFile {
     pub lenses: Option<Lenses>,
     /// The calibration the trailer holds, when a string of it parses.
     pub calibration: Option<Calibration>,
+    /// How sure the lenses' geometry is, from the built-in table's entry
+    /// for the camera, when the calibration is one a stitch reads: on a
+    /// master and on its LRV, which holds the master's strings.
+    pub geometry: Option<GeometryInfo>,
     /// The recording's other file by name, and whether the bytes agree:
     /// filled by [`verify_companion`], which the caller runs, since only
     /// it can open a file beside this one (D45).
@@ -52,14 +59,58 @@ pub struct CameraFile {
     /// is left out, with a [`codes::BAD_TRAILER`] warning. None when the
     /// file has no trailer or its trailer can't be read.
     pub records: Option<Vec<RecordInfo>>,
+    /// Why the calibration gives no stitch, when a string of it parses
+    /// but [`stitching`] refuses it or finds no V3 or V6 string: what
+    /// `doctor --file` says is missing. Not in the JSON, where
+    /// `geometry` null and a [`codes::BAD_TRAILER`] warning, or
+    /// `calibration.in_use` null or `generations`, say as much.
+    #[serde(skip)]
+    pub unstitched: Option<String>,
 }
 
 /// A dual-fisheye file's lens streams.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Lenses {
-    /// The two video streams, by FFmpeg's index, in file order. Which is
-    /// which lens (`binding`, its `evidence` and `screen_side`) is M3.5's.
+    /// The two video streams, by FFmpeg's index, in file order.
     pub tracks: [usize; 2],
+    /// Which track each calibration block describes, as the table's
+    /// entry says: `direct` (block b, track b) or `reversed` (block b,
+    /// track 1 − b; the X5's). None without a calibration a stitch reads.
+    pub binding: Option<&'static str>,
+    /// How the entry knows: its geometry's evidence ("placeholder until
+    /// the fit" on the X5 until M3.6). None with `binding`.
+    pub evidence: Option<String>,
+    /// The stream, by FFmpeg's index, of the lens on the screen's side,
+    /// once a take settles it (M3.12); None until then.
+    pub screen_side: Option<usize>,
+}
+
+/// The lenses' geometry as the built-in table's entry gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GeometryInfo {
+    /// How far it is to be trusted: [`status_word`]'s `provisional`,
+    /// `settled`, `fitted` or `user`.
+    pub status: &'static str,
+    /// A sentence: why, from the entry, never the file's own text.
+    pub evidence: String,
+}
+
+/// A geometry's status as probe and `doctor --file` word it.
+pub fn status_word(s: Status) -> &'static str {
+    match s {
+        Status::Provisional => "provisional",
+        Status::Settled => "settled",
+        Status::Fitted => "fitted",
+        Status::User => "user",
+    }
+}
+
+/// A binding as probe words it.
+fn binding_word(b: Binding) -> &'static str {
+    match b {
+        Binding::Direct => "direct",
+        Binding::Reversed => "reversed",
+    }
 }
 
 /// The calibration in a file's trailer, as a project's snapshot of it
@@ -190,6 +241,9 @@ pub(crate) fn read(
         if let (Some(a), Some(b)) = (video.next(), video.next()) {
             out.lenses = Some(Lenses {
                 tracks: [a.index, b.index],
+                binding: None,
+                evidence: None,
+                screen_side: None,
             });
         }
     }
@@ -225,7 +279,60 @@ pub(crate) fn read(
     };
     name_camera(guess, &metadata);
     out.calibration = calibration(&metadata, warnings);
+    match stitching(&metadata) {
+        Ok(Some(s)) => bind(&mut out, &s),
+        // A trailer of V1 and V2 strings alone, as older cameras write:
+        // nothing wrong with it, but nothing a stitch reads.
+        Ok(None) => {
+            if out.calibration.is_some() {
+                out.unstitched =
+                    Some("the trailer holds neither a V3 nor a V6 calibration string".into());
+            }
+        }
+        Err(e) => {
+            if out
+                .calibration
+                .as_ref()
+                .is_some_and(|c| warn_unstitched(&e, c))
+            {
+                warnings.push(bad_trailer(format!(
+                    "the Insta360 trailer's calibration can't be stitched: {e}"
+                )));
+            }
+            out.unstitched = Some(e.to_string());
+        }
+    }
     out
+}
+
+/// The table's entry from `s` into `out`: the lenses' binding, its
+/// evidence and the screen side, and the geometry.
+fn bind(out: &mut CameraFile, s: &Stitching) {
+    let g = &s.known.geometry;
+    if let Some(l) = out.lenses.as_mut() {
+        l.binding = Some(binding_word(g.binding));
+        l.evidence = Some(g.evidence.clone());
+        l.screen_side = s
+            .known
+            .screen_side_track
+            .and_then(|t| l.tracks.get(usize::from(t)).copied());
+    }
+    out.geometry = Some(GeometryInfo {
+        status: status_word(g.status),
+        evidence: g.evidence.clone(),
+    });
+}
+
+/// Whether [`stitching`]'s refusal `e` of the calibration `c` needs a
+/// warning of its own: a string that doesn't parse has its warning from
+/// [`calibration`], and field 136 when it names no generation that
+/// parses has `in_use` null (and its own warning when it names one the
+/// trailer doesn't hold or that doesn't parse).
+fn warn_unstitched(e: &CameraError, c: &Calibration) -> bool {
+    match e {
+        CameraError::NotCalibration { part, .. } => *part != Part::Field(136) || c.in_use.is_some(),
+        _ => false,
+    }
 }
 
 /// The camera as the metadata names it, over what the container's tags

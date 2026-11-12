@@ -6,8 +6,9 @@
 //! strings assembled from insta360.md §4.1's table of each block's
 //! tokens; synth's writer and printer, which share nothing with the
 //! parsers either, are held to them in `synth_insv.rs` (unit (d)). Pat's
-//! four strings are copied from the bytes of Pat's files, in all 14 of
-//! which they are byte-identical.
+//! four strings are `testkit::pats`'s, the bytes of Pat's files, in all
+//! 14 of which they are byte-identical (`tier2_samples.rs` holds the
+//! files to them).
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): camera's suite ≤ 1 s at the default
 //! 256 cases, which each test prints its time against; the properties
@@ -30,6 +31,7 @@ use spherecut_camera::insta360::{
 use spherecut_camera::pb::{Field, Value, Walker};
 use spherecut_camera::{CameraError, Part};
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats::{V1, V2, V3, V6};
 
 /// The suite's budget in seconds, at the default number of cases: all of
 /// camera's (19.6).
@@ -72,13 +74,10 @@ fn cases() -> u32 {
         .unwrap_or(256)
 }
 
-// Pat's four strings, as the X5 writes them, copied from fields 5, 53, 54
-// and 111 of Pat's files (byte-identical in all 14), and the generations
-// they are. insta360.md's "Pat's X5 samples" lays them out by token.
-const V1: &str = "2_2653.545_2701.130_2692.130_-0.198_0.211_90.280_2661.203_8069.000_2684.950_0.239_0.113_89.107_10752_5376_1137";
-const V2: &str = "2_2660.372_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_1.00000000_-0.18756898_0.27067676_-0.08894466_10752_5376_113_2670.937_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_1.00000000_-0.18880324_0.27227741_-0.08904964_10752_5376_113_132096";
-const V3: &str = "2_2.000000_4284.620_4284.280_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_0.18632051_2.04984355_-3.24446917_-0.00143576_-0.00339240_10752_5376_113_2.000000_4291.030_4291.030_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_0.18940836_2.07073069_-3.24103332_0.00013831_-0.00299873_10752_5376_113_197632";
-const V6: &str = "2_2.000000_4277.520_4277.270_2713.050_2689.210_-0.310_-0.271_90.255_0.000000_0.000000_0.000000_0.28032997_0.89045405_2.04927588_-8.05179787_0.00000000_0.00120200_-0.00259487_0.02324706_0.00533920_-0.01560208_0.00019357_-0.04580523_0.00197187_10752_5376_113_2.000000_4284.400_4284.760_8075.730_2680.350_0.120_-0.173_89.112_0.000637_0.000001_-0.031525_0.27665332_0.98522973_1.83605266_-7.99374485_0.00000000_0.00021056_-0.00147626_0.01940425_0.00331838_-0.01330665_0.00074511_-0.02859299_0.00888746_10752_5376_113_394240";
+// Pat's four strings, as the X5 writes them (fields 5, 53, 54 and 111 of
+// Pat's files, byte-identical in all 14), from testkit's one copy (the
+// project review's F137), and the generations they are. insta360.md's
+// "Pat's X5 samples" lays them out by token.
 const PATS: [(Generation, &str); 4] = [
     (Generation::V1, V1),
     (Generation::V2, V2),

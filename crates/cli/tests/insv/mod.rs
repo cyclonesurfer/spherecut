@@ -86,6 +86,29 @@ pub fn master_with(dir: &Path, name: &str, records: &Records, fault: Option<Insv
     Written { path, layout }
 }
 
+/// The MP4 of two lens tracks that [`master`] wrote in `dir` for the
+/// master `name`, before it appended the trailer: a plain file of the
+/// master's tracks, with no trailer.
+pub fn tracks(dir: &Path, name: &str) -> PathBuf {
+    dir.join(format!("{name}.tracks.mp4"))
+}
+
+/// A master in `dir` named `name`, of the tracks [`master`] wrote there
+/// for the master `from` ([`tracks`]), with the trailer of `records` and
+/// `fault` planted in it: another trailer on the same tracks, which
+/// codes nothing more.
+pub fn retrailed(
+    dir: &Path,
+    from: &str,
+    name: &str,
+    records: &Records,
+    fault: Option<InsvFault>,
+) -> Written {
+    let path = dir.join(name);
+    let layout = insv::append_trailer(&tracks(dir, from), &path, records, fault).unwrap();
+    Written { path, layout }
+}
+
 /// The records [`lrv`] writes in its trailer for an LRV of `frames`
 /// frames: [`records`] as `Records::x5_lrv` gives the LRV them, so that
 /// its exposure record (4) is the master's whatever `frames` is, as the

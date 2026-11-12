@@ -2544,6 +2544,18 @@ not on playback; the app's export renders beside the viewer on a
 device of its own (D56). What the Why argued for still holds: the
 export, `spherecut render` and M5 run with no window.
 
+*Updated 2026-11-12 (M3.5's unit (b)):* camera now depends on sphere,
+as D61 said it would from M3.5: `insta360::to_calibration` fills
+sphere's `rig::Calibration` from a file's strings, `insta360::known`
+holds the built-in geometry table as sphere's `rig::Geometry`, and
+`insta360::stitching` gives both, the one entry probe and the stitch
+read. media depends on sphere too, from M3.5's types stage, to name
+the binding and the geometry's status that probe reports. The types
+stage's new crate, `boundary` (Pat's calibration as synth's truths and
+synth's lens truth as sphere's types, the project review's F137), is
+test support beside synth and testkit: only ever a dev-dependency,
+with `#![forbid(unsafe_code)]`, so nothing that ships links it.
+
 ## D29. MediaBackend and frame-exact seek
 
 *2026-10-24, M1 slice 2a. Updates D13. The M1 plan's D27 (section 3.3,
