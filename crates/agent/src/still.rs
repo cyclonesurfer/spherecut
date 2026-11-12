@@ -972,11 +972,12 @@ impl<'g> Still<'g> {
         }
     }
 
-    /// Step 8: `decoded` through `views` (or flat, as `look.draw` says),
-    /// `size` pixels large, on the GPU (one [`StillRenderer`] a still, so
-    /// that its pipelines are made once) or the CPU reference, which
-    /// draws only through one view. Several views are a frame's over the
-    /// shutter, averaged for motion blur (`frame --project`).
+    /// Step 8: `decoded` through `views` (or flat, as `look.draw` says,
+    /// when `views` goes unused), `size` pixels large, on the GPU (one
+    /// [`StillRenderer`] a still, so that its pipelines are made once) or
+    /// the CPU reference ([`reference::render_flat`] for flat, else
+    /// through one view). Several views are a frame's over the shutter,
+    /// averaged for motion blur (`frame --project`).
     pub fn render(
         &mut self,
         decoded: &Decoded,
@@ -997,28 +998,22 @@ impl<'g> Still<'g> {
         };
         let frame = decoded.frame.as_ref();
         let Some(gpu) = self.gpu else {
+            let cpu = reference::Options {
+                level0: false,
+                placement,
+            };
+            if look.draw != Draw::View {
+                // The flat pass, as `StillOptions::flat` draws it: no view.
+                let f64s = reference::render_flat(frame, size, &cpu).map_err(render_error)?;
+                return Ok(quantize(&f64s, look.depth));
+            }
             let [view] = views else {
                 return Err(failure(
                     codes::INTERNAL,
                     "the CPU reference draws through one view, with no motion blur",
                 ));
             };
-            if look.draw != Draw::View {
-                return Err(failure(
-                    codes::INTERNAL,
-                    "the CPU reference draws only through a view",
-                ));
-            }
-            let f64s = reference::render(
-                frame,
-                view,
-                size,
-                &reference::Options {
-                    level0: false,
-                    placement,
-                },
-            )
-            .map_err(render_error)?;
+            let f64s = reference::render(frame, view, size, &cpu).map_err(render_error)?;
             return Ok(quantize(&f64s, look.depth));
         };
         let renderer = self.renderer.get_or_insert_with(|| StillRenderer::new(gpu));
@@ -1373,7 +1368,9 @@ impl<'g> Still<'g> {
     /// decoder or zero copy `opts` asks for that isn't software;
     /// `not_equirect` for a file that isn't a camera's pair of lenses,
     /// one with no calibration ("no calibration"), one whose trailer
-    /// can't be read ("can't be stitched", as [`pair_stitching`] says),
+    /// can't be read ("can't be stitched", as [`pair_stitching`] says,
+    /// before "isn't a camera's pair" for an Insta360 file whose trailer
+    /// probe couldn't read for its lens tracks),
     /// one whose camera the table says isn't stitchable, and a rig that
     /// can't be built ("build no rig", with sphere's `RigError`); and a
     /// lens's own failure to open, naming its track. The tables' open
@@ -1415,6 +1412,15 @@ impl<'g> Still<'g> {
             ));
         }
         let Some(lenses) = &report.camera_file.lenses else {
+            // An Insta360 file whose trailer probe couldn't read for its
+            // tracks: the trailer's own failure, naming the part at fault.
+            let insta360 = report
+                .camera
+                .as_ref()
+                .is_some_and(|c| c.layout == Layout::Insta360DualFisheye);
+            if insta360 {
+                pair_stitching(src)?;
+            }
             return Err(refuse(
                 codes::NOT_EQUIRECT,
                 format!(
