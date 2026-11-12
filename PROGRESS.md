@@ -22,7 +22,7 @@ decisions and their reasons in `DECISIONS.md`.
 |---|---|
 | OS | Ubuntu 24.04.5 LTS, 4 CPUs, 15 GB RAM |
 | Rust | 1.97.0 stable (rustup) with rustfmt, clippy, cargo-deny 0.20.2, cargo-audit 0.22.2; 1.95 for the MSRV check (1.88.0 before slice 3a). clang 18.1.3, strace 6.8 |
-| FFmpeg | 6.1.1 (Ubuntu), with -dev headers, libx264, libx265, libdav1d, SVT-AV1. Also built from upstream tags for the compatibility checks in D2: minimal 7.1, 8.1 and 9.0.2; and 9.0.2 (`n9.0.2-full`, rebuilt in M3.5's fix round; before it, with VA-API, libx264, libx265 and libdav1d only), 8.1.3 (libavcodec 62.28.103, as on odin and huginn) and 7.1.3 (libavcodec 61.19.101; Fedora 43 has 7.1) with VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, SVT-AV1, Opus, Vorbis and, before FFmpeg 9, which has no such option, libshaderc, as `scripts/build-ffmpeg.sh` builds them, on Khronos Vulkan-Headers 1.4.354 over the system loader (Ubuntu's 1.3.275 headers are older than 8.1's Vulkan needs). The libdrm, Opus, Vorbis, shaderc and SVT-AV1 -dev packages it needs were installed on 2026-10-24; the 6.1 bindings and link lines built after are byte for byte those built before. No `glslc`, so no SPIR-V compiler at build time |
+| FFmpeg | 6.1.1 (Ubuntu), with -dev headers, libx264, libx265, libdav1d, SVT-AV1. Also built from upstream tags for the compatibility checks in D2: minimal 7.1, 8.1 and 9.0.2; and 9.0.2 (`n9.0.2-full`, rebuilt on 2026-11-12, before M3.5's fix round; before that, with VA-API, libx264, libx265 and libdav1d only), 8.1.3 (libavcodec 62.28.103, as on odin and huginn) and 7.1.3 (libavcodec 61.19.101; Fedora 43 has 7.1) with VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, SVT-AV1, Opus, Vorbis and, before FFmpeg 9, which has no such option, libshaderc, as `scripts/build-ffmpeg.sh` builds them, on Khronos Vulkan-Headers 1.4.354 over the system loader (Ubuntu's 1.3.275 headers are older than 8.1's Vulkan needs). The libdrm, Opus, Vorbis, shaderc and SVT-AV1 -dev packages it needs were installed on 2026-10-24; the 6.1 bindings and link lines built after are byte for byte those built before. No `glslc`, so no SPIR-V compiler at build time |
 | Vulkan | lavapipe only: llvmpipe, Mesa 25.2.8, Vulkan 1.4.318 |
 | Devices | no `/dev/dri`, no GPU, so no VA-API and no Vulkan Video; no sound card (ALSA's `default` PCM isn't there) and no sound server, so audio plays on the null output; ALSA's headers (libasound2-dev 1.2.11) for the build |
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
@@ -3425,18 +3425,20 @@ sees nothing new: the X5's geometry is the placeholder until M3.6
   `still::pair_stitching` (which calls `may_block` before it opens the
   file), and builds the rig with `Rig::build` from the calibration,
   `PairOptions`' geometry or else the file's `Known` entry, the tune,
-  front track 0 and each track's coded side. `StillPair::seek` moves
-  track 0 to the time and track 1 exactly to the pts track 0 shows, and
-  calls the pair `damaged` when the two differ; `StillPair::render`
-  keeps one `reference::LensPair` for the frames and runs
-  `render_rig_of` with unit gains, for one view. Every can't-stitch
-  refusal is `not_equirect`, an unreadable trailer included, with the
-  reason in the message; a file that can't be opened fails with media's
-  code. Rung 3 (`agent/tests/rung3.rs`): `write_insv`'s rung 3 file,
-  opened and seeked, hashes plane for plane equal to rung 1's lossless
-  frames (8 frames, 2 tracks), and its stitch equals rung 1's render
-  byte for byte (the 512 × 256 equirect and `whole_view(0)` at 256²,
-  with the rig and colour equal), corner codes and all.
+  front track 0 and each track's coded side. `StillPair::seek` seeks
+  each track exactly to the time, in its own clip time (with
+  `SeekMode::Keyframe`, track 1 to the time track 0's keyframe shows),
+  and calls the pair `damaged` when the two frames' times in the file
+  differ; `StillPair::render` keeps one `reference::LensPair` for the
+  frames and runs `render_rig_of` with unit gains, for one view. Every
+  can't-stitch refusal is `not_equirect`, an unreadable trailer
+  included, with the reason in the message; a file that can't be opened
+  fails with media's code. Rung 3 (`agent/tests/rung3.rs`):
+  `write_insv`'s rung 3 file, opened and seeked, hashes plane for plane
+  equal to rung 1's lossless frames (8 frames, 2 tracks), and its stitch
+  equals rung 1's render byte for byte (the 512 × 256 equirect and
+  `whole_view(0)` at 256², with the rig and colour equal), corner codes
+  and all.
 - **(d) frame on a camera's pair (1342ada to f63b783).** `spherecut
   frame <insv>` takes the pair path when probe calls the file Insta360
   dual fisheye. With `--reference` it opens both lenses through
@@ -3483,23 +3485,24 @@ it could be):
   `scripts/build-ffmpeg.sh` passes `--enable-libshaderc` only where
   configure lists it, which FFmpeg 9's doesn't. D30 and D35 have dated
   notes.
-- **(b) Tests and speed (3a06c85 to 5f8129c).** R3, R5:
+- **(b) Tests and speed (3a06c85 to 5f8129c).** R3, R5 and R15:
   `tests/instrument.rs` takes rung 1's camera, far tune, pairs, shots
   and views from `synth::rung`, so there is one copy, and
   `tests/rung_copy.rs`, which had held the copy to literals of its own,
   is gone; `instrument.json` and the binary's 335 printed values are
-  unchanged. R4: `insv_file.rs` writes a 61-frame file at 29.97 and
-  holds the X5's default GOP (the master's key frames at 1 and 61, the
-  LRV's at 1, 31 and 61), each track held to its 61 frames. R6: the pats
-  test's control prints a truth a digit off. R9: each refusal
-  `write_insv` documents is run. R10: `StssDiffer`'s rule as the code
-  has it (amendment 8). R11, R18: the docs list every file that still
-  writes out the X5's format (the canvas, lens type 113, the packed
-  words and field 27's window) and the two doc samples. `rung3.rs`
-  sweeps the folders of runs that have ended. `write_insv` codes the two
-  lens tracks and the LRV side by side (`std::thread::scope`, a
-  one-thread encoder each): the same files byte for byte (18 files, 8
-  specs, 3 runs), errors in the old order.
+  unchanged, and D65's update says so, the views included. R4:
+  `insv_file.rs` writes a 61-frame file at 29.97 and holds the X5's
+  default GOP (the master's key frames at 1 and 61, the LRV's at 1, 31
+  and 61), each track held to its 61 frames. R6: the pats test's control
+  prints a truth a digit off. R9: each refusal `write_insv` documents is
+  run. R10: amendment 8 states `StssDiffer`'s rule as the code has it.
+  R11, R18: the docs list every file that still writes out the X5's
+  format (the canvas, lens type 113, the packed words and field 27's
+  window) and the two doc samples. `rung3.rs` sweeps the folders of runs
+  that have ended. `write_insv` codes the two lens tracks and the LRV
+  side by side (`std::thread::scope`, a one-thread encoder each): the
+  same files byte for byte (18 files, 8 specs, 3 runs), errors in the
+  old order.
 - **(c) Camera, agent and CLI (636fbd2 to 7f444b6).** R2:
   `Known::refusal()` words the table's "not stitchable", and
   `media::camera::bind` carries it to doctor `--file`, whose `missing`
@@ -3507,21 +3510,30 @@ it could be):
   probe's `geometry.notice`, frame's `stitch.geometry.notice` and a new
   warning code, `geometry_assumed`. R7: `still::damage_warnings` serves
   `open_pair` too, so a pair's damage warns on frame's stitched and
-  `--lens` paths. R1: frame_insv's one `clear_error` is six predicates,
-  each with a control that reaches it (the panic control only in a debug
-  build, where `SPHERECUT_DEBUG_PANIC` works). R8: cli-json's exit table
-  and usage text list M3.5's usage errors, and `contract.rs` runs each
-  and holds its status to `contract::frame_exit`. R12 to R16: docs and
-  test nits. frame's refusal of a pair without `--reference` no longer
-  says "stitching arrives in M3"; look, compare and the project tools
-  keep it, through `still::INSTA360_UNSTITCHED`, until M3.7. The agent's
-  probe summary of an X5 master is 1112 bytes (944 before M3.5), and
-  `tools/list` is unchanged at 12,245 of 12,288 bytes.
-- **(d)** This note, plan amendment 8 and the check. R19 asked for them:
-  Status, the M3.2 and M3.4 notes' forward references, Next and Known
-  issues are brought up to date. DECISIONS needed no note beyond the
-  units': D63, D64 and D65, which the slice touched, were checked
-  against the code as fixed.
+  `--lens` paths. R1: frame_insv's one `clear_error` is five predicates
+  (`refused`, `exits_by_table`, `no_panic`, `wrote_nothing` and
+  `names_in`), each with a control that reaches it (the panic control
+  only in a debug build, where `SPHERECUT_DEBUG_PANIC` works). R8:
+  cli-json's exit table and usage text list M3.5's usage errors, and
+  `contract.rs` runs each and holds its status to
+  `contract::frame_exit`. R12: `PairOptions::rig`'s doc names
+  `RigOptions`'s real fields. R13: the bad `--geometry` and
+  `--stitch-distance` values are checked for Spherecut's own words,
+  which clap's echo of the value doesn't hold.
+  R14: the "default distance" run gives no `--stitch-distance`. R16:
+  `--decoder`'s help says a pair refuses VA-API and Vulkan only when
+  stitched with `--reference` (exit 2). frame's refusal of a pair
+  without `--reference` no longer says "stitching arrives in M3"; look,
+  compare and the project tools keep it, through
+  `still::INSTA360_UNSTITCHED`, until M3.7. The agent's probe summary of
+  an X5 master is 1112 bytes (944 before M3.5), and `tools/list` is
+  unchanged at 12,245 of 12,288 bytes.
+- **(d) The note and the check (682fb5c on).** Unit (d) wrote this note
+  and plan amendment 8, as R19 asked, and ran the check: Status, the
+  M3.2 and M3.4 notes' forward references, Next and Known issues are
+  brought up to date. DECISIONS needed no note beyond the units': D63,
+  D64 and D65, which the slice touched, were checked against the code
+  as fixed.
 
 **Open, and known limits:**
 - The M3.5 row's Tier 1 time is over its 3 s (Known issues); amendment 8
@@ -3567,12 +3579,13 @@ it could be):
 
 **Measured**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
 lavapipe), at 7f444b6 unless named:
-- Tier 1 against 19.6's budgets. The M3.5 row: 3.56 to 3.71 s in three
-  runs each (`rung3.rs`, 5 tests, 2.05 to 2.09 s of its 2 s share,
-  CPU-bound at about 7.3 CPU-s; `frame_insv.rs`, 7 tests, 1.51 to 1.62 s
-  of its 1 s, about 1 s of it writing `InsvSpec::small()`), against 3 s
-  (4.5 s by amendment 8); unit (b) measured 3.42 to 3.61 s at its tip,
-  before (c)'s warnings test. camera's ≤ 1 s: companions 0.07 s,
+- Tier 1 against 19.6's budgets. The M3.5 row: 3.60 to 3.67 s, run by
+  run, in three runs of each suite (`rung3.rs`, 5 tests, 2.05 to 2.09 s
+  of its 2 s share, CPU-bound at about 7.3 CPU-s, its three fault files
+  8 frames long; `frame_insv.rs`, 7 tests, 1.51 to 1.62 s of its 1 s,
+  about 1 s of it writing `InsvSpec::small()`), against 3 s (4.5 s by
+  amendment 8); unit (b) measured 3.42 to 3.61 s at its tip, before
+  (c)'s warnings test. camera's ≤ 1 s: companions 0.07 s,
   geometry 0.00 s, strings 0.01 s, synth_insv 0.04 s, trailer 0.10 s.
   sphere's ≤ 30 s: `rig.rs` 2.10 s, `unified.rs` 0.11 s. M3.4's row:
   `instrument.rs` 10.38 s of its 11 s share (10.69 s before the fix
@@ -3588,8 +3601,9 @@ lavapipe), at 7f444b6 unless named:
   M3.5 at about 7 s at d943b3f (rung3 2.16 s, frame_insv 1.08 s,
   insv_file 0.79 s, rung_copy 0.57 s, contract 2.16 s); since then
   frame_insv has grown to 1.5 to 1.6 s (the briefed fixtures, then (c)'s
-  test), frame.rs by about 0.4 s and the audio seek test by about 1.5 s,
-  and rung_copy's 0.57 s has gone.
+  test), frame.rs by about 0.4 s and the audio suite by about 1.5 s
+  (the seek test, which now runs a CodecDelay copy too, takes 1.25 to
+  1.39 s alone), and rung_copy's 0.57 s has gone.
 - `write_insv` alone, 3 runs: rung 3's file 0.89 to 0.92 s cold and 0.34
   to 0.40 s warm, against 1.18 to 1.25 and 0.54 to 0.64 s with its
   tracks coded one after another; `small()` with an LRV 0.25 to 0.27 s
@@ -5642,9 +5656,9 @@ each slice's merge sweeps the list.
   the Tier 1 media tests need. Use RPM Fusion's `ffmpeg`. Tier 1 also needs
   libdav1d, an FFmpeg built with Vulkan, Mesa's lavapipe and strace.
   The 9.0.2 prefix the checks built against had no Vulkan or
-  libsvtav1, so 19 Tier 1 tests failed there for want of them; M3.5's
-  fix round rebuilt it as 8.1.3's is built (D2; the FFmpeg 9.0.2 entry
-  below). (as of 2026-11-12)
+  libsvtav1, so 19 Tier 1 tests failed there for want of them; it was
+  rebuilt on 2026-11-12, before M3.5's fix round, as 8.1.3's is built
+  (D2; the FFmpeg 9.0.2 entry below). (as of 2026-11-12)
 - `cargo xtask check` builds only against the FFmpeg pkg-config finds,
   unless `SPHERECUT_FFMPEG_COMPAT` lists other prefixes, and a fresh
   checkout has none: other builds are checked only where someone has
@@ -5797,8 +5811,8 @@ each slice's merge sweeps the list.
   both 3840² lens tracks in software from the keyframe before its time,
   and stitches on the CPU: 4.8 s and 1.31 GB for clip 8 at 1 s on the
   cloud box (debug build), so Tier 2c's `samples_frame_clip8_renders`,
-  three renders, takes 14.9 s. M3.7's GPU stitch is the fast path. (as
-  of 2026-11-12)
+  three renders, takes 14.9 s. M3.7's GPU stitch is the fast path.
+  (as of 2026-11-12)
 - A camera's pair decodes in software only until M3.7. `frame <insv>`
   without `--reference` is refused (`not_equirect`, with hints for
   `--reference`, M3.7 and `--equirect`); with it, `--decoder vaapi` or
@@ -5808,12 +5822,16 @@ each slice's merge sweeps the list.
   (as of 2026-11-12)
 - Plan 19.6's M3.5 row (rung 3 and `frame --reference`, 3 s) isn't met
   on the 4-core cloud box: 3.42 to 3.61 s at unit (b)'s tip in the fix
-  round, and 3.56 to 3.71 s at 7f444b6, with `rung3.rs` at 2.05 to 2.09
-  s of its 2 s share and `frame_insv.rs` at 1.51 to 1.62 s of its 1 s.
-  rung3 is CPU-bound (about 7.3 CPU-s on 4 cores), and frame_insv spends
-  about 1 s writing `InsvSpec::small()`. Coding `write_insv`'s tracks
-  side by side took about 0.3 s off the row; no fixture was shrunk and
-  no check cut. Plan amendment 8 raises the row to 4.5 s (3.71 s and 20
+  round, and 3.60 to 3.67 s run by run at 7f444b6, with `rung3.rs` at
+  2.05 to 2.09 s of its 2 s share and `frame_insv.rs` at 1.51 to 1.62 s
+  of its 1 s. rung3 is CPU-bound (about 7.3 CPU-s on 4 cores), and
+  frame_insv spends about 1 s writing `InsvSpec::small()`. Coding
+  `write_insv`'s tracks side by side took about 0.3 s off the row. No
+  clean fixture was shrunk and no check cut; rung3's three fault files
+  (`StartPtsDiffer`, `NoCalibration`, `WrongTokenCount`) were cut in
+  M3.5 (c) to 8 frames from `small()`'s 30, which still reach frame 5
+  (the refusals don't depend on length), saving about 0.25 s. Plan
+  amendment 8 raises the row to 4.5 s (the highest run, 3.67 s, and 20
   %, rounded up), inside M3's 135 s; the two suites still print their
   old shares. (as of 2026-11-12)
 - `a_locked_pair_paces_to_its_slowest_lens` (playback
@@ -5841,18 +5859,20 @@ each slice's merge sweeps the list.
   `first_at` clamp, D35), and the test makes copies with and without a
   1024-sample CodecDelay on every FFmpeg and runs both through the
   open-time drop, emulated where the demuxer drops nothing (6.1, and 7.1
-  by its source). The orchestrator rebuilt the 9.0.2 install as
-  `n9.0.2-full` with `scripts/build-ffmpeg.sh`, as 8.1.3's is built
-  (VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, libsvtav1, Opus
-  and Vorbis, on Vulkan-Headers 1.4.354), but without
+  by its source). On 2026-11-12, before the fix round, the orchestrator
+  rebuilt the 9.0.2 install as `n9.0.2-full` with
+  `scripts/build-ffmpeg.sh` (a copy carrying the libshaderc fix that the
+  fix round then committed), as 8.1.3's is built (VA-API, Vulkan,
+  libdrm, libx264, libx265, libdav1d, libsvtav1, Opus and Vorbis, on
+  Vulkan-Headers 1.4.354), but without
   `--enable-libshaderc`, which FFmpeg 9 doesn't have, and without
   `glslc`: its spirv_compiler is off, and with it the Vulkan parts of
   ffv1, prores, apv and dpx, while H.264, HEVC and AV1 Vulkan decode are
   unaffected. The old install had no Vulkan or libsvtav1, so 19 more
   tests failed there for want of them; the compat run will show whether
   the new one clears them. Also unchecked on 9.0.2: whether its Matroska
-  muxer trims the AAC track's end with a DiscardPadding. (as of
-  2026-11-12)
+  muxer trims the AAC track's end with a DiscardPadding.
+  (as of 2026-11-12)
 - FFmpeg 6.1's MP4 demuxer gives the last packet of a track that starts
   with an empty edit of its own the track's media duration less its
   shifted timestamp (11 ticks for a 1001-tick frame 990 ticks late), so

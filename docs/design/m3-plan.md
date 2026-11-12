@@ -1036,7 +1036,7 @@ symbol); an amendment's are at its own date.*
      `geometry.status`, else `lookup` on the model and firmware; `stitchable` also needs `stitching`
      to accept the calibration and the table's row to be stitchable, and `missing` says "a
      calibration a stitch can read: …" for V1/V2-only trailers and oblong windows. media now depends
-     on sphere (for the binding and status in probe), beside camera → sphere; ARCHITECTURE records
+     on sphere (for the binding and status in probe), as camera does; ARCHITECTURE records
      both, and no third-party crate was added (20).
    - **The synthetic file (7.2; 22.1's M3.5 row).** 22.1's "N-track `Mp4Writer`" and 7.2's
      "`Mp4Writer` takes N video streams": as built, `write_insv` codes each lens alone with
@@ -1095,15 +1095,15 @@ symbol); an amendment's are at its own date.*
      `StillPair::render` keeps the CPU arm's one-view rule and refuses several views as internal,
      and the average waits for a caller that passes several. `Still::open_pair` decodes in software
      only: a GPU, VA-API, Vulkan Video or zero copy is refused as internal until M3.7. Track 0 is in
-     front until question 3 settles (6.2, 11.1). `StillPair::seek` moves track 0 to the time and
-     track 1 exactly to the pts track 0 shows, and the pair is `damaged` if they differ; with
-     `SeekMode::Keyframe`, track 0 lands on its keyframe and track 1 is decoded exactly to that
-     time, and docs/agents.md's look section says so when M3.7 lets look reach a pair. Every
-     can't-stitch refusal is `not_equirect`, an unreadable trailer included (probe's `bad_trailer`
-     stays a probe warning), with the reason in the message ("isn't a camera's pair of lenses", "no
-     calibration", "can't be stitched" or "build no rig"); a file that can't be opened fails with
-     media's `not_found` or `io_error`. `still::pair_stitching` calls `may_block` before it opens
-     the file, and a pair's damage warns as any file's does (`still::damage_warnings`).
+     front until question 3 settles (6.2, 11.1). `StillPair::seek` seeks each track exactly to the
+     time, each in its own clip time, and the pair is `damaged` if the two frames' times in the file
+     differ; with `SeekMode::Keyframe`, track 0 lands on its keyframe and track 1 is decoded exactly
+     to the time track 0 shows, and docs/agents.md's look section says so when M3.7 lets look reach
+     a pair. Every can't-stitch refusal is `not_equirect`, an unreadable trailer included (probe's
+     `bad_trailer` stays a probe warning), with the reason in the message ("isn't a camera's pair of
+     lenses", "no calibration", "can't be stitched" or "build no rig"); a file that can't be opened
+     fails with media's `not_found` or `io_error`. `still::pair_stitching` calls `may_block` before
+     it opens the file, and a pair's damage warns as any file's does (`still::damage_warnings`).
    - **frame on a camera's pair (12, 14's frame row).** 14's row says frame stitches by default.
      Until M3.7 a run without `--reference` is refused as `not_equirect`, with hints for
      `--reference`, M3.7 and `--equirect`, and M3.7 replaces the refusal with the GPU stitch. The
@@ -1148,24 +1148,33 @@ symbol); an amendment's are at its own date.*
      demuxer drops nothing (6.1, 7.1) or through the demuxer's own drop (8.1, 9.0). Its controls
      (`AudioFault::keeps_samples_before_first`, the fix turned off) must fail with the priming
      handed out, on both copies and every FFmpeg. `scripts/build-ffmpeg.sh` now builds FFmpeg 9,
-     which has no `--enable-libshaderc`, and the orchestrator rebuilt the 9.0.2 install with it
-     (`n9.0.2-full`: VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, libsvtav1, Opus and Vorbis
-     on Vulkan-Headers 1.4.354, without `glslc`, so its spirv_compiler is off). Both halves wait on
-     that compat run, the only place the demuxers' own drop runs, and M3.21's review checks it.
-     Still open: on 7.1 the CodecDelay copy's start isn't pinned, and whether 9.0's Matroska muxer
-     trims the AAC track's end with a DiscardPadding is unchecked.
+     which has no `--enable-libshaderc`, and the orchestrator had rebuilt the 9.0.2 install with
+     that fix on 2026-11-12, before the fix round committed it (`n9.0.2-full`: VA-API, Vulkan,
+     libdrm, libx264, libx265, libdav1d, libsvtav1, Opus and Vorbis on Vulkan-Headers 1.4.354,
+     without `glslc`, so its spirv_compiler is off). Both halves wait on that compat run, the only
+     place the demuxers' own drop runs, and M3.21's review checks it. Still open: on 7.1 the
+     CodecDelay copy's start isn't pinned, and whether 9.0's Matroska muxer trims the AAC track's
+     end with a DiscardPadding is unchecked.
    - **The M3.5 row's budget (19.6, 22.1's M3.5 row; decision (vi)).** 19.6's 3 s for rung 3 and
      `frame --reference` isn't met on the 4-core cloud box: 3.42 to 3.61 s at the fix round's unit
-     (b) and 3.56 to 3.71 s at 7f444b6, with `rung3.rs` 2.05 to 2.09 s (CPU-bound, about 7.3 CPU-s)
-     and `frame_insv.rs` 1.51 to 1.62 s (about 1 s of it writing `small()`), after `write_insv`'s
-     tracks were coded side by side, with no fixture shrunk and no check cut. The row is raised to
-     the measured time plus 20 %, rounded up to a tenth of a second: the highest measured, 3.71 s,
-     gives 4.452, so 4.5 s (unit (b)'s 3.61 s alone would give 4.4 s). M3's budgets then sum to
-     134.5 s, from 133 s, inside its 135 s. The shares that fit are rung3 2.5 s and frame_insv 2.0
-     s; the suites' printed `BUDGET_S` (2.0 and 1.0 s) move with the next change to their code. Tier
-     2c's clip 8 frame stays at 1 s (decision (vii)): its three renders take 14.9 s and 1.31 GB at
-     peak, and one 4.8 s, since a render at 1 s decodes both 3840² tracks in software from the
-     keyframe on top of making the pair (amendment 5: about 0.5 s and 470 MB at 3840²).
+     (b) and 3.60 to 3.67 s run by run at 7f444b6, with `rung3.rs` 2.05 to 2.09 s (CPU-bound, about
+     7.3 CPU-s) and `frame_insv.rs` 1.51 to 1.62 s (about 1 s of it writing `small()`), after
+     `write_insv`'s tracks were coded side by side. No clean fixture was shrunk and no check cut,
+     but rung3's three fault files (`faulty()`'s `StartPtsDiffer`, `NoCalibration` and
+     `WrongTokenCount`) have been 8 frames long since M3.5 (c), not `small()`'s 30. They test the
+     same faults: they still reach frame 5, where `StartPtsDiffer`'s lens 1 is at pts 6006 and lens
+     0 at 5005, and the refusals don't depend on length. At the time it saved about 0.25 s (the
+     suite ran 2.4 s with all three at 30 frames and 2.13 to 2.17 s at 8). Decision (vi) raises the
+     row to the measured time plus 20 %, rounded up to a tenth of a second, and names unit (b)'s
+     row, whose 3.61 s gives 4.4 s. Unit (c) then added to `frame_insv.rs` (its warnings test and
+     the split clear-error checks), so the row is raised on the tip's figures instead: the highest
+     run at 7f444b6, 3.67 s, gives 4.404, so 4.5 s (the sum of each suite's highest time, 3.71 s,
+     taken from different runs, gives 4.5 s too). M3's budgets then sum to 134.5 s, from 133 s,
+     inside its 135 s. The shares that fit are rung3 2.5 s and frame_insv 2.0 s; the suites' printed
+     `BUDGET_S` (2.0 and 1.0 s) move with the next change to their code. Tier 2c's clip 8 frame
+     stays at 1 s (decision (vii)): its three renders take 14.9 s and 1.31 GB at peak, and one 4.8
+     s, since a render at 1 s decodes both 3840² tracks in software from the keyframe on top of
+     making the pair (amendment 5: about 0.5 s and 470 MB at 3840²).
    - **Changed in place.** The header's paragraph on section 0 (the items run 1 to 8); amendment 5's
      average over views; 4.2's frame code on both hemispheres; 5.2's `to_calibration`; 7.1's
      back-hemisphere frame code; 7.2's N video streams; 8.8's mirrored frame codes; 14's frame row
@@ -3242,7 +3251,7 @@ The stitch shader's cost is P-SHADE's (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K on 
 Each new suite prints its time against its budget: camera ≤ 1 s, its 100k run apart (M3.2);
 sphere's properties and rung 0 ≤ 30 s in release [amendment 4: in a debug build, sphere and synth at
 opt-level 3] (M3.3); metrics, seam self-tests, the
-attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s [amendment 8: 4.5 s, measured 3.56 to 3.71 s] (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
+attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s [amendment 8: 4.5 s, measured 3.60 to 3.67 s] (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
 recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8, measured: its 32 tests 5.3 to 5.9 s alone and 6.7 to 7.4 s beside four busy loops, 5.5 s alone after D77's compute mips, none measured under load since: amendment 6); schema, edits
 and agents ≤ 3 s (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
 (M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s to `cargo xtask
