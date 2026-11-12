@@ -668,7 +668,9 @@ fn starts_late_by(t: &TrackTiming, ticks: u32) -> Result<(), String> {
 /// late in a movie timescale of 1000, FFmpeg's own before 9, whose empty
 /// edit is rounded down to 33 ms; and the same source muxed with no
 /// delay, which starts at 0. A delay that isn't whole ticks of the
-/// source's time base is refused.
+/// source's time base is refused, and so is a negative one, each with its
+/// own message, which the check holds it to; the controls run each
+/// message's check on the other's refusal.
 #[test]
 fn mux_delays_a_track_by_whole_ticks() {
     let _t = timed("mux_delays_a_track_by_whole_ticks");
@@ -760,7 +762,41 @@ fn mux_delays_a_track_by_whole_ticks() {
     );
     assert_eq!(on_time.first_pts, 0);
 
-    // A seventh of a second isn't whole ticks of 1/30000 s.
+    // A seventh of a second isn't whole ticks of 1/30000 s, and a frame
+    // early is whole ticks but before the movie's start: each is refused,
+    // for its own reason, before anything is written.
     let seventh = Time::seconds(Rational::new(1, 7).unwrap());
-    must_fail("a delay of 1/7 s", mux("seventh.insv", seventh));
+    let not_ticks = must_fail("a delay of 1/7 s", mux("seventh.insv", seventh));
+    let not_ticks_why = format!(
+        "{}: a delay of 1/7 s isn't whole ticks of its time base 1/30000",
+        second.display()
+    );
+    refused_as(&not_ticks, &not_ticks_why).unwrap();
+    let early = Time::seconds(Rational::new(-1001, 30_000).unwrap());
+    let negative = must_fail("a delay of -1001/30000 s", mux("early.insv", early));
+    let negative_why = format!("{}: a delay of -1001/30000 s", second.display());
+    refused_as(&negative, &negative_why).unwrap();
+    for name in ["seventh.insv", "early.insv"] {
+        assert!(!dir.0.join(name).exists(), "{name} was written");
+    }
+    // Their controls: each check on the other's refusal, a mux refused
+    // for another reason.
+    must_fail(
+        "a negative delay taken for one of part ticks",
+        refused_as(&negative, &not_ticks_why),
+    );
+    must_fail(
+        "a delay of part ticks taken for a negative one",
+        refused_as(&not_ticks, &negative_why),
+    );
+}
+
+/// Whether the mux was refused with exactly the message `why`: the
+/// source, the delay and the reason, so that a mux refused for another
+/// reason (a path, a missing stream, the other delay refusal) fails.
+fn refused_as(e: &encode::EncodeError, why: &str) -> Result<(), String> {
+    match e {
+        encode::EncodeError::Invalid(said) if said == why => Ok(()),
+        e => Err(format!("refused with {e:?}, not {why:?}")),
+    }
 }
