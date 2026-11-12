@@ -281,7 +281,11 @@ fn write_insv_writes_the_x5s_container() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(left, [s.name.clone()], "only the master is left");
+    assert_eq!(
+        left,
+        std::slice::from_ref(&s.name),
+        "only the master is left"
+    );
 
     x5_container(&files.master).unwrap();
     let bytes = std::fs::read(&files.master).unwrap();
