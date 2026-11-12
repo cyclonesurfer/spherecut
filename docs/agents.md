@@ -550,6 +550,7 @@ the agent as fields do, as a backstop. The codes:
 | `cancelled` | The call was cancelled; the client gets no response for it (a cancelled render's `state`, too) |
 | `internal` | Spherecut's fault, not the agent's |
 | `bad_edit` | An edit the project's rules refuse, at `edits[i]`: its op and the rule (`limit`, `in_use`, `not_found` and so on) are in the message; nothing was saved |
+| `calibration_mismatch` | A `set_source` whose whole `dual_fisheye` source has a calibration other than its media's file holds, at `edits[i].source.calibration`: the parts that differ are in the message; nothing was saved |
 | `stale_revision` | The project isn't at `if_revision`, or was written by something else since its history was; read it again |
 | `not_top` | The step to undo or redo is the user's; ask the user, or make an edit that changes it |
 | `nothing_to_undo` | No step to undo |

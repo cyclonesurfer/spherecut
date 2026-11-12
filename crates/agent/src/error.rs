@@ -59,6 +59,9 @@ pub mod codes {
     /// An edit the project's rules refuse: its op and the rule's code
     /// are in the message. Nothing was saved.
     pub const BAD_EDIT: &str = "bad_edit";
+    /// A `set_source` whose whole `dual_fisheye` source has a calibration
+    /// other than the one its media's file holds. Nothing was saved.
+    pub const CALIBRATION_MISMATCH: &str = "calibration_mismatch";
     /// The project's revision isn't `if_revision`, or its history was
     /// written with another revision of it.
     pub const STALE_REVISION: &str = "stale_revision";
@@ -133,6 +136,7 @@ pub mod codes {
         CANCELLED,
         INTERNAL,
         BAD_EDIT,
+        CALIBRATION_MISMATCH,
         STALE_REVISION,
         NOT_TOP,
         NOTHING_TO_UNDO,
