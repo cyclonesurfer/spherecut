@@ -40,8 +40,9 @@ pub struct FileCheck {
     pub camera: Option<String>,
     /// The firmware the trailer gives, as written (`v1.1.22_build1`).
     pub firmware: Option<String>,
-    /// Whether it can be stitched: two lens streams that decode, and the
-    /// calibration the camera says it uses, in its trailer.
+    /// Whether it can be stitched: two lens streams that decode, the
+    /// calibration the camera says it uses, in its trailer, and a camera
+    /// whose files the built-in table stitches.
     pub stitchable: bool,
     /// That calibration's generation, `v6` on the X5, or null.
     pub calibration: Option<String>,
@@ -211,8 +212,10 @@ fn add_new(warnings: &mut Vec<Warning>, more: impl IntoIterator<Item = Warning>)
 /// What the camera's trailer leaves missing for a stitch, in words: the
 /// trailer itself, or the trailer when it can't be read, with the
 /// probe's own words on why; the two lens streams; the calibration the
-/// camera says it uses; and, when that parses, one a stitch can read
-/// (`camera::insta360::stitching`'s refusal, as probe keeps it).
+/// camera says it uses; when that parses, one a stitch can read
+/// (`camera::insta360::stitching`'s refusal, as probe keeps it); and a
+/// camera the built-in table stitches, in the words frame's refusal of
+/// the pair gives (`known::Known::refusal`, as probe keeps it).
 fn trailer_missing(r: &ProbeReport) -> Vec<String> {
     let f = &r.camera_file;
     let mut missing = Vec::new();
@@ -262,6 +265,9 @@ fn trailer_missing(r: &ProbeReport) -> Vec<String> {
                 missing.push(format!("a calibration a stitch can read: {why}"));
             }
         }
+    }
+    if let Some(why) = &f.table_refusal {
+        missing.push(format!("a camera Spherecut stitches: {why}"));
     }
     missing
 }
@@ -370,10 +376,86 @@ pub fn render_text(f: &FileCheck) -> String {
 
 #[cfg(test)]
 mod tests {
-    use spherecut_media::camera::GeometryInfo;
+    use std::collections::BTreeMap;
+
+    use spherecut_media::camera::{Calibration, GeometryInfo, Lenses};
+    use spherecut_media::probe::{Container, StructureCheck};
     use spherecut_testkit::control::must_fail;
 
     use super::*;
+
+    /// A probe of an X5 master with both lens streams and its V6
+    /// calibration in use, whose camera the table's entry `known` is:
+    /// what `bind` keeps of it, the refusal among it, built by hand.
+    fn x5_master(known: &known::Known) -> ProbeReport {
+        ProbeReport {
+            path: "VID_20261022_101500_00_001.insv".into(),
+            file_size: 1,
+            container: Container {
+                format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+                format_long: String::new(),
+                duration: None,
+                start_time: None,
+                bit_rate: None,
+                tags: BTreeMap::new(),
+            },
+            streams: Vec::new(),
+            mp4: None,
+            camera: None,
+            camera_file: CameraFile {
+                lenses: Some(Lenses {
+                    tracks: [0, 1],
+                    binding: Some("reversed"),
+                    evidence: Some(known.geometry.evidence.clone()),
+                    screen_side: None,
+                }),
+                calibration: Some(Calibration {
+                    generations: vec!["v6".into()],
+                    in_use: Some("v6".into()),
+                    canvas: [7680, 3840],
+                    window: None,
+                    hash: "0123456789abcdef".into(),
+                    offset_version: Some(4),
+                }),
+                geometry: Some(GeometryInfo {
+                    status: status_word(known.geometry.status),
+                    evidence: known.geometry.evidence.clone(),
+                }),
+                records: Some(Vec::new()),
+                table_refusal: known.refusal(),
+                ..CameraFile::default()
+            },
+            structure: StructureCheck::Full,
+            damage: Vec::new(),
+            warnings: Vec::new(),
+            ffmpeg_log: Vec::new(),
+        }
+    }
+
+    /// A camera the table says isn't stitchable is missing from doctor
+    /// `--file`'s list, so the file isn't stitchable, in the words
+    /// frame's refusal of the pair gives (`Known::refusal`); no entry
+    /// says so until M3.6's fit, so the entry is made by hand.
+    ///
+    /// Control: the X5's own entry, which the table stitches, leaves
+    /// nothing missing, so a line pushed whatever the table says fails.
+    #[test]
+    fn the_table_s_refusal_is_missing() {
+        let x5 = known::lookup("Insta360 X5", "v1.1.22_build1");
+        let refused = known::Known {
+            stitchable: false,
+            ..x5.clone()
+        };
+        let why = refused.refusal().expect("the entry refuses");
+        assert_eq!(
+            trailer_missing(&x5_master(&refused)),
+            [format!("a camera Spherecut stitches: {why}")]
+        );
+        must_fail(
+            "the X5's own entry, missing a camera Spherecut stitches",
+            !trailer_missing(&x5_master(&x5)).is_empty(),
+        );
+    }
 
     /// The geometry word is the table's entry's: probe's `geometry`'s
     /// status when the file has one, else the entry for the model and

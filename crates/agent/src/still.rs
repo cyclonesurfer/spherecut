@@ -1442,14 +1442,10 @@ impl<'g> Still<'g> {
             }
         }
         let stitched = pair_stitching(src)?;
-        if !stitched.known.stitchable {
+        if let Some(why) = stitched.known.refusal() {
             return Err(refuse(
                 codes::NOT_EQUIRECT,
-                format!(
-                    "{file} can't be stitched: Spherecut's table of cameras says the {}'s \
-                     files aren't",
-                    stitched.known.model
-                ),
+                format!("{file} can't be stitched: {why}"),
             ));
         }
         stop.go_on()?;

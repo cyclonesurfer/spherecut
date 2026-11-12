@@ -50,6 +50,21 @@ pub struct Known {
     pub notice: Option<&'static str>,
 }
 
+impl Known {
+    /// Why the table doesn't stitch the model's files, when it says so
+    /// ([`Known::stitchable`] false), in the words each refusal of them
+    /// gives: frame's (`agent::still::Still::open_pair`) and doctor
+    /// `--file`'s, through probe. `None` when the table stitches them.
+    pub fn refusal(&self) -> Option<String> {
+        (!self.stitchable).then(|| {
+            format!(
+                "Spherecut's table of cameras says the {}'s files aren't stitchable",
+                self.model
+            )
+        })
+    }
+}
+
 /// One row of the table: a camera body, by the model its files' field
 /// 2 names, with the conventions its files leave open and what its
 /// evidence covers. A firmware update or a later body is a row.

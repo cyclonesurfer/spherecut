@@ -14,10 +14,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use spherecut_camera::insta360::calib::{self, Generation};
+use spherecut_camera::insta360::known::Known;
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
-    Metadata, NameRole, Pairing, Stitching, Trailer, companions, parse_exposure, parse_metadata,
-    read_record, read_trailer, stitching,
+    Metadata, NameRole, Pairing, Trailer, companions, parse_exposure, parse_metadata, read_record,
+    read_trailer, stitching,
 };
 use spherecut_camera::{CameraError, Part};
 use spherecut_sphere::rig::{Binding, Status};
@@ -66,6 +67,13 @@ pub struct CameraFile {
     /// `calibration.in_use` null or `generations`, say as much.
     #[serde(skip)]
     pub unstitched: Option<String>,
+    /// Why the built-in table doesn't stitch the camera's files, when
+    /// the calibration is one a stitch reads and the table says so
+    /// ([`Known::refusal`]): what `doctor --file` says is missing,
+    /// in the words frame's refusal of the pair gives. Not in the JSON,
+    /// which says nothing of it yet; no entry refuses until M3.6's fit.
+    #[serde(skip)]
+    pub table_refusal: Option<String>,
 }
 
 /// A dual-fisheye file's lens streams.
@@ -280,7 +288,7 @@ pub(crate) fn read(
     name_camera(guess, &metadata);
     out.calibration = calibration(&metadata, warnings);
     match stitching(&metadata) {
-        Ok(Some(s)) => bind(&mut out, &s),
+        Ok(Some(s)) => bind(&mut out, &s.known),
         // A trailer of V1 and V2 strings alone, as older cameras write:
         // nothing wrong with it, but nothing a stitch reads.
         Ok(None) => {
@@ -305,15 +313,15 @@ pub(crate) fn read(
     out
 }
 
-/// The table's entry from `s` into `out`: the lenses' binding, its
-/// evidence and the screen side, and the geometry.
-fn bind(out: &mut CameraFile, s: &Stitching) {
-    let g = &s.known.geometry;
+/// The table's entry `known` into `out`: the lenses' binding, its
+/// evidence and the screen side, the geometry, and the table's refusal
+/// of the camera's files, if it gives one.
+fn bind(out: &mut CameraFile, known: &Known) {
+    let g = &known.geometry;
     if let Some(l) = out.lenses.as_mut() {
         l.binding = Some(binding_word(g.binding));
         l.evidence = Some(g.evidence.clone());
-        l.screen_side = s
-            .known
+        l.screen_side = known
             .screen_side_track
             .and_then(|t| l.tracks.get(usize::from(t)).copied());
     }
@@ -321,6 +329,7 @@ fn bind(out: &mut CameraFile, s: &Stitching) {
         status: status_word(g.status),
         evidence: g.evidence.clone(),
     });
+    out.table_refusal = known.refusal();
 }
 
 /// Whether [`stitching`]'s refusal `e` of the calibration `c` needs a
@@ -528,5 +537,28 @@ mod tests {
             "a directory, warned of as a file that can't be opened",
             dir[0].starts_with("the file can't be opened"),
         );
+    }
+
+    /// A camera the table says isn't stitchable has its refusal kept for
+    /// `doctor --file`, in the words [`Known::refusal`] gives frame's;
+    /// no entry says so until M3.6's fit, so the entry is made by hand.
+    ///
+    /// Control: the X5's own entry, which the table stitches, keeps none.
+    #[test]
+    fn bind_keeps_the_table_s_refusal() {
+        let x5 = spherecut_camera::insta360::known::lookup("Insta360 X5", "v1.1.22_build1");
+        let refused = Known {
+            stitchable: false,
+            ..x5.clone()
+        };
+        let kept = |known: &Known| {
+            let mut out = CameraFile::default();
+            bind(&mut out, known);
+            out.table_refusal
+        };
+        let why = kept(&refused).expect("the refusal is kept");
+        assert_eq!(Some(why.clone()), refused.refusal());
+        assert!(why.contains("X5"), "{why}");
+        must_fail("the X5's own entry keeps a refusal", kept(&x5).is_some());
     }
 }
