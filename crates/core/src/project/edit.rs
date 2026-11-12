@@ -142,14 +142,19 @@ pub enum Edit {
     },
     /// Replace a media's whole source (M3 plan 11.3): stitching a camera
     /// file that was added as equirect, a binding swapped, a measured
-    /// geometry taken, or a file tagged as equirect.
+    /// geometry taken, or a file tagged as equirect. Its inverse is the
+    /// source that was there.
     SetSource {
         media: MediaId,
         source: Source,
     },
     /// Replace a dual-fisheye media's whole tune, its whole gains, or
     /// both (at least one), as `set_export` replaces the export settings;
-    /// `profile` names the stitch profile the tune came from.
+    /// another kind of source has no stitch. `profile` names the stitch
+    /// profile the tune came from, so it comes only with a tune, and a
+    /// tune without one clears the media's; gains alone leave the tune
+    /// and its profile. Its inverse holds what it replaced: the old tune
+    /// with the old profile, the old gains, or both.
     SetStitch {
         media: MediaId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,7 +164,8 @@ pub enum Edit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<ProfileRef>,
     },
-    /// Set a media's nadir and zenith caps (M3.20).
+    /// Set a media's nadir and zenith caps (M3.20), on any source. Its
+    /// inverse is the caps that were there.
     SetCaps {
         media: MediaId,
         caps: Caps,
@@ -459,6 +465,13 @@ impl Project {
         match self.clip_mut(id) {
             Some(c) => Ok(c),
             None => fail(Code::NotFound, format!("there is no clip {id}")),
+        }
+    }
+
+    fn media_or_fail(&mut self, id: MediaId) -> Result<&mut Media, Problem> {
+        match self.media.iter_mut().find(|m| m.id == id) {
+            Some(m) => Ok(m),
+            None => fail(Code::NotFound, format!("there is no media {id}")),
         }
     }
 
@@ -817,8 +830,71 @@ impl Project {
                 let old = self.rename(id, name)?;
                 vec![Edit::Rename { id, name: old }]
             }
-            Edit::SetSource { .. } | Edit::SetStitch { .. } | Edit::SetCaps { .. } => {
-                todo!("M3.9 unit (b)")
+            Edit::SetSource { media, source } => {
+                let id = *media;
+                let m = self.media_or_fail(id)?;
+                let old = std::mem::replace(&mut m.source, source.clone());
+                vec![Edit::SetSource {
+                    media: id,
+                    source: old,
+                }]
+            }
+            Edit::SetStitch {
+                media,
+                tune,
+                gains,
+                profile,
+            } => {
+                if tune.is_none() && gains.is_none() {
+                    return fail(Code::Invalid, "set_stitch needs `tune`, `gains` or both");
+                }
+                if tune.is_none() && profile.is_some() {
+                    return fail(
+                        Code::Invalid,
+                        "set_stitch's `profile` says where its `tune` came from, so it needs a `tune`",
+                    );
+                }
+                let id = *media;
+                let m = self.media_or_fail(id)?;
+                let d = match &mut m.source {
+                    Source::DualFisheye(d) => d,
+                    other => {
+                        return fail(
+                            Code::Invalid,
+                            format!(
+                                "media {id} is {}, not a camera's two fisheye lenses, so it has no stitch to set",
+                                kind_name(other)
+                            ),
+                        );
+                    }
+                };
+                // A tune replaces the profile it came from, or clears it;
+                // gains alone leave both.
+                let (old_tune, old_profile) = match tune {
+                    Some(t) => (
+                        Some(std::mem::replace(&mut d.tune, *t)),
+                        std::mem::replace(&mut d.profile, profile.clone()),
+                    ),
+                    None => (None, None),
+                };
+                let old_gains = gains
+                    .as_ref()
+                    .map(|g| std::mem::replace(&mut d.gains, g.clone()));
+                vec![Edit::SetStitch {
+                    media: id,
+                    tune: old_tune,
+                    gains: old_gains,
+                    profile: old_profile,
+                }]
+            }
+            Edit::SetCaps { media, caps } => {
+                let id = *media;
+                let m = self.media_or_fail(id)?;
+                let old = std::mem::replace(&mut m.caps, caps.clone());
+                vec![Edit::SetCaps {
+                    media: id,
+                    caps: old,
+                }]
             }
         })
     }
@@ -958,6 +1034,15 @@ impl Project {
             Code::NotFound,
             format!("there is no sequence, marker or target {id} to rename"),
         )
+    }
+}
+
+/// What a source is, as a refusal names it.
+fn kind_name(source: &Source) -> &'static str {
+    match source {
+        Source::Equirect {} => "an equirect picture",
+        Source::DualFisheye(_) => "a camera's two fisheye lenses",
+        Source::EacPair(_) => "a camera's two EAC tracks",
     }
 }
 

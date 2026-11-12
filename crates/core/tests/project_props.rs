@@ -7,14 +7,22 @@
 mod common;
 
 use std::collections::HashMap;
+use std::f64::consts::TAU;
 use std::path::Path;
 
 use common::*;
+use glam::DVec3;
 use proptest::prelude::*;
 use spherecut_core::project::file;
 use spherecut_core::project::*;
 use spherecut_core::{FrameRate, Rational};
+use spherecut_sphere::fisheye::V6Reading;
 use spherecut_sphere::perspective::{LensShape, Morph, Projection};
+use spherecut_sphere::rig::{
+    Binding, CalibTerms, CanvasMap, EulerConv, Extrinsics, Generation, Geometry, LensCalib,
+    LensTune, QuarterTurn, Rig, RigLens, Status, Tune, TurnAxis, TzSign,
+};
+use spherecut_testkit::control::{at_least, must_fail};
 
 /// One edit's worth of randomness, turned into an edit by [`make`]
 /// against the project as it is when it is applied.
@@ -467,28 +475,748 @@ fn history_keeps_its_limit_and_drops_redo_on_a_new_step() {
     assert!(e.contains("cursor 9 is past its 3 steps"), "{e}");
 }
 
-proptest! {
-    /// Random tunes, gains, sources and caps inside 11.2's bounds, applied
-    /// through the three stitch ops in random order (M3 plan 11.5): undoing
-    /// all gives the first project, redoing gives the last, and every step
-    /// saves and loads the same. Control: an inverse of `set_stitch` that
-    /// drops the gains is caught.
-    #[test]
-    #[ignore = "M3.9 unit (b)"]
-    #[expect(unreachable_code, reason = "M3.9 unit (b) writes the body")]
-    fn stitch_edits_undo_and_save(_seed in any::<u64>()) {
-        todo!()
+/// The bands the stitch property draws each lens's tune from: inside
+/// 11.2's bounds, and narrowed until every corner of them clears the
+/// frame and leaves no direction uncovered ([`the_drawn_tunes_clear_the_frame`]),
+/// which `validate` holds each tune to (11.2). On the base calibration a
+/// radius scale of 1.05 leaves the frame 0.74° past 90° at θ_max 95°,
+/// under the 3° feather, and ±1° of turn at q 3.34 leaves −0.22° of
+/// coverage, so the radius scale is held to ±1% and the turn to ±0.5°;
+/// q keeps 11.2's whole range.
+mod band {
+    /// Each lens's yaw, pitch and roll, ± degrees (11.2: ±15).
+    pub const YPR_DEG: f64 = 0.5;
+    /// Each lens's centre shift, ± canvas pixels (11.2: ±64).
+    pub const CENTRE_PX: f64 = 16.0;
+    /// The radius scale's least and most (11.2: 0.9 to 1.1).
+    pub const RADIUS_SCALE: [f64; 2] = [0.99, 1.01];
+    /// ξ's delta, ± (11.2 gives no range; F038 keeps ξ + it above −1).
+    pub const XI_DELTA: f64 = 0.05;
+    /// θ_max's least and most, degrees (11.2: 85 to 110).
+    pub const THETA_MAX_DEG: [f64; 2] = [95.0, 105.0];
+    /// The feather's most, degrees (11.2: 0 to 15).
+    pub const FEATHER_DEG: f64 = 3.0;
+    /// q's most, m⁻¹ (11.2: 0 to 3.34).
+    pub const Q_PER_M: f64 = 3.34;
+}
+
+/// The base calibration of the stitch property's camera source, in the
+/// X5's shape with numbers of my own (F137: none of Pat's): synth's
+/// `x5_like` V3 blocks and `x5_like_v6` V6 blocks with their last digits
+/// changed, both held as a file holding both strings holds them, under
+/// the X5 row's conventions with `generation` in use.
+fn base_source(generation: Generation) -> DualFisheye {
+    let block = |b: usize, fx: f64, fy: f64, terms| {
+        let ([cx, cy], ypr_deg, t_m) = [
+            ([2704.7, 2673.4], [0.31, -0.22, 90.47], [0.0; 3]),
+            (
+                [2669.2, 2703.3],
+                [-0.26, 0.33, 89.32],
+                [-0.00447, 0.000018, -0.0322],
+            ),
+        ][b];
+        LensCalib {
+            xi: 2.0,
+            fx,
+            fy,
+            cx,
+            cy,
+            ypr_deg,
+            t_m,
+            terms,
+        }
+    };
+    let v3 = |k, p| CalibTerms::V3 { k, p };
+    let v6 = |d| CalibTerms::V6 { d };
+    let raw = RawStrings {
+        v1: None,
+        v2: None,
+        v3: Some("a V3 string of my own".into()),
+        v6: Some("a V6 string of my own".into()),
+    };
+    DualFisheye {
+        camera: Camera {
+            make: Some("Insta360".into()),
+            model: Some("Insta360 X5".into()),
+            firmware: Some("v1.1.22_build1".into()),
+            serial: Some("SYNTH00001".into()),
+        },
+        tracks: [0, 1],
+        front_track: 0,
+        calibration: CalibSnapshot {
+            canvas: [10752, 5376],
+            window: [5312, 5312],
+            window_offset: [0, 0],
+            hash: raw.hash(),
+            raw,
+            v3: Some([
+                block(
+                    0,
+                    4284.66,
+                    4284.24,
+                    v3(
+                        [0.18632057, 2.04984351, -3.24446913],
+                        [-0.00143572, -0.00339246],
+                    ),
+                ),
+                block(
+                    1,
+                    4291.07,
+                    4291.01,
+                    v3(
+                        [0.18940832, 2.07073065, -3.24103338],
+                        [0.00013837, -0.00299871],
+                    ),
+                ),
+            ]),
+            v6: Some([
+                block(
+                    0,
+                    4277.56,
+                    4277.23,
+                    v6([
+                        0.28032991,
+                        0.89045402,
+                        2.04927581,
+                        -8.05179784,
+                        0.0,
+                        0.00120203,
+                        -0.00259481,
+                        0.02324702,
+                        0.00533924,
+                        -0.01560201,
+                        0.00019353,
+                        -0.04580527,
+                        0.00197181,
+                    ]),
+                ),
+                block(
+                    1,
+                    4284.44,
+                    4284.72,
+                    v6([
+                        0.27665338,
+                        0.98522977,
+                        1.83605261,
+                        -7.99374482,
+                        0.0,
+                        0.00021052,
+                        -0.00147621,
+                        0.01940429,
+                        0.00331834,
+                        -0.01330661,
+                        0.00074517,
+                        -0.02859293,
+                        0.00888742,
+                    ]),
+                ),
+            ]),
+        },
+        geometry: Geometry {
+            binding: Binding::Reversed,
+            canvas: CanvasMap::C,
+            extrinsics: Extrinsics::Stored(EulerConv::PLACEHOLDER),
+            turn: TurnAxis::Y,
+            tz: TzSign::AsStored,
+            upright: QuarterTurn::Zero,
+            generation,
+            v6: V6Reading::RADIAL_ONLY,
+            status: Status::Provisional,
+            evidence: "placeholder until the fit".into(),
+        },
+        tune: Tune::default(),
+        gains: Gains::Off {},
+        profile: None,
     }
 }
 
-/// The corners of the property's tune draws clear `validate`'s frame and
-/// coverage rules: `Rig::build` takes each, each lens's min(θ_max,
-/// θ_frame) − 90° is at least the largest feather drawn, and the two
-/// lenses cover every direction at the largest q drawn. Controls: a
-/// radius scale of 1.1 fails the frame half; θ_max 95° on both lenses
-/// with one yawed 15° at q 3.34 fails the coverage half.
+/// Each corner of the frame's bands for one lens: radius scale, centre
+/// shift on each axis and ξ's delta at their least and most, θ_max at
+/// `theta_max_deg`.
+fn frame_corners(radius: [f64; 2], theta_max_deg: f64) -> Vec<LensTune> {
+    let ends = |e: f64| [-e, e];
+    let mut out = Vec::new();
+    for radius_scale in radius {
+        for x in ends(band::CENTRE_PX) {
+            for y in ends(band::CENTRE_PX) {
+                for xi_delta in ends(band::XI_DELTA) {
+                    out.push(LensTune {
+                        centre_px: [x, y],
+                        radius_scale,
+                        xi_delta,
+                        theta_max_deg,
+                        ..LensTune::default()
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The least room, in degrees, that min(θ_max, θ_frame) leaves past 90°
+/// over each lens of both generations at every corner of the frame's
+/// bands with the radius scale's ends `radius`, with that corner; each
+/// corner's rig built at the feather's and q's most. θ_frame falls as
+/// the focal grows, as ξ shrinks and as the centre nears an edge, so its
+/// least over the bands is at a corner; the lens's turn and q don't move
+/// it.
+fn frame_room(radius: [f64; 2]) -> (f64, LensTune) {
+    let mut least = (f64::INFINITY, LensTune::default());
+    for generation in [Generation::V3, Generation::V6] {
+        for theta_max_deg in band::THETA_MAX_DEG {
+            for corner in frame_corners(radius, theta_max_deg) {
+                let mut d = base_source(generation);
+                d.tune = Tune {
+                    lenses: [corner; 2],
+                    feather_deg: band::FEATHER_DEG,
+                    q_per_m: band::Q_PER_M,
+                };
+                let rig = d
+                    .rig([768; 2])
+                    .unwrap_or_else(|e| panic!("{generation:?} at {corner:?}: {e}"));
+                for lens in &rig.lenses {
+                    let room = lens.theta_max.min(lens.theta_frame).to_degrees() - 90.0;
+                    if room < least.0 {
+                        least = (room, corner);
+                    }
+                }
+            }
+        }
+    }
+    least
+}
+
+/// How far, in degrees, the two lenses' reach exceeds what covering
+/// every direction needs, by the sufficient rule `validate` applies
+/// (11.2): each lens's min(θ_max, θ_frame) less asin(q·|c_b − o|), the
+/// most parallax can turn its ray, about its own axis, the two summing
+/// to at least 360° less the angle between the axes. On the great circle
+/// through both axes a direction's angles to them sum to at most that,
+/// and anywhere else to less.
+fn coverage_slack(rig: &Rig) -> f64 {
+    let reach = |l: &RigLens| l.theta_max.min(l.theta_frame) - (rig.q * l.centre_m.length()).asin();
+    let axis = |l: &RigLens| l.lens_from_rig.inverse() * DVec3::Z;
+    let [a, b] = &rig.lenses;
+    let apart = axis(a).angle_between(axis(b));
+    (reach(a) + reach(b) - (TAU - apart)).to_degrees()
+}
+
+/// Each lens's own corner of the frame's bands, at θ_max
+/// `theta_max_deg`, where its min(θ_max, θ_frame) is least on `d`'s
+/// calibration and geometry. A lens's θ_frame reads only its own block
+/// and tune, so the two lenses' worst corners are found together, each
+/// lens on its own; that the bands move neither lens's axis nor its
+/// centre is checked at each corner.
+fn worst_frames(d: &DualFisheye, theta_max_deg: f64) -> [LensTune; 2] {
+    let still = d.rig([768; 2]).unwrap();
+    let mut least = [(f64::INFINITY, LensTune::default()); 2];
+    for corner in frame_corners(band::RADIUS_SCALE, theta_max_deg) {
+        let mut d = d.clone();
+        d.tune.lenses = [corner; 2];
+        let rig = d.rig([768; 2]).unwrap();
+        for (b, (lens, still)) in rig.lenses.iter().zip(&still.lenses).enumerate() {
+            assert_eq!(lens.lens_from_rig, still.lens_from_rig);
+            assert_eq!(lens.centre_m, still.centre_m);
+            let reach = lens.theta_max.min(lens.theta_frame);
+            if reach < least[b].0 {
+                least[b] = (reach, corner);
+            }
+        }
+    }
+    least.map(|(_, corner)| corner)
+}
+
+/// The least [`coverage_slack`] over both generations, both bindings and
+/// every corner of the two lenses' yaw, pitch and roll bands of ±`ypr`
+/// degrees, at q `q` and θ_max `theta_max_deg`, each lens at its own
+/// worst corner of the frame's bands ([`worst_frames`]). A lens's reach
+/// reads its own θ_frame, which only its frame bands move, and its
+/// centre, which neither they nor the turns move; the angle between the
+/// axes reads only the turns, which move no θ_frame (the loop checks
+/// both). So each lens's reach is least at its worst frame corner
+/// whatever the other's corner and the turns, and the least over every
+/// pair of frame corners and every corner of the turns is here.
+fn least_coverage(ypr: f64, q: f64, theta_max_deg: f64) -> f64 {
+    let ends = [-ypr, ypr];
+    let mut least = f64::INFINITY;
+    for generation in [Generation::V3, Generation::V6] {
+        for binding in [Binding::Direct, Binding::Reversed] {
+            let mut d = base_source(generation);
+            d.geometry.binding = binding;
+            d.tune = Tune {
+                lenses: worst_frames(&d, theta_max_deg),
+                feather_deg: band::FEATHER_DEG,
+                q_per_m: q,
+            };
+            let untuned = d.rig([768; 2]).unwrap();
+            for i in 0..64 {
+                let turn = |bits: usize| [0, 1, 2].map(|k| ends[(bits >> k) & 1]);
+                for (b, bits) in [i & 7, i >> 3].into_iter().enumerate() {
+                    d.tune.lenses[b].ypr_deg = turn(bits);
+                }
+                let rig = d.rig([768; 2]).unwrap();
+                for (l, u) in rig.lenses.iter().zip(&untuned.lenses) {
+                    assert_eq!(l.theta_frame, u.theta_frame);
+                    assert!((l.centre_m.length() - u.centre_m.length()).abs() < 1e-12);
+                }
+                least = least.min(coverage_slack(&rig));
+            }
+        }
+    }
+    least
+}
+
+/// The corners of the stitch property's tune draws clear `validate`'s
+/// frame and coverage rules (11.2), which run at every apply: `Rig::build`
+/// takes each (its refusals read only the frame's bands and θ_max), each
+/// lens's min(θ_max, θ_frame) − 90° is at least the largest feather
+/// drawn, and the two lenses cover every direction at the largest q
+/// drawn, by [`coverage_slack`]'s rule. Controls: a radius scale of 1.1
+/// fails the frame half; θ_max 95° on both lenses with one yawed 15° at
+/// q 3.34 fails the coverage half.
 #[test]
-#[ignore = "M3.9 unit (b)"]
 fn the_drawn_tunes_clear_the_frame() {
-    todo!()
+    let began = std::time::Instant::now();
+    let (room, worst) = frame_room(band::RADIUS_SCALE);
+    eprintln!("the frame's least room: {room:.3}° at {worst:?}");
+    assert_eq!(
+        at_least(room, band::FEATHER_DEG).passes(),
+        Some(true),
+        "the frame leaves {room:.3}° at {worst:?}"
+    );
+    let slack = least_coverage(band::YPR_DEG, band::Q_PER_M, band::THETA_MAX_DEG[0]);
+    eprintln!("the coverage's least slack: {slack:.3}°");
+    assert_eq!(at_least(slack, 0.0).passes(), Some(true), "{slack:.3}°");
+
+    // Controls.
+    let (room, at) = frame_room([band::RADIUS_SCALE[0], 1.1]);
+    eprintln!("at a radius scale of 1.1: {room:.3}° at {at:?}");
+    must_fail(
+        "a radius scale of 1.1 clears the frame",
+        at_least(room, band::FEATHER_DEG),
+    );
+    let mut d = base_source(Generation::V6);
+    d.tune.q_per_m = 3.34;
+    for lens in &mut d.tune.lenses {
+        lens.theta_max_deg = 95.0;
+    }
+    d.tune.lenses[1].ypr_deg = [15.0, 0.0, 0.0];
+    let slack = coverage_slack(&d.rig([768; 2]).unwrap());
+    eprintln!("θ_max 95° with lens B yawed 15° at q 3.34: {slack:.3}°");
+    must_fail(
+        "θ_max 95° with lens B yawed 15° at q 3.34 covers every direction",
+        at_least(slack, 0.0),
+    );
+    eprintln!(
+        "the_drawn_tunes_clear_the_frame: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// One lens's tune, drawn inside [`band`].
+fn lens_tune() -> impl Strategy<Value = LensTune> {
+    (
+        prop::array::uniform3(-band::YPR_DEG..=band::YPR_DEG),
+        prop::array::uniform2(-band::CENTRE_PX..=band::CENTRE_PX),
+        band::RADIUS_SCALE[0]..=band::RADIUS_SCALE[1],
+        -band::XI_DELTA..=band::XI_DELTA,
+        band::THETA_MAX_DEG[0]..=band::THETA_MAX_DEG[1],
+    )
+        .prop_map(
+            |(ypr_deg, centre_px, radius_scale, xi_delta, theta_max_deg)| LensTune {
+                ypr_deg,
+                centre_px,
+                radius_scale,
+                xi_delta,
+                theta_max_deg,
+            },
+        )
+}
+
+/// A whole tune, drawn inside [`band`].
+fn tune() -> impl Strategy<Value = Tune> {
+    (
+        prop::array::uniform2(lens_tune()),
+        0.0..=band::FEATHER_DEG,
+        0.0..=band::Q_PER_M,
+    )
+        .prop_map(|(lenses, feather_deg, q_per_m)| Tune {
+            lenses,
+            feather_deg,
+            q_per_m,
+        })
+}
+
+/// A fingerprint of 16 hex digits from `n`.
+fn fingerprint(n: u64) -> Fingerprint {
+    Fingerprint {
+        bytes: n >> 24,
+        head: format!("{n:016x}"),
+    }
+}
+
+/// Off, Fixed or Auto gains inside 11.2's bounds: each Fixed gain 0.5 to
+/// 2 (11.2: 0.25 to 4), an Auto track at a positive rate with finite
+/// ratios, measured under a tune of its own.
+fn gains() -> impl Strategy<Value = Gains> {
+    let fixed = prop::array::uniform2(prop::array::uniform3(0.5f64..2.0))
+        .prop_map(|rgb| Gains::Fixed { rgb });
+    let auto = (
+        0.5f64..60.0,
+        prop::collection::vec(prop::array::uniform3(-0.5f32..0.5), 1..24),
+        tune(),
+        any::<bool>(),
+        any::<u64>(),
+        0u32..4,
+        any::<u32>(),
+    )
+        .prop_map(
+            |(rate_hz, log_ratio, under, lrv, n, every, estimator)| Gains::Auto {
+                rate_hz,
+                log_ratio,
+                basis: gains_basis(&under),
+                input: AnalysisInput {
+                    file: if lrv { Analysed::Lrv } else { Analysed::Master },
+                    fingerprint: fingerprint(n),
+                    frames: match every {
+                        0 => Sampling::Keyframes {},
+                        n => Sampling::Every { n },
+                    },
+                },
+                estimator,
+            },
+        );
+    prop_oneof![Just(Gains::Off {}), fixed, auto]
+}
+
+/// No profile, or one of four by name with a file of its own.
+fn profile() -> impl Strategy<Value = Option<ProfileRef>> {
+    prop::option::of(
+        (0u8..4, any::<u64>())
+            .prop_map(|(n, bytes)| ProfileRef::of(&format!("profile {n}"), &bytes.to_le_bytes())),
+    )
+}
+
+/// An equirect source, or [`base_source`] at either generation with
+/// either binding, any status and a drawn tune, gains and profile.
+fn source() -> impl Strategy<Value = Source> {
+    let camera = (
+        any::<bool>(),
+        0usize..4,
+        any::<bool>(),
+        tune(),
+        gains(),
+        profile(),
+    )
+        .prop_map(|(direct, status, v3, tune, gains, profile)| {
+            let mut d = base_source(if v3 { Generation::V3 } else { Generation::V6 });
+            d.geometry.binding = if direct {
+                Binding::Direct
+            } else {
+                Binding::Reversed
+            };
+            d.geometry.status = [
+                Status::Provisional,
+                Status::Settled,
+                Status::Fitted,
+                Status::User,
+            ][status];
+            d.geometry.evidence = format!("drawn {:?}", d.geometry.status);
+            d.tune = tune;
+            d.gains = gains;
+            d.profile = profile;
+            Source::DualFisheye(Box::new(d))
+        });
+    prop_oneof![1 => Just(Source::Equirect {}), 3 => camera]
+}
+
+/// A cap inside 11.2's bounds (5° to 35°, an edge of 0° to 5°): a fill,
+/// or a patch whose file sits beside the clips.
+fn cap() -> impl Strategy<Value = Box<Cap>> {
+    (
+        any::<bool>(),
+        0.0f64..10.0,
+        any::<u64>(),
+        5.0f64..=35.0,
+        0.0f64..=5.0,
+        -180.0f64..180.0,
+    )
+        .prop_map(|(fill, ring_deg, n, cap_deg, edge_deg, rotation_deg)| {
+            Box::new(Cap {
+                mode: if fill {
+                    CapMode::Fill { ring_deg }
+                } else {
+                    CapMode::Patch {
+                        path: format!("/clips/caps/patch_{}.png", n % 4).into(),
+                        fingerprint: fingerprint(n),
+                    }
+                },
+                cap_deg,
+                edge_deg,
+                rotation_deg,
+            })
+        })
+}
+
+fn caps() -> impl Strategy<Value = Caps> {
+    (prop::option::of(cap()), prop::option::of(cap()))
+        .prop_map(|(nadir, zenith)| Caps { nadir, zenith })
+}
+
+/// One stitch op's worth of randomness, its media still to pick.
+#[derive(Debug, Clone)]
+enum StitchDraw {
+    Source(Source),
+    /// A tune, gains and a profile, each or none, boxed as an edit's are
+    /// not, since they outweigh the other draws.
+    Stitch(Box<(Option<Tune>, Option<Gains>, Option<ProfileRef>)>),
+    Caps(Caps),
+}
+
+/// Which media (0 to 4 the camera file's, 5 to 8 the equirect file's, 9
+/// one that isn't there) and the op.
+fn stitch_draw() -> impl Strategy<Value = (u8, StitchDraw)> {
+    let op = prop_oneof![
+        source().prop_map(StitchDraw::Source),
+        (
+            prop::option::weighted(0.7, tune()),
+            prop::option::weighted(0.7, gains()),
+            profile()
+        )
+            .prop_map(|(tune, gains, profile)| StitchDraw::Stitch(Box::new((
+                tune, gains, profile
+            )))),
+        caps().prop_map(StitchDraw::Caps),
+    ];
+    (0u8..10, op)
+}
+
+fn stitch_edit(media: [MediaId; 2], pick: u8, draw: &StitchDraw) -> Edit {
+    let media = match pick {
+        0..=4 => media[0],
+        5..=8 => media[1],
+        _ => MediaId(999),
+    };
+    match draw.clone() {
+        StitchDraw::Source(source) => Edit::SetSource { media, source },
+        StitchDraw::Stitch(stitch) => {
+            let (tune, gains, profile) = *stitch;
+            Edit::SetStitch {
+                media,
+                tune,
+                gains,
+                profile,
+            }
+        }
+        StitchDraw::Caps(caps) => Edit::SetCaps { media, caps },
+    }
+}
+
+/// The refusal the stitch ops' own rules give `edit` on `p`, if any: a
+/// `set_stitch` with neither a tune nor gains, or with a profile but no
+/// tune, is Invalid whatever its media; a media that isn't there is
+/// NotFound; a `set_stitch` on a media that isn't two fisheye lenses is
+/// Invalid.
+fn ruled_out(p: &Project, edit: &Edit) -> Option<Code> {
+    let (media, stitch) = match edit {
+        Edit::SetSource { media, .. } | Edit::SetCaps { media, .. } => (*media, false),
+        Edit::SetStitch {
+            media,
+            tune,
+            gains,
+            profile,
+        } => {
+            if tune.is_none() && (gains.is_none() || profile.is_some()) {
+                return Some(Code::Invalid);
+            }
+            (*media, true)
+        }
+        other => unreachable!("{other:?} is no stitch op"),
+    };
+    match p.media_by_id(media) {
+        None => Some(Code::NotFound),
+        Some(m) if stitch && !matches!(m.source, Source::DualFisheye(_)) => Some(Code::Invalid),
+        Some(_) => None,
+    }
+}
+
+/// The stitch property's project: a 10 s camera file of two 5376² lenses
+/// whose source is [`base_source`] at V6, made as `project_media` makes
+/// one, then a 10 s equirect file added. Returns it and the two media.
+fn stitch_project() -> (Project, [MediaId; 2]) {
+    let mut m = common::media("/clips/VID_20250101_120000_00_001.insv", 10);
+    m.video.width = 5376;
+    m.video.height = 5376;
+    m.source = Source::DualFisheye(Box::new(base_source(Generation::V6)));
+    let mut p = Project::untitled(
+        m,
+        InitialView {
+            orientation: ypr(20.0, -5.0, 0.0),
+            fov_deg: 90.0,
+            projection: Projection::Rectilinear,
+        },
+    )
+    .unwrap();
+    let camera = p.the_clip().media;
+    p.apply(&[Edit::AddMedia {
+        media: common::media("/clips/pano.mp4", 10),
+    }])
+    .unwrap();
+    let flat = p
+        .media()
+        .iter()
+        .map(|m| m.id)
+        .find(|&id| id != camera)
+        .unwrap();
+    (p, [camera, flat])
+}
+
+/// Whether `inverse`, applied to `after`, gives back `before`'s content.
+fn undoes(after: &Project, inverse: &[Edit], before: &Project) -> bool {
+    let mut p = after.clone();
+    p.apply(inverse).is_ok() && p.same_content(before)
+}
+
+/// The gains of media `id` in `p`, if it has two fisheye lenses.
+fn gains_of(p: &Project, id: MediaId) -> Option<&Gains> {
+    match &p.media_by_id(id)?.source {
+        Source::DualFisheye(d) => Some(&d.gains),
+        _ => None,
+    }
+}
+
+/// `p` saved as a project file's text in `/clips` and loaded again.
+fn saved_and_loaded(p: &Project) -> Project {
+    let folder = Path::new("/clips");
+    file::from_json(&file::to_json(p, folder).unwrap(), folder).unwrap()
+}
+
+/// The control on the undo check: `set_stitch`'s inverse `inverse` with
+/// its gains dropped, applied to `after`, must not give back `before`'s
+/// content when the edit changed the gains. It runs only on an inverse
+/// that holds a tune beside its gains, whose dropped form still applies,
+/// so that it is the comparison that tells the two apart: without the
+/// tune it would hold neither, which `set_stitch` refuses. Returns
+/// whether it ran.
+fn dropping_the_gains_is_caught(before: &Project, after: &Project, inverse: &[Edit]) -> bool {
+    let [
+        Edit::SetStitch {
+            media,
+            tune: Some(tune),
+            gains: Some(_),
+            profile,
+        },
+    ] = inverse
+    else {
+        return false;
+    };
+    if gains_of(before, *media) == gains_of(after, *media) {
+        return false;
+    }
+    let mut undone = after.clone();
+    undone
+        .apply(&[Edit::SetStitch {
+            media: *media,
+            tune: Some(*tune),
+            gains: None,
+            profile: profile.clone(),
+        }])
+        .unwrap_or_else(|e| panic!("the inverse without its gains is refused: {e}"));
+    must_fail(
+        "set_stitch's inverse without its gains undoes it",
+        undone.same_content(before),
+    );
+    true
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(
+        std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(256)
+    ))]
+
+    /// Random tunes, gains, sources and caps through `set_source`,
+    /// `set_stitch` and `set_caps` in random order (M3 plan 11.5), on a
+    /// camera file and an equirect one: a step the ops' own rules refuse
+    /// changes nothing, and no other is refused; each step's inverse
+    /// undoes it exactly; the project saves and loads as itself at every
+    /// step it takes (one case saving the first); undoing all gives the
+    /// first project and redoing all the last. No case builds a rig. Its
+    /// gate is a run at `PROPTEST_CASES=100000`. Control: an inverse of
+    /// `set_stitch` that drops its gains, and still applies, fails the
+    /// undo check: on the first project, whose tune and Fixed gains of
+    /// 0.9 on lens B every case sets, and at each drawn edit that sets a
+    /// tune and changes the gains.
+    #[test]
+    fn stitch_edits_undo_and_save(steps in prop::collection::vec(prop::collection::vec(stitch_draw(), 1..=2), 1..=8)) {
+        let (mut p, media) = stitch_project();
+        let original = p.clone();
+        // The first project is every case's, so one case saves it.
+        static FIRST: std::sync::Once = std::sync::Once::new();
+        FIRST.call_once(|| assert_eq!(saved_and_loaded(&original), original));
+
+        // A tune and Fixed gains, so that the inverse holds both and the
+        // control's form of it, the tune alone, applies.
+        let mut fixed = p.clone();
+        let applied = fixed
+            .apply(&[Edit::SetStitch {
+                media: media[0],
+                tune: Some(Tune { q_per_m: 1.0 / 1.5, ..Tune::default() }),
+                gains: Some(Gains::Fixed { rgb: [[1.0; 3], [0.9; 3]] }),
+                profile: None,
+            }])
+            .unwrap();
+        prop_assert!(undoes(&fixed, &applied.inverse, &p));
+        prop_assert!(dropping_the_gains_is_caught(&p, &fixed, &applied.inverse));
+
+        let mut h = History::new();
+        let mut states = vec![p.clone()];
+        for draws in &steps {
+            let edits: Vec<Edit> = draws.iter().map(|(pick, d)| stitch_edit(media, *pick, d)).collect();
+            // Each edit is judged on what the edits before it leave.
+            let mut scratch = p.clone();
+            let mut ruled = None;
+            for (i, e) in edits.iter().enumerate() {
+                if let Some(code) = ruled_out(&scratch, e) {
+                    ruled = Some((i, code));
+                    break;
+                }
+                let was = scratch.clone();
+                match scratch.apply(std::slice::from_ref(e)) {
+                    Ok(applied) => {
+                        prop_assert!(undoes(&scratch, &applied.inverse, &was), "{:?}", e);
+                        dropping_the_gains_is_caught(&was, &scratch, &applied.inverse);
+                    }
+                    Err(err) => prop_assert!(false, "{:?} refused by no rule of the stitch ops: {}", e, err),
+                }
+            }
+            let before = p.clone();
+            match (h.record(&mut p, "Stitch", Origin::User, &edits), ruled) {
+                (Ok(step), None) => {
+                    prop_assert!(undoes(&p, &step.inverse, &before));
+                    prop_assert!(p.same_content(&scratch));
+                    prop_assert_eq!(&saved_and_loaded(&p), &p);
+                    states.push(p.clone());
+                }
+                // The project is the one before, which saved as itself.
+                (Err(e), Some((i, code))) => {
+                    prop_assert_eq!((e.index, e.code()), (i, code), "{}", e);
+                    prop_assert_eq!(&p, &before, "a refused step changes nothing");
+                }
+                (Ok(_), Some((i, code))) => prop_assert!(false, "edit {} applied where {} was due", i, code),
+                (Err(e), None) => prop_assert!(false, "refused by no rule of the stitch ops: {}", e),
+            }
+        }
+        for state in states[..states.len() - 1].iter().rev() {
+            prop_assert!(h.undo(&mut p).unwrap().is_some());
+            prop_assert!(p.same_content(state));
+        }
+        prop_assert!(h.undo(&mut p).unwrap().is_none());
+        prop_assert!(p.same_content(&original));
+        for state in &states[1..] {
+            prop_assert!(h.redo(&mut p).unwrap().is_some());
+            prop_assert!(p.same_content(state));
+        }
+        prop_assert!(h.redo(&mut p).unwrap().is_none());
+    }
 }
