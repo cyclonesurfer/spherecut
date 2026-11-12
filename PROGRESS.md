@@ -3563,7 +3563,8 @@ it could be):
   -0.198 (camera's `Token::new` and `strings.rs`'s grammar test) and
   8075.73 (sphere's `rig.rs`). `testkit::pats`'s doc lists them, with
   the files that write out the X5's format.
-- FFmpeg 9 waits on the compat run (Known issues). On 7.1 the seek test
+- On FFmpeg 9.0.2 one more Tier 1 test fails, in synth's writers
+  (Known issues). On 7.1 the seek test
   checks seek parity on the CodecDelay copy without pinning where it
   starts, and whether 9.0's Matroska muxer also trims the AAC track's
   end with a DiscardPadding is unchecked.
@@ -3622,9 +3623,19 @@ lavapipe), at 7f444b6 unless named:
   passed in 1163 s: 1658 tests passed, 0 failed and 60 ignored on 141
   result lines, against 1618, 0 and 58 on 133 at the review-fix slice's
   0b3ab9b. At f63b783 it failed on one playback test while an FFmpeg
-  build ran beside it (Known issues, the lock test). It runs once more
-  after this note's commit, at the fix round's tip, and the merge
-  records it; so does the orchestrator's compat run on 8.1.3 and 9.0.2.
+  build ran beside it (Known issues, the lock test). At 30ad23a, the fix
+  round's last code commit, it passed in 844 s: 1663 tests passed, 0
+  failed and 60 ignored on 140 result lines.
+- `cargo xtask compat` at 7bc2745 built and linked against FFmpeg 9.0.2
+  and 8.1.3 (clippy, link and binding passed on both). Tier 1 on 8.1.3
+  failed once on `never_blocks`'s seek storm (one 12.6 ms UI iteration
+  against a 10 ms ceiling) while analysis agents loaded the box, and
+  passed on a rerun with the box quiet (140 result lines, 1207 s).
+  Tier 1 on 9.0.2 passed every binary up to synth's `tests/writers.rs`,
+  including both tests M3.5 fixed and the ones that failed on the old
+  install for want of Vulkan and libsvtav1, and failed there on one
+  test (Known issues); cargo stopped at that binary, so testkit, xtask
+  and the doctests didn't run on 9.0.2.
 
 ## Agent integration (track A): how it got here
 
@@ -5843,8 +5854,8 @@ each slice's merge sweeps the list.
   taken as a timing flake under load; another failure would need a look
   at the test's margins. (as of 2026-11-12)
 - On FFmpeg 9.0.2 two Tier 1 tests failed, at 073715b as at the
-  review-fix slice. M3.5 settles both, pending the orchestrator's compat
-  run on 8.1.3 and 9.0.2, where neither has run since.
+  review-fix slice. M3.5 fixed both, and both pass in compat's Tier 1
+  on 9.0.2 at 7bc2745 (and on 8.1.3).
   `mp4_output_keeps_each_track_s_tables` (media `tests/mux.rs`) failed
   because FFmpeg 9's MP4 muxer writes edit lists in a movie timescale
   that is the least common multiple of the tracks' timescales, where 6.1
@@ -5869,10 +5880,19 @@ each slice's merge sweeps the list.
   `glslc`: its spirv_compiler is off, and with it the Vulkan parts of
   ffv1, prores, apv and dpx, while H.264, HEVC and AV1 Vulkan decode are
   unaffected. The old install had no Vulkan or libsvtav1, so 19 more
-  tests failed there for want of them; the compat run will show whether
-  the new one clears them. Also unchecked on 9.0.2: whether its Matroska
-  muxer trims the AAC track's end with a DiscardPadding.
-  (as of 2026-11-12)
+  tests failed there for want of them; on the new one they pass. Also
+  unchecked on 9.0.2: whether its Matroska muxer trims the AAC track's
+  end with a DiscardPadding. (as of 2026-11-12)
+- On FFmpeg 9.0.2 one test in synth's `tests/writers.rs` fails,
+  `audio_encoders_with_small_fixed_frames_get_exact_frames`:
+  `Mp4Writer::finish` returns "Invalid data found when processing input"
+  from writing the MP4 trailer. It is most likely Vorbis in MP4: on the
+  old 9.0.2 install, which had no libvorbis, the test passed with
+  FFmpeg's own Opus encoder alone. It passes on 6.1 and 8.1.3. Cargo
+  stopped at that binary, so testkit, xtask and the doctests haven't run
+  on 9.0.2. Not M3.5's: the next slice that touches synth's writers or
+  media's muxing takes it, with a Tier 1 run on 9.0.2 that doesn't stop
+  at the first failure. (as of 2026-11-12)
 - FFmpeg 6.1's MP4 demuxer gives the last packet of a track that starts
   with an empty edit of its own the track's media duration less its
   shifted timestamp (11 ticks for a 1001-tick frame 990 ticks late), so

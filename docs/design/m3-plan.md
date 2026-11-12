@@ -1007,9 +1007,10 @@ symbol); an amendment's are at its own date.*
    rewritten. D64 (drafted in M3.5), the slice's dated notes in DECISIONS (on D28, D30, D35, D63 and
    D65) and PROGRESS's M3.5 note hold the detail; where one of them says otherwise, this item holds.
    The slice was built in four units on the types they share, reviewed afresh (R1 to R19, and FFmpeg
-   9's audio seek) and fixed in a round of four more units; the orchestrator's compat run on 8.1.3
-   and 9.0.2 comes after it. Where the orchestrator settled a unit's question for Pat within the
-   plan, the item says "decision (i)" to "(vii)"; Pat may overrule any of them.
+   9's audio seek) and fixed in a round of four more units; compat at its tip passed on 8.1.3 and
+   found one more FFmpeg 9.0.2 failure, in synth's writers (PROGRESS, Known issues). Where the
+   orchestrator settled a unit's question for Pat within the plan, the item says "decision (i)" to
+   "(vii)"; Pat may overrule any of them.
    - **The calibration and the table (5.2, 5.3).** 5.2's `to_calibration(&Calib) -> Calibration`
      can't fill sphere's `Calibration`, which holds the source side, field 27's window and both
      generations. As built: `camera::insta360::to_calibration(v3: Option<&Calib>, v6:
