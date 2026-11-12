@@ -755,8 +755,10 @@ fn warned_once(ran: &Ran, code: &str, what: &str) -> Result<(), String> {
 /// whose model has no entry in the table is stitched by the X5's, with
 /// one `geometry_assumed` warning giving the table's notice, which
 /// `stitch.geometry.notice` gives too. The controls: the same master
-/// without the damage, the X5's, gives neither warning, stitched or as
-/// a lens, and its notice is null.
+/// without the damage, the X5's, gives no `damaged` warning, stitched
+/// or as a lens, and stitched it gives no `geometry_assumed` warning
+/// and its notice is null. A lens alone is never stitched, so it has no
+/// geometry to assume.
 #[test]
 fn frame_insv_warns_of_damage_and_an_assumed_geometry() {
     /// A run: its name, the file it renders and its flags.
@@ -1115,8 +1117,9 @@ fn warns_bad_trailer(report: &Value) -> Result<(), String> {
 /// (its picture is there) and for the probe's and BadMagic's warnings;
 /// a fault's own refusal said to exit 2, where the table gives 1, and
 /// one said to be `internal`, for `exits_by_table`; a run that panics
-/// (`SPHERECUT_DEBUG_PANIC=main`, a debug build's switch) for
-/// `no_panic`; and for `names_in`, each fault's names against a sibling
+/// (`SPHERECUT_DEBUG_PANIC=main`) for `no_panic`, in a debug build only,
+/// since a release build has no such switch and runs `no_panic` without
+/// its control; and for `names_in`, each fault's names against a sibling
 /// fault's message, which names another part.
 #[test]
 fn frame_insv_trailer_faults_are_clear_errors() {
@@ -1141,23 +1144,26 @@ fn frame_insv_trailer_faults_are_clear_errors() {
         .collect();
     let files = each(&all, |f| pair(*f));
     let (ran, panicked) = std::thread::scope(|s| {
-        // The run that panics, of the file without a fault.
-        let panicked = s.spawn(|| {
-            let out = dir.join("panicked.png");
-            let o = spherecut()
-                .env("SPHERECUT_DEBUG_PANIC", "main")
-                .arg("frame")
-                .arg(files[files.len() - 1])
-                .arg("-o")
-                .arg(&out)
-                .args(["--json", "--reference", "--size", "64x32"])
-                .output()
-                .unwrap();
-            Ran {
-                status: o.status.code(),
-                doc: document(&o.stdout),
-                stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
-            }
+        // The run that panics, of the file without a fault: a debug
+        // build's, since a release build has no such switch.
+        let panicked = cfg!(debug_assertions).then(|| {
+            s.spawn(|| {
+                let out = dir.join("panicked.png");
+                let o = spherecut()
+                    .env("SPHERECUT_DEBUG_PANIC", "main")
+                    .arg("frame")
+                    .arg(files[files.len() - 1])
+                    .arg("-o")
+                    .arg(&out)
+                    .args(["--json", "--reference", "--size", "64x32"])
+                    .output()
+                    .unwrap();
+                Ran {
+                    status: o.status.code(),
+                    doc: document(&o.stdout),
+                    stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
+                }
+            })
         });
         let ran = each(&files, |file| {
             let name = file.parent().unwrap().file_name().unwrap().to_owned();
@@ -1165,7 +1171,7 @@ fn frame_insv_trailer_faults_are_clear_errors() {
             std::fs::create_dir_all(out.parent().unwrap()).unwrap();
             (frame(file, &out, &["--reference", "--size", "64x32"]), out)
         });
-        (ran, panicked.join().unwrap())
+        (ran, panicked.map(|h| h.join().unwrap()))
     });
     let reports = probe(&files);
     let unfaulted = all.len() - 1;
@@ -1207,8 +1213,10 @@ fn frame_insv_trailer_faults_are_clear_errors() {
         "the exit table, internal",
         exits_by_table(&said_so(1, "internal")),
     );
-    assert_eq!(panicked.code(), "internal", "{}", panicked.doc);
-    must_fail("no panic, of a run that panicked", no_panic(&panicked));
+    if let Some(panicked) = &panicked {
+        assert_eq!(panicked.code(), "internal", "{}", panicked.doc);
+        must_fail("no panic, of a run that panicked", no_panic(panicked));
+    }
     // BadMagic: not Insta360's to probe, which warns; frame's refusal
     // carries the warning.
     let k = faults.len();
