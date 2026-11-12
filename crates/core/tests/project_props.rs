@@ -944,7 +944,9 @@ fn caps() -> impl Strategy<Value = Caps> {
 #[derive(Debug, Clone)]
 enum StitchDraw {
     Source(Source),
-    Stitch(Option<Tune>, Option<Gains>, Option<ProfileRef>),
+    /// A tune, gains and a profile, each or none, boxed as an edit's are
+    /// not, since they outweigh the other draws.
+    Stitch(Box<(Option<Tune>, Option<Gains>, Option<ProfileRef>)>),
     Caps(Caps),
 }
 
@@ -958,7 +960,9 @@ fn stitch_draw() -> impl Strategy<Value = (u8, StitchDraw)> {
             prop::option::weighted(0.7, gains()),
             profile()
         )
-            .prop_map(|(tune, gains, profile)| StitchDraw::Stitch(tune, gains, profile)),
+            .prop_map(|(tune, gains, profile)| StitchDraw::Stitch(Box::new((
+                tune, gains, profile
+            )))),
         caps().prop_map(StitchDraw::Caps),
     ];
     (0u8..10, op)
@@ -972,12 +976,15 @@ fn stitch_edit(media: [MediaId; 2], pick: u8, draw: &StitchDraw) -> Edit {
     };
     match draw.clone() {
         StitchDraw::Source(source) => Edit::SetSource { media, source },
-        StitchDraw::Stitch(tune, gains, profile) => Edit::SetStitch {
-            media,
-            tune,
-            gains,
-            profile,
-        },
+        StitchDraw::Stitch(stitch) => {
+            let (tune, gains, profile) = *stitch;
+            Edit::SetStitch {
+                media,
+                tune,
+                gains,
+                profile,
+            }
+        }
         StitchDraw::Caps(caps) => Edit::SetCaps { media, caps },
     }
 }
@@ -1081,7 +1088,7 @@ fn dropping_the_gains_is_caught(before: &Project, after: &Project, inverse: &[Ed
     }
     let dropped = Edit::SetStitch {
         media: *media,
-        tune: tune.clone(),
+        tune: *tune,
         gains: None,
         profile: profile.clone(),
     };
