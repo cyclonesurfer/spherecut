@@ -24,6 +24,7 @@ use spherecut_core::{FrameRate, Rational, StopToken};
 use spherecut_media::backend::{
     FfmpegBackend, MediaBackend, NextFrame, VideoFrame, VideoRequest, VideoStreamInfo,
 };
+use spherecut_media::encode::EncodeError;
 use spherecut_media::mp4::{self, TrackTiming};
 use spherecut_media::probe::{self, StreamKind};
 use spherecut_synth::Pattern;
@@ -33,7 +34,7 @@ use spherecut_synth::insv::{
     write_insv,
 };
 use spherecut_synth::lens::{CalibTruth, Generation, compose, x5_like, x5_like_planted};
-use spherecut_synth::media::{pairs_64, write_pair};
+use spherecut_synth::media::{SynthError, pairs_64, write_pair};
 use spherecut_synth::yuv::YuvPlanes;
 use spherecut_testkit::Fnv64;
 use spherecut_testkit::control::must_fail;
@@ -356,6 +357,104 @@ fn write_insv_writes_the_x5s_container() {
         "write_pair's movie timescale as the master's",
         pair_timing.edit.unwrap().movie_timescale == 240_000,
     );
+}
+
+/// Whether `write_insv` refuses `spec` as invalid with exactly
+/// `"<name>: <why>"` and leaves `dir` unmade, or what it did instead.
+fn refused_as(spec: &InsvSpec, dir: &Path, why: &str) -> Result<(), String> {
+    let want = format!("{}: {why}", spec.name);
+    match write_insv(spec, dir) {
+        Err(SynthError::Encode(EncodeError::Invalid(said))) if said == want => {}
+        Err(e) => return Err(format!("refused: {e}")),
+        Ok(files) => return Err(format!("wrote {}", files.master.display())),
+    }
+    match dir.exists() {
+        true => Err(format!("made {}", dir.display())),
+        false => Ok(()),
+    }
+}
+
+/// `write_insv` refuses each spec its doc refuses, as invalid, naming
+/// the spec and why, before it makes `dir`: no frames, an IDR every 0
+/// frames, `LensOneFrameShort` or `StssDiffer` on one frame,
+/// `RateDiffer` at a rate neither n/1001 nor whole (12.5), an LRV of a
+/// master not named as the X5 names it, and an LRV at a rate it takes no
+/// whole number of frames of (24 fps, against the LRV's 29.97). The
+/// controls hold each refusal to the next one's message.
+#[test]
+fn write_insv_refuses_the_specs_it_documents() {
+    let _t = timed("write_insv_refuses_the_specs_it_documents");
+    let dir = temp_dir("refusals");
+    let base = || spec(110, 128, 2, FrameRate::FPS_29_97);
+    let fault = |fault| InsvSpec {
+        fault: Some(fault),
+        frames: 1,
+        ..base()
+    };
+    let lrv = Some(LrvSpec {
+        side: 64,
+        quality: Quality::Lossless,
+    });
+    let cases: Vec<(InsvSpec, &str)> = vec![
+        (
+            InsvSpec {
+                frames: 0,
+                ..base()
+            },
+            "an .insv needs a frame",
+        ),
+        (
+            InsvSpec {
+                keyint: Some(0),
+                ..base()
+            },
+            "an IDR every 0 frames",
+        ),
+        (
+            fault(InsvFault::LensOneFrameShort),
+            "LensOneFrameShort needs 2 frames",
+        ),
+        (fault(InsvFault::StssDiffer), "StssDiffer needs 2 frames"),
+        (
+            InsvSpec {
+                fault: Some(InsvFault::RateDiffer),
+                ..spec(
+                    110,
+                    128,
+                    2,
+                    FrameRate::new(Rational::new(25, 2).unwrap()).unwrap(),
+                )
+            },
+            "RateDiffer needs a rate of n/1001 or a whole one",
+        ),
+        (
+            InsvSpec {
+                name: "clip.insv".into(),
+                lrv,
+                ..base()
+            },
+            "an LRV needs a master named VID_<date>_<time>_00_<NNN>.insv",
+        ),
+        (
+            InsvSpec {
+                lrv,
+                ..spec(
+                    110,
+                    128,
+                    2,
+                    FrameRate::new(Rational::new(24, 1).unwrap()).unwrap(),
+                )
+            },
+            "its LRV takes no whole number of its frames",
+        ),
+    ];
+    for (i, (s, why)) in cases.iter().enumerate() {
+        let at = dir.0.join(format!("case-{i}"));
+        assert_eq!(refused_as(s, &at, why), Ok(()), "{why}");
+        // Its control: the next refusal's message.
+        let other = cases[(i + 1) % cases.len()].1;
+        must_fail(&format!("{why} as {other}"), refused_as(s, &at, other));
+    }
 }
 
 /// Whether track `track` of `path` holds an IDR every `gop` frames from
