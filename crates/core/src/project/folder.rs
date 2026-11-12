@@ -463,6 +463,18 @@ impl ProjectFolder {
         project: &Project,
         history: &History,
     ) -> Result<Saved, FolderError> {
+        self.create_with(name, project, history, TempFile::publish_new)
+    }
+
+    /// [`ProjectFolder::create`], publishing with `publish`, which tests
+    /// make take `persist_new`'s other ways.
+    fn create_with(
+        &self,
+        name: &OsStr,
+        project: &Project,
+        history: &History,
+        publish: impl FnOnce(TempFile) -> io::Result<std::fs::Metadata>,
+    ) -> Result<Saved, FolderError> {
         may_block("saving a project");
         self.check_name(name)?;
         let path = self.path_of(name);
@@ -472,7 +484,7 @@ impl ProjectFolder {
         }
         let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
         let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
-        tmp.persist_new().map_err(|source| {
+        let published = publish(tmp).map_err(|source| {
             if source.kind() == io::ErrorKind::AlreadyExists {
                 FolderError::Exists { path: path.clone() }
             } else {
@@ -482,8 +494,9 @@ impl ProjectFolder {
                 }
             }
         })?;
-        // persist_new renames or links the same inode in, so the identity
-        // holds.
+        // The published file's, which the copy fallback makes another file
+        // than the temporary one (F032), with the same bytes.
+        let identity = Identity::of(&published, text.as_bytes());
         Ok(publish_history(side, identity, dropped, &path))
     }
 
@@ -1053,9 +1066,43 @@ mod tests {
     /// takes its identity from the published file, not the temporary one.
     /// Control: the temporary file's identity fails the same check.
     #[test]
-    #[ignore = "M3.9 unit (a)"]
     fn create_names_the_published_file_after_a_copy() {
-        todo!()
+        use spherecut_testkit::control::must_fail;
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        // What renameat2 says without RENAME_NOREPLACE, and link(2) on FAT.
+        let no_flag = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(22));
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(1));
+        let mut temp = None;
+        let saved = folder
+            .create_with(name, &p, &h, |tmp| {
+                temp = Some(tmp.file().metadata()?);
+                tmp.persist_new_with(no_flag, no_links)
+            })
+            .unwrap();
+        let published = folder.identity(name).unwrap().unwrap();
+        let temp = temp.unwrap();
+        assert_ne!(
+            temp.ino(),
+            std::fs::metadata(dir.join(name)).unwrap().ino(),
+            "the copy path"
+        );
+        assert_eq!(saved.identity, published);
+        // So the next save, which expects what create saved, goes ahead,
+        // and the history beside it is the one written with it.
+        let loaded = folder.load(name).unwrap();
+        assert_eq!(loaded.identity, saved.identity);
+        assert_eq!(loaded.history, Kept::Kept(History::new()));
+        rename(&mut p, &mut h, "b");
+        folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
+
+        must_fail(
+            "the temporary file's identity taken for the published file's",
+            Identity::of(&temp, &std::fs::read(dir.join(name)).unwrap()) == published,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// F036: a symbolic link at the history file's name is

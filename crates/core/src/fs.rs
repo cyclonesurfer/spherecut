@@ -249,16 +249,24 @@ impl TempFile {
     /// leaves what is there alone, whenever it turned up. The temp file is
     /// gone either way.
     pub fn persist_new(self) -> io::Result<()> {
+        self.publish_new().map(drop)
+    }
+
+    /// [`TempFile::persist_new`], giving the published file's metadata:
+    /// the temporary file's own where it was renamed or linked in, the
+    /// copy's where it was copied, which is another file (the project
+    /// review's F032).
+    pub(crate) fn publish_new(self) -> io::Result<std::fs::Metadata> {
         self.persist_new_with(rename_new, |from, to| std::fs::hard_link(from, to))
     }
 
-    /// [`TempFile::persist_new`], publishing with `rename` or else `link`,
+    /// [`TempFile::publish_new`], publishing with `rename` or else `link`,
     /// which tests make refuse as filesystems without them do.
-    fn persist_new_with(
+    pub(crate) fn persist_new_with(
         mut self,
         rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
-    ) -> io::Result<()> {
+    ) -> io::Result<std::fs::Metadata> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
         // One step that leaves nothing at the temporary name and is never
@@ -266,7 +274,7 @@ impl TempFile {
         match rename(&self.path, &self.dest) {
             Ok(()) => {
                 self.persisted = true;
-                return Ok(());
+                return self.file.metadata();
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
             // The filesystem doesn't take the flag (EINVAL), or the kernel
@@ -277,8 +285,8 @@ impl TempFile {
                 self.dest.display()
             ),
         }
-        match link(&self.path, &self.dest) {
-            Ok(()) => {}
+        let copy = match link(&self.path, &self.dest) {
+            Ok(()) => None,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
             // No hard links here (EPERM on FAT, EOPNOTSUPP or ENOSYS on
             // some network filesystems), or another refusal, which the
@@ -288,24 +296,27 @@ impl TempFile {
                     "no hard link to {} ({e}); copying instead",
                     self.dest.display()
                 );
-                self.copy_to_new()?;
+                Some(self.copy_to_new()?)
             }
-        }
+        };
         // `dest` holds the file now, under its own name too; the temp
         // name goes, as on a drop.
         self.persisted = true;
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!("could not remove {}: {e}", self.path.display());
         }
-        Ok(())
+        match copy {
+            Some(meta) => Ok(meta),
+            None => self.file.metadata(),
+        }
     }
 
     /// Create `dest` exclusively, copy the file into it and flush it,
     /// removing it again if the copy fails: what [`persist_new`]
-    /// does without hard links.
+    /// does without hard links. The copy's metadata, once flushed.
     ///
     /// [`persist_new`]: TempFile::persist_new
-    fn copy_to_new(&mut self) -> io::Result<()> {
+    fn copy_to_new(&mut self) -> io::Result<std::fs::Metadata> {
         let mode = self.file.metadata()?.permissions().mode() & 0o777;
         let mut out = OpenOptions::new()
             .write(true)
@@ -315,17 +326,17 @@ impl TempFile {
         let copied = (|| {
             self.file.seek(SeekFrom::Start(0))?;
             io::copy(&mut self.file, &mut out)?;
-            out.sync_all()
+            out.sync_all()?;
+            out.metadata()
         })();
-        if let Err(e) = copied {
+        if copied.is_err() {
             // The exclusive create made it ours, so it is ours to remove.
             drop(out);
             if let Err(r) = std::fs::remove_file(&self.dest) {
                 tracing::warn!("could not remove {}: {r}", self.dest.display());
             }
-            return Err(e);
         }
-        Ok(())
+        copied
     }
 }
 
