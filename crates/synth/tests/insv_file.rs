@@ -258,8 +258,8 @@ const X5_COLOR: ColorCodes = ColorCodes {
 
 /// The master is the X5's container (3.1, 7.2): two square `hvc1`
 /// tracks coded as the X5 codes them (full range, BT.709, chroma left,
-/// the spec's `keyint` or the X5's GOP, no B-frames), one silent AAC
-/// track, `ftyp wide mdat moov`, and the `inst` box holding synth's
+/// an IDR every `keyint` frames, no B-frames; the X5's own GOP is
+/// [`write_insv_codes_the_x5s_gop`]'s), one silent AAC track, `ftyp wide mdat moov`, and the `inst` box holding synth's
 /// trailer where `InsvFiles::layout` says, whose serial probe reads. Both
 /// tracks' tables are the same, read by the box reader and by the backend
 /// the frame lock asks, and their edits are exact in the movie's
@@ -269,8 +269,10 @@ const X5_COLOR: ColorCodes = ColorCodes {
 fn write_insv_writes_the_x5s_container() {
     let _t = timed("write_insv_writes_the_x5s_container");
     let dir = temp_dir("container");
-    let mut s = spec(101, 128, 8, FrameRate::FPS_29_97);
-    s.keyint = Some(3);
+    let s = InsvSpec {
+        keyint: Some(3),
+        ..spec(101, 128, 8, FrameRate::FPS_29_97)
+    };
     let files = write_insv(&s, &dir.0).unwrap();
     assert_eq!(files.master, dir.0.join(&s.name));
     assert_eq!(files.lrv, None);
@@ -325,15 +327,6 @@ fn write_insv_writes_the_x5s_container() {
     }
     assert_eq!(timings[0], timings[1]);
 
-    // The X5's GOP at 29.97, 60 frames, has one IDR in 8.
-    s.keyint = None;
-    s.name = master_name(102);
-    let x5_gop = write_insv(&s, &dir.0).unwrap();
-    for k in 0..2 {
-        let t = mp4::track_timing(&x5_gop.master, k).unwrap();
-        assert_eq!(t.stss.as_deref(), Some(&[1][..]));
-    }
-
     // The silent AAC track, and what probe makes of the file.
     let report = probe::probe(&files.master).unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
@@ -363,6 +356,57 @@ fn write_insv_writes_the_x5s_container() {
         "write_pair's movie timescale as the master's",
         pair_timing.edit.unwrap().movie_timescale == 240_000,
     );
+}
+
+/// Whether track `track` of `path` holds an IDR every `gop` frames from
+/// its first, by its `stss` and by the decoder's key flags, or the first
+/// way it doesn't.
+fn idr_every(path: &Path, track: usize, gop: u64) -> Result<(), String> {
+    let t = mp4::track_timing(path, track).unwrap();
+    let want: Vec<u64> = (1..=t.count).step_by(gop as usize).collect();
+    let stss: Option<Vec<u64>> = t.stss.map(|s| s.into_iter().map(u64::from).collect());
+    if stss.as_ref() != Some(&want) {
+        return Err(format!("track {track}'s stss is {stss:?}, not {want:?}"));
+    }
+    let (_, keys) = each_frame(path, track, |f| f.key);
+    let got: Vec<u64> = (1..).zip(&keys).filter(|k| *k.1).map(|k| k.0).collect();
+    if got != want {
+        return Err(format!("track {track}'s key frames are {got:?}"));
+    }
+    Ok(())
+}
+
+/// With no `keyint`, the tracks are coded at the X5's GOP (3.1), shown
+/// in a file long enough to hold each track's second IDR: 61 frames at
+/// 29.97, the master's tracks an IDR every 60 frames (2 s, frames 1 and
+/// 61) and the LRV's every 30 (1 s, frames 1, 31 and 61), by `stss` and
+/// by the decoder's key flags. The controls hold each track to the
+/// other's GOP: the LRV, coded at another GOP, to the master's, and the
+/// master's tracks to the LRV's.
+#[test]
+fn write_insv_codes_the_x5s_gop() {
+    let _t = timed("write_insv_codes_the_x5s_gop");
+    let dir = temp_dir("gop");
+    let s = InsvSpec {
+        lrv: Some(LrvSpec {
+            side: 64,
+            quality: Quality::Lossless,
+        }),
+        ..spec(102, 128, 61, FrameRate::FPS_29_97)
+    };
+    assert_eq!(s.keyint, None);
+    let files = write_insv(&s, &dir.0).unwrap();
+    let lrv = files.lrv.unwrap();
+    for k in 0..2 {
+        assert_eq!(idr_every(&files.master, k, 60), Ok(()));
+        must_fail(
+            &format!("the master's track {k} at the LRV's GOP"),
+            idr_every(&files.master, k, 30),
+        );
+    }
+    assert_eq!(idr_every(&lrv, 0, 30), Ok(()));
+    let why = must_fail("the LRV at the master's GOP", idr_every(&lrv, 0, 60));
+    assert!(why.contains("[1, 31, 61]"), "{why}");
 }
 
 /// A `Quality::Lossless` file's decoded planes hash equal to
