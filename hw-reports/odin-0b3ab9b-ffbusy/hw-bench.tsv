@@ -1,0 +1,4 @@
+# audio output: host PulseAudio, device EDIFIER R1700BTs, f32 at 48000 Hz, 2 channels, buffer asked 1024 frames, last period 1024 frames, latency 181.9 ms (median; 171.0 to 182.1), 94 callbacks, 0 host xruns
+audio clock over 2 s of Instant	1.999957895671831	s	1.999957895671831	1.999957895671831	1
+audio latency (median)	181.868	ms	181.868	181.868	1
+audio callback gap, worst (× its buffer)	1.050402046875	x	1.050402046875	1.050402046875	1

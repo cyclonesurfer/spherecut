@@ -1,0 +1,33 @@
+Monitors:
+├──Monitor DP-3 (Dell Inc. 24")
+│  ├──Vendor: DEL
+│  ├──Product: DELL U2412M
+│  ├──Serial: YMYH14820ALL
+│  ├──Current mode
+│  │   └──1920x1200@59.950
+│  └──Preferences
+│      └──Backlight: None
+└──Monitor HDMI-1 (Acer Technologies 27")
+   ├──Vendor: ACR
+   ├──Product: KB272 E
+   ├──Serial: 3326079CE3W01
+   ├──Current mode
+   │   └──1920x1080@60.000
+   └──Preferences
+       └──Backlight: None
+
+Logical monitors:
+├──Logical monitor #1
+│  ├──Position: (0, 0)
+│  ├──Scale: 1.25
+│  ├──Transform: normal
+│  ├──Primary: yes
+│  └──Monitors: (1)
+│      └──HDMI-1 (Acer Technologies 27")
+└──Logical monitor #2
+   ├──Position: (1536, 0)
+   ├──Scale: 1.25
+   ├──Transform: normal
+   ├──Primary: no
+   └──Monitors: (1)
+       └──DP-3 (Dell Inc. 24")

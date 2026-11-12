@@ -1,0 +1,59 @@
+{
+  "env": [
+    "WAYLAND_DISPLAY=wayland-0"
+  ],
+  "locked": false,
+  "not_run": [
+    {
+      "label": "stitched samples",
+      "why": "none under /home/pat/spherecut/samples (clip 12 is still wanted)"
+    }
+  ],
+  "runs": [
+    {
+      "clip": "/home/pat/spherecut/target/hw-media/hevc8-5k7-30fps-noisy-20s.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-0.json",
+      "failed": [],
+      "label": "noisy 5.7K 8-bit",
+      "n": 0,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-0.png"
+    },
+    {
+      "clip": "/home/pat/spherecut/target/hw-media/hevc10-5k7-30fps-noisy-20s.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-1.json",
+      "failed": [],
+      "label": "noisy 5.7K 10-bit",
+      "n": 1,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-1.png"
+    },
+    {
+      "clip": "/home/pat/spherecut/target/hw-gui/media/gui-seam.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-2.json",
+      "failed": [],
+      "label": "seam 3840×1920 HEVC",
+      "n": 2,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-2.png"
+    },
+    {
+      "clip": "/home/pat/spherecut/target/hw-gui/media/sync-flash-beep-2997.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-3.json",
+      "failed": [],
+      "label": "sync flash and beep",
+      "n": 3,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-3.png"
+    },
+    {
+      "clip": "/home/pat/spherecut/samples/insta360-x5/VID_20261022_170245_00_009.insv",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-4.json",
+      "failed": [],
+      "label": "X5 raw view insta360-x5/VID_20261022_170245_00_009.insv",
+      "n": 4,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-4.png"
+    }
+  ],
+  "session": "WAYLAND_DISPLAY set",
+  "vaapi_hevc": [
+    "HEVC Main",
+    "HEVC Main 10"
+  ]
+}
