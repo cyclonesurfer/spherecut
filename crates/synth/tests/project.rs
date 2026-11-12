@@ -12,17 +12,20 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::f64::consts::PI;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use glam::DVec3;
+use spherecut_boundary::sphere_rig;
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{
     Metadata, Stitching, known, parse_metadata, read_record, read_trailer, stitching,
 };
 use spherecut_core::project::{
-    DualFisheye, Edit, Gains, Media, Project, RawStrings, Source, gains_basis,
+    DualFisheye, Edit, Gains, INITIAL_VIEW, Media, Project, RawStrings, Source, gains_basis,
 };
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_media::probe::{ProbeReport, probe};
@@ -32,7 +35,8 @@ use spherecut_media::project::{
 use spherecut_sphere::rig::{Binding, Generation, Geometry, Rig, Status, Tune};
 use spherecut_synth::insv::{InsvFault, InsvSpec, Records, Value, append_trailer};
 use spherecut_synth::project::{PLANTED_BINDING, STITCH, StitchFixture, stitch_fixture};
-use spherecut_testkit::control::must_fail;
+use spherecut_synth::rung;
+use spherecut_testkit::control::{at_least, at_most, must_fail};
 
 /// When the suite's first test began.
 static BEGAN: OnceLock<Instant> = OnceLock::new();
@@ -202,6 +206,35 @@ fn digit_off_file() -> &'static Path {
     })
 }
 
+/// Rung 3's file with field 27's offset, which a stitch doesn't read
+/// (U13), at (32, 16) in place of the (0, 0) synth writes.
+fn offset_file() -> &'static Path {
+    static FILE: OnceLock<PathBuf> = OnceLock::new();
+    FILE.get_or_init(|| {
+        let mut records = fixture().spec.records.clone();
+        let window = records
+            .metadata
+            .iter_mut()
+            .find(|f| f.number == 27)
+            .unwrap();
+        let Value::Message(items) = &mut window.value else {
+            panic!("{window:?}");
+        };
+        let mut changed = 0;
+        for item in items {
+            let to = match item.number {
+                5 => 32,
+                6 => 16,
+                _ => continue,
+            };
+            item.value = Value::Varint(to);
+            changed += 1;
+        }
+        assert_eq!(changed, 2);
+        retrailered("offset", &records, None)
+    })
+}
+
 // Reading them.
 
 /// `path`'s source, as `camera_source` gives it after probe.
@@ -278,18 +311,22 @@ fn same_rigs(got: &Rig, want: &Rig) -> Result<(), String> {
 /// `camera_source` of a synthetic X5 file gives its tracks, its camera as
 /// the metadata names it, the table's geometry and the trailer's hash, and
 /// a snapshot whose calibration is the trailer's, field for field, from
-/// which `rig()` builds. Control: a file whose V3 string, the one it
-/// holds, differs in one digit hashes otherwise.
+/// which `rig()` builds, with field 27's offset beside it; the media
+/// `project_media` makes of the file is of its first lens track. Control:
+/// a file whose V3 string, the one it holds, differs in one digit hashes
+/// otherwise.
 #[test]
 fn a_camera_file_makes_a_dual_fisheye_media() {
     let _time = timed("a_camera_file_makes_a_dual_fisheye_media");
     let control = std::thread::spawn(digit_off_file);
+    let offset = std::thread::spawn(offset_file);
     let path = rung3_file();
     let (source, report) = source_of(path);
     let d = source.unwrap().unwrap();
     let lenses = report.camera_file.lenses.as_ref().unwrap();
     assert_eq!(d.tracks.map(|t| t as usize), lenses.tracks);
     assert_eq!(d.front_track, 0);
+    assert_eq!(media_of(path, &report).video.stream, d.tracks[0]);
     assert_eq!(
         (&d.tune, &d.gains, &d.profile),
         (&Tune::default(), &Gains::Off {}, &None)
@@ -345,12 +382,26 @@ fn a_camera_file_makes_a_dual_fisheye_media() {
     assert_eq!(s.canvas, probed.canvas);
     let window = probed.window.as_ref().unwrap();
     assert_eq!(s.window, window.dst);
-    assert_eq!(s.window_offset, window.offset);
+    assert_eq!((s.window_offset, window.offset), ([0, 0], [0, 0]));
     let entry = stitching_of(path);
     assert_eq!(s.calibration(), entry.calibration);
     assert_eq!(s.canvas, [2 * entry.calibration.src, entry.calibration.src]);
     assert!(s.v3.is_some() && s.v6.is_none());
     d.rig([768; 2]).unwrap();
+
+    // Field 27's offset, as probe prints it, kept beside a calibration it
+    // doesn't move (U13).
+    let (shifted, shifted_report) = source_of(offset.join().unwrap());
+    let shifted = shifted.unwrap().unwrap();
+    let probed = shifted_report.camera_file.calibration.as_ref().unwrap();
+    assert_eq!(
+        (
+            shifted.calibration.window_offset,
+            probed.window.as_ref().unwrap().offset
+        ),
+        ([32, 16], [32, 16])
+    );
+    assert_eq!(shifted.calibration.calibration(), s.calibration());
 
     // Control: a string a digit off hashes otherwise, through the same
     // reading.
@@ -463,11 +514,37 @@ fn a_newer_table_entry_supersedes_a_guess() {
     );
 }
 
+/// The most lens B's texel moves from rig `from` to rig `to`, in slot
+/// pixels, over 720 directions on the seam: the great circle 90° from
+/// lens A's axis in `from`.
+fn seam_shift(from: &Rig, to: &Rig) -> f64 {
+    let axis = from.lenses[0].lens_from_rig.inverse() * DVec3::Z;
+    let (u, v) = axis.any_orthonormal_pair();
+    (0..720)
+        .map(|i| {
+            let (sin, cos) = (f64::from(i) * PI / 360.0).sin_cos();
+            let d = u * cos + v * sin;
+            let texel = |rig: &Rig| {
+                rig.texel(1, d)
+                    .unwrap_or_else(|| panic!("lens B has no image of {d}"))
+            };
+            (texel(to) - texel(from)).length()
+        })
+        .fold(0.0, f64::max)
+}
+
 /// 11.5's export and viewer fixture is `project_media` of the rung-3 file
-/// with `camera_source`'s source, then a `set_source` and one
-/// `set_stitch`; its rig equals the one built from the numbers it hands
-/// out apart from the project. Controls: at `Tune::default()` lens B
-/// doesn't move; without the `set_source` the rigs differ.
+/// with `camera_source`'s source, then a `set_source` that changes only
+/// the geometry's binding (to rung 3's planted Direct) and its status (to
+/// User), and one `set_stitch` that changes only the tune and the gains.
+/// Its rig is `Rig::build` of the numbers it hands out apart from the
+/// project, under synth's calibration and planted conventions through the
+/// boundary, as rung 3 builds rung 1's: exactly, since synth prints the
+/// calibration's numbers as stored and camera reads them back to the same
+/// doubles. Lens B's texel on the seam moves 1 to 5 px from where the
+/// default tune puts it. Controls: at `Tune::default()` it moves 0;
+/// without the `set_source` (the X5 row's binding, Reversed) the
+/// project's rig isn't the boundary's.
 #[test]
 fn the_stitch_fixture_is_a_set_source_and_a_set_stitch() {
     let _time = timed("the_stitch_fixture_is_a_set_source_and_a_set_stitch");
@@ -505,58 +582,103 @@ fn the_stitch_fixture_is_a_set_source_and_a_set_stitch() {
     assert!(log_ratio.windows(2).all(|w| w[0][0] < w[1][0]));
     assert_eq!(basis, &gains_basis(&tune));
 
-    // Each project: the media project_media makes, then two steps.
+    // What project_media and camera_source make of the file, made again
+    // here: the project both fixtures start from.
+    let path = f.files.master.as_path();
+    let report = probe(path).unwrap();
+    let camera = camera_source(spherecut_media::Source::path(path), &report)
+        .unwrap()
+        .unwrap();
+    let mut entry = media_of(path, &report);
+    entry.source = Source::DualFisheye(Box::new(camera.clone()));
+    let base = Project::untitled(entry, INITIAL_VIEW).unwrap();
+    let id = base.the_clip().media;
+    let made = base.media_by_id(id).unwrap();
+    let planted = DualFisheye {
+        geometry: Geometry {
+            binding: Binding::Direct,
+            status: Status::User,
+            ..camera.geometry.clone()
+        },
+        ..camera.clone()
+    };
+
+    // Each project: that media, then the set_source, which changes only
+    // the binding and the status, and the set_stitch, which changes only
+    // the tune and the gains. Undoing both gives the first project back.
     for (p, h, gains) in [
         (&f.fixed, &f.fixed_history, &f.fixed_gains),
         (&f.auto, &f.auto_history, &f.auto_gains),
     ] {
-        let media = p.media_by_id(p.the_clip().media).unwrap();
-        assert_eq!(media.path, f.files.master);
-        assert_eq!(input.fingerprint, media.fingerprint);
+        assert_eq!(input.fingerprint, made.fingerprint);
         let labels: Vec<&str> = h.steps().iter().map(|s| s.label.as_str()).collect();
         assert_eq!(labels, [PLANTED_BINDING, STITCH]);
-        assert!(matches!(
-            h.steps()[0].edits.as_slice(),
-            [Edit::SetSource { .. }]
-        ));
+        assert_eq!(
+            h.steps()[0].edits,
+            [Edit::SetSource {
+                media: id,
+                source: Source::DualFisheye(Box::new(planted.clone())),
+            }]
+        );
         assert_eq!(
             h.steps()[1].edits,
             [Edit::SetStitch {
-                media: media.id,
+                media: id,
                 tune: Some(tune),
                 gains: Some(gains.clone()),
                 profile: None,
             }]
         );
-        let d = fisheye(p);
+        let stitched = DualFisheye {
+            tune,
+            gains: gains.clone(),
+            ..planted.clone()
+        };
         assert_eq!(
-            (d.geometry.binding, d.geometry.status),
-            (Binding::Direct, Status::User)
+            p.media_by_id(id).unwrap(),
+            &Media {
+                source: Source::DualFisheye(Box::new(stitched)),
+                ..made.clone()
+            }
         );
-        assert_eq!((&d.tune, &d.gains, d.front_track), (&tune, gains, 0));
+        let (mut undone, mut history) = (p.clone(), h.clone());
+        assert!(history.undo(&mut undone).unwrap().is_some());
+        assert!(history.undo(&mut undone).unwrap().is_some());
+        assert!(undone.same_content(&base));
     }
 
-    // The rig: the file's calibration and the table's geometry with the
-    // binding rung 3 planted, under the numbers handed out.
-    let entry = stitching_of(&f.files.master);
-    let planted = Geometry {
-        binding: Binding::Direct,
-        ..entry.known.geometry.clone()
-    };
-    let build = |tune: &Tune, geometry: &Geometry| {
-        Rig::build(&entry.calibration, geometry, tune, f.front_track, f.sides).unwrap()
-    };
-    let reference = build(&f.tune, &planted);
-    let rig = fisheye(&f.fixed).rig(f.sides).unwrap();
-    same_rigs(&rig, &reference).unwrap();
-    same_rigs(&fisheye(&f.auto).rig(f.sides).unwrap(), &reference).unwrap();
+    // The rig: synth's calibration and planted conventions, those rung 3's
+    // file was written from, through the boundary, under the numbers
+    // handed out.
+    let truth = rung::camera();
+    assert_eq!((&f.spec.calib, &f.spec.rig), (&truth.planted, &truth.truth));
+    assert_eq!(
+        f.spec.records,
+        Records::x5_like(
+            std::slice::from_ref(&truth.cal),
+            &truth.planted,
+            f.spec.frames,
+            f.spec.rate
+        )
+    );
+    let reference =
+        |tune: &Tune| sphere_rig(&truth.cal, &f.spec.calib, tune, f.front_track, f.sides).unwrap();
+    let rig = reference(&f.tune);
+    same_rigs(&fisheye(&f.fixed).rig(f.sides).unwrap(), &rig).unwrap();
+    same_rigs(&fisheye(&f.auto).rig(f.sides).unwrap(), &rig).unwrap();
 
-    // Controls: the tune left at its default, where lens B doesn't
-    // move; and the set_stitch alone, on the X5 row's binding.
-    let untuned = build(&Tune::default(), &planted);
+    // Lens B on the seam, against the default tune (11.5: 1 to 5 px).
+    let untuned = reference(&Tune::default());
+    let shift = seam_shift(&untuned, &rig);
+    eprintln!("lens B moves {shift:.3} px on the seam");
+    assert_eq!(at_least(shift, 1.0).passes(), Some(true), "{shift} px");
+    assert_eq!(at_most(shift, 5.0).passes(), Some(true), "{shift} px");
+
+    // Controls: the default tune against itself; and the set_stitch
+    // alone, on the X5 row's binding.
     must_fail(
-        "the default tune builds the fixture's rig",
-        same_rigs(&untuned, &rig),
+        "lens B moves on the seam at the default tune",
+        at_least(seam_shift(&untuned, &untuned), 1.0),
     );
     let mut p = f.fixed.clone();
     let mut h = f.fixed_history.clone();
@@ -565,7 +687,7 @@ fn the_stitch_fixture_is_a_set_source_and_a_set_stitch() {
     p.apply(&f.fixed_history.steps()[1].edits).unwrap();
     assert_eq!(fisheye(&p).geometry.binding, Binding::Reversed);
     must_fail(
-        "the set_stitch alone builds the fixture's rig",
-        same_rigs(&fisheye(&p).rig(f.sides).unwrap(), &reference),
+        "the set_stitch alone builds the boundary's rig",
+        same_rigs(&fisheye(&p).rig(f.sides).unwrap(), &rig),
     );
 }

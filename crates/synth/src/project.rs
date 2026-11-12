@@ -84,9 +84,9 @@ pub fn fixture_tune() -> Tune {
 /// media `project_media` makes with `camera_source`'s source, an
 /// untitled project of it at [`INITIAL_VIEW`], and in each of the two
 /// projects a `set_source` labelled [`PLANTED_BINDING`] (the source with
-/// its geometry's binding Direct and its status User) and a `set_stitch`
-/// labelled [`STITCH`] (the tune, and the Fixed or the Auto gains), each
-/// by the user. An error when the file can't be written or read back as
+/// its geometry's binding made Direct and its status User, and nothing
+/// else changed) and a `set_stitch` labelled [`STITCH`] (the tune, and
+/// the Fixed or the Auto gains), each by the user. An error when the file can't be written or read back as
 /// a camera file, or when an edit is refused.
 pub fn stitch_fixture(dir: &Path) -> Result<StitchFixture, SynthError> {
     let spec = InsvSpec::rung3();
@@ -121,11 +121,11 @@ pub fn stitch_fixture(dir: &Path) -> Result<StitchFixture, SynthError> {
     let base = Project::untitled(media, INITIAL_VIEW).map_err(|e| read(e.to_string()))?;
     let id = base.the_clip().media;
 
+    // Only the binding and the status: the evidence stays the table's.
     let planted = DualFisheye {
         geometry: Geometry {
             binding: Binding::Direct,
             status: Status::User,
-            evidence: "rung 3's planted binding: block b on track b".into(),
             ..camera.geometry
         },
         ..camera
