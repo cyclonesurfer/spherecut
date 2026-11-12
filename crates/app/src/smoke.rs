@@ -557,6 +557,8 @@ struct Mark {
     ui_frames: u64,
     passes: u64,
     work: usize,
+    /// With the drain on, the drains' waits.
+    drain: Option<DrainWaits>,
 }
 
 impl SmokeDriver {
@@ -1093,7 +1095,21 @@ impl Run {
             ui_frames: self.ui_frames,
             passes: self.passes,
             work: self.work.len(),
+            drain: self.drain_from.is_some().then(|| perf.drain_waits()),
         }
+    }
+
+    /// What the drains did from the run's start to `end`, with the drain
+    /// on: the waits and the counts alike.
+    fn drain(&self, end: &Mark) -> Option<DrainReport> {
+        let (from, to) = self.drain_from.as_ref().zip(end.drain.as_ref())?;
+        let since = |c: Counter| end.counters[c as usize].saturating_sub(self.start[c as usize]);
+        Some(DrainReport::of(
+            &to.since(from),
+            since(Counter::DrainErrors),
+            since(Counter::DrainOverflow),
+            end.counters[Counter::DrainUnavailable as usize],
+        ))
     }
 
     /// The UI and the clip's frames from `a` to `b`, as the gates judge
@@ -1813,14 +1829,7 @@ impl SmokeDriver {
                     .map(|(a, b)| (b.played_s - a.played_s).max(0.0)),
             )
         });
-        let drain = run.drain_from.as_ref().zip(perf.as_ref()).map(|(from, p)| {
-            DrainReport::of(
-                &p.drain_waits().since(from),
-                counted(Counter::DrainErrors),
-                counted(Counter::DrainOverflow),
-                p.count(Counter::DrainUnavailable),
-            )
-        });
+        let drain = end.as_ref().and_then(|m| run.drain(m));
         Report {
             version: spherecut_core::brand::VERSION,
             clip: self.args.clip.display().to_string(),
@@ -2054,19 +2063,18 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_late_pass_is_listed_once_settled_with_the_slowest_stages_between() {
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        let mut run = Run {
-            since: t0,
+    /// A run that started at `since`, with nothing gathered and the
+    /// drain off.
+    fn run_at(since: Instant) -> Run {
+        Run {
+            since,
             start: [0; Counter::ALL.len()],
             seen: [0; Stage::ALL.len()],
             samples: Default::default(),
             missed: [0; Stage::ALL.len()],
             ui_frames: 0,
             passes: 0,
-            work: vec![1.5],
+            work: Vec::new(),
             settled: None,
             last_ui: None,
             slowest: [None; Stage::ALL.len()],
@@ -2077,7 +2085,15 @@ mod tests {
             vaapi_drain: VaapiDrain::Off,
             drain_from: None,
             probe: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_late_pass_is_listed_once_settled_with_the_slowest_stages_between() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut run = run_at(t0);
+        run.work = vec![1.5];
         // Before the mark, late or not, nothing is listed.
         run.note_late(at(0), 0.0, Some(60.0));
         run.note_late(at(50), 0.05, Some(60.0));
@@ -2089,6 +2105,7 @@ mod tests {
             ui_frames: 0,
             passes: 0,
             work: 0,
+            drain: None,
         });
         // On time at 60 Hz (17 ms): not listed, and the samples before it
         // go with it.
@@ -2393,6 +2410,52 @@ mod tests {
             serde_json::to_value(&none).unwrap()["waited_per_download"],
             serde_json::json!({"p50": null, "max": null})
         );
+    }
+
+    /// The drain's block covers the run up to its end, where it stopped
+    /// playing for an export if it did: the waits as the counts, and
+    /// nothing with the drain off.
+    ///
+    /// Control: the waits read when the report is written, after those
+    /// drained while the export finished, give another median and most.
+    #[test]
+    fn the_drain_block_ends_where_the_run_did() {
+        use spherecut_playback::PerfStats;
+        use spherecut_testkit::control::must_fail;
+
+        let p = PerfStats::new();
+        p.record_drain_waits(9);
+        p.add(Counter::DrainErrors, 7);
+        let mut run = run_at(Instant::now());
+        run.start = Counter::ALL.map(|c| p.count(c));
+        run.vaapi_drain = VaapiDrain::Download;
+        run.drain_from = Some(p.drain_waits());
+        for w in [0, 1, 1, 2, 5] {
+            p.record_drain_waits(w);
+        }
+        p.add(Counter::DrainErrors, 1);
+        let stopped = run.mark(1.0, &p);
+        // While the export finishes.
+        for _ in 0..6 {
+            p.record_drain_waits(30);
+        }
+        p.add(Counter::DrainErrors, 4);
+        let ran = |end: &Mark| {
+            run.drain(end).map(|d| (d.waited_per_download, d.errors))
+                == Some((
+                    Waited {
+                        p50: Some(1),
+                        max: Some(5),
+                    },
+                    1,
+                ))
+        };
+        assert!(ran(&stopped), "{:?}", run.drain(&stopped));
+        must_fail("the waits at the report's time", ran(&run.mark(2.0, &p)));
+
+        let off = run_at(Instant::now());
+        let end = off.mark(1.0, &p);
+        assert_eq!((end.drain, off.drain(&end)), (None, None));
     }
 
     #[test]
