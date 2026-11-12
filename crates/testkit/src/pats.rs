@@ -4,12 +4,13 @@
 //! (`docs/formats/insta360.md`, "Pat's X5 samples", which lays them out
 //! by token).
 //!
-//! Every test that needs Pat's numbers reads them from here, through
-//! [`tokens`] or a parser of its own, or holds its own copy to these by a
-//! drift test: `spherecut-boundary` builds synth's truths by parsing V3
-//! and V6, camera's Tier 2c test compares these with the files, and the
-//! copies left in synth, sphere, camera and cli each have a test that
-//! fails when one of their numbers stops being these strings'.
+//! Pat's numbers belong here: a test reads them through [`tokens`] or a
+//! parser of its own, or holds its own copy to these by a drift test.
+//! `spherecut-boundary` builds synth's truths by parsing V3 and V6. The
+//! drift tests for the copies still left in synth, sphere, camera and cli
+//! (one test each that fails when one of their numbers stops being these
+//! strings'), and camera's Tier 2c test that compares these with the
+//! files, are M3.5's units (a), (b) and (d)'s to write.
 //!
 //! This module holds text, not meaning: which token is which number is
 //! the format notes' §4.1, which each reader applies with its own code.
