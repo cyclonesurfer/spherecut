@@ -146,9 +146,11 @@ pub enum CameraError {
         offset: u64,
     },
     /// Calibration strings that parse but can't be a
-    /// `sphere::rig::Calibration` (`insta360::to_calibration`, M3.5):
-    /// `why` says what, and `part` is the field it is in, the string's
-    /// (54 or 111) or field 27's window.
+    /// `sphere::rig::Calibration` (`insta360::to_calibration` and
+    /// `insta360::stitching`, M3.5): `why` says what, and `part` is where
+    /// it is: the string's field (54 or 111), field 27's window, field
+    /// 136 when it can't say which generation the rig reads, or record 1
+    /// when it holds neither a V3 nor a V6 string.
     #[error("{part} can't be a calibration: {why}")]
     NotCalibration { part: Part, why: &'static str },
     /// Reading the file failed, in `part`, at the byte the seek or read
