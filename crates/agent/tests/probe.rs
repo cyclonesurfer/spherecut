@@ -523,7 +523,7 @@ fn the_largest_results_fit() {
 /// binds as reversed, a placeholder until the fit.
 ///
 /// The control: the same tracks without the trailer, a plain MP4, have
-/// neither.
+/// neither, so the pinned check fails on them.
 #[test]
 fn probe_summary_carries_binding_and_geometry() {
     let t = TempDir::new("binding");
@@ -556,21 +556,16 @@ fn probe_summary_carries_binding_and_geometry() {
     let r = probe(&t.tools(), json!({"files": [master, "tracks.mp4"]})).unwrap();
     assert_eq!(r["complete"], true, "{r}");
     let (m, p) = (&r["files"][0], &r["files"][1]);
-    assert_eq!(
-        m["lenses"],
-        json!({
-            "tracks": [0, 1],
-            "binding": "reversed",
-            "evidence": "placeholder until the fit",
-            "screen_side": null,
-        }),
-        "{m}"
-    );
-    assert_eq!(
-        m["geometry"],
-        json!({"status": "provisional", "evidence": "placeholder until the fit"}),
-        "{m}"
-    );
+    let lenses = json!({
+        "tracks": [0, 1],
+        "binding": "reversed",
+        "evidence": "placeholder until the fit",
+        "screen_side": null,
+    });
+    let geometry = json!({"status": "provisional", "evidence": "placeholder until the fit"});
+    // The pinned check: the summary's lenses and geometry are the X5's.
+    let pinned = |s: &Value| s["lenses"] == lenses && s["geometry"] == geometry;
+    assert!(pinned(m), "{m}");
     assert_eq!(m["calibration"]["in_use"], "v6", "{m}");
     assert_eq!(p["file"], "tracks.mp4", "{p}");
     assert!(
@@ -578,7 +573,7 @@ fn probe_summary_carries_binding_and_geometry() {
         "{p}"
     );
     must_fail(
-        "the tracks without the trailer, with lenses or a geometry",
-        p.get("lenses").is_some() || p.get("geometry").is_some(),
+        "the pinned lenses and geometry, of the tracks without the trailer",
+        pinned(p),
     );
 }

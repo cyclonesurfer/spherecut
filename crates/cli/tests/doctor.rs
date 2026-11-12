@@ -598,7 +598,8 @@ fn blank_track(path: &Path, track: usize) {
 /// older camera writes), that it can't be stitched, and why.
 ///
 /// The control: the master's tracks without its trailer, a plain MP4,
-/// have no `geometry` in probe's report.
+/// have no `geometry` in probe's report, so the pinned check, doctor's
+/// word as probe's status, fails on them.
 #[test]
 fn doctor_file_reports_the_known_geometry() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -666,15 +667,18 @@ fn doctor_file_reports_the_known_geometry() {
         v["result"]["files"][0]["report"].clone()
     };
 
-    // The X5's entry, on its firmware and on another: the word is the
-    // geometry's status that probe reports.
+    // The pinned check: doctor's word is the provisional status that
+    // probe's geometry block reports.
+    let pinned = |f: &Value, r: &Value| {
+        r["geometry"]["status"] == "provisional" && f["geometry"] == r["geometry"]["status"]
+    };
+    // The X5's entry, on its firmware and on another.
     for (path, summary) in [
         (&master.path, "Insta360 X5 v1.1.22, geometry provisional"),
         (&firmware, "Insta360 X5 v9.9.9, geometry provisional"),
     ] {
         let (f, r) = (file(path), probed(path));
-        assert_eq!(r["geometry"]["status"], "provisional", "{r}");
-        assert_eq!(f["geometry"], r["geometry"]["status"], "{f:#}");
+        assert!(pinned(&f, &r), "{f:#}\n{r}");
         assert_eq!(f["summary"], summary, "{f:#}");
         assert_eq!(f["stitchable"], true, "{f:#}");
         assert_eq!(f["missing"], json!([]), "{f:#}");
@@ -737,13 +741,13 @@ fn doctor_file_reports_the_known_geometry() {
 
     // The control: the tracks alone have no geometry block, and doctor
     // says the table's word for a camera it doesn't know.
-    let r = probed(&plain);
-    must_fail(
-        "the tracks without the trailer, with a geometry",
-        r["geometry"] != Value::Null,
-    );
-    let f = file(&plain);
+    let (f, r) = (file(&plain), probed(&plain));
+    assert_eq!(r["geometry"], Value::Null, "{r}");
     assert_eq!(f["geometry"], "provisional", "{f:#}");
     assert_eq!(f["stitchable"], false, "{f:#}");
+    must_fail(
+        "doctor's word as probe's geometry status, of the tracks without the trailer",
+        pinned(&f, &r),
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

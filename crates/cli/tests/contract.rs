@@ -2307,7 +2307,7 @@ fn the_readme_shows_how_to_run_every_command() {
 /// same. Each master is the first's tracks with another trailer.
 ///
 /// The control: those tracks without a trailer, a plain MP4, have
-/// neither block.
+/// neither block, so the pinned check fails on them, in JSON and in text.
 #[test]
 fn probe_reports_binding_and_geometry() {
     let started = Instant::now();
@@ -2357,14 +2357,18 @@ fn probe_reports_binding_and_geometry() {
     };
     let geometry =
         |evidence: &str| serde_json::json!({"status": "provisional", "evidence": evidence});
+    // The pinned check: a report's lenses and geometry are the entry's,
+    // with its evidence.
+    let pinned = |r: &Value, evidence: &str| {
+        r["lenses"] == lenses(evidence) && r["geometry"] == geometry(evidence)
+    };
     let placeholder = "placeholder until the fit";
     let other_firmware =
         "placeholder until the fit; measured on firmware v1.1.22_build1, not this file's";
     let no_row = "placeholder until the fit; the X5's row, as no row is for this file's model";
     for (k, evidence) in [(0, placeholder), (1, other_firmware), (2, no_row)] {
         let r = report(k);
-        assert_eq!(r["lenses"], lenses(evidence), "{r}");
-        assert_eq!(r["geometry"], geometry(evidence), "{r}");
+        assert!(pinned(r, evidence), "{evidence}: {r}");
         assert_eq!(r["warnings"], serde_json::json!([]), "{r}");
     }
     assert_eq!(report(1)["camera"]["firmware"], "v9.9.9");
@@ -2400,8 +2404,8 @@ fn probe_reports_binding_and_geometry() {
     assert_eq!(p["lenses"], Value::Null, "{p}");
     assert_eq!(p["geometry"], Value::Null, "{p}");
     must_fail(
-        "the master's tracks without its trailer, with lenses or a geometry",
-        p["lenses"] != Value::Null || p["geometry"] != Value::Null,
+        "the pinned lenses and geometry, of the master's tracks without its trailer",
+        pinned(p, placeholder),
     );
 
     // The text: the binding beside the tracks, and the geometry.
@@ -2410,11 +2414,12 @@ fn probe_reports_binding_and_geometry() {
         assert_eq!(out.status.code(), Some(0));
         text(&out.stdout)
     };
-    let t = probe_text(&master.path);
-    for want in [
+    let wants = [
         "\n  lenses     streams #0 and #1, binding reversed (placeholder until the fit)\n",
         "\n  geometry   provisional: placeholder until the fit\n",
-    ] {
+    ];
+    let t = probe_text(&master.path);
+    for want in wants {
         assert!(t.contains(want), "no {want:?} in:\n{t}");
     }
     assert!(!t.contains("isn't read yet"), "{t}");
@@ -2425,9 +2430,13 @@ fn probe_reports_binding_and_geometry() {
     );
     assert!(!t.contains("\n  geometry "), "{t}");
     let t = probe_text(&plain);
+    assert!(
+        !t.contains("\n  lenses ") && !t.contains("\n  geometry "),
+        "{t}"
+    );
     must_fail(
-        "the tracks alone, with lenses or a geometry in text",
-        t.contains("\n  lenses ") || t.contains("\n  geometry "),
+        "the pinned lines in the text of the tracks alone",
+        wants.iter().all(|want| t.contains(want)),
     );
     eprintln!(
         "probe_reports_binding_and_geometry: {:.1} s",
