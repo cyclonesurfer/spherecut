@@ -7,6 +7,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
 mod mcp_client;
 
 use std::process::{Command, Stdio};
@@ -336,6 +337,47 @@ fn unbase64(s: &str) -> Vec<u8> {
         out.extend_from_slice(&n.to_be_bytes()[1..digits.len()]);
     }
     out
+}
+
+/// The server reads only what it was given under strace (DECISIONS D24):
+/// a session that probes and looks at a clip opens no network socket,
+/// nor a connection anywhere.
+#[test]
+fn mcp_opens_no_network_socket() {
+    let start = std::time::Instant::now();
+    let dir = media_dir("strace");
+    let log = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("mcp-strace-{}.log", std::process::id()));
+    // The server opens what an agent names with openat2, beneath its root.
+    let mut program = common::strace(&log, "socket,connect,openat,openat2");
+    program.arg(env!("CARGO_BIN_EXE_spherecut"));
+    let mut s = Server::spawn_with(program, |c| {
+        c.arg("--read-root").arg(&dir.0);
+    });
+    let init = s.initialize("2025-11-25");
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+    s.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    for (id, name, args) in [
+        (1, "probe", json!({"files": ["clip.mp4"]})),
+        (2, "look", json!({"file": "clip.mp4", "mode": "sheet"})),
+    ] {
+        let r = s.call(id, "tools/call", json!({"name": name, "arguments": args}));
+        assert!(r["result"].get("isError").is_none(), "{name}: {r}");
+    }
+    let (status, _, _, stderr) = s.close();
+    assert!(status.success(), "{status}: {stderr}");
+    let log_text = std::fs::read_to_string(&log).unwrap();
+    std::fs::remove_file(&log).ok();
+    // The trace saw the server open the clip ...
+    assert!(
+        log_text
+            .lines()
+            .any(|l| l.contains("openat2(") && l.contains("\"clip.mp4\"")),
+        "strace saw no open of clip.mp4:\n{log_text}"
+    );
+    // ... and no network socket, nor a connection anywhere.
+    common::assert_no_network(&log_text);
+    eprintln!("mcp_opens_no_network_socket took {:?}", start.elapsed());
 }
 
 /// look by `call` and by `tools/call`: the same JSON, and the same image,

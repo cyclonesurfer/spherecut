@@ -16,13 +16,12 @@ version = 2
 # Everything here is compatible with distributing Spherecut under
 # GPL-3.0-or-later. Add to this list only after checking compatibility and
 # recording the reason in DECISIONS.md.
+# The list holds only what the Linux graph uses (D8): cargo-deny warns
+# of an entry nothing matches, so a licence that leaves the graph leaves
+# the list too.
 allow = [
     "GPL-3.0-or-later",
-    "GPL-3.0",
-    "LGPL-2.1-or-later",
-    "LGPL-3.0-or-later",
     "MIT",
-    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
@@ -30,21 +29,22 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
-    "BSL-1.0",
-    "CC0-1.0",
-    "MPL-2.0",
 ]
 confidence-threshold = 0.9
-unused-allowed-license = "allow"
+unused-allowed-license = "warn"
 # WTFPL is GPL-compatible (FSF license list); allowed only for the FFmpeg
 # bindings. See DECISIONS.md D2, "FFmpeg through ffmpeg-next".
 exceptions = [
     { crate = "ffmpeg-next", allow = ["WTFPL"] },
     { crate = "ffmpeg-sys-next", allow = ["WTFPL"] },
-    # egui's default fonts, Ubuntu-Light and Hack, are OFL-1.1 and
-    # Ubuntu-font-1.0, both GPL-compatible for fonts embedded in a program
-    # (Pat's M1 answer; DECISIONS D34). Allowed for that crate only.
+    # egui's default fonts (DECISIONS D36). Ubuntu-Light is under the
+    # Ubuntu Font Licence 1.0, Hack under MIT and the Bitstream Vera
+    # licence (its fonts/Hack-Regular.txt), and egui-icons.ttf, a subset
+    # of emoji-icon-font, under MIT. OFL-1.1 covers only NotoEmoji, built
+    # only with the crate's `monochrome_emoji_fonts` feature (its
+    # src/lib.rs:33), which nothing turns on. The exception stays because
+    # the crate declares "(MIT OR Apache-2.0) AND OFL-1.1 AND
+    # Ubuntu-font-1.0". Allowed for that crate only.
     { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
@@ -65,6 +65,11 @@ deny = [
     { crate = "rustls", reason = "no network access at runtime" },
     { crate = "native-tls", reason = "no network access at runtime" },
     { crate = "openssl", reason = "no network access at runtime" },
+    { crate = "socket2", reason = "no network access at runtime" },
+    { crate = "async-std", reason = "no network access at runtime" },
+    { crate = "async-net", reason = "no network access at runtime" },
+    { crate = "hickory-resolver", reason = "no network access at runtime" },
+    { crate = "trust-dns-resolver", reason = "no network access at runtime" },
     { crate = "wry", reason = "no webviews" },
     { crate = "tauri", reason = "no webviews" },
     { crate = "webkit2gtk", reason = "no webviews" },
@@ -91,6 +96,15 @@ deny = ["web", "webgpu", "webgl", "angle", "glsl", "spirv", "static-dxc", "vulka
 [[bans.features]]
 crate = "image"
 allow = ["png"]
+
+# tokio comes in only for wasm targets (wasm-bindgen-futures, through
+# winit); its sockets and DNS (`net`) never (D8, D24). mio's `net` stays:
+# cpal's PulseAudio host, pulseaudio 0.3.2, reaches the sound server
+# over a Unix socket (`mio::net::UnixStream`, its client.rs:6) and
+# refuses a PULSE_SERVER that isn't `unix:` (its lib.rs:32-38).
+[[bans.features]]
+crate = "tokio"
+deny = ["net"]
 
 # The PulseAudio protocol host only, with ALSA, which cpal always builds
 # on Linux (D35): `pipewire` and `jack` link libraries no build machine

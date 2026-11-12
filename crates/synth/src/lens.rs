@@ -49,7 +49,10 @@ impl TruthBinding {
 /// How a block's numbers, in canvas pixels, scale to a square track of
 /// side s. src is the side of a block's square on the canvas (5376 on the
 /// X5), dst is field 27's (5312), and c_local is the block's centre less
-/// its offset on the canvas (block 1's cx less src).
+/// its offset on the canvas (block 1's cx less src). Like
+/// `sphere::rig::CanvasMap`, it leaves out reading D, field 27's window
+/// offset taken literally (`docs/formats/insta360.md` §4.4), so no gate
+/// plants it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum TruthCanvas {
     /// Focal f · s/dst, centre c_local · s/src.
@@ -1191,10 +1194,13 @@ fn euler_rotation(euler: &TruthEuler, ypr_deg: [f64; 3]) -> DQuat {
 /// j to j + 1, [`render_lens`]), so it scales as the table writes it, c ·
 /// s/src under A and C, with no half-pixel shift; `sphere::rig` reads it
 /// the same way. Whether the X5 counts its cx and cy from pixel corners
-/// or, as OpenCV does, from pixel centres is a camera assumption the plan
-/// doesn't list: from centres, the slot's centre would sit 0.5 · s/src
-/// (0.5 · s/dst under B) further along each axis, 0.36 px at 3840² and
-/// 0.07 px at 768².
+/// or, as OpenCV does, from pixel centres is plan 3.2's unknown U15: from
+/// centres, the slot's centre would sit 0.5 · s/src (0.5 · s/dst under
+/// B) further along each axis, 0.36 px at 3840² and 0.07 px at 768².
+/// Both lenses' centres move alike, which M3.6's fit reads as a relative
+/// tilt (about 0.019° about each axis, under stage J's 0.05°), so the
+/// seam cannot tell the two apart; U15 accepts it below the floor, and
+/// synth plants the corner reading only, as sphere reads it.
 fn slot_model(cal: &CalibTruth, b: usize, planted: &Planted, side: u32) -> TruthModel {
     let block = &cal.blocks[b];
     let s = f64::from(side);

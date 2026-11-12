@@ -139,28 +139,40 @@ new features to agents, which adds a little work to each.
       odin passes (H3), and at 125 % on odin (2026-10-30); Hyprland
       waits for a machine.
 - [ ] Hardware: 5.7K30 stitched equirect plays in real time on odin and
-      huginn with VA-API decode; numbers in `docs/perf.md`. Vulkan Video
-      HEVC is measured too (doctor's decode check, a bit-exact check on
-      the X5 samples and the sample benchmark), because odin's discrete
+      huginn with VA-API decode (D42 moved the gate to the app's default
+      path; the wording waits on Pat); numbers in `docs/perf.md`. Vulkan
+      Video HEVC is measured too (doctor's decode check, a bit-exact check
+      on the X5 samples and the sample benchmark), because odin's discrete
       RDNA3 may decode HEVC with FFmpeg's Vulkan path where huginn's RADV
       can't. Pending hardware: on odin the noisy 5.7K clips play in real
-      time with Vulkan Video, which `Auto` picks there, headless and in
-      the window (H3, D42), but not with VA-API, whose copy decodes them
-      at 14 to 22 fps; huginn's run and clip 12, a stitched camera
-      export, are still to come.
+      time with Vulkan Video, which `Auto` picks there, headless and in the
+      window (H3, D42), but not with VA-API, whose copy decodes them at 14
+      to 22 fps; huginn's run and clip 12 are still to come. The file that
+      closes the row is clip 12 at 5.7K30, a Studio export of take 16 as
+      stitched equirect (`docs/SAMPLES.md`): the bench judges only files at
+      or under 5.7K30.
 - [ ] Zero-copy proof (Pat, 2026-10-24, from the stack review): a Tier 2
       test imports VA-API NV12 and P010 frames from an X5 sample into wgpu
       as DMA-BUF planes on huginn and odin, renders one frame, and matches
       the copy path's output; a benchmark plays X5 8K30 both ways. It runs
       with M1's hardware report. Whether zero-copy becomes the default is
-      decided before M3, when raw 8K dual fisheye has to play. The copy
-      path stays as the fallback, and the overlay and doctor say which
-      path is in use (D25). Decided for Vulkan Video on 2026-10-30 (Pat,
-      from odin's window): it decodes on the renderer's own device by
-      default where that can be shared; VA-API's import stays opt-in
-      until huginn's numbers. Pending hardware: odin's test passes (one
-      unexplained mismatch in about a dozen runs, PROGRESS's known
-      issues), and huginn's run is still to come.
+      decided before M3, when raw 8K dual fisheye has to play. The copy path
+      stays as the fallback, and the overlay and doctor say which path is in
+      use (D25). Decided for Vulkan Video on 2026-10-30 (Pat, from odin's
+      window): it decodes on the renderer's own device by default where that
+      can be shared; VA-API's import stays opt-in until huginn's numbers.
+      Pending hardware: on odin the test ran 22 times up to 04d15be and
+      mismatched twice, at 0d491ae (`hw-reports/odin-0d491ae.md:141-142`)
+      and 0663e05 (`hw-reports/odin-0663e057fe.md:160-161`:
+      19 of 2,764,800 values, by 0.0863 at most), both on
+      `VID_20261022_165613_00_007.insv` frame 26, view 0, at the first
+      render after the import, and both in full-suite runs; the second
+      time, the same import rendered again as the copy. The fault in a
+      slot's 8-bit planes that D77 records is the probable cause, and the
+      run at 04d15be, after D77's workaround, passed. At 0b3ab9b it passed
+      in the first full-suite run since D77
+      (`hw-reports/odin-0b3ab9b4d0.md:133`) and 30 of 30 times alone
+      (`hw-reports/odin-0b3ab9b-zc/`). huginn's run is still to come.
 
 ## M2 Clip reframer
 
@@ -169,10 +181,11 @@ The first version Pat can use for real.
 - [x] Single-clip reframer mode on the core data model (a sequence with one
       clip), so M5's timeline extends it rather than replacing it.
 - [x] Trim in/out with exact rational times; markers.
-- [x] Keyframes for orientation (quaternion), FOV, projection and morph;
-      set from the viewer; interpolation on SO(3) (squad or a C¹ spline)
-      with easing presets; property tests for continuity and no flips
-      through ±180°.
+- [x] Keyframes for orientation (quaternion), FOV, projection and morph; set
+      from the viewer; interpolation on SO(3) (squad or a C¹ spline) with
+      easing presets; property tests for continuity and no flips through
+      ±180°. (Default Level interpolates yaw, pitch and roll per angle; Free
+      interpolates on SO(3). Which is the default waits on Pat, D50.)
 - [x] Curve editor panel (FOV, morph, and yaw/pitch/roll as displayed
       views of the quaternion track) with easing presets.
 - [x] Look-at target keyframes.
@@ -238,7 +251,7 @@ settings, or has "ultracode" in its prompt, before the first workflow.
       sources are forbidden, crates.io's 0.2.x predates the X5, and its
       geometry is Studio-derived. Whether M4 uses it to parse the IMU
       stays open. Section 20 of `docs/design/m3-plan.md` and the plan's
-      D62 (its section 23), which DECISIONS.md records at M3.21;
+      D62 (its section 23), which DECISIONS.md recorded at M3.2;
       DECISIONS, Open.)
 - [ ] Source models in the shader: dual fisheye with calibration, GoPro
       EAC pair; feathered seam blending; per-lens exposure/white-balance
@@ -584,7 +597,8 @@ rows differently in a few places (section 1.1): `redo` is `undo` with
 listed only with a write root; and `add_clip` and `remove_clip` are
 refused under M2's one clip, so the every-variant test checks their
 refusal. A Tier 2 MCP session renders on VA-API and compares the file
-with its project (`mcp_render_vaapi`); its run on odin is to come.
+with its project (`mcp_render_vaapi`); it passed on odin at 0c0296b
+(PR #26).
 
 ### A3 Work alongside Pat in the GUI (after M5)
 

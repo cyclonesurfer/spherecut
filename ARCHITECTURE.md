@@ -6,29 +6,37 @@ This describes the design as built, plus the planned parts marked
 ## Crates
 
 ```
-          app (eframe viewer; M1 slice 7)   cli (`spherecut` binary)   tests
-                          \                |                    /
-                           +---- export (M2.4 and M2.5) -------+
-                                      |
-   playback (Player, decode workers, frame cache, GPU slots, presenter, the file's audio; M1 slices 5 and 6)
-                     |                                    |
-   render (wgpu on Vulkan, WGSL; M1 slice 3)   audio (cpal output, chunk ring, audio clock; M1 slice 6)
-                                      |
-                    motion (IMU, stabilization)  (planned)
-                                      |
-     media (FFmpeg, MediaBackend and frame-exact seek, probing, MP4 boxes, doctor)
-                                      |
-        camera (cameras' raw files from their bytes: the Insta360 trailer; M3.2)
-                                      |
-   sphere (projection math)      core (time, frames, colour, stop tokens, clocks, the UI thread's guard, atomic writes, the project model)
+level  crate     what it holds                                 depends on
+  6    cli       the `spherecut` binary                        agent app core export media playback render sphere
+  5    app       the GUI: viewer and reframer (eframe)         audio core export media playback render sphere
+  5    agent     the MCP server, its tools, the JSON contract  camera core export media render sphere
+  4    playback  Player: decode workers, cache, slots, lock    audio core media render
+  4    export    an export: decode, render, encode, checks     core media render
+  3    media     FFmpeg, MediaBackend, probe, MP4, doctor      camera core
+  2    render    wgpu on Vulkan, WGSL, the CPU reference       core sphere
+  2    camera    cameras' raw files, read from their bytes     core
+  2    audio     cpal output, chunk ring, audio clock          core
+  1    core      time, frames, clocks, the project model       sphere
+  0    sphere    projection maths, lenses, the rig, splines    nothing
+
+test support, used only by tests and xtask:
+       synth     test patterns and media, the lens truth       core media sphere
+       testkit   Tier 2 gates, controls, benches, samples      nothing
+       xtask     check, compat, gen-media, hw-test             synth testkit
 ```
 
-`synth` (test patterns and media, and backends that stand in for FFmpeg)
-and `testkit` (test helpers) sit beside this stack and are used only by
-tests and `xtask`.
+A crate depends only on crates at a lower level. The last column is its
+dependencies among ours as `cargo metadata --offline` lists them,
+dev-dependencies left out: playback and export sit side by side, and
+neither depends on the other. `synth` (test patterns and media, and
+backends that stand in for FFmpeg), `testkit` (test helpers) and
+`xtask` sit beside this stack: the crates above take synth and testkit
+as dev-dependencies only, so nothing that ships links them. `motion`
+(IMU, stabilization; M4) is planned and not yet a crate.
 
 core depends on sphere (since M2.1, D48), whose projections and
-quaternions the project model holds; sphere depends on neither.
+quaternions the project model holds; sphere depends on no other crate
+of ours.
 
 camera (M3.2, D61) reads cameras' raw files from their bytes, with no
 FFmpeg, and depends on core alone (sphere joins in M3.5). media depends
@@ -40,7 +48,10 @@ and its blending, seam instrument and fit in render: there is no
 agent depends on export (since M2.5): the JSON contract it holds for
 the CLI lists the export's codes and turns its errors and fallbacks
 into `render`'s documents (D51), and A2's `render` and `job` drive the
-same job handle.
+same job handle. It depends on camera too (since M3.2): its probe
+groups a recording's files by camera's naming rule (`ops::clips`,
+through `insta360::companions`), and `doctor --file` reads which
+generation a lens's calibration is (`doctor_file`).
 
 render depends on core and sphere only, not on media: frames reach it
 through `core::video::VideoPlanes`, so the library has no FFmpeg
@@ -51,19 +62,19 @@ samples reach it from playback's `audio-decode` thread.
 
 | Crate | Role | Status |
 |---|---|---|
-| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34) files written whole or not at all (`fs::TempFile`, D16), and the project model (`project`: media, a sequence of clips with trims, view keys and markers, look-at targets, every change an `Edit` through `Project::apply`, undo `History`, the JSON project file; D47, D48; and `project::anim`, the view of a clip at a time from its keys, D50) | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking`; M2.1: `project`; M2.2: `project::anim` |
-| `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models, view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers, keyed lens shapes (`LensShape`), and the keyframe splines (`spline`: the scalar spline with eases and spin, Free's SO(3) spline, `follow_spin`'s maths) | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph`; M2.2: `spline`, `LensShape` |
-| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6 |
+| `spherecut-core` | Product name constants (`brand`), exact rational time and its serialized form (D27), the `--time` grammar (`TimeSpec`), what a decoded frame is (`video`: pixel layouts, planes, colour), stop tokens by generation (`cancel`), the clocks playback runs on (`clock`: the `Clock` trait, `SystemClock`, the frame-steppable `ManualClock`), the guard that a blocking call never runs on the UI thread (`blocking`: `mark_ui_thread`, `may_block`, D34), the submit gate (`gate::SubmitGate`: while the UI thread holds a swapchain image, no other thread submits to its device, D41), what a Vulkan device must have to be shared with FFmpeg's Vulkan Video (`vkplan`, which render and doctor plan it by, D25), files written whole or not at all (`fs::TempFile`, D16), and the project model (`project`: media, a sequence of clips with trims, view keys and markers, look-at targets, every change an `Edit` through `Project::apply`, undo `History`, the JSON project file; D47, D48; and `project::anim`, the view of a clip at a time from its keys, D50) | M0: name and time; M1: `video`, `cancel`; slice 4: `TimeSpec`, `fs`; slice 5: `clock`, `blocking`; slice 9: `gate`, `vkplan`; M2.1: `project`; M2.2: `project::anim` |
+| `spherecut-sphere` | CPU reference projection math in f64: equirect and its uv gradient, cube/EAC, fisheye lens models (`fisheye`, with M3.3's stitching models, `Unified` and `KbLens`, and the one `Canonical` distortion every reading of a camera's terms maps onto, D63), view projections and morphs and their inverse (`project_morph`), output pixels to lens coordinates (`pixel`), yaw, pitch and roll (`orient`), rotation helpers, keyed lens shapes (`LensShape`), and the keyframe splines (`spline`: the scalar spline with eases and spin, Free's SO(3) spline, `follow_spin`'s maths), grabbing the picture and zooming about the cursor for the viewer (`grab`), and a stitched lens pair (`rig`: the conventions a camera's files leave open, as data in `Geometry`, and the `Rig` built from a calibration, a geometry and a tune; M3 plan 6.2) | M0; M1 slice 3a: `pixel`, `orient`, `uv_gradient`, `project_morph`; slice 7: `grab`; M2.2: `spline`, `LensShape`; M3.3: `rig` and `fisheye`'s stitching models |
+| `spherecut-media` | FFmpeg in a safe RAII layer, probing with structural damage checks, our own ISO-BMFF box reader and metadata injector, a sequential video decoder, the `MediaBackend` traits with frame-exact seek in software and on VA-API or Vulkan Video with fallback to software, the render node lookup, the colour default rules, audio decoding to the output's rate and channels on the clip's time axis (`audio`, D35), a small MP4 writer, `doctor`'s capability checks, a video track's timing tables read from its boxes (`mp4::track_timing`, and `MediaBackend::track_timing` whatever the decoder, which M3.8's lock opens on), and what probe reads of a camera's own records through the camera crate (`camera`: an Insta360 file's trailer) | M0; `MediaBackend` from M1 slice 2a, hardware from 2b, audio from 6; M3.0: `track_timing`; M3.2: `camera` |
 | `spherecut-synth` | Synthetic scenes (grid, high-frequency, seam), YUV conversion at any matrix, range and subsampling, the supersampled ideal of a view (`render_view_ideal`, which the goldens hold minified views to), tones and first-order ambiX, test clips (open GOPs, edit lists, VFR, Matroska remuxes, seeded noise for camera bitrates) and broken files, `SyntheticBackend` and `GatedBackend`; for M3's camera files, the lens truth synth plants (`lens`: one calibration's stored numbers, `CalibTruth`, and `Planted`, synth's own enums for the conventions a camera's files leave open), the frame codes in a lens image's corners (`code`) and the two-track pair clips with their coding read back (`media::write_pair`, `track_coding`), and the Insta360-like trailer writer (`insv`: the X5's records for a master and its LRV, `Records::x5_like` and `x5_lrv`, laid out by `inst_box` and appended by `append_trailer`, with the trailer faults of `InsvFault` planted on request) and the calibration-string printer (`insv::print`, at the X5's precision), which share no code with camera's reader and parser (M3 plan 4.1 rule 2) | M0; M1 slices 2a, 2b and 3b; M3.0: `lens`; M3.1: `code`, the pair clips; M3.2: `insv` |
-| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, `require_audio_device` among them, the `TIER2-SKIP:` marker), benchmark recording (`bench`, with latency percentiles) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4) |
+| `spherecut-testkit` | Tier 2 gating (`tier2::require_*`, the `TIER2-SKIP:` marker): Tier 2h's gates, `require_audio_device` among them, which call `require_hw_run` first and so skip unless hw-test set `SPHERECUT_TIER2`, and Tier 2c's `require_samples_cpu`, which needs only `SPHERECUT_SAMPLES` (M3 plan 4.4, D60); the control every check runs beside it, which must fail (`control::must_fail`, D32, D60); Pat's takes by role (`samples::role`, from `samples-roles.toml`); how far a test's code raises the process's peak resident set (`memory::peak_rss_growth_kib`, M3 plan 4.3's K3); benchmark recording (`bench`, with latency percentiles, into the file hw-test names in `SPHERECUT_BENCH_OUT`, else to stderr) and FNV-1a hashing (`fnv64`) | M0; M1 slice 3a: `fnv64` (and `compare` until M2.4); M3.0: `control`, `samples`, `require_samples_cpu`; M3.1: `memory` |
 | `spherecut-camera` | Cameras' raw files, read from their bytes with no FFmpeg (D61, and the M3 plan's D62): the Insta360 trailer and its records (`insta360::read_trailer`, `read_record`, under the limits in `insta360::limits`), the metadata record (`parse_metadata`, through the schema-less protobuf walker `pb::Walker`), the thumbnail, IMU span and exposure records, the calibration strings parsed into named tokens and printed back byte for byte (`insta360::calib`), and a recording's files, by name (`companions`) and by bytes (`verify_companion`). Every reader takes `impl Read + Seek` and calls `may_block` first. Later in M3, the conversion to sphere's rig and other cameras | M3.2: the types, then its units (a) to (d) |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
 | `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics, and since M3.4 their weighted forms), from testkit so that agent can use it (amendment 2 item 32); for stitching (D65), the CPU reference's stitch of a lens pair (`reference::render_rig`, with debug modes 4 to 7, and `render_rig_of` on a `LensPair` made ready once) and the seam instrument (`seam`: the masks, the strips about the seam, a bin's shifts and the signature with each term's standard error), held to synth's lens pictures by rung 1 and the attribution matrix (`tests/instrument.rs`); later the shader's stitch, the fit and scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare`; M3.4: `seam`, `render_rig` |
-| `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer, the benchmarks and M2's export drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`) | M1 slices 5 and 6 |
+| `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer and the playback benchmarks drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown), which the export doesn't: it runs threads of its own (D52); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`); and the frame lock (`lock`, D67): a camera's two lenses, opened with `Player::open_locked`, shown only as pairs of frames at one clip time | M1 slices 5 and 6; M3.8: `lock` |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software; the pace an export from the app keeps while the UI is busy (`Pace`, one frame per UI pass) | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times; M2.7: `Pace` |
 | `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside two rows of tabs: Info, Inspector, Doctor and Files, then Curves and Sphere); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs (each project file opened under its lock with the history beside it, and never saved over a file changed on disk: A2.3, D57), the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`); and (M2.7, D55) the curve editor (`curves`), the sphere overview (`overview`), the Inspector and look-at targets (`inspector`) and the export window with its job (`export`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs | M1 slices 7 and 8, M2.6, M2.7 |
-| `spherecut-agent` | Agent integration (D23, D43 to D46, D57 to D59): the MCP server (`rpc`), the tools and their hand-written schemas (`tools`, `ops`), the roots (`roots`), the JSON contract of `--json` (`contract`, D27), frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; A2's project tools (`ops::project`, `ops::edit`, `reference`) render jobs (`jobs`, `ops::render`, `ops::job`), and a project's frames for compare, look and check (`ops::sequence`, `ops::compare`); later the GUI attach bridge | A1, A2 |
+| `spherecut-agent` | Agent integration (D23, D43 to D46, D57 to D59): the MCP server (`rpc`) and its eleven tools with their hand-written schemas and the validator for them (`tools`, `schema`, `ops`): probe, look, analyze, check and doctor (A1), then project, edit, undo, render, job and compare (A2), of which `spherecut call` runs all but render and job (`CALL_REFUSES`); the roots (`roots`), every limit an agent is held to (`limits`), a tool's failure with its code (`error`) and text from media files made safe to hand on (`text`); the JSON contract of `--json` (`contract`, D27); frame's core that look renders through (`still`), look's canvas and font (`image`, `font`), the instructions and the skill; A2's project ops (`ops::project`, `ops::edit`, `reference`), render jobs (`jobs`, `ops::render`, `ops::job`), and a project's frames for compare, look and check (`ops::sequence`, `ops::compare`); since M3.2, what `doctor --file` says of a camera's file (`doctor_file`) and a recording's files grouped by camera's naming rule (`ops::clips`); later the GUI attach bridge | A1, A2; M3.2: `doctor_file` |
 | `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it), `render` (a project's export, one envelope a line, D51), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project` |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
@@ -321,7 +332,8 @@ The other modules are safe Rust:
   from a snapped Matroska default duration that the first 64 blocks and
   the Cues keep to; the end of the stream from the container, else the
   last frame's interval; the frame count from the MP4 index; the mapping
-  from the track's spherical boxes). Streams whose timestamps tie or go
+  from the track's spherical boxes, or for Matroska and WebM from FFmpeg's
+  spherical side data). Streams whose timestamps tie or go
   backwards seek by the tie rule, the latter by decoding from the start.
   Playing on, `next_frame` says a failed read once, as a `Damaged` event
   with its cause, before the first frame the decoder drains after it or
@@ -837,22 +849,29 @@ three. Once the muxer has finished, one last pass of media's injector
 it with V2 and `SA3D` for 360, the V1 `uuid`, no video edit list and
 the moov first; `check::check` reads it back through the probe (codec,
 size, frames, duration, rate, layout, the spherical boxes, the audio),
-and only then is it persisted at the output. A failure at any step, or
-a cancel, removes both temporary files. Before it starts, the export
-sweeps its folder of a killed export's temporary files (their locks are
-free, D16) and refuses a disk with less free space than two copies of
-the size estimate. `Progress` counts frames muxed and then the last
-pass's bytes; the `Report` holds what was made and each check passed.
-`prepare` (the preset, the frame plan, the encoders) and `needed_bytes`
-(two copies of the estimate) are public so that the agent's `render`
-refuses what `start` would before it queues (D58), and `planned` (the
-file the last pass checks for, and the audio choice) so that `check`
-with a project checks what a render would write (D59);
+then a second time through FFmpeg's own demuxer, `probe::demuxer_view`
+(its spherical side data, its "ambisonic 1" layout for ambiX, and no
+complaint of a spherical box in its log), and only then is it persisted
+at the output. A failure at any step, or a cancel, removes both
+temporary files. Before it starts, the export sweeps its folder of a
+killed export's temporary files (their locks are free, D16) and refuses
+a disk with less free space than two copies of the size estimate.
+`Progress` counts frames muxed and then the last pass's bytes; the
+`Report` holds what was made and each check passed. `prepare` (the
+preset, the frame plan, the encoders) and `needed_bytes` (two copies of
+the estimate) are public so that the agent's `render` refuses what
+`start` would before it queues (D58), and `planned` (the file the last
+pass checks for, and the audio choice) so that `check` with a project
+checks what a render would write (D59);
 `ExportJob::exact` takes the output path as given, never following a link at it, for a
 path through `/proc/self/fd`. The sweep takes files older than
 `core::fs::SWEEP_AGE`, 10 s.
 
-The app's export (M2.7, D55) renders on the viewer's device and queue.
+The app's export (M2.7, D55) renders on a GPU device of its own on the
+window's adapter (`Gpu::beside`; M2.10, D56), so it shares no wgpu
+lock, queue or submit gate with the window, only the GPU. With
+`SPHERECUT_EXPORT_DEVICE=window`, or when a second device can't be had,
+it renders on the viewer's device and queue, as M2.7 ran it.
 Its `ExportJob` carries a `Pace`, shared with the UI: each UI pass says
 whether the viewer plays and whether a drag runs. While the viewer
 plays, each of the export's stages (decode, render, encode) starts no
@@ -862,10 +881,7 @@ stage waits before each frame for the UI's next pass,
 or 100 ms at most, and its renderer keeps its jobs short
 (`StillRenderer::share`, M2.10, D56): one submission in flight, a view
 larger than 4K in bands of 4K's pixels, the readback in copies of 16
-MiB. It renders on a GPU device of its own on the window's adapter
-(`Gpu::beside`), so it shares no wgpu lock, queue or submit gate with
-the window, only the GPU; the window's device is the fallback
-(`SPHERECUT_EXPORT_DEVICE=window` asks for it). Each UI pass also says
+MiB. Each UI pass also says
 whether the viewer has two frames ready beyond the one it shows, and
 while a drag runs and it hasn't, the export's decode, render and encode
 stages each wait before a frame's work (`Pace::yield_to_viewer`, 100 ms
@@ -1029,7 +1045,15 @@ without waiting.
   end; the document's `export` holds its outcome and the run's numbers
   over the time it ran. hw-test's Tier 2 `gui_smoke` runs it on each clip in the
   desktop session it finds, unless logind says it is locked, and
-  kittest runs it with no compositor.
+  kittest runs it with no compositor. Three more hidden flags (D40) let
+  a run see the UI while decode falls behind: `--smoke-decoder` plays
+  on the decoder named, `--smoke-decode-floor-ms` lets each stream hand
+  out at most one frame a floor, and `--smoke-control-ui-waits`, the
+  control, makes each pass of the UI's logic wait for the next decoded
+  frame (at most `CONTROL_WAIT`, 250 ms), breaking D34's rule on
+  purpose and only under `--smoke`. The document's `asked` says which
+  of them the run had; hw-test's Tier 2 `gui_decode_behind` runs them
+  (below, "Testing tiers").
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
   M2.2b, D53) is the toolkit check's (D26): `proto::TimelineProto`, on
   the device the viewer would take, draws 500 seeded clips on 6 tracks
@@ -1223,8 +1247,10 @@ without waiting.
   mips, both upload paths, `render_still` against the CPU reference, and
   the golden images (below). The CLI's tests (`crates/cli/tests/`) run
   the binary: the JSON contract with every exit status (a Ctrl+C in the
-  middle of a seek included), FFmpeg's confinement under strace, and
-  `frame` on lavapipe (the Euler table, the frame code read back, every
+  middle of a seek included), FFmpeg's confinement and the network
+  under strace (probe, doctor, frame, render and the MCP server open no
+  `AF_INET` or `AF_INET6` socket and `connect` to nothing but a Unix
+  socket, D24), and `frame` on lavapipe (the Euler table, the frame code read back, every
   error row with nothing left behind, the output races, the pipeline
   goldens). The playback engine's tests (`crates/playback/tests/`) run
   on lavapipe, and on a `ManualClock` wherever wall time would make
@@ -1239,20 +1265,48 @@ without waiting.
   decoder's tests (`crates/synth/tests/audio.rs`) check samples, seeks,
   resampling and channels on clips synth writes, and the audio crate's
   (`crates/audio/tests/clock.rs`) the clock on the fake and null
-  devices.
+  devices. Every check has a control beside it, run every time, that
+  must fail (`spherecut_testkit::control::must_fail`, D32, D60): the
+  same check on input that is wrong on purpose. A control that stops
+  failing fails the test.
   `cargo xtask check` runs all of it, against the FFmpeg pkg-config
-  finds. `cargo xtask compat` runs clippy against other FFmpeg builds
+  finds, in this order: rustfmt; clippy with `-D warnings`, then
+  clippy's network lints on a scratch crate that opens a TCP stream and
+  looks up a name, which must fail them; rustdoc over every crate with
+  `-D warnings` last, after the caller's flags, then on scratch crates
+  with a broken link, an ambiguous one and an unclosed HTML tag, which
+  must fail; the build with the toolchain of `rust-version` (1.95),
+  then a scratch crate a minor release past it, which must fail (the
+  step is skipped, saying so, when rustup or that toolchain is missing,
+  but fails under CI); compat's clippy and link (below); the Tier 1
+  tests; the doc tests; cargo-deny, then its bans on a scratch workspace
+  that depends on socket2, reqwest and tokio's `net`, which must fail;
+  and cargo-audit (D1, D8, D24, D32). `cargo xtask compat` runs clippy against other FFmpeg builds
   and builds and links the tests against each, in a target directory of
   its own that is deleted when the FFmpeg behind its prefix changes (and
   only while it holds compat's stamp), checks before and after that
   every library the build bound came from the prefix, and
   with `--test` runs Tier 1 against one; `check` runs the clippy and the
   link for the prefixes `SPHERECUT_FFMPEG_COMPAT` lists, and says when it
-  lists none (D2).
-* **Tier 2** needs hardware or samples. Tier 2 tests are `#[ignore]`d with a
-  reason and call `spherecut_testkit::tier2::require_*`, which fails the
-  test with a `TIER2-SKIP:` marker when a device or sample is missing.
-  `cargo xtask hw-test` first lists the Tier 2 tests with `cargo test
+  lists none (D2). CI (`.github/workflows/check.yml`, D78) runs the same
+  `cargo xtask check` on GitHub's Ubuntu 24.04 runner, where `CI` makes
+  the MSRV build required, and `cargo xtask compat` against FFmpeg 8.1.3
+  and 9.0.2; it is started by hand until Pat turns its push trigger on,
+  and it runs no Tier 2 test.
+* **Tier 2** needs hardware or Pat's camera samples, and comes in two
+  kinds (M3 plan 4.4, D60). Tier 2 tests are `#[ignore]`d with a reason
+  and call `spherecut_testkit::tier2::require_*` first, which fails the
+  test with a `TIER2-SKIP:` marker when a device or sample is missing,
+  so a Tier 2 test never passes on a machine that lacks what it needs.
+  **Tier 2h** tests need the hardware, real time or the GUI: their
+  gates call `require_hw_run`, which skips unless `SPHERECUT_TIER2` is
+  set, as hw-test sets it. **Tier 2c** tests need the samples and the
+  CPU only, and gate on `require_samples_cpu` alone, which needs only
+  `SPHERECUT_SAMPLES`, so agents run them in the cloud while they
+  build:
+  `SPHERECUT_SAMPLES=<folder> cargo test -p <crate> --test <file> -- --ignored <name>`.
+  Their checks have controls that must fail too.
+  `cargo xtask hw-test` runs both kinds. It first lists the Tier 2 tests with `cargo test
   [--release] -- --ignored --list`, then runs them with `--no-fail-fast`,
   and reports every listed test exactly once as `<binary>::<test>`: pass,
   FAIL with its output, skipped with the reason, left out by `--quick`, or
@@ -1277,12 +1331,29 @@ without waiting.
   |A/V| p95 reaches 20 ms on the sync clip, or HEVC decodes in software
   where doctor says VA-API decodes it; without a session it skips, and
   with the session locked (logind's `LockedHint`) it fails at once
-  and the report says so. The
+  and the report says so. Its "UI while decode falls behind" section
+  is `gui_decode_behind`'s (D40), which judges what `gui_smoke` can't,
+  as that fails any run that drops frames: run 0 holds decode to a
+  frame in 50 ms (`--smoke-decode-floor-ms 50`) on a 30 fps seam clip,
+  run 1 plays the noisy 5.7K 10-bit clip on VA-API with its frames
+  copied (`--smoke-decoder vaapi`, `SPHERECUT_ZERO_COPY=0`), and run 2,
+  the control, is run 0 with the UI waiting for each decoded frame
+  (`--smoke-control-ui-waits`). With decode behind (at most 85% of the
+  frames expected shown), runs 0 and 1 must hold the UI's gates above
+  (90% presented, a p99 of at most 1.5 refresh periods) with no
+  blocking call on the UI thread, and the control must block and fail
+  them; run 1 keeping up is inconclusive, not a failure. Its runs are
+  listed in `gui-decode-behind.json` and its screenshots copied beside
+  the report as `<report>-behind-<n>.png`. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at
   60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in
   real time, and gate 5.7K real time on the hardware decoder `Auto`
-  picks (D34). `cargo xtask hw-test --list` lists the Tier 2 tests.
+  picks (D34). A benchmark records its lines through `testkit::bench`
+  (the median of `SPHERECUT_BENCH_RUNS` measured runs, 3 by default):
+  into the file hw-test names in `SPHERECUT_BENCH_OUT`, which it puts
+  in the report's benchmark table, and to stderr elsewhere.
+  `cargo xtask hw-test --list` lists the Tier 2 tests.
 
 ### Golden images
 

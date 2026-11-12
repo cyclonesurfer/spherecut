@@ -3,7 +3,9 @@
 //! per run, on success and on every kind of failure; the same shape for
 //! one file or many; the exit statuses, frame's 3 and 4 included; codes
 //! that don't change; times that read back exactly; and SIGINT, which
-//! cancels frame and ends probe and doctor at once.
+//! cancels frame and ends probe and doctor at once. Beside the contract,
+//! the help: `call --help` names every tool `call` runs, and the README
+//! shows how to run every command `--help` lists.
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -764,12 +766,74 @@ fn the_smoke_flags_need_their_output_and_a_display() {
         text(&out.stderr)
     );
     assert!(!json.exists());
+    // The decode-behind run's flags (D40) need --smoke too.
+    for args in [
+        &["--smoke-decoder", "vaapi"][..],
+        &["--smoke-decode-floor-ms", "50"],
+        &["--smoke-control-ui-waits"],
+    ] {
+        let out = run(args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    // With it they parse, and the run ends where every smoke run does
+    // without a display.
+    let with = |extra: &[&str]| {
+        let mut args = vec!["--smoke", "clip.mp4", "--smoke-out", json.to_str().unwrap()];
+        args.extend_from_slice(extra);
+        run(&args)
+    };
+    let parses =
+        |out: &Output| out.status.code() == Some(3) && text(&out.stderr).contains("no display");
+    for extra in [
+        &[
+            "--smoke-decoder",
+            "vaapi",
+            "--smoke-decode-floor-ms",
+            "50",
+            "--smoke-control-ui-waits",
+        ][..],
+        &["--smoke-decoder", "auto"],
+        &["--smoke-decoder", "software"],
+        &["--smoke-decoder", "vulkan"],
+        &["--smoke-decode-floor-ms", "1"],
+        &["--smoke-decode-floor-ms", "500"],
+    ] {
+        let out = with(extra);
+        assert!(parses(&out), "{extra:?}: {}", text(&out.stderr));
+    }
+    // The parser's controls: a floor out of its range, or a decoder it
+    // doesn't know, is a usage error.
+    for (name, extra) in [
+        ("a decode floor of 0 ms", ["--smoke-decode-floor-ms", "0"]),
+        (
+            "a decode floor of 501 ms",
+            ["--smoke-decode-floor-ms", "501"],
+        ),
+        ("a decoder named nonesuch", ["--smoke-decoder", "nonesuch"]),
+    ] {
+        let out = with(&extra);
+        must_fail(name, parses(&out));
+        assert_eq!(out.status.code(), Some(2), "{name}: {}", text(&out.stderr));
+    }
+    assert!(!json.exists());
     // Hidden from the help.
     let help = text(&run(&["--help"]).stdout);
     assert!(
         help.contains("--adapter") && !help.contains("--smoke"),
         "{help}"
     );
+    for flag in [
+        "--smoke-decoder",
+        "--smoke-decode-floor-ms",
+        "--smoke-control-ui-waits",
+    ] {
+        assert!(!help.contains(flag), "{flag}: {help}");
+    }
 }
 
 #[test]
@@ -2073,4 +2137,133 @@ fn files_records(layout: &TrailerLayout) -> Value {
         .iter()
         .map(|s| serde_json::json!({"id": s.id, "size": s.size}))
         .collect()
+}
+
+/// Whether `help`, `spherecut call --help`'s text, names every tool that
+/// `call` runs, and says that the ones it refuses run under `spherecut
+/// mcp`.
+fn call_help_names(help: &str) -> Result<(), String> {
+    let words: Vec<&str> = help
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .collect();
+    let refused = spherecut_agent::CALL_REFUSES;
+    let mut missing: Vec<String> = spherecut_agent::tools::TOOLS
+        .iter()
+        .map(|t| t.name)
+        .filter(|n| !refused.contains(n) && !words.contains(n))
+        .map(str::to_owned)
+        .collect();
+    // The refused ones, in a sentence that says where they run.
+    let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    for n in refused {
+        let said = flat.split(". ").any(|sentence| {
+            sentence.contains("mcp")
+                && sentence
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|w| w == *n)
+        });
+        if !said {
+            missing.push(format!("{n} (with mcp)"));
+        }
+    }
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("call's help doesn't name {missing:?}"))
+    }
+}
+
+#[test]
+fn call_help_names_every_tool_call_runs() {
+    let out = spherecut(&["call".as_ref(), "--help".as_ref()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    call_help_names(&text(&out.stdout)).unwrap();
+
+    // The tool's help as it was at 073715b.
+    let failed = must_fail(
+        "call's help at 073715b",
+        call_help_names("  <TOOL>  The tool: probe, look, analyze, check or doctor."),
+    );
+    for n in ["project", "compare", "render", "job"] {
+        assert!(failed.contains(n), "{failed}");
+    }
+}
+
+/// The commands `spherecut --help` lists, but `help`.
+fn commands(help: &str) -> Vec<String> {
+    help.lines()
+        .skip_while(|l| l.trim() != "Commands:")
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|c| *c != "help")
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether `readme` has, in a `sh` block, a line that runs each of
+/// `commands`: one starting `spherecut <command>` or
+/// `./target/release/spherecut <command>`.
+fn readme_runs(readme: &str, commands: &[String]) -> Result<(), String> {
+    let mut lines = Vec::new();
+    let mut in_sh = false;
+    for line in readme.lines() {
+        if line.starts_with("```") {
+            in_sh = !in_sh && line.trim() == "```sh";
+        } else if in_sh {
+            lines.push(line.trim_start_matches("./target/release/"));
+        }
+    }
+    let missing: Vec<&String> = commands
+        .iter()
+        .filter(|c| {
+            let run = format!("spherecut {c}");
+            !lines.iter().any(|l| {
+                l.strip_prefix(&run)
+                    .is_some_and(|r| r.is_empty() || r.starts_with(' '))
+            })
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("the README never shows how to run {missing:?}"))
+    }
+}
+
+#[test]
+fn the_readme_shows_how_to_run_every_command() {
+    let out = spherecut(&["--help".as_ref()]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let listed = commands(&text(&out.stdout));
+    for c in [
+        "probe", "doctor", "frame", "render", "mcp", "call", "agents",
+    ] {
+        assert!(
+            listed.iter().any(|l| l == c),
+            "--help lists no {c}: {listed:?}"
+        );
+    }
+    let readme =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"))
+            .unwrap();
+    readme_runs(&readme, &listed).unwrap();
+
+    let without: String = readme
+        .lines()
+        .filter(|l| !l.starts_with("spherecut render "))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let failed = must_fail(
+        "the README without its `spherecut render` lines",
+        readme_runs(&without, &listed),
+    );
+    assert!(failed.contains("render"), "{failed}");
+    let mut more = listed.clone();
+    more.push("nosuch".to_owned());
+    let failed = must_fail(
+        "a command the README doesn't run",
+        readme_runs(&readme, &more),
+    );
+    assert!(failed.contains("nosuch"), "{failed}");
 }

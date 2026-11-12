@@ -8,8 +8,9 @@
 //! rendered to (D77); both upload paths fill a slot alike; bad frames
 //! and wrong slots are refused; a frame already on the GPU fills a slot
 //! as an upload does, and planes already there (slice 5b's imports, made
-//! here by wgpu) fill one byte for byte as their bytes do; and the upload
-//! bench runs, small (its Tier 2 form, `bench_upload_5k7`, is here too).
+//! here by wgpu) fill one byte for byte as their bytes do; a renderer's
+//! slot holds the frame it drew last; and the upload bench runs, small
+//! (its Tier 2 form, `bench_upload_5k7`, is here too).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -22,8 +23,8 @@ use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::upload::EightBitMips;
 use spherecut_render::{
     AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
-    PlaneFormat, Projector, SlotShape, UploadPath, Uploader, ViewParams, dmabuf, reference, upload,
-    vkshare,
+    PlaneFormat, Projector, SlotShape, StillOptions, StillRenderer, UploadPath, Uploader,
+    ViewParams, dmabuf, reference, upload, vkshare,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::{Pattern, render_equirect};
@@ -1639,6 +1640,56 @@ fn bench_upload_5k7() {
             runs: bench::runs(),
         },
     );
+}
+
+/// Whether level 0 of each plane of `slot` holds 8-bit `frame`'s codes;
+/// or the first plane that doesn't, and how many of its bytes differ.
+fn holds(slot: &GpuFrame, frame: &Frame) -> Result<(), String> {
+    for i in 0..frame.planes.len() {
+        let t = slot
+            .plane_texture(i)
+            .ok_or_else(|| format!("no plane {i}"))?;
+        let got = read_texture(gpu(), t, 0).map_err(|e| e.to_string())?.data;
+        let want = codes(frame, i);
+        let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+        if got.len() != want.len() || differ > 0 {
+            return Err(format!(
+                "plane {i}: {differ} of {} bytes differ, {} read",
+                want.len(),
+                got.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn a_renderers_slot_holds_the_frame_it_drew_last() {
+    // The Tier 2 zero-copy check reads a renderer's slot when a render of
+    // a frame on the GPU differs from the copy's (`StillRenderer::slot`),
+    // to tell a slot that holds other bytes from a render that drew the
+    // right ones wrong. After a render, level 0 of each plane holds the
+    // frame's codes; a slot of the same shape made fresh holds zeros,
+    // which the same check must refuse.
+    let gpu = gpu();
+    let mut renderer = StillRenderer::new(gpu);
+    assert!(renderer.slot().is_none(), "a slot before any render");
+    let view = ViewParams::new(glam::DQuat::IDENTITY, Lens::new(Projection::Fisheye, 3.0));
+    let opts = StillOptions::default();
+    for seed in [51, 52] {
+        let frame = noise(Kind::Nv12, (96, 48), 16, seed);
+        renderer
+            .render(gpu, &frame, &view, (48, 32), &opts)
+            .unwrap();
+        let slot = renderer.slot().expect("a slot after a render");
+        holds(slot, &frame).unwrap_or_else(|why| panic!("seed {seed}: {why}"));
+    }
+    let fresh = GpuFrame::new(gpu, renderer.slot().unwrap().shape()).unwrap();
+    let why = must_fail(
+        "a fresh slot's zeros",
+        holds(&fresh, &noise(Kind::Nv12, (96, 48), 16, 52)),
+    );
+    assert!(why.starts_with("plane 0: "), "{why}");
 }
 
 #[test]

@@ -154,7 +154,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
         brand::APP_NAME,
         options,
         Box::new(move |cc| {
-            spherecut_core::blocking::mark_ui_thread();
+            spherecut_core::blocking::mark_ui_thread_with(crate::smoke::ui_thread_policy(
+                args.smoke.as_ref(),
+            ));
             let rs = cc
                 .wgpu_render_state
                 .as_ref()
@@ -171,6 +173,9 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
             let mut open = args.files;
             if let Some(smoke) = &args.smoke {
                 settings.overlay = true;
+                if let Some(d) = smoke.decoder {
+                    settings.decoder = d;
+                }
                 open = vec![smoke.clip.clone()];
             }
             let ctx = cc.egui_ctx.clone();
@@ -195,9 +200,10 @@ pub fn run(args: GuiArgs) -> Result<(), GuiError> {
                 BudgetFrom::Settings => None,
             };
             let audio = DeviceAudio::new(backend.clone(), AudioDevice::Default);
+            let floor = args.smoke.as_ref().and_then(|s| s.decode_floor);
             let app = SpherecutApp::new(AppParts {
                 gpu: gpu.clone(),
-                backend,
+                backend: crate::smoke::with_decode_floor(backend, floor),
                 clock: Arc::new(SystemClock::new()),
                 audio: Some(Arc::new(audio)),
                 repaint: Some(repaint),

@@ -5,9 +5,83 @@ would make us revisit it. Heavy dependencies are justified here, as the
 project rules require. Entries go in number order, with the open
 questions last. M1's plan reserved D27 to D37 (`docs/design/m1-plan.md`,
 section 0), so each of those lands in its place with its slice, and D38
-came before some of them. Superseded entries stay and say so.
+came before some of them. M3's plan reserves D60 to D76 for M3's slices
+(`docs/design/m3-plan.md`, section 23), so a number there with no
+heading belongs to a slice not yet built (D64 is M3.5's, D66 M3.7's);
+D77 came from M3.8 and D78 from the review-fix slice. Superseded
+entries stay and say so.
 
-## D1. Rust stable, edition 2024, MSRV 1.88 now and 1.95 with the GUI
+Index:
+
+- D1. Rust stable, edition 2024, MSRV 1.95
+- D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
+- D3. Hardware decoding never falls back to software silently
+- D4. Our own MP4 box parser and injector for spherical metadata
+- D5. glam for vectors and quaternions
+- D6. Our own exact rational time type
+- D7. GUI and GPU stack (for M1)
+- D8. Supply chain and no runtime network
+- D9. Test tiers and synthetic media
+- D10. GPL-3.0-or-later, and reuse of GPL code
+- D11. FFmpeg's C enums are read as ints, never as bindgen enums
+- D12. FFmpeg's log goes to `tracing`
+- D13. What `VideoDecoder` does with a damaged file
+- D14. A hardware decoder says why it refused a stream
+- D15. MP4 parser limits, damage checks and fuzzing
+- D16. `inject` and `Mp4Writer` write atomically
+- D17. First-order ambiX in AAC uses the 4.0 layout
+- D18. Doctor checks capability, and reads packages only to word fixes
+- D19. How `cargo xtask hw-test` reports Tier 2 tests
+- D20. Benchmarks repeat, and report median and spread
+- D21. The `deny.toml` bans list
+- D22. Direct dependencies
+- D23. Agent integration: an MCP server and the JSON CLI
+- D24. FFmpeg opens only the file Spherecut opened
+- D25. Zero-copy decode-to-render is proved in M1, decided before M3
+- D26. egui stays, checked against a timeline prototype at the end of M2
+- D27. The CLI JSON contract
+- D28. Crate layout, rust-version 1.95 and where unsafe may appear
+- D29. MediaBackend and frame-exact seek
+- D30. Pixel formats and colour defaults
+- D31. The render pipeline
+- D32. Golden images
+- D33. View conventions
+- D34. The playback engine
+- D35. Audio and A/V sync
+- D36. The GUI's dependencies, features and Wayland gaps
+- D37. Hardware testing in M1
+- D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
+- D39. `frame --decoder auto` tries VA-API on the rendering GPU, then software
+- D40. The overlay, the settings, the raw view and the smoke run
+- D41. The submit gate
+- D42. The real-time gate plays as the app does
+- D43. A1's MCP layer, schemas and roots
+- D44. A1's MCP server: the protocol and its conventions
+- D45. A1's roots: how an agent's paths are opened
+- D46. A1's analyze and check: what each measures
+- D47. The project file: JSON with a schema number
+- D48. The project model and `Edit`
+- D49. Rendering for export: the output frame, equirect output, the YUV pass and motion blur
+- D50. Keyframes and interpolation: Level by default, one scalar spline, Free on SO(3)
+- D51. `spherecut render`: the export from the command line, one envelope a line
+- D52. The export pipeline: presets, encoders, the MP4 in one last pass, audio cut to the sample, parity floors and the job handle
+- D53. The toolkit check: a timeline prototype behind a hidden flag, and its gates
+- D54. The reframer's GUI, part 1: the untitled project, the keyed view, the strip and the play span
+- D55. The reframer's GUI, part 2: the curve editor, the sphere overview, the Inspector and targets, the export window and its pace
+- D56. The app's export and the window: no wait through wgpu, a smaller unit, a device of its own, the viewer first
+- D57. Projects for agents: the folder handle, the lock, the history file, and the project tools
+- D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
+- D59. Compare, and projects in look and check: a sequence's frames one way, the render's times
+- D60. M3's verification contract
+- D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
+- D62. Our own trailer reader: a hand-written walker, D15's limits, no telemetry-parser
+- D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
+- D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
+- D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
+- D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
+- D78. An independent check on GitHub's runner
+
+## D1. Rust stable, edition 2024, MSRV 1.95
 
 *2026-10-22, M0.*
 
@@ -34,6 +108,17 @@ rather than again in slice 7. Fedora 44's RPM is 1.99 (huginn's), not
 `cargo +1.95 build --workspace --all-targets` builds without warnings and
 `cargo +1.95 test --workspace` passes (368 tests, then 377). Rechecked at
 0233870, after slice 3b's goldens: both pass, with 389 tests.
+
+*Updated 2026-11-11 (review-fix slice):* the heading said "MSRV 1.88 now
+and 1.95 with the GUI"; it was 1.88 until M1 slice 3a brought in wgpu
+(c7f02cf, 2026-10-24) and moved it to 1.95, which egui 0.37, the crate
+that pins that wgpu (D7), needs (the note above); it has been 1.95
+since. From this slice `cargo xtask check` builds every crate and target
+with `rust-version`'s toolchain through rustup (`cargo check --workspace
+--all-targets --all-features`, in a target directory of its own), with a
+control: a scratch crate whose `rust-version` is one minor past it must
+be refused. Without rustup or the toolchain the step is skipped and says
+so, except under CI, where it fails.
 
 ## D2. FFmpeg through ffmpeg-next, hardware paths over ffmpeg-sys-next
 
@@ -405,6 +490,22 @@ video's identity edit, and puts the moov first with every chunk offset
 moved, as faststart would; the export reads the result back with the
 same parser before it is put in place.
 
+*Updated 2026-11-11 (review-fix slice):* reading back with our own
+parser alone validated our boxes against our own reading of them
+(F123): a box FFmpeg reads otherwise, or gives up on, passed. The
+export now reads the file a second time through FFmpeg's own demuxer,
+`probe::demuxer_view`, which opens the header alone under probe's
+confinement (`ffi::open_header`, without `avformat_find_stream_info`)
+and returns each stream's spherical side data and channel layout with
+the log. Its checks are `ffmpeg_sphere`, `ffmpeg_ambix` and
+`ffmpeg_log` (D52). The validation above becomes a test: the 360
+export test reads the file through `demuxer_view`, and copies with one
+box renamed `free` or one field changed fail the check that names them
+(`SA3D` version 1 or a reordered channel map, `svhd` version 1, `st3d`
+gone, `sv3d` and the V1 `uuid` both gone); a copy that loses only
+`sv3d`, or only the V1 `uuid`, still passes, since FFmpeg takes the
+sphere from the other.
+
 ## D5. glam for vectors and quaternions
 
 *2026-10-22, M0. Research: `docs/research/gpu-ui-stack.md` §8.*
@@ -492,6 +593,22 @@ under strace and fail on any `AF_INET` or `AF_INET6` socket.
 anything and downloads nothing, but on Fedora it makes one read-only
 `rpm -q` query to word its fixes. `cargo xtask hw-test` also runs `rpm -q`
 in its prerequisite check.
+
+*Updated 2026-11-11 (review-fix slice):* `cargo xtask check` runs, in
+order: rustfmt, clippy with `-D warnings` and its network controls,
+rustdoc with `-D warnings` over every crate (intra-doc links and HTML,
+a bin's private items too) and its controls, the MSRV build (D1) and
+its control, the FFmpeg builds in `SPHERECUT_FFMPEG_COMPAT` (D2), Tier
+1, the doc tests, cargo-deny and its network bans' controls, and
+cargo-audit. Each control is a scratch crate made to fail its gate,
+and a control that passes fails the check (D32). The licence allow
+list now holds only what the Linux graph uses (GPL-3.0-or-later, MIT,
+Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+BSD-3-Clause, ISC, Zlib, Unicode-3.0), and `unused-allowed-license` is
+`warn`, so an entry nothing uses shows and goes; GPL-3.0,
+LGPL-2.1-or-later, LGPL-3.0-or-later, MIT-0, Unicode-DFS-2016, BSL-1.0,
+CC0-1.0 and MPL-2.0 left the list, unused. A licence a new dependency
+brings is added with its reason here.
 
 ## D9. Test tiers and synthetic media
 
@@ -845,11 +962,15 @@ Damage, which `spherecut probe` fails on (`Mp4Tree::damage()`):
   retyping it looks the same as a damaged one, so such a file fails
   `probe` and `inject` refuses it, rather than a stream going missing
   without a word. No such file turned up in the sweeps;
-- an `sv3d` in a sample entry without `svhd`, without `proj`, or with a
-  `proj` that has no `prhd`. FFmpeg then ignores the whole `sv3d`, saying
-  no more than "Missing projection box" in its log, so a `proj` renamed
-  to `qroj` loses the projection. A projection box FFmpeg does not know,
-  such as `mshp`, is not damage;
+- an `sv3d` in a sample entry that FFmpeg's `mov_read_sv3d` ignores. It
+  reads the boxes in one order and gives up on the whole `sv3d` at the
+  first it doesn't find there: `svhd` first, of version 0; then `proj`;
+  in `proj`, `prhd` first, of version 0 and 24 bytes, since it reads the
+  pose and no more; then a projection box, of version 0 for `equi` and
+  `cbmp`, and a `cbmp` of layout 0. It says no more than "Missing
+  projection box" or the like in its log, so a `proj` renamed to `qroj`
+  loses the projection. A projection box FFmpeg does not know, such as
+  `mshp`, is not damage;
 - a child of a sample entry whose type is printable but not `sv3d` and
   whose payload starts with an `svhd` box, which only `sv3d` holds: an
   `sv3d` renamed to `rv3d` or `sv3D`, which FFmpeg skips with the
@@ -989,6 +1110,35 @@ damaged trailers among them, never panic, and whatever trailer comes
 back is checked against the bytes themselves. At 100,000 cases they
 take 1.4 s and 0.9 s in a debug build on the cloud box (4 Xeon cores,
 camera at opt-level 2).
+
+*Updated 2026-11-11 (review-fix slice):* the `sv3d` check above now
+follows the order in which FFmpeg reads the boxes (F124). It used to
+ask only that `svhd`, `proj` and `prhd` be there, so an `sv3d` with
+`proj` before `svhd`, the projection before `prhd`, or an `svhd` of
+version 1 passed, though FFmpeg 6.1.1 ignores each. It reads the same
+in 7.1, 8.1 and 9.0.2. `generated_media.rs`'s
+`ffmpeg_and_the_damage_check_agree_on_sv3d_layouts` builds each such
+`sv3d`, a `proj` with only its header and a 28-byte `prhd` among them,
+and checks that FFmpeg's own demuxer gives the stream no sphere and
+that the check names it. A mesh FFmpeg ignores too but isn't named, and
+the writer's own `sv3d` is neither. Our reader of `sv3d` stays lenient
+and the check is what tells. The export's `sa3d` check also wants what
+FFmpeg 6.1 takes (D52).
+
+*Updated 2026-11-11 (review-fix slice):* what the 256 MiB `moov` limit
+costs in memory (F132). The parser reads the whole `moov` payload into
+one buffer, up to 256 MiB, and copies each leaf it keeps out of it: the
+sample tables whatever their size, and others up to 1 MiB. A hostile
+`moov` made of sample tables is held twice while it is parsed, so
+probe's peak is about 512 MiB, bounded but twice the limit; that
+matters for the GUI, which probes in its own process. `inject` holds
+more: the parsed tree, its own copy of `moov`'s bytes, a copy for each
+placing pass, and a tree and a copy for each re-reading of the edited
+`moov` to find its chunk tables, so a few times the `moov` at its peak.
+It reads only Spherecut's own muxer's output (`encode.rs`), never a
+file a user hands it, so no hostile `moov` reaches it. Keeping the
+sample tables as ranges into the one buffer would bring probe's peak to
+the limit; nothing does that yet.
 
 ## D16. `inject` and `Mp4Writer` write atomically
 
@@ -1150,6 +1300,14 @@ Cost: FFmpeg's mov demuxer reads our `SA3D` as "ambisonic 1", but
 `avformat_find_stream_info` then replaces it with the AAC decoder's 4.0,
 so players that ignore `SA3D` play it as 4.0 surround.
 
+*Updated 2026-11-11 (review-fix slice):* the export's `ffmpeg_ambix`
+check (D52, F123) reads the header alone (`ffi::open_header`), before
+`avformat_find_stream_info`, so that it sees the demuxer's "ambisonic
+1" and not the decoder's 4.0; that is still so on FFmpeg 6.1.1, 7.1.3,
+8.1.3 and 9.0.2. A file whose `SA3D` FFmpeg ignores keeps the layout
+the demuxer gave the AAC stream before it, "4 channels", which fails
+the check.
+
 Revisit for M2/M6: Opus with channel mapping family 2 (ffprobe 6.1 reports
 "ambisonic 1" for it in MP4). It needs packed-float audio in `Mp4Writer`
 and a check that YouTube accepts it.
@@ -1228,6 +1386,24 @@ above, as the `result` of a `spherecut.doctor/1` document. An issue of
 severity error makes `ok` false, with the code `doctor_errors`, and still
 exits 1; a command line that doesn't parse exits 2.
 
+*Updated 2026-11-11 (review-fix slice):* "a Vulkan Video decode problem
+is a note, because VA-API is the first hardware decoder" holds only on an
+integrated GPU (F125). On a discrete GPU the player prefers Vulkan Video
+(D34), since VA-API's frames are copied out of video memory there: on
+odin's RX 7600, VA-API played 5.7K 8-bit at 28 fps unthrottled and
+dropped 33 frames in 20 s, 409 at 5.7K 10-bit and 445 at 8K, while
+Vulkan Video dropped none at 5.7K (`docs/perf.md`'s playback tables:
+only Vulkan Video plays 5.7K in real time there). So when FFmpeg's
+Vulkan device is a discrete GPU, a format that Vulkan Video can't decode,
+or decodes wrongly, and that VA-API decodes in its place makes the issue
+a warning, whose impact says that VA-API's frames are copied out of
+video memory, which drops frames at 5.7K and up. The rest is as before:
+VA-API unable for every format is a note (VA-API's own issue is the
+warning), and Vulkan Video's wrong output where VA-API can't decode is a
+warning. On an integrated GPU nothing changed, word for word. Doctor
+judges the GPU by FFmpeg's Vulkan device and the player by wgpu's
+adapter, so on a machine with two GPUs the two can differ.
+
 ## D19. How `cargo xtask hw-test` reports Tier 2 tests
 
 *2026-10-23, M0. Makes D9's "never a pass and never a mystery failure"
@@ -1296,6 +1472,19 @@ next, on an idle GPU.
 seconds (the playback benchmarks), with Runs counting the seconds and
 Range the slowest and the fastest; its spread says how even playback
 was, not how busy the machine was.
+
+*Updated 2026-11-11 (review-fix slice):* `docs/PROMPT.md:127` asks for
+criterion benchmarks on hot paths. This harness and the Tier 2
+end-to-end benchmarks (decode, upload, playback, export) stand in for
+them, because criterion brings a tree of crates of its own (its
+plotting and statistics), against the rule of no new crates without a
+reason that outweighs it, and the numbers PROMPT asks for are whole
+paths on Pat's machines, which a micro-benchmark doesn't give. The cost
+is no regression signal for the CPU's hot paths between hardware runs:
+CPU benchmarks of the fit's hot paths (the seam signature's candidate,
+about 70 ms) come with M3.6, through `testkit::bench`, tracked in
+`docs/perf.md`. The deviation was recorded only in the M1 plan
+(`docs/design/m1-plan.md`, its dependency list) until now.
 
 ## D21. The `deny.toml` bans list
 
@@ -1413,6 +1602,18 @@ was wgpu-hal's already, at the same version.
 on core and thiserror, and on proptest, synth and testkit for its tests,
 all in the tree already, so it adds no crate. Sphere joins its
 dependencies in M3.5, and media depends on it from M3.2's unit (c).
+
+*Updated 2026-11-11 (review-fix slice):* one more duplicate a Linux
+build compiles: syn 2.0.119 beside 3.0.9. `cargo tree --offline -e
+normal,build --target x86_64-unknown-linux-gnu -i syn@3.0.9` gives
+bindgen (ffmpeg-sys-next's build), bytemuck_derive, clap_derive,
+futures-macro, serde_derive and thiserror-impl 2; `-i syn@2.0.119`
+gives enum-primitive-derive (pulseaudio's), enumn (accesskit's, under
+egui), thiserror-impl 1 (pulseaudio's, calloop 0.13's and
+smithay-client-toolkit 0.19's), tracing-attributes (tracing's) and
+zerocopy-derive (ahash's and half's). Neither can be unified from here:
+each side is a dependency's own pin. It costs compile time only, as the
+others above do.
 
 ## D23. Agent integration: an MCP server and the JSON CLI
 
@@ -1727,6 +1928,21 @@ FFmpeg release renames these demuxers (the names hold from 6.1 to 9.0) or
 opens a format context's input other than through `s->io_open(s,
 &s->pb, ...)`; or a camera records pictures larger than 2^27 pixels.
 
+*Updated 2026-11-11 (review-fix slice):* `spherecut render` and `spherecut
+mcp`, which open media too, now run under strace beside probe, doctor
+and frame (`crates/cli/tests/confinement.rs`'s
+`render_opens_no_network_socket` and `mcp.rs`'s
+`mcp_opens_no_network_socket`, which calls probe and look). One check,
+`assert_no_network`, fails on an `AF_INET` or `AF_INET6` socket or a
+`connect` to anything but a Unix socket, and first fails on two planted
+lines, its control. clippy also refuses
+`std::net::ToSocketAddrs::to_socket_addrs`, the DNS lookup the banned
+types don't cover, and `cargo xtask check` runs clippy and cargo-deny
+on scratch crates that use a banned type, the lookup and a banned HTTP
+crate, each of which must fail (D8). The GUI under strace is still
+open: no Tier 1 test runs the window, and gui_smoke runs on odin
+without a trace.
+
 ## D25. Zero-copy decode-to-render is proved in M1, decided before M3
 
 *2026-10-24, before M1's code. Pat approved it from the stack review
@@ -1811,6 +2027,26 @@ fast as copied (265 and 136 fps a lens unthrottled), level with Vulkan
 Video copied, and its 8K modes three times and half again as fast (76
 and 59), where Vulkan Video copied makes 63 and 78. The choice before
 M3 waits for path B's rows and huginn's.
+
+*Updated 2026-11-11 (review-fix slice):* three claims in path A's note
+above are withdrawn (F088, F115). wgpu has a hook for the ownership
+transfer after all: a raw barrier recorded through
+`CommandEncoder::as_hal_mut`, which path A has submitted ahead of each
+upload since M3.8 (`docs/design/m1-5b.md`, "The acquire"), from
+`VK_QUEUE_FAMILY_FOREIGN_EXT` on every device Spherecut makes where the
+driver lists that family's extension, now that `gpu.rs` opens its
+devices with it too (D31); without it the acquire still names
+`VK_QUEUE_FAMILY_EXTERNAL`.
+"ANV reads imported DMA-BUFs without it" was never run: no Intel GPU has
+run path A. And the Tier 2 comparison missed the cause twice:
+`zero_copy_matches_copy_path` failed on odin on the same frame (X5 frame
+26, view 0) at 0d491ae and at 0663e05 without naming a cause, and the
+likely one, RADV's DCC on the slots' 8-bit planes, was found by D67's
+pair check, not by it (D77). The comparison now also imports and
+renders every other frame before its download, the order the player
+takes, and a render that differs says where the frame first parts from
+its download: the import's planes, the slot's, or neither, so the
+render (F113, F114).
 
 *Updated 2026-10-30 by slice 5b's path B, as built* (`docs/design/m1-5b.md`).
 FFmpeg's Vulkan Video decodes on wgpu's own device:
@@ -2175,6 +2411,18 @@ Revisit if: a caller needs codes on doctor's issues or one document per
 file of a long run; or A1's schemas want another time or error shape, in
 which case that is a version 2 of these schemas, never a silent change.
 
+*Updated 2026-11-11 (review-fix slice):* the Codes bullet's Matroska
+message is gone (F070, F128). Since A1.6 probe reads a Matroska or WebM
+file's `Projection` and `StereoMode` elements from FFmpeg's side data
+(D46), so frame has treated a tagged Matroska equirect as an equirect
+since then, and only one without a `Projection` element reached that
+message, which blamed metadata left unread. Such a file now gets what an
+MP4 without `sv3d` gets: `not_equirect`, saying it is 2:1 with no
+spherical metadata and may not be an equirect (or what else it is), and
+`--equirect` renders it. `crates/cli/tests/frame.rs`'s
+`a_matroska_file_is_equirect_when_its_projection_says_so` renders a
+tagged remux with no flag and refuses an untagged one.
+
 ## D28. Crate layout, rust-version 1.95 and where unsafe may appear
 
 *2026-10-24, M1 slice 3b. The M1 plan's D26 (section 2); updates D1,
@@ -2287,6 +2535,14 @@ raw files read from their bytes), depends on core (and on sphere from
 M3.5), and media depends on it, never the reverse; it has
 `#![forbid(unsafe_code)]`. M3's lens maths and rig go in sphere and its
 blending, instrument and fit in render: there is no `stitch` crate.
+
+*Updated 2026-11-11 (review-fix slice):* the Why above says M2's export
+and `spherecut render` drive the engine; as built they don't. The
+export (D52) runs its own decode, render and encode threads on
+`export`'s own types, and `export` depends on core, media and render,
+not on playback; the app's export renders beside the viewer on a
+device of its own (D56). What the Why argued for still holds: the
+export, `spherecut render` and M5 run with no window.
 
 ## D29. MediaBackend and frame-exact seek
 
@@ -3843,6 +4099,21 @@ each level. It takes this amendment's means from the same function
 (`mean_codes`, shared with `fs_mip`), and a Tier 1 test holds it to the
 render passes byte for byte at every level, down to 1×1; the stored
 goldens didn't change. Deep planes keep the render pass.
+
+*Updated 2026-11-11 (review-fix slice):* "Slice 5b replaces
+`open_device` alone" no longer holds (F115). Every device but path B's
+is still made in `gpu::open_device`, and on Vulkan, the only backend the
+instance lists, that opens it through wgpu-hal's `open_with_callback`
+too (`vkshare::open_plain`), adding only `VK_EXT_queue_family_foreign`
+where the driver lists it, so that path A's acquire (D25) names the
+foreign queue family on the headless, window and export devices as on
+the shared one. It first refuses what wgpu's `request_device` refuses
+before opening a device, which `create_device_from_hal` leaves to its
+caller: an experimental feature the descriptor doesn't opt in to, and a
+feature or limit beyond the adapter's. Path B's devices are
+`vkshare::open_shared`'s, which add the video queues and extensions as
+well. The stored goldens came out identical, and every measurement the
+same, in three runs on lavapipe after the change.
 
 ## D32. Golden images
 
@@ -5893,6 +6164,16 @@ Two of the lock's review fixes reach every player, locked or not:
   `Player::old_idle_rule(true)`, doc-hidden, puts it back for the
   tests' controls.
 
+*Updated 2026-11-11 (review-fix slice):* "out of memory, making or
+writing a slot, kills that slot" now means the slot's own memory (F118).
+Path B's copier takes a buffer from its pool, or allocates one, for each
+copy out of FFmpeg's image; when the copier runs out of memory, the
+frame alone is downloaded and uploaded as bytes, with a warning, and
+neither the slot nor zero copy for later opens is given up
+(`upload::fallback_for`). The copier's other failures are told apart
+too (F117): a timeout or a lost device is the GPU's failure
+(`GpuFailed`), not a refused frame.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
@@ -6232,10 +6513,18 @@ What:
   clipboard, turns on image's `bmp` and `tiff` for its Windows and macOS
   clipboards, which Linux never builds, and image's PNG-only allow list
   (D22) holds for Linux. Advisories pass with no ignores.
-- **Fonts.** egui's default fonts (Ubuntu-Light and Hack in
-  `epaint_default_fonts`) are OFL-1.1 and Ubuntu-font-1.0. *Pat decided
+- **Fonts.** egui's default fonts in `epaint_default_fonts` are
+  Ubuntu-Light, under the Ubuntu Font Licence 1.0, Hack, under MIT and
+  the Bitstream Vera licence (its `fonts/Hack-Regular.txt`), and
+  `egui-icons.ttf`, a subset of emoji-icon-font under MIT. OFL-1.1
+  covers only NotoEmoji, built only with the crate's
+  `monochrome_emoji_fonts` feature, which nothing turns on; the crate
+  declares all three licences, hence the exception. (*Corrected
+  2026-11-11 in the review-fix slice:* this said Ubuntu-Light and Hack
+  were OFL-1.1 and Ubuntu-font-1.0; `deny.toml`'s comment says the
+  same as here.) *Pat decided
   on 2026-10-24:* keep them, with a license exception in `deny.toml` for
-  that crate only. Both licences allow the fonts to be embedded in a
+  that crate only. Their licences allow the fonts to be embedded in a
   GPL program. They have no emoji or arrows: a missing glyph is drawn
   as a box (and fails a kittest), so the UI's buttons and the keys' help
   are words ("Play", "Prev", "Dismiss").
@@ -6521,6 +6810,12 @@ that `--no-tier1` becomes the habit; or H2's `gui_smoke` fails a
 session that was on screen (winit reporting the wrong refresh rate, or
 a compositor that paces a visible window below it).
 
+*Updated 2026-11-12 (review-fix slice):* CI (D78) runs Tier 1 on
+GitHub's runner, on lavapipe, and that doesn't replace Tier 1 on odin's
+RADV: the Vulkan driver, the render node and the decoders the tests
+find there differ (D38). So odin's hw-test at a slice's end keeps Tier
+1 on (no `--no-tier1`), and a Tier 1 failure there still fails the run.
+
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
@@ -6606,6 +6901,15 @@ the driver doesn't support the format, not FFmpeg's reason.
 
 Revisit if: doctor or the app should decode on the same device (the app
 will, once it decodes on Vulkan), or FFmpeg changes how it picks one.
+
+*Updated 2026-11-11 (review-fix slice):* where FFmpeg can't open a
+Vulkan device at all, doctor's Fedora fix installed `mesa-vulkan-drivers`
+whatever was there (F133). With `mesa-vulkan-drivers-freeworld`
+installed, which conflicts with it, the fix is now `sudo dnf install
+vulkan-loader`, keeping that driver, and `VK_LOADER_DEBUG=error,warn
+vulkaninfo --summary`, which shows why no Vulkan device opens, as the
+fix for a Vulkan that runs only on the CPU already asks. Where no GPU is
+visible, the pass-through line still comes first.
 
 ## D39. `frame --decoder auto` tries VA-API on the rendering GPU, then software
 
@@ -6888,6 +7192,51 @@ without them (Matroska), is refused and plays unlocked as before.
   plants a document for each.
 - The app passes `LockRefused` and `LensShort` over until M3.10 gives
   them notices.
+
+*Updated 2026-11-11 (review-fix slice):* the smoke run can hold decode
+back, so that hw-test sees the UI while decode falls behind, which
+gui_smoke never did (its clips decode in time on odin). Three hidden
+flags, each only with `--smoke`: `--smoke-decoder DECODER` plays on
+the decoder named; `--smoke-decode-floor-ms MS` (1 to 500) makes each
+stream hand out at most one frame a floor, held on the decode worker's
+thread; and `--smoke-control-ui-waits` makes the UI wait, after each
+pass's tick, for the next decoded frame (at most 250 ms a pass). The
+document's result says what was asked (`asked`).
+
+`gui_decode_behind` (`crates/cli/tests/tier2_gui.rs`) makes three runs:
+run 0, decode held to 20 fps on a 30 fps clip on the default path;
+run 1, VA-API with its frames copied (`SPHERECUT_ZERO_COPY=0`) on the
+noisy 5.7K 10-bit perf clip, which is behind where VA-API is slow, as
+on odin; and run 2, the control, run 0 with the UI waiting. Each run's
+precondition is that decode was behind: at most 85 % of the frames
+expected shown after the first second, or the run fails (run 1's is
+inconclusive instead, since a fast VA-API keeps up). The gates are
+gui_smoke's own UI gates: 90 % of the UI frames expected presented, a
+p99 of at most 1.5 refresh periods, and no blocking call on the UI
+thread. The control must fail them as a slow UI in a window drawn,
+and must block; one that passes fails the test (D32). The report has a
+section for it ("UI while decode falls behind").
+
+The control breaks D34's rule that the UI thread never waits, on
+purpose and only under `--smoke`; each wait is a `may_block`, so it
+shows in `blocked_on_ui_thread`. Considered: a cargo feature on the
+app, turned on through the cli's dev-dependency, as D30's
+`fault-injection` is. It would rest on feature unification in
+hw-test's `--all-targets` release build to reach the binary the GUI
+tests run, so a build of the binary alone would lack the flags and the
+test would fail for that rather than for the UI; a hidden flag in
+every build is plainer, and costs nothing unused.
+
+*Noted 2026-11-12 (odin at 0b3ab9b, PR #35):* `gui_decode_behind`'s
+run 1 failed its UI gates in all three samples, with decode behind
+(19 to 21 % of the frames shown). It presented 74 to 78 % of the UI
+frames, at a UI p99 of 92.7 to 122.3 ms, while the UI's own work was
+1.4 to 2.1 ms at p95 (`hw-reports/odin-0b3ab9b4d0.md:1753` and
+`:1770`, `hw-reports/odin-0b3ab9b-behind-2.md:233` and `:250`,
+`hw-reports/odin-0b3ab9b-125.md:233` and `:250`). Run 0 passed, and the
+control failed as it must. A short slice traces the stall on odin and
+fixes it before huginn's run, beside M3.5. That is the working default
+until Pat answers the card of 2026-11-12 (PROGRESS's Known issues).
 
 ## D41. The submit gate
 
@@ -7563,12 +7912,38 @@ Revisit if: YouTube's pages change (refetch them), or M2's exports
 exist (name them in the fixes), or Pat's footage shows a camera file
 `archive` misreads.
 
+*Updated 2026-11-11 (review-fix slice):* the decoder now reads a
+Matroska or WebM file's projection as probe does (F070). Its stream facts
+(`VideoStreamInfo::mapping`) came from an MP4 track's boxes alone, so
+every Matroska file got the default mapping, and the still renderer, the
+viewer, the raw view's choice and the export rendered a tagged
+top-bottom, cropped or posed Matroska equirect whole, uncropped and
+unposed, with no warning, though probe and `check` named its layout.
+Without an MP4 track, the mapping now comes from FFmpeg's spherical and
+stereo side data, through the same `spherical::from_ffmpeg` as probe's.
+`synth/tests/generated_media.rs` checks the decoder's mapping of a mono
+and a top-bottom remux against the MP4's, and `crates/cli/tests/frame.rs`
+renders the top-bottom, left-right, cropped, posed and plain rows of its
+warnings test from Matroska remuxes too (st3d's custom layout has no
+Matroska `StereoMode`), with the same pictures and warnings.
+
 ## D47. The project file: JSON with a schema number
 
 *2026-10-31, M2.1. From `docs/design/m2-plan.md` section 5 and its
 amendments. Pat was asked to choose between JSON, RON and SQLite, with
 JSON recommended; until Pat answers, this is the working choice, and
 another answer changes only `core::project::file`.*
+
+*Updated 2026-11-11 (review-fix slice):* not only `core::project::file`
+any more. Another answer also changes the folder's lock and history
+records, which `crates/core/src/project/folder.rs` writes and reads as
+JSON (the holder line at :374, the history at :623 and :646, the
+lock's read at :699); the undo budget, which `history.rs:183` sizes by
+each step's JSON length; `docs/cli-json.md`'s `not_project` ("not
+JSON", :307) and `malformed_project` ("the JSON pointer", :309); and
+M3.9's schema 2 (D68), built on this format. RON could keep the JSON
+sidecars and change the project file alone; SQLite would rework
+`folder.rs`'s write-the-whole-file-then-rename and its byte hashes.
 
 What, as `crates/core/src/project/file.rs` does it:
 
@@ -8188,6 +8563,22 @@ What, as `crates/export` does it:
   stitched, equirectangular) and `SA3D` first-order ambiX on ambiX
   audio; a flat export must have no spherical metadata. The `Report`
   lists each check with what it found.
+
+  *Updated 2026-11-11 (review-fix slice):* the checks above are our own
+  parser's reading (D4), so a box FFmpeg reads otherwise passed them
+  (F123). Three more checks follow, of what FFmpeg's own demuxer reads
+  of the header (`probe::demuxer_view`, `check::check_demuxer_view`):
+  `ffmpeg_sphere` (the one video stream's spherical side data is the
+  whole sphere, equirect, mono, at no pose for 360, and absent for
+  flat), `ffmpeg_ambix` for ambiX audio (the audio stream's layout is
+  "ambisonic 1") and `ffmpeg_log` (no line of FFmpeg's log complains of
+  a spherical box, `probe::SPHERICAL_COMPLAINTS`; such a line is listed
+  however long the log is). A complaint fails the export for now: one
+  constant, `SPHERICAL_COMPLAINT_FAILS`, would make it a warning, which
+  is Pat's call. `sa3d` also wants what FFmpeg 6.1's reader takes
+  (F124): version 0, no head-locked stereo, and the identity channel map
+  (`0..channels`); the 360 export test's copies with `SA3D` of version 1
+  or a reordered map fail it.
 - **Parity floors** (item 31, section 11): an export decoded again is
   held to `StillRenderer` of the same views of the same source frame in
   the encoder's planes, every frame, by luma PSNR and SSIM. Each floor
@@ -8312,7 +8703,11 @@ What, as `crates/export` does it:
   4's 10-bit AV1 is 13 dB under SVT-AV1's and 2.7 under its own 8-bit
   one, still 7 dB over PLAN's 40 dB, so it stands (below). The 8K 360
   export through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of
-  8.0).
+  8.0): seen on stderr at 6993987, not in a report, since libtest drops
+  a passing test's output. Since the review-fix slice the test records
+  both (`bench::record`, "360 8k export <encoder>"), and odin's report
+  at 0b3ab9b has them: 10.16 fps and 35.30 Mb/s
+  (`hw-reports/odin-0b3ab9b4d0.md:252-253`).
 
 Not yet, and where it goes:
 
@@ -9264,6 +9659,81 @@ Revisit if: an agent needs the source and the render side by side in
 one image; a codec's clamping moves compare's numbers (then read Y);
 or 1 % of shape lets a wrong project through.
 
+## D60. M3's verification contract
+
+*Decided in the M3 plan for M3.0 (2026-11-01; `docs/design/m3-plan.md`
+section 4.1, and D60's row in its section 23); recorded by the
+review-fix slice (2026-11-11), since M3.0 built it but left this entry
+out.*
+
+What: every M3 slice is checked against these rules, which its
+reviewer reads before the code (m3-plan 4.1):
+
+1. **Every check has a control that must fail**, run on every run.
+   D32's rule for the goldens, "a control that stops failing fails the
+   test", is `spherecut_testkit::control::must_fail(name, outcome)`,
+   which every M3 suite uses: it takes a `bool` or a `Result` and
+   panics, naming the control, if the doctored input passed. A control
+   is a doctored input or rule, not the check's own assertion negated.
+   xtask's checks keep the same rule with its own `must_fail`.
+2. **Independent instruments.** synth's lens model (pixel to
+   direction) shares no code with sphere's (direction to pixel), which
+   the WGSL mirrors; synth composes the extrinsics with its own code
+   from its own `Planted` and meets sphere's types only at a test's
+   boundary. The CPU reference measures the shader, and the seam
+   estimator samples through the CPU reference, never the WGSL under
+   test. synth prints the calibration strings and camera parses them.
+3. **Floors before gates.** A Tier 2 number on Pat's footage is
+   reported with the instrument's noise floor on the same take. A row
+   is recorded until its question is settled, then gated from the floor
+   with at least a 3σ margin, and the switch is a reviewed change.
+4. **Failing first.** A bug fix comes with a test that the slice note
+   shows failing on main.
+5. **Cheap Tier 1.** Each new suite has a wall-time budget and prints
+   its time, the slice note records how much `cargo xtask check` grew,
+   and synthetic media live in temporary folders, at most 50 MB at
+   once.
+6. **The push rule**: a full `cargo xtask check`, compat builds
+   against FFmpeg 8.1.3 and 9.0.2, and every new or touched property
+   test at `PROPTEST_CASES=100000`; from M3.6, `cargo xtask fit-matrix`
+   for a slice that touches `render::seam`, `sphere::rig` or
+   `synth::lens`.
+7. **Provenance.** The review lists every outside source the diff used,
+   and nothing comes from the Insta360 Media SDK or Studio,
+   telemetry-parser's `rig.rs` or mask files, video-types' statements
+   of vendor internals, the third-party stitchers the plan names, or
+   DJI's stitcher constants.
+8. **The slice note** in PROGRESS lists each new control and each
+   measured number with its floor and machine, in place of a separate
+   ledger.
+
+Beside them: the round-trip ladder (m3-plan 4.2), one scene and one
+rig climbed rung by rung from synth's points to Pat's footage, each
+rung compared with the one below and with the analytic ideal; and
+Tier 2c (4.4), tests that need Pat's samples and the CPU alone, which
+agents run in the cloud while they build. They gate on
+`spherecut_testkit::tier2::require_samples_cpu`, which needs only
+`SPHERECUT_SAMPLES`; Tier 2h's gates call `require_hw_run` first,
+which skips unless hw-test set `SPHERECUT_TIER2` (D9, README's
+Development).
+
+Why: conventions are M3's main risk (which lens is which, the Euler
+order, a sign), and a wrong one shows only as "a bad seam". Only a
+measured number with a control and a floor tells a guess from a fact.
+Instruments that share code agree with each other while both are
+wrong. The slice note carries the same rows as a per-PR ledger would,
+with no second document to keep in step.
+
+Considered: a ledger file per pull request (the slice note does it);
+controls only for the goldens, as D32 had them (a check without one
+can pass by testing nothing); Tier 2 tests that need
+samples kept under hw-test alone (then the fit could only be tried on
+odin).
+
+Revisit if: a control proves flaky in a way that its check isn't, or
+the ladder's thresholds stop separating a right rig from a wrong one
+(M3.21's review judges them again).
+
 ## D61. Crates for M3: camera reads the vendors' bytes, media depends on it, no stitch crate
 
 *2026-11-01, M3 slice M3.2. The M3 plan, `docs/design/m3-plan.md`
@@ -9511,6 +9981,23 @@ and the baseline (0.46° at q = 0.5 and 3.1° at 3.34 on Pat's numbers) as
 well as a rule for θ_max; and leaving the ring black and saying so.
 `sphere::rig`'s docs cite D64 for the rig, which is M3.5's and takes
 this note over when it is written.
+
+*Updated 2026-11-11 (review-fix slice):* "Every reading of the camera's
+terms maps onto it" holds for V6, not for V3's tangential pair.
+`Canonical::v3` takes V3's fourth and fifth terms as p1 then p2, as
+synth's `brown` does, and nothing varies that order the way
+`V6Reading` varies V6's. It is an assumption, taken from Gyroflow's and
+video-types' V3 model (one author, [code] in `docs/formats/insta360.md`
+§4.3) and OpenCV's omnidir, and no source contradicts it. Swapped on
+Pat's V3 at 3840² under reading C, a pixel moves by up to 6.35 px (lens
+0) and 10.2 px (lens 1) at 90° off axis, 7.39 and 11.86 px at 100°:
+a first harmonic around the seam, mostly across it, which stage J's
+free rotation largely takes up; the part along it (2.12 px on lens 0,
+3.40 on lens 1, at 90°) is above the 0.3 px margin by which take 14
+ranks V3 against V6. So the order bears only on plan 3.2's U7 (V3 or
+V6), and a misread V3 scores worse, which pushes towards V6, U7's
+default. Revisit if: take 14 scores V3 within a few pixels of V6; then
+score both V3 orders.
 
 ## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 
@@ -10488,6 +10975,14 @@ come in a container without tables; a display rate near a whole
 multiple of a clip's counts its drops as skips; or M3.14's LRV proxy
 needs the group's members over one stream.
 
+*Noted 2026-11-12 (Pat's answer of 2026-11-11, the review-fix slice):*
+no cap for now. When every member trails the clock, `until` stays
+uncapped, as built: the pair slides behind as one lens alone does, each
+freeze bounded by its lag. odin's 8K25 path B row showed no slide. M3.10
+no longer waits on the question (plan amendment 7). A mode that shows
+the slide (M3.10's stitched `gui_smoke`, a slower part) goes back to Pat
+with its numbers; a cap is a playback change.
+
 ## D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
 
 *2026-11-11, M3 slice M3.8's fix round. Updates D25 and D31. What it
@@ -10715,6 +11210,86 @@ run. The project rows, sampling planes made without
 rectilinear, within the 0.19 to 0.22 and 0.73 to 0.81 odin measured
 from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
 
+## D78. An independent check on GitHub's runner
+
+*2026-11-12, the review-fix slice, from the review's F098 and F061. Adds
+a note to D37.*
+
+What:
+
+- **The workflow**, `.github/workflows/check.yml`: two jobs on GitHub's
+  `ubuntu-24.04` runner, each limited to 120 minutes, with read-only
+  access to the repository, the checkout's credentials not kept, and a
+  run cancelled when a newer one for the same branch starts.
+  - **check** installs README's Ubuntu 24.04 packages, Rust 1.97.0 with
+    rustfmt and clippy, the MSRV toolchain (1.95, D1), and cargo-deny
+    0.20.2 and cargo-audit 0.22.2 (cached by their versions), and runs
+    `cargo xtask check` as it is: rustfmt; clippy and its network
+    controls; rustdoc and its controls; the MSRV build, required here
+    since GitHub sets `CI`; the Tier 1 tests on lavapipe against
+    Ubuntu's FFmpeg 6.1; the doc tests; cargo-deny and its controls;
+    and cargo-audit (D8). Cargo's registry and target directory are
+    cached by the Rust version and `Cargo.lock`.
+  - **compat** installs those packages and the ones
+    `scripts/build-ffmpeg.sh` lists, builds FFmpeg 8.1.3 and 9.0.2 with
+    that script (cached by the script's hash), and runs `cargo xtask
+    compat` against both with `--clean`: clippy and a link of the tests
+    against each, the two releases of the M3 plan's push rule (4.1 rule
+    6, D2).
+- **What it can't run.** Tier 2 of either kind (VA-API, Vulkan Video,
+  real time, the GUI and `gui_smoke`, Pat's samples); the benchmarks;
+  Tier 1 on a real GPU, which odin's hw-test keeps (D37's note); the
+  property tests at 100,000 cases; `cargo xtask fit-matrix` (from
+  M3.6); and Tier 1 against 8.1.3 or 9.0.2, which compat builds and
+  links but doesn't run.
+- **Manual until Pat turns it on.** `on:` holds only
+  `workflow_dispatch`; a push trigger on `main`, leaving out
+  `hw-reports/` (no check reads it), is written out beside it,
+  commented. Pushing a file under `.github/workflows/` needs a token
+  with the `workflow` scope, so the workflow came in a commit of its
+  own, last on its branch, which can be split off if the push is
+  refused.
+- **The push rule stays the building agent's.** A run here is a second
+  run of the same commands on a machine the building agent doesn't
+  control. It doesn't replace the full check, compat and property-test
+  runs before a push (M3 plan 4.1 rule 6), and nothing waits on it.
+- **Only GitHub's own actions**, `actions/checkout` (v5) and
+  `actions/cache` (v4), named by major version. Pinning each to a
+  commit is a follow-up: no commit hash was at hand offline, and none
+  was written from memory.
+- **Its test**, `xtask/tests/workflow.rs`, reads the workflow as text
+  and holds it to the files it stands for: the check job installs every
+  package README's Ubuntu 24.04 section names, compat those and
+  build-ffmpeg.sh's, the check job runs `cargo xtask check` alone,
+  `RUST_MSRV` is the workspace's `rust-version`, and compat builds
+  against 8.1.3 and 9.0.2. Each rule has a control, a doctored copy
+  that must fail (D32): README asking for `libfoo-dev`, build-ffmpeg.sh
+  asking for `libbar-dev`, the check run with `--no-supply-chain`,
+  `RUST_MSRV` 1.94, and compat without 9.0.2.
+
+Why: every gate (the check, compat, cargo-deny and cargo-audit, the
+property tests) was run and reported only by the agent that built the
+change (F098), and `scripts/check.sh` said it was kept for a CI that
+didn't exist (F061).
+
+Considered: a self-hosted runner on odin, which could run Tier 2 but
+would hand Pat's machine to a workflow, and is Pat's to decide; the
+property tests at 100,000 cases on the runner, left to the push rule
+until a run shows what they cost there; third-party actions for the
+toolchain or the cache, left out because GitHub's two suffice and each
+other action is someone else's code run with the repository's token.
+
+What it costs is Pat's question. GitHub doesn't bill its standard
+runners' minutes on a public repository and counts them against the
+account's monthly allowance on a private one. A cold run, which builds
+FFmpeg twice and fills both caches, is the longest; no run has been
+timed yet.
+
+Revisit if: a warm run takes over 60 minutes; Tier 1 flakes on the
+runner (lavapipe on GitHub's CPUs, or a timing-bound test); or Pat
+wants branch protection, which would make a passing run required
+before a merge.
+
 ## Open
 
 - **telemetry-parser** (Gyroflow's camera metadata parser). DJI Osmo 360
@@ -10736,7 +11311,24 @@ from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
   parsing alone.
 - **The project file format** (D47): Pat was asked on 2026-10-30
   (JSON, RON or SQLite; JSON recommended). M2 is built on JSON
-  meanwhile; another answer changes only `core::project::file`.
+  meanwhile. Another answer changes `core::project::file`, the folder's
+  JSON lock and history records, the undo budget, two of `cli-json.md`'s
+  codes and M3.9's schema 2 (D47's update); RON could keep the
+  sidecars, and SQLite would rework the folder's write-then-rename.
+- **The interpolation default** (D50): Level, which interpolates yaw,
+  pitch and roll each as an angle, or Free, which interpolates on
+  SO(3) as `docs/PROMPT.md` asks. Pat was asked on 2026-10-31, with
+  Level recommended; Level is the working choice, and another answer
+  changes only the default `OrientMode`, not the file.
+- **M3's defaults that change what Pat sees** (`docs/design/m3-plan.md`
+  section 24, question 3): the lens at the centre of the default view
+  (the one away from the screen, once take 15 says which), stitch
+  distance 2 m, seam width 10°, proxies WhenPresent. They are the
+  working defaults until Pat answers.
+- **Which GoPro and DJI cameras Pat owns** (m3-plan question 4): the
+  MAX or MAX 2, and the Osmo 360, for M3.18 and M3.19's clips.
+- **D77's Mesa report**: drafted in D77; filing it upstream, or not, is
+  Pat's call.
 - **Attach socket** (A3): Pat to confirm that a local socket the GUI
   opens only when Pat turns attach on (mode 0600, Pat's user only) is
   IPC, not the network access Pat's rule forbids. Before A3 (D23).

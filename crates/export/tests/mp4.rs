@@ -20,12 +20,15 @@ use spherecut_agent::tools::Spherecut;
 use spherecut_core::brand::APP_NAME;
 use spherecut_core::project::{Aspect, AudioChoice, Codec, Orientation, Output, Project, Range};
 use spherecut_core::time::FrameRate;
-use spherecut_export::check::{Expected, ExpectedAudio, check};
+use spherecut_export::check::{Expected, ExpectedAudio, check, check_demuxer_view};
 use spherecut_export::{Export, ExportJob, Report, Stage};
+use spherecut_media::Source;
 use spherecut_media::mp4::{self, Mp4Tree};
+use spherecut_media::probe::{self, DemuxerView, StreamKind};
 use spherecut_media::spherical;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{Audio, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// 2 s of the grid at 30 fps, 1024×512, with `audio`.
 fn source(name: &str, audio: Audio) -> std::path::PathBuf {
@@ -105,12 +108,170 @@ fn a_360_export_has_the_moov_first_v1_and_v2_and_no_video_edit_list() {
     assert!(spherical::read_track(audio).spatial_audio.is_some());
 
     passes(&scratch.0, &out, "youtube_360");
+
+    // FFmpeg's own demuxer reads what was written (F123): the whole
+    // sphere, mono, at no pose, ambiX audio, and no complaint.
+    let want = Expected {
+        codec: Codec::Hevc,
+        size: (3840, 1920),
+        frames: 15,
+        duration: secs(1, 2),
+        rate: FrameRate::FPS_30,
+        sphere: true,
+        audio: Some(ExpectedAudio {
+            codec: "aac".into(),
+            rate: 48_000,
+            channels: 4,
+            ambix: true,
+        }),
+    };
+    let flag = || Arc::new(AtomicBool::new(false));
+    let read = |path: &Path| probe::demuxer_view(Source::path(path), None).unwrap();
+    let layout = |view: &DemuxerView| {
+        let a = view.streams.iter().find(|s| s.kind == StreamKind::Audio);
+        a.and_then(|a| a.channel_layout.clone())
+    };
+    let view = read(&out);
+    let video_view = view.streams.iter().find(|s| s.kind == StreamKind::Video);
+    let sphere = video_view
+        .and_then(|v| v.spherical.clone())
+        .expect("FFmpeg's sphere");
+    let whole = spherical::Projection::Equirect {
+        top: 0,
+        bottom: 0,
+        left: 0,
+        right: 0,
+    };
+    assert_eq!(sphere.projection, Some(whole));
+    assert_eq!(sphere.stereo, Some(spherical::StereoMode::Mono));
+    assert_eq!(
+        (sphere.pose_yaw, sphere.pose_pitch, sphere.pose_roll),
+        (0.0, 0.0, 0.0)
+    );
+    assert_eq!(layout(&view).as_deref(), Some("ambisonic 1"));
+    assert!(
+        view.spherical_complaints().is_empty(),
+        "{:?}",
+        view.ffmpeg_log
+    );
+    check_demuxer_view(&view, &want).unwrap();
+    // Control: the same reading, wanted flat, fails.
+    let flat = Expected {
+        sphere: false,
+        ..want.clone()
+    };
+    let e = must_fail(
+        "a 360 file's reading, wanted flat",
+        check_demuxer_view(&view, &flat),
+    );
+    assert!(e.to_string().starts_with("check: ffmpeg_sphere: "), "{e}");
+
+    // Copies FFmpeg reads otherwise, each with one box renamed `free` or
+    // one field changed, and the check of FFmpeg's reading that names it
+    // (`None`: FFmpeg reads it as written).
+    let bytes = std::fs::read(&out).unwrap();
+    let entry = |t: &mp4::Mp4Box| {
+        t.path(&[b"mdia", b"minf", b"stbl", b"stsd"])
+            .unwrap()
+            .children[0]
+            .clone()
+    };
+    let (ventry, aentry) = (entry(video), entry(audio));
+    let st3d = ventry.child(b"st3d").unwrap();
+    let sv3d = ventry.child(b"sv3d").unwrap();
+    let svhd = sv3d.child(b"svhd").unwrap();
+    let sa3d = aentry.child(b"SA3D").unwrap();
+    let v1 = video
+        .children
+        .iter()
+        .find(|b| b.uuid == Some(spherical::SPHERICAL_V1_UUID))
+        .unwrap();
+    let free = |b: &mp4::Mp4Box| (usize::try_from(b.offset).unwrap() + 4, &b"free"[..]);
+    let at = |b: &mp4::Mp4Box| usize::try_from(b.offset + b.header_len).unwrap();
+    let copy = |name: &str, edits: &[(usize, &[u8])]| {
+        let mut f = bytes.clone();
+        for &(o, new) in edits {
+            f[o..o + new.len()].copy_from_slice(new);
+        }
+        let path = scratch.0.join(format!("{name}.mp4"));
+        std::fs::write(&path, f).unwrap();
+        path
+    };
+    let version_1 = &[1u8][..];
+    for (name, edits, fails_at) in [
+        ("v1-free", vec![free(v1)], None),
+        ("sv3d-free", vec![free(sv3d)], None),
+        (
+            "sv3d-and-v1-free",
+            vec![free(sv3d), free(v1)],
+            Some("ffmpeg_sphere"),
+        ),
+        ("st3d-free", vec![free(st3d)], Some("ffmpeg_sphere")),
+        ("sa3d-free", vec![free(sa3d)], Some("ffmpeg_ambix")),
+        ("sa3d-v1", vec![(at(sa3d), version_1)], Some("ffmpeg_ambix")),
+        (
+            "sa3d-map",
+            vec![
+                (at(sa3d) + 12, &[0, 0, 0, 1][..]),
+                (at(sa3d) + 16, &[0, 0, 0, 0][..]),
+            ],
+            Some("ffmpeg_ambix"),
+        ),
+        ("svhd-v1", vec![(at(svhd), version_1)], Some("ffmpeg_log")),
+        (
+            "svhd-v1-v1-free",
+            vec![(at(svhd), version_1), free(v1)],
+            Some("ffmpeg_sphere"),
+        ),
+    ] {
+        let doctored = copy(name, &edits);
+        let view = read(&doctored);
+        let r = check_demuxer_view(&view, &want);
+        match fails_at {
+            None => {
+                r.unwrap_or_else(|e| panic!("{name}: {e}"));
+            }
+            Some(check) => {
+                let e = must_fail(name, r).to_string();
+                assert!(e.starts_with(&format!("check: {check}: ")), "{name}: {e}");
+            }
+        }
+        // Our own parser's checks name what FFmpeg ignores in `SA3D` too
+        // (F124).
+        if name.starts_with("sa3d-v") || name == "sa3d-map" {
+            let e = must_fail(name, check(&doctored, &want, flag())).to_string();
+            assert!(e.starts_with("check: sa3d: "), "{name}: {e}");
+        }
+        let log = view.ffmpeg_log.join("\n");
+        match name {
+            "sa3d-free" | "sa3d-map" => {
+                assert_ne!(layout(&view).as_deref(), Some("ambisonic 1"), "{name}");
+            }
+            "sa3d-v1" => assert!(log.contains("Unsupported SA3D box version 1"), "{log}"),
+            "svhd-v1" => assert!(log.contains("Unknown spherical version 1"), "{log}"),
+            _ => {}
+        }
+    }
+
     let names: Vec<_> = report.checks.iter().map(|c| c.name).collect();
     assert_eq!(
         names,
         [
-            "probe", "layout", "codec", "size", "frames", "duration", "rate", "st3d", "sv3d", "v1",
-            "audio", "sa3d"
+            "probe",
+            "layout",
+            "codec",
+            "size",
+            "frames",
+            "duration",
+            "rate",
+            "st3d",
+            "sv3d",
+            "v1",
+            "audio",
+            "sa3d",
+            "ffmpeg_sphere",
+            "ffmpeg_ambix",
+            "ffmpeg_log"
         ]
     );
 }
@@ -143,7 +304,9 @@ fn a_flat_export_has_the_moov_first_and_no_spherical_metadata() {
             "duration",
             "rate",
             "spherical",
-            "audio"
+            "audio",
+            "ffmpeg_sphere",
+            "ffmpeg_log"
         ]
     );
     let found = |name| {
@@ -225,4 +388,18 @@ fn a_flat_export_has_the_moov_first_and_no_spherical_metadata() {
         },
         "audio",
     );
+
+    // FFmpeg's demuxer reads no sphere in it (F123); the control: the
+    // same reading, wanted 360, fails.
+    let view = probe::demuxer_view(Source::path(&out), None).unwrap();
+    check_demuxer_view(&view, &want).unwrap();
+    let sphere = Expected {
+        sphere: true,
+        ..want.clone()
+    };
+    let e = must_fail(
+        "a flat file's reading, wanted 360",
+        check_demuxer_view(&view, &sphere),
+    );
+    assert!(e.to_string().starts_with("check: ffmpeg_sphere: "), "{e}");
 }

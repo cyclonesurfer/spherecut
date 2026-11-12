@@ -67,8 +67,9 @@ pub enum RigDebug {
     /// Mode 6: the weights the lenses blend by, block 0's in red and
     /// block 1's in blue.
     Weights,
-    /// Mode 7: the seam difference, |lin0 − lin1| × 8 in linear light
-    /// where both lenses cover; black elsewhere.
+    /// Mode 7: the seam difference, |g0·lin0 − g1·lin1| × 8 in linear
+    /// light, the frame's gains applied, where both lenses cover; black
+    /// elsewhere.
     SeamDiff,
 }
 

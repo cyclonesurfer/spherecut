@@ -56,6 +56,7 @@ use spherecut_sphere::{LonLat, equirect, pixel};
 use spherecut_synth::media::{self, CLIP_COLOR, Codec, Spec};
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{AXIS_MARKERS, Pattern, RgbImage, decode_frame_code, render_equirect};
+use spherecut_testkit::control::must_fail;
 use spherecut_testkit::{Fnv64, fnv64};
 
 use document::document;
@@ -411,12 +412,11 @@ fn the_frame_shown_is_the_one_asked_for() {
         (&["--time", "17f"], 17, "17/30", true),
         (&["--frame", "29"], 29, "29/30", true),
     ];
-    // The remux has no spherical metadata.
-    for (clip, tag) in [(&mp4, None), (&mkv, Some("--equirect"))] {
+    // The remux keeps the clip's projection, so neither needs
+    // --equirect.
+    for clip in [&mp4, &mkv] {
         for (args, want, requested, by_frame) in rows {
-            let mut args = args.to_vec();
-            args.extend(tag);
-            let (got, r) = shown(clip, &out, &args);
+            let (got, r) = shown(clip, &out, args);
             let name = clip.file_name().unwrap().to_string_lossy();
             assert_eq!(got, *want, "{name} {args:?}: {r}");
             assert_eq!(r["frame"]["time"]["frame"], *want, "{name} {args:?}: {r}");
@@ -432,6 +432,67 @@ fn the_frame_shown_is_the_one_asked_for() {
             assert_eq!(r["exactness"], "exact");
         }
     }
+}
+
+/// What frame said of an untagged Matroska file at 073715b: that
+/// Spherecut doesn't read Matroska's spherical metadata, which it does
+/// (F070).
+const OLD_MATROSKA: &str = "/tmp/errors/gop8.mkv is a 512x256 Matroska/WebM file, and Spherecut \
+                            doesn't read Matroska's spherical metadata yet (Spherical Video \
+                            V2's Projection element), so it can't tell whether it is an \
+                            equirect; --equirect renders it as equirect anyway";
+
+/// Whether `message` says that the 512x256 file `name` may not be an
+/// equirect for want of spherical metadata.
+fn says_untagged(message: &str, name: &str) -> bool {
+    message.contains(&format!(
+        "/{name} is 512x256, 2:1, but has no spherical metadata, so it may not be an equirect"
+    ))
+}
+
+/// Whether `file` renders with no flags: frame exits 0 with no warnings.
+fn renders(file: &Path, out: &Path) -> Result<(), String> {
+    let ran = frame(file, out, &["--overwrite"]);
+    let warnings = ran.doc["warnings"].as_array().map_or(0, Vec::len);
+    if ran.status == Some(0) && warnings == 0 {
+        Ok(())
+    } else {
+        Err(format!("{:?}: {} / {}", ran.status, ran.doc, ran.stderr))
+    }
+}
+
+/// A Matroska file is an equirect when its Projection element, which
+/// FFmpeg's demuxer exports, says so, and is refused as an untagged MP4 is
+/// when it has none (F070).
+#[test]
+fn a_matroska_file_is_equirect_when_its_projection_says_so() {
+    let dir = TempDir::new("mkv-equirect");
+    let out = dir.join("out.png");
+    let tagged = grid_clip(&dir, "tagged", (512, 256), 3, Codec::H264);
+    let tagged_mkv = media::remux_to_mkv(&tagged, &dir).unwrap();
+    renders(&tagged_mkv, &out).unwrap();
+
+    let untagged = media::write(
+        &Spec {
+            name: "untagged".into(),
+            width: 512,
+            height: 256,
+            frames: 3,
+            ..Spec::default()
+        },
+        &dir,
+    )
+    .unwrap();
+    let untagged_mkv = media::remux_to_mkv(&untagged, &dir).unwrap();
+    let ran = frame(&untagged_mkv, &out, &["--overwrite"]);
+    assert_eq!(ran.status, Some(1), "{} / {}", ran.doc, ran.stderr);
+    assert_eq!(ran.code(), "not_equirect", "{}", ran.doc);
+    let m = ran.doc["error"]["message"].as_str().unwrap();
+    assert!(says_untagged(m, "untagged.mkv"), "{m}");
+    must_fail(
+        "an untagged Matroska file renders",
+        renders(&untagged_mkv, &out),
+    );
 }
 
 /// On a variable-rate clip a frame number counts frames (section 5), and
@@ -784,12 +845,13 @@ fn every_failure_leaves_nothing_behind() {
     );
     let m = message(&cut, &["--equirect", "--time", "0.9"]);
     assert!(m.contains("is damaged before 0.9 s"), "{m}");
-    // probe reads spherical metadata from MP4 boxes only, which the
-    // message says rather than that the file has none.
+    // A Matroska file with no Projection element is refused as an MP4
+    // with no sv3d is, not for metadata left unread.
     let m = message(&mkv, &[]);
-    assert!(
-        m.contains(" is a 512x256 Matroska/WebM file, and Spherecut doesn't read Matroska's spherical metadata yet"),
-        "{m}"
+    assert!(says_untagged(&m, "gop8.mkv"), "{m}");
+    must_fail(
+        "the old Matroska message says the file is untagged",
+        says_untagged(OLD_MATROSKA, "gop8.mkv"),
     );
     let m = message(&mkv_cut, &["--equirect", "--frame", "29"]);
     assert!(m.contains("is damaged before frame 29"), "{m}");
@@ -1319,38 +1381,11 @@ fn what_frame_renders_differently_it_warns_about() {
         ("plain", grid.clone(), mono([0.0; 3], full), None, String::new()),
     ];
     let out = dir.join("out.png");
-    for (name, img, boxes, code, message) in &cases {
-        let clip = tagged_clip(&dir, name, img, boxes.clone());
-        // The F marker ahead, and what is behind.
+    // A 10° view of `clip` turned `yaw` degrees: the run, and its centre
+    // pixel's colour.
+    let look = |clip: &Path, yaw: &str| {
         let ran = frame(
-            &clip,
-            &out,
-            &["--fov", "10", "--size", "33x33", "--overwrite"],
-        );
-        ran.ok();
-        let w = ran.doc["warnings"].as_array().unwrap();
-        match code {
-            Some(code) => {
-                assert_eq!(w.len(), 1, "{name}: {}", ran.doc);
-                assert!(has_two_keys(&w[0]), "{name}: {}", ran.doc);
-                assert_eq!(w[0]["code"], *code, "{name}");
-                assert_eq!(w[0]["message"], message.as_str(), "{name}");
-                // People see it on stderr.
-                assert!(
-                    ran.stderr.contains(message.as_str()),
-                    "{name}: {}",
-                    ran.stderr
-                );
-            }
-            None => assert!(w.is_empty(), "{name}: {}", ran.doc),
-        }
-        let centre = rgb(&load(&out), 16, 16);
-        assert!(
-            far(centre, marker('F')) <= 0.1,
-            "{name}: the centre is {centre:?}"
-        );
-        let ran = frame(
-            &clip,
+            clip,
             &out,
             &[
                 "--fov",
@@ -1358,19 +1393,87 @@ fn what_frame_renders_differently_it_warns_about() {
                 "--size",
                 "33x33",
                 "--yaw",
-                "180",
+                yaw,
                 "--overwrite",
             ],
         );
         ran.ok();
-        let behind = rgb(&load(&out), 16, 16);
-        let want = if *name == "cropped" {
+        let centre = rgb(&load(&out), 16, 16);
+        (ran, centre)
+    };
+    // Whether the F marker is ahead.
+    let ahead_is_f = |clip: &Path| -> Result<(), [f64; 3]> {
+        let (_, centre) = look(clip, "0");
+        if far(centre, marker('F')) <= 0.1 {
+            Ok(())
+        } else {
+            Err(centre)
+        }
+    };
+    // The warning, the F marker ahead, and what is behind.
+    let check = |clip: &Path, name: &str, code: Option<&str>, message: &str| {
+        let file = clip.file_name().unwrap().to_string_lossy();
+        let (ran, _) = look(clip, "0");
+        let w = ran.doc["warnings"].as_array().unwrap();
+        match code {
+            Some(code) => {
+                assert_eq!(w.len(), 1, "{file}: {}", ran.doc);
+                assert!(has_two_keys(&w[0]), "{file}: {}", ran.doc);
+                assert_eq!(w[0]["code"], code, "{file}");
+                assert_eq!(w[0]["message"], message, "{file}");
+                // People see it on stderr.
+                assert!(ran.stderr.contains(message), "{file}: {}", ran.stderr);
+            }
+            None => assert!(w.is_empty(), "{file}: {}", ran.doc),
+        }
+        if let Err(centre) = ahead_is_f(clip) {
+            panic!("{file}: the centre is {centre:?}");
+        }
+        let (_, behind) = look(clip, "180");
+        let want = if name == "cropped" {
             [0.0; 3]
         } else {
             marker('B')
         };
-        assert!(far(behind, want) <= 0.1, "{name}: behind is {behind:?}");
+        assert!(far(behind, want) <= 0.1, "{file}: behind is {behind:?}");
+    };
+    // What probe reads of a file's projection: the projection, the stereo
+    // layout (none written is mono) and the pose.
+    let seen = |clip: &Path| {
+        let r = spherecut_media::probe::probe(clip).unwrap();
+        let v2 = r.streams[0].spherical.v2.clone().unwrap();
+        (
+            v2.projection,
+            v2.stereo.unwrap_or(StereoMode::Mono),
+            [v2.pose_yaw, v2.pose_pitch, v2.pose_roll],
+        )
+    };
+    for (name, img, boxes, code, message) in &cases {
+        let clip = tagged_clip(&dir, name, img, boxes.clone());
+        check(&clip, name, *code, message);
+        // The same in Matroska, whose Projection and StereoMode elements
+        // FFmpeg's demuxer exports, and the decoder reads them as probe
+        // does (F070). st3d's custom layout has no StereoMode to go to.
+        if *name == "custom" {
+            continue;
+        }
+        let mkv = media::remux_to_mkv(&clip, &dir).unwrap();
+        assert_eq!(seen(&mkv), seen(&clip), "{name}");
+        check(&mkv, name, *code, message);
     }
+    // A top-bottom picture tagged mono: the whole picture is the sphere,
+    // and the seam between the eyes is ahead.
+    let as_mono = tagged_clip(
+        &dir,
+        "top-bottom-as-mono",
+        &stack(&grid, &other, false),
+        mono([0.0; 3], full),
+    );
+    let as_mono = media::remux_to_mkv(&as_mono, &dir).unwrap();
+    must_fail(
+        "a top-bottom picture tagged mono shows F ahead",
+        ahead_is_f(&as_mono),
+    );
 
     // A crop on one side and the top only, lon −90° to 180° and lat 67.5°
     // down: each side lands where its bound says, left from right and top

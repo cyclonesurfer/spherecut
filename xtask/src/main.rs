@@ -10,6 +10,7 @@ use clap::{Parser, Subcommand};
 
 mod check;
 mod compat;
+mod controls;
 mod gen_media;
 mod gui_report;
 mod hw_test;
@@ -26,14 +27,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// fmt, clippy (-D warnings, also against the FFmpeg builds listed in
-    /// SPHERECUT_FFMPEG_COMPAT, with the tests linked against each), Tier 1
-    /// tests, cargo-deny and cargo-audit.
+    /// SPHERECUT_FFMPEG_COMPAT, with the tests linked against each),
+    /// rustdoc (-D warnings), the MSRV build (`rust-version`'s toolchain
+    /// through rustup; skipped without it, except under CI), Tier 1 tests,
+    /// doc tests, cargo-deny and cargo-audit. Clippy's network lints,
+    /// rustdoc, the MSRV build and cargo-deny's network bans each also run
+    /// on scratch crates made to fail them.
     Check(check::Args),
     /// Clippy and a link of the tests against other FFmpeg builds, each in
     /// its own target directory; --test also runs the Tier 1 tests against
     /// one.
     ///
-    /// Each build's target directory is spherecut-compat-<label>, <label>
+    /// Each build's target directory is `spherecut-compat-<label>`, `<label>`
     /// being the prefix's last component, in the directory
     /// SPHERECUT_FFMPEG_COMPAT_TARGET_DIR names, or else in compat/ in
     /// cargo's target directory. compat stamps each one it makes, and
@@ -49,7 +54,7 @@ enum Cmd {
     Compat(compat::Args),
     /// Write the synthetic test-media set to test-media/.
     GenMedia(gen_media::Args),
-    /// Tier 2 run on real hardware; writes hw-reports/<host>-<commit>.md.
+    /// Tier 2 run on real hardware; writes `hw-reports/<host>-<commit>.md`.
     HwTest(hw_test::Args),
 }
 

@@ -1,0 +1,87 @@
+{
+  "schema": "spherecut.timeline-proto/1",
+  "ok": true,
+  "result": {
+    "version": "0.1.0",
+    "seconds": 20.0,
+    "played_s": 20.003135352,
+    "adapter": {
+      "name": "AMD Radeon RX 7600 (RADV NAVI33)",
+      "vendor": 4098,
+      "device": 29824,
+      "device_type": "DiscreteGpu",
+      "driver": "radv",
+      "driver_info": "Mesa 26.2.5",
+      "cpu": false
+    },
+    "surface_format": "Bgra8Unorm",
+    "scale": 1.25,
+    "native_scale": 1.0,
+    "zoom": 1.25,
+    "window": [
+      1280,
+      800
+    ],
+    "refresh_hz": 60.0,
+    "tracks": 6,
+    "clips": 500,
+    "textures": 500,
+    "ui": {
+      "from_s": 1.00533545,
+      "frames": 1138,
+      "passes": 1138,
+      "expected": 1139.86799412,
+      "presented": 0.9983612189046135,
+      "late": 2,
+      "interval_ms": {
+        "samples": 1138,
+        "missed": 0,
+        "p50": 16.665573,
+        "p95": 16.758165,
+        "p99": 17.0795,
+        "max": 27.862808
+      },
+      "work_ms": {
+        "samples": 1138,
+        "missed": 0,
+        "p50": 0.5350059,
+        "p95": 1.1761299,
+        "p99": 1.498587,
+        "max": 1.858425
+      },
+      "build_ms": {
+        "samples": 1138,
+        "missed": 0,
+        "p50": 0.101992,
+        "p95": 0.21282999,
+        "p99": 0.26031,
+        "max": 0.662154
+      }
+    },
+    "drawn": {
+      "clips": 500,
+      "thumbnails": 227,
+      "names": 64,
+      "snap_lines": 4
+    },
+    "actions": {
+      "moves": 2,
+      "trims": 2,
+      "scrubs": 0,
+      "zoom_passes": 479,
+      "pan_passes": 181,
+      "snaps": 28
+    },
+    "span_s": [
+      2.0305960041744266,
+      963.2612656345229
+    ],
+    "blocked_on_ui_thread": 0,
+    "screenshot": "/home/pat/spherecut/target/hw-gui/gui-proto-1.png",
+    "screenshot_size": [
+      960,
+      600
+    ]
+  },
+  "warnings": []
+}

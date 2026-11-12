@@ -1,7 +1,7 @@
 //! `analyze` (a1-plan section 6.3, D46): a stretch of a file measured
 //! over time, in buckets of equal length: its video packets' timing
-//! ([`timing`], without decoding), the change from frame to frame
-//! ([`motion`]), or its audio's levels ([`audio`]).
+//! (`timing`, without decoding), the change from frame to frame
+//! (`motion`), or its audio's levels (`audio`).
 //!
 //! Every kind stops before the call's deadline at a bucket's end, and
 //! answers with the buckets it finished, `complete: false` and

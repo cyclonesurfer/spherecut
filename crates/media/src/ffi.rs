@@ -869,7 +869,7 @@ pub fn ffmpeg_version() -> String {
 pub(crate) const DEMUXERS: [&str; 2] = [MOV_DEMUXER, "matroska,webm"];
 
 /// FFmpeg's name for its MOV/MP4 demuxer.
-const MOV_DEMUXER: &str = "mov,mp4,m4a,3gp,3g2,mj2";
+pub(crate) const MOV_DEMUXER: &str = "mov,mp4,m4a,3gp,3g2,mj2";
 
 /// The containers of `DEMUXERS`, as errors name them.
 pub const CONTAINERS: &str = "MP4/MOV and Matroska/WebM";
@@ -917,17 +917,31 @@ pub fn open_input(
     path: &Path,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<ff::format::context::Input, OpenError> {
-    open_input_with(path, cancel, &DEMUXERS, MAX_PIXELS)
+    open_input_with(path, cancel, &DEMUXERS, MAX_PIXELS, true)
+}
+
+/// [`open_input`] without `avformat_find_stream_info`: the streams as the
+/// demuxer read them from the file's header, and nothing a decoder said
+/// of them, under the same confinement. An `SA3D` box's audio is
+/// "ambisonic 1" here, and `avformat_find_stream_info` replaces that with
+/// the decoder's "4.0" (seen on FFmpeg 6.1.1, 7.1.3, 8.1.3 and 9.0.2), so
+/// only this reading shows what the mov demuxer made of the box.
+pub fn open_header(
+    path: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<ff::format::context::Input, OpenError> {
+    open_input_with(path, cancel, &DEMUXERS, MAX_PIXELS, false)
 }
 
 /// [`open_input`] with other demuxers and another picture size limit, so
 /// that tests can show what the confinement does with a demuxer that
-/// opens other files.
+/// opens other files, and [`open_header`] without `stream_info`.
 fn open_input_with(
     path: &Path,
     cancel: Option<Arc<AtomicBool>>,
     demuxers: &[&str],
     max_pixels: i64,
+    stream_info: bool,
 ) -> Result<ff::format::context::Input, OpenError> {
     spherecut_core::may_block("opening a media file");
     let meta = std::fs::metadata(path).map_err(OpenError::Io)?;
@@ -997,46 +1011,52 @@ fn open_input_with(
             .finish()
             .unwrap_or(OpenError::Ffmpeg(ff::Error::from(ret))));
     }
-    // One dictionary per stream, for the decoders FFmpeg opens to find
-    // the streams' parameters.
-    // SAFETY: an open input context.
-    let streams = unsafe { (*ps).nb_streams } as usize;
-    // The frame size the demuxer read for each stream from the container.
-    // SAFETY: an open input context's `streams` holds `nb_streams` live
-    // streams, each with live codec parameters; width and height are
-    // plain ints.
-    let declared: Vec<(c_int, c_int)> = unsafe {
-        (0..streams)
-            .map(|i| {
-                let par = (**(*ps).streams.add(i)).codecpar;
-                ((*par).width, (*par).height)
+    // The frame size the demuxer read for each stream from the container,
+    // put back below where the decoders refused it; none without them.
+    let mut declared: Vec<(c_int, c_int)> = Vec::new();
+    let mut ret = 0;
+    if stream_info {
+        // One dictionary per stream, for the decoders FFmpeg opens to find
+        // the streams' parameters.
+        // SAFETY: an open input context.
+        let streams = unsafe { (*ps).nb_streams } as usize;
+        // SAFETY: an open input context's `streams` holds `nb_streams` live
+        // streams, each with live codec parameters; width and height are
+        // plain ints.
+        declared = unsafe {
+            (0..streams)
+                .map(|i| {
+                    let par = (**(*ps).streams.add(i)).codecpar;
+                    ((*par).width, (*par).height)
+                })
+                .collect()
+        };
+        let mut decoder_opts: Vec<*mut sys::AVDictionary> = (0..streams)
+            .map(|_| {
+                let mut d = ff::Dictionary::new();
+                d.set("max_pixels", &max_pixels.to_string());
+                // SAFETY: owned by `decoder_opts` until it is taken back
+                // below.
+                unsafe { d.disown() }
             })
-            .collect()
-    };
-    let mut decoder_opts: Vec<*mut sys::AVDictionary> = (0..streams)
-        .map(|_| {
-            let mut d = ff::Dictionary::new();
-            d.set("max_pixels", &max_pixels.to_string());
-            // SAFETY: owned by `decoder_opts` until it is taken back below.
-            unsafe { d.disown() }
-        })
-        .collect();
-    // SAFETY: an open input context and, when it has streams, an array of
-    // one dictionary per stream, as FFmpeg asks.
-    let ret = unsafe {
-        sys::avformat_find_stream_info(
-            ps,
-            if streams == 0 {
-                std::ptr::null_mut()
-            } else {
-                decoder_opts.as_mut_ptr()
-            },
-        )
-    };
-    for d in decoder_opts {
-        // SAFETY: each is one of the dictionaries made above, which FFmpeg
-        // may have changed but not freed.
-        drop(unsafe { ff::Dictionary::own(d) });
+            .collect();
+        // SAFETY: an open input context and, when it has streams, an array
+        // of one dictionary per stream, as FFmpeg asks.
+        ret = unsafe {
+            sys::avformat_find_stream_info(
+                ps,
+                if streams == 0 {
+                    std::ptr::null_mut()
+                } else {
+                    decoder_opts.as_mut_ptr()
+                },
+            )
+        };
+        for d in decoder_opts {
+            // SAFETY: each is one of the dictionaries made above, which
+            // FFmpeg may have changed but not freed.
+            drop(unsafe { ff::Dictionary::own(d) });
+        }
     }
     let refused = watch.finish();
     if ret < 0 || refused.is_some() {
@@ -3294,9 +3314,12 @@ pub(crate) struct DrmLayer {
     pub pitch: u64,
 }
 
-/// Map the VA-API frame `src` to DRM PRIME for reading: FFmpeg syncs the
-/// surface and exports it with a layer per plane (FFmpeg's
-/// `vaapi_map_to_drm_esh`). The mapped frame holds `src`'s surface and
+/// Map the VA-API frame `src` to DRM PRIME for reading: FFmpeg's
+/// `vaapi_map_to_drm_esh` syncs the surface (`vaSyncSurface`, under the
+/// `AV_HWFRAME_MAP_READ` flag passed here, as read at n6.1, n7.1, n8.1
+/// and n9.0.2) and exports it with a layer per plane. That sync is the
+/// only thing that orders the decode before the GPU reads the import
+/// (`docs/design/m1-5b.md`). The mapped frame holds `src`'s surface and
 /// the exported fds until it is freed.
 pub(crate) fn map_drm_prime(src: &ff::frame::Video) -> Result<ff::frame::Video, ff::Error> {
     let mut dst = ff::frame::Video::empty();
@@ -4379,6 +4402,51 @@ mod tests {
     }
 
     #[test]
+    fn open_header_keeps_the_confinement() {
+        use spherecut_testkit::control::must_fail;
+
+        crate::init();
+        let dir = TempDir::new("header");
+        let playlist = dir.write(
+            "list.m3u8",
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.0,\nhttp://127.0.0.1:1/a.ts\n#EXT-X-ENDLIST\n",
+        );
+        // The playlist `open_input` refuses, refused before its demuxer
+        // runs.
+        let refused = |r: Result<ff::format::context::Input, OpenError>| match r {
+            Err(OpenError::Container { format, .. }) if format == "hls" => Ok(()),
+            r => Err(format!("{:?}", r.map(|_| ()))),
+        };
+        refused(open_header(&playlist, None)).unwrap();
+        assert!(matches!(
+            open_header(&dir.0, None),
+            Err(OpenError::NotAFile)
+        ));
+        // Let in, its segment's open is refused while the header is read,
+        // which `avformat_find_stream_info` doesn't reach.
+        match open_input_with(&playlist, None, &["hls"], MAX_PIXELS, false) {
+            Err(OpenError::Nested { url }) => {
+                assert_eq!(url, "http://127.0.0.1:1/a.ts");
+            }
+            r => panic!("expected a refused open, got {:?}", r.map(|_| ())),
+        }
+        // The refusal is the demuxer list's, which both opens share.
+        must_fail(
+            "the playlist with its demuxer let in, refused as a container",
+            refused(open_input_with(
+                &playlist,
+                None,
+                &["hls"],
+                MAX_PIXELS,
+                false,
+            )),
+        );
+        // And the clip opens, with its streams.
+        let ictx = open_header(&clip(&dir, "clip.mp4"), None).unwrap();
+        assert_eq!(ictx.streams().count(), 1);
+    }
+
+    #[test]
     fn nested_opens_are_refused_and_named() {
         // With the HLS demuxer let in, which Spherecut never does, its
         // segments are what io_open refuses: one outside the playlist's
@@ -4403,7 +4471,7 @@ mod tests {
                 )
                 .as_bytes(),
             );
-            match open_input_with(&playlist, None, &["hls"], MAX_PIXELS) {
+            match open_input_with(&playlist, None, &["hls"], MAX_PIXELS, true) {
                 Err(OpenError::Nested { url }) => assert!(url.ends_with(want), "{url}"),
                 r => panic!("{name}: expected a refused open, got {:?}", r.map(|_| ())),
             }
@@ -4416,8 +4484,9 @@ mod tests {
         crate::init();
         let dir = TempDir::new("stream-info");
         let clip = clip(&dir, "clip.mp4");
-        let (r, log) =
-            crate::hwprobe::capture_ffmpeg_log(|| open_input_with(&clip, None, &DEMUXERS, 1000));
+        let (r, log) = crate::hwprobe::capture_ffmpeg_log(|| {
+            open_input_with(&clip, None, &DEMUXERS, 1000, true)
+        });
         r.unwrap();
         assert!(
             log.iter()
@@ -4441,7 +4510,7 @@ mod tests {
         let mjpeg = clip_with(&dir, "mjpeg.mp4", "mjpeg", &[("strict", "-1")]);
         for clip in [clip(&dir, "h264.mp4"), mjpeg] {
             let (ictx, log) = crate::hwprobe::capture_ffmpeg_log(|| {
-                open_input_with(&clip, None, &DEMUXERS, 1000).unwrap()
+                open_input_with(&clip, None, &DEMUXERS, 1000, true).unwrap()
             });
             assert!(
                 log.iter()

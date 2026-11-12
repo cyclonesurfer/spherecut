@@ -4,7 +4,7 @@
 //! (M2's limits, [`limits`]), and look-at targets. It changes only through
 //! [`Project::apply`], which takes a list of [`Edit`]s and applies all of
 //! them or none, so the GUI, the CLI and A2's agents change it the same
-//! way; [`History`] keeps the undo steps, and [`file`] saves and loads it.
+//! way; [`History`] keeps the undo steps, and [`file`](mod@file) saves and loads it.
 //!
 //! Every clip, key, marker, target, media entry, sequence and track has an
 //! id from the project's one counter, never reused, so an id names one

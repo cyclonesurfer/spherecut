@@ -689,7 +689,7 @@ fn result(output: &Path, r: &Report) -> RenderResult {
 }
 
 /// The summary for people: "wrote out.mp4: 600 frames (20 s) at
-/// 3840×1920, HEVC 10-bit in hevc_vaapi, AAC audio, 45.1 MB, 14 checks
+/// 3840×1920, HEVC 10-bit in hevc_vaapi, AAC audio, 45.1 MB, 13 checks
 /// passed", and what fell back.
 fn summary(r: &RenderResult) -> String {
     let codec = match r.codec {

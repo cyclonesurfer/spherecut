@@ -94,6 +94,14 @@ impl Binding {
 /// ([`Calibration::src`], 5376 on the X5), dst is field 27's window
 /// ([`Calibration::dst`], 5312), and c_local is the block's centre in its
 /// own square ([`LensCalib::cx`]). An LRV half has s = 832.
+///
+/// Field 27 also stores an offset (0, 0 on the X5), which no map here
+/// reads. Read literally, as a dst window at that offset (focal f · s/dst,
+/// centre (c_local − offset) · s/dst), it would move every centre about
+/// 23 px at 3840² from A, B and C, which agree within 0.25 px. That
+/// reading, D in `docs/formats/insta360.md` §4.4, is unsettled and left
+/// out: the evidence there points away from it, and a convention outside
+/// this space lands as [`Extrinsics::Fitted`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CanvasMap {
     /// Focal f · s/dst, centre c_local · s/src.
@@ -492,7 +500,12 @@ pub struct LensCalib {
     /// Pat's V6). It and `cy` are read as corner-origin, pixel (i, j)
     /// covering [i, i + 1) × [j, j + 1), as a slot's pixels are, so that a
     /// canvas map scales the centre as it scales the side. That is an
-    /// assumption about the camera, which M3.6's fit can test.
+    /// assumption about the camera, plan 3.2's unknown U15, and M3.6's fit
+    /// cannot test it: counted from pixel centres, as OpenCV counts, both
+    /// blocks' centres would move 0.5 canvas px along each axis, and an
+    /// equal shift of both centres is a relative tilt to the fit (plan 8.4,
+    /// 0.0375° per canvas px), about 0.019° about each axis, under stage
+    /// J's 0.05°. U15 accepts it below the fit's floor.
     pub cx: f64,
     pub cy: f64,
     /// The stored yaw, pitch and roll, in degrees.

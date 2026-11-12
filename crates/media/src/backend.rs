@@ -482,14 +482,16 @@ pub enum Timing {
 /// How a frame maps onto the sphere, from the stream's spherical metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceMapping {
-    /// From Spherical Video V2 (`sv3d/proj`), or equirect for V1's
+    /// From Spherical Video V2 (`sv3d/proj`, or the `Projection` element
+    /// FFmpeg exports from Matroska and WebM), or equirect for V1's
     /// `equirectangular`; `None` without spherical metadata.
     pub projection: Option<Projection>,
     /// The part of the sphere's equirect uv square the frame covers, as
     /// left, top, right and bottom: (0, 0, 1, 1) unless `equi`'s crop
     /// bounds say otherwise.
     pub cover: [f64; 4],
-    /// From `st3d`, or V1's `StereoMode`; mono when neither says.
+    /// From `st3d` (or Matroska's `StereoMode`), or V1's `StereoMode`;
+    /// mono when neither says.
     pub stereo: StereoMode,
     /// An `sv3d` pose that isn't zero, which M1 shows but doesn't apply
     /// (D33).
@@ -917,7 +919,9 @@ impl VideoFrame {
 
     /// A frame still on its device, copied into system memory: what a
     /// caller that can't import it reads (`None` for one that isn't on a
-    /// device). Blocks while the device copies.
+    /// device). Blocks while the device copies. A frame doesn't know its
+    /// file, so its error names none: the caller names it
+    /// ([`MediaError::or_path`]).
     pub fn to_system(&self) -> Option<Result<VideoFrame, MediaError>> {
         let device = match &self.storage {
             FrameStorage::DrmPrime { device, .. } => device,

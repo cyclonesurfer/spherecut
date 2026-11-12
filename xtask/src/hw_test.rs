@@ -81,7 +81,7 @@ pub struct Args {
     /// Build in debug mode and skip the benchmarks (environment and tests only).
     #[arg(long)]
     quick: bool,
-    /// Where to write the report (default: hw-reports/<host>-<commit>.md).
+    /// Where to write the report (default: `hw-reports/<host>-<commit>.md`).
     #[arg(long)]
     out: Option<PathBuf>,
     /// Leave out the Tier 1 tests on this machine.
@@ -2072,6 +2072,12 @@ pub fn run(a: Args) -> Result<()> {
         &gui_out,
         &report_path,
         &gui_test("::gui_smoke"),
+    ));
+    let _ = writeln!(r, "## UI while decode falls behind\n");
+    r.push_str(&crate::gui_report::behind_section(
+        &gui_out,
+        &report_path,
+        &gui_test("::gui_decode_behind"),
     ));
     let _ = writeln!(r, "## Timeline prototype\n");
     r.push_str(&crate::gui_report::proto_section(

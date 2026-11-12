@@ -53,13 +53,14 @@ pub enum Exit {
     Failed = 1,
     /// The command line is wrong.
     Usage = 2,
-    /// `frame` (and the GUI, later): a codec or device the command itself
-    /// needs is missing (no GPU, a hardware decoder asked for that can't
-    /// decode, no decoder; no display). probe and doctor never exit so.
+    /// `frame`, `render`, `call` and the GUI: a codec or device the
+    /// command itself needs is missing (no GPU, a hardware decoder or
+    /// encoder asked for that can't run, no decoder or encoder; no
+    /// display). probe and doctor never exit so.
     Missing = 3,
-    /// `frame`: interrupted (SIGINT), leaving no output file. The run's
-    /// document still goes out, with the code `cancelled`. probe and
-    /// doctor never exit so.
+    /// `frame`, `render` and `call`: interrupted (SIGINT); frame and
+    /// render leave no output file. The run's document still goes out,
+    /// with the code `cancelled`. probe and doctor never exit so.
     Cancelled = 4,
 }
 
@@ -512,7 +513,8 @@ pub struct TimeRange {
 /// How far the export has got.
 #[derive(Debug, Clone, Serialize)]
 pub struct RenderProgress {
-    /// Frames muxed: never fewer than the line before said, even when an
+    /// Frames given to the encoder, which muxes each soon after (export's
+    /// `Progress`): never fewer than the line before said, even when an
     /// encoder that failed in its first second starts over in software.
     pub frames_done: u64,
     pub frames_total: u64,
@@ -621,7 +623,8 @@ pub struct RenderAudio {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RenderCheck {
     /// `probe`, `layout`, `codec`, `size`, `frames`, `duration`, `rate`,
-    /// `st3d`, `sv3d`, `v1`, `spherical`, `audio` or `sa3d`.
+    /// `st3d`, `sv3d`, `v1`, `spherical`, `audio` or `sa3d`, then FFmpeg's
+    /// own reading: `ffmpeg_sphere`, `ffmpeg_ambix` or `ffmpeg_log`.
     pub name: &'static str,
     pub found: String,
 }

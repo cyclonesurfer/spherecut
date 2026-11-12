@@ -92,6 +92,29 @@ struct GuiCli {
     /// The smoke export with motion blur on.
     #[arg(long, hide = true, requires = "smoke_export")]
     smoke_export_blur: bool,
+    /// The decoder the smoke run plays on, over Automatic (D40).
+    #[arg(
+        long,
+        hide = true,
+        value_enum,
+        value_name = "DECODER",
+        requires = "smoke"
+    )]
+    smoke_decoder: Option<frame::DecoderArg>,
+    /// Each stream of the smoke run hands out at most one frame in this
+    /// many milliseconds, 1 to 500, so that decode falls behind (D40).
+    #[arg(
+        long,
+        hide = true,
+        value_name = "MS",
+        requires = "smoke",
+        value_parser = clap::value_parser!(u32).range(1..=500)
+    )]
+    smoke_decode_floor_ms: Option<u32>,
+    /// The control of a smoke run with decode behind: the UI waits for
+    /// each decoded frame while the clip plays, as it must not (D40).
+    #[arg(long, hide = true, requires = "smoke")]
+    smoke_control_ui_waits: bool,
     /// The toolkit check's timeline prototype (D26) in place of the
     /// viewer; with --proto-out, a script drives it, what each UI pass
     /// took goes there as JSON (spherecut.timeline-proto/1), and it
@@ -178,7 +201,9 @@ enum Cmd {
     /// same roots and limits, and print its result as one JSON document
     /// (docs/agents.md).
     Call {
-        /// The tool: probe, look, analyze, check or doctor.
+        /// The tool: probe, look, analyze, check, doctor, project, edit,
+        /// undo or compare (docs/agents.md). render and job run only under
+        /// `spherecut mcp`.
         tool: String,
         /// Its arguments, a JSON object, as an agent sends them, such as
         /// '{"files": ["a.mp4"]}'.
@@ -186,8 +211,8 @@ enum Cmd {
         args: String,
         #[command(flatten)]
         agent: AgentArgs,
-        /// Where look's images go, as spherecut-look-<ms>-<n>.jpg (or
-        /// .png): the temporary folder by default. The document's
+        /// Where look's images go, as `spherecut-look-<ms>-<n>.jpg` (or
+        /// `.png`): the temporary folder by default. The document's
         /// `images` lists them.
         #[arg(long, value_name = "DIR")]
         image_dir: Option<PathBuf>,
@@ -537,6 +562,16 @@ fn gui(args: GuiCli) -> Exit {
                     preset: args.smoke_export_preset,
                     blur: args.smoke_export_blur,
                 }),
+            decoder: args.smoke_decoder.map(|d| match d {
+                frame::DecoderArg::Auto => spherecut_app::settings::DecoderSetting::Auto,
+                frame::DecoderArg::Software => spherecut_app::settings::DecoderSetting::Software,
+                frame::DecoderArg::Vaapi => spherecut_app::settings::DecoderSetting::VaApi,
+                frame::DecoderArg::Vulkan => spherecut_app::settings::DecoderSetting::Vulkan,
+            }),
+            decode_floor: args
+                .smoke_decode_floor_ms
+                .map(|ms| std::time::Duration::from_millis(u64::from(ms))),
+            control_ui_waits: args.smoke_control_ui_waits,
         }),
         proto: args
             .timeline_proto

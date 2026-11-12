@@ -16,6 +16,8 @@ disallowed-types = [
 # Its output opens take the path as a URL too, so `http://...` would
 # write to the network; Mp4Writer writes through a file it opened itself.
 disallowed-methods = [
+    # Its DNS lookup (D8, D24), which the types above don't cover.
+    { path = "std::net::ToSocketAddrs::to_socket_addrs", reason = "Spherecut makes no network connections (D8, D24)" },
     { path = "ffmpeg_next::format::open", reason = "unconfined; use ffi::open_input (D24)" },
     { path = "ffmpeg_next::format::open_with", reason = "unconfined; use ffi::open_input (D24)" },
     { path = "ffmpeg_next::format::input", reason = "unconfined; use ffi::open_input (D24)" },

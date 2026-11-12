@@ -101,8 +101,11 @@
 //! plays it locked, reading its corner codes and its slots back as Tier
 //! 2h does, so that none can rot between hardware runs;
 //! `p_lock_scores_the_presents_that_owe_a_frame_and_drops_a_lens` scores
-//! synthetic passes as P-LOCK does. Run the rest with `cargo xtask
-//! hw-test`.
+//! synthetic passes as P-LOCK does; and
+//! `a_zero_copy_mismatch_names_the_stage_that_parts_from_the_download`
+//! holds the zero-copy checks' account of a wrong frame (its take, the
+//! slot, or the render) to planes and a slot made on lavapipe. Run the
+//! rest with `cargo xtask hw-test`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -145,7 +148,7 @@ use spherecut_render::{
     Placement, Projector, RenderError, SlotShape, StillOptions, StillRenderer, Uploader,
     ViewParams, upload,
 };
-use spherecut_render::{readback, wgpu};
+use spherecut_render::{readback, wgpu, yuv};
 use spherecut_sphere::DQuat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -2808,10 +2811,15 @@ fn render_taken(
 }
 
 /// What a zero-copy render `got` that differs from the copy's `want`
-/// says about why: how much differs; whether the same take, rendered
-/// again, and a fresh take render as `got` or as `want`; and whether
-/// the frame downloads now as it did before (if not, its surface changed
-/// under the frame that holds it).
+/// says about why. First, where the frame's bytes part from its
+/// download's ([`stage`]), read before anything renders again: in the
+/// take's planes; in `renderer`'s slot as the take's last render left it
+/// (`view`'s for a held frame, the last view's for one rendered right
+/// after its decode); or in neither, so in the render. Then how much
+/// differs; whether the same take, rendered again, and a fresh take
+/// render as `got` or as `want`; and whether the frame downloads now as
+/// it did before (if not, its surface changed under the frame that holds
+/// it).
 #[allow(clippy::too_many_arguments)]
 fn mismatch(
     gpu: &Gpu,
@@ -2825,6 +2833,14 @@ fn mismatch(
     size: (u32, u32),
     opts: &StillOptions,
 ) -> String {
+    let slot = renderer.slot().map(|s| read_planes(gpu, s));
+    let held = taken_planes(gpu, taken);
+    let copy = frame.to_system();
+    let stage = match &copy {
+        Some(Ok(c)) => stage(how, held, slot, c),
+        Some(Err(e)) => format!("no stage named, the download failing: {e}"),
+        None => "no stage named, the frame not on its device".to_string(),
+    };
     let (g, w) = (got.unit_rgb(), want.unit_rgb());
     let differ = g.iter().zip(&w).filter(|(a, b)| a != b).count();
     let most = g
@@ -2847,7 +2863,7 @@ fn mismatch(
         }
         Err(NotCompared::Decode(e) | NotCompared::Export(e) | NotCompared::Import(e)) => Err(e),
     });
-    let downloaded = like(match frame.to_system() {
+    let downloaded = like(match copy {
         Some(Ok(copy)) => renderer
             .render(gpu, &copy, view, size, opts)
             .map_err(|e| e.to_string()),
@@ -2855,10 +2871,190 @@ fn mismatch(
         None => Err("not on its device".into()),
     });
     format!(
-        "{differ} of {} channel values differ, by {most:.4} at most; rendered again it \
-         renders {again}, taken again {fresh}, and downloaded again {downloaded}",
+        "{stage}; {differ} of {} channel values differ, by {most:.4} at most; rendered \
+         again it renders {again}, taken again {fresh}, and downloaded again {downloaded}",
         w.len()
     )
+}
+
+/// Where a frame taken on the GPU first parts from its download, `copy`:
+/// in the take's planes read back (`held`: an import's textures, or the
+/// copy's buffer), plane by plane ([`same_planes`]); in the renderer's
+/// slot, level 0, read back (`slot`), Y's samples that differ held to
+/// odin's GFX11 R8 signature ([`r8_cells`]); or in neither, so in the
+/// render. A deep frame's slot holds the ingest pass's halves, not the
+/// planes' bytes, so it isn't compared.
+fn stage(
+    how: &OnDevice,
+    held: Result<Vec<readback::Texels>, String>,
+    slot: Option<Result<Yuv, String>>,
+    copy: &VideoFrame,
+) -> String {
+    let taken = how.taken();
+    match held.and_then(|h| Ok((h, planes_of(copy)?))) {
+        Ok((h, c)) => {
+            if let Err(why) = same_planes(&h, &c) {
+                return format!("{taken} already differs from the download: {why}");
+            }
+        }
+        Err(e) => return format!("no stage named, reading the planes failing: {e}"),
+    }
+    let Some(slot) = slot else {
+        return format!("{taken} is the download's bytes, and the renderer has no slot");
+    };
+    match slot.and_then(|s| Ok((s, yuv_of(copy)?))) {
+        Err(e) => format!("{taken} is the download's bytes; the slot isn't compared: {e}"),
+        Ok((s, c)) if !s.same_shape(&c) => format!(
+            "{taken} is the download's bytes; the slot is {}, the download {}",
+            s.shape(),
+            c.shape()
+        ),
+        Ok((s, c)) if s == c => {
+            format!("{taken} and the slot are the download's bytes, so the render differs")
+        }
+        Ok((s, c)) => {
+            let diffs: Vec<PlaneDiff> = (0..3)
+                .map(|i| PlaneDiff::of(&s.0[i], &c.0[i], s.band_rows(i)))
+                .collect();
+            let planes = ["Y", "U", "V"]
+                .iter()
+                .zip(&diffs)
+                .filter(|(_, d)| d.samples > 0)
+                .map(|(name, d)| format!("{name} in {} samples, by {} at most", d.samples, d.most))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let r8 = match r8_cells(&diffs[0]) {
+                Ok(on) => format!("odin's GFX11 R8 signature: {on}"),
+                Err(off) => format!("not odin's GFX11 R8 signature: {off}"),
+            };
+            format!("{taken} is the download's bytes, but the slot differs: {planes}; {r8}")
+        }
+    }
+}
+
+/// The planes `taken` holds, read back from `gpu`: an import's textures,
+/// whole, or the planes in the copy's buffer. Waits for the GPU.
+fn taken_planes(gpu: &Gpu, taken: &Taken) -> Result<Vec<readback::Texels>, String> {
+    match taken {
+        Taken::Imported(planes) => planes
+            .iter()
+            .map(|t| readback::read_texture(gpu, t, 0).map_err(|e| e.to_string()))
+            .collect(),
+        Taken::Copied(c) => {
+            let end = c
+                .planes
+                .iter()
+                .map(|p| p.offset + u64::from(p.bytes_per_row) * u64::from(p.size.1))
+                .max()
+                .unwrap_or(0);
+            let bytes = yuv::read_buffer(gpu, &c.buffer, end).map_err(|e| e.to_string())?;
+            c.planes
+                .iter()
+                .map(|p| {
+                    let row = p.size.0 as usize * p.bytes_per_texel as usize;
+                    let mut data = Vec::with_capacity(row * p.size.1 as usize);
+                    for y in 0..p.size.1 as usize {
+                        let at = p.offset as usize + y * p.bytes_per_row as usize;
+                        let bytes = bytes.get(at..at + row).ok_or_else(|| {
+                            format!(
+                                "the copy's buffer ends before row {y} of its plane at {}",
+                                p.offset
+                            )
+                        })?;
+                        data.extend_from_slice(bytes);
+                    }
+                    Ok(readback::Texels {
+                        width: p.size.0,
+                        height: p.size.1,
+                        bytes_per_texel: p.bytes_per_texel,
+                        data,
+                    })
+                })
+                .collect()
+        }
+    }
+}
+
+/// `frame`'s planes in memory, each row without its padding, as a take's
+/// planes read back are.
+fn planes_of(frame: &dyn VideoPlanes) -> Result<Vec<readback::Texels>, String> {
+    let layout = frame.layout();
+    let mut planes = Vec::new();
+    for (i, desc) in layout.planes.iter().enumerate() {
+        let p = frame
+            .plane(i)
+            .ok_or_else(|| format!("{} has no plane {i} in memory", layout.name))?;
+        let row = desc.row_bytes(p.width);
+        let mut data = Vec::with_capacity(row * p.height as usize);
+        for y in 0..p.height {
+            let bytes = p
+                .row(y, row)
+                .ok_or_else(|| format!("{}'s plane {i} has no row {y}", layout.name))?;
+            data.extend_from_slice(bytes);
+        }
+        planes.push(readback::Texels {
+            width: p.width,
+            height: p.height,
+            bytes_per_texel: u32::try_from(row / p.width.max(1) as usize).unwrap_or(0),
+            data,
+        });
+    }
+    Ok(planes)
+}
+
+/// Whether the planes a take holds, read back (`taken`), are its
+/// download's (`copy`) byte for byte; or, for each plane that isn't, how
+/// many of its texels differ and the first of them in raster order.
+fn same_planes(taken: &[readback::Texels], copy: &[readback::Texels]) -> Result<(), String> {
+    if taken.len() != copy.len() {
+        return Err(format!(
+            "{} planes, the download {}",
+            taken.len(),
+            copy.len()
+        ));
+    }
+    let mut off = Vec::new();
+    for (i, (t, c)) in taken.iter().zip(copy).enumerate() {
+        if (t.width, t.height, t.bytes_per_texel) != (c.width, c.height, c.bytes_per_texel) {
+            off.push(format!(
+                "plane {i} is {}x{} of {} bytes a texel, the download's {}x{} of {}",
+                t.width, t.height, t.bytes_per_texel, c.width, c.height, c.bytes_per_texel
+            ));
+            continue;
+        }
+        let b = t.bytes_per_texel.max(1) as usize;
+        let mut differ = t
+            .data
+            .chunks_exact(b)
+            .zip(c.data.chunks_exact(b))
+            .enumerate()
+            .filter(|(_, (g, w))| g != w)
+            .map(|(n, _)| n);
+        if let Some(n) = differ.next() {
+            let w = t.width.max(1) as usize;
+            off.push(format!(
+                "plane {i}: {} of {} texels differ, the first at x {} y {}",
+                1 + differ.count(),
+                t.data.len() / b,
+                n % w,
+                n / w
+            ));
+        }
+    }
+    if off.is_empty() {
+        Ok(())
+    } else {
+        Err(off.join("; "))
+    }
+}
+
+/// Whether a frame's renders through the zero-copy views, `got`, are
+/// `want`'s bytes, view for view; or the first view whose aren't.
+fn same(got: &[Image], want: &[Image]) -> Result<(), usize> {
+    got.iter()
+        .zip(want)
+        .position(|(g, w)| g != w)
+        .map_or(Ok(()), Err)
 }
 
 /// `frame`'s planes imported into `gpu`, as `frame --zero-copy` and the
@@ -2901,14 +3097,24 @@ fn refused(e: RenderError) -> NotCompared {
 /// downloaded as it comes) and, [`SURFACE_CAP`] − 1 frames later, as the
 /// GPU takes it, holding the frames in between as the frame cache would:
 /// the two renders must be the same bytes. A surface the decoder took
-/// back while it was held would show a later picture. Every other frame
-/// is also taken on the GPU right after its decode, before its download,
-/// and must render as the copy too. On path B that is the upload
-/// thread's order: the copier copies the image out as soon as the decoder
-/// hands it over. It is one thread, so no later decode runs during the
-/// copy, as one may on the player's decode thread. On path A the take
-/// only imports the planes, and the GPU reads them when they render,
-/// after the download, so the order there is the held take's. Returns the
+/// back while it was held would show a later picture.
+///
+/// Every other frame is also taken on the GPU and rendered through every
+/// view right after its decode, before anything downloads it, as the
+/// upload thread takes a frame and the viewer draws it, and those renders
+/// must be the copy's too. On path B the copier's barrier then starts
+/// from the decoder's layout and its wait meets the decode's semaphore;
+/// on path A the GPU's first read of the import comes before VA-API's
+/// download reads the surface. No later decode runs meanwhile (one test
+/// thread), as one may on the player's decode thread. Once a clip, on
+/// the first such frame that moved from the one before, two controls
+/// run: the renders' check must refuse the frame before's renders, and
+/// the planes' check of [`mismatch`] ([`same_planes`]), which the take
+/// must pass against its own download, must refuse the frame before's
+/// download.
+///
+/// The copy renders through a renderer of its own, so that the zero-copy
+/// renderer's slot holds the take's when a render differs. Returns the
 /// frames compared, and of those, the ones taken right after their
 /// decode.
 fn compare_zero_copy(
@@ -2939,12 +3145,16 @@ fn compare_zero_copy(
     let views = zero_copy_views();
     let opts = StillOptions::default();
     let mut renderer = StillRenderer::new(&rig.gpu);
+    let mut copies = StillRenderer::new(&rig.gpu);
     // Each held frame with its copy path's renders.
     let mut held: VecDeque<(usize, Arc<VideoFrame>, Vec<Image>)> = VecDeque::new();
     let mut compared = 0;
     let mut early = 0;
     let mut moved = false;
+    let mut controlled = false;
     let mut last: Option<Vec<Image>> = None;
+    // The frame before's download, kept until the controls have run.
+    let mut last_copy: Option<VideoFrame> = None;
     let mut check = |renderer: &mut StillRenderer,
                      (k, frame, want): (usize, Arc<VideoFrame>, Vec<Image>)|
      -> Result<(), NotCompared> {
@@ -2982,10 +3192,21 @@ fn compare_zero_copy(
                     .unwrap_or_else(|| "no reason given".into()),
             ));
         }
-        // Production order: taken as soon as it is decoded.
-        let first = (k % 2 == 0)
-            .then(|| take(&rig.gpu, how, &frame))
-            .transpose()?;
+        // Production order: taken as soon as it is decoded, and rendered
+        // before anything downloads it.
+        let first = if k % 2 == 0 {
+            let taken = take(&rig.gpu, how, &frame)?;
+            let got: Vec<Image> = views
+                .iter()
+                .map(|(view, size)| {
+                    render_taken(&rig.gpu, &mut renderer, &frame, &taken, view, *size, &opts)
+                        .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()))
+                })
+                .collect();
+            Some((taken, got))
+        } else {
+            None
+        };
         let copied = frame
             .to_system()
             .expect("a frame on its device")
@@ -2993,40 +3214,63 @@ fn compare_zero_copy(
         let want: Vec<Image> = views
             .iter()
             .map(|(view, size)| {
-                renderer
+                copies
                     .render(&rig.gpu, &copied, view, *size, &opts)
                     .unwrap_or_else(|e| panic!("frame {k}: rendering the copy: {e}"))
             })
             .collect();
-        if let Some(taken) = &first {
-            for (i, (view, size)) in views.iter().enumerate() {
-                let got = render_taken(&rig.gpu, &mut renderer, &frame, taken, view, *size, &opts)
-                    .unwrap_or_else(|e| panic!("frame {k}: rendering {}: {e}", how.taken()));
-                if got != want[i] {
-                    let why = mismatch(
-                        &rig.gpu,
-                        &mut renderer,
-                        how,
-                        &frame,
-                        taken,
-                        &got,
-                        &want[i],
-                        view,
-                        *size,
-                        &opts,
-                    );
+        if let Some((taken, got)) = &first {
+            if let Err(i) = same(got, &want) {
+                let (view, size) = &views[i];
+                let why = mismatch(
+                    &rig.gpu,
+                    &mut renderer,
+                    how,
+                    &frame,
+                    taken,
+                    &got[i],
+                    &want[i],
+                    view,
+                    *size,
+                    &opts,
+                );
+                panic!(
+                    "{}: frame {k}, view {i}: {} taken and rendered before its download \
+                     renders other bytes than the copy: {why}",
+                    path.display(),
+                    how.taken()
+                );
+            }
+            if !controlled
+                && let (Some(before), Some(before_copy)) = (&last, &last_copy)
+                && *before != want
+            {
+                must_fail("an early render of another frame", same(got, before));
+                let planes = taken_planes(&rig.gpu, taken)
+                    .unwrap_or_else(|e| panic!("frame {k}: reading {} back: {e}", how.taken()));
+                let copy_of = |f: &VideoFrame| {
+                    planes_of(f).unwrap_or_else(|e| panic!("frame {k}: a download's planes: {e}"))
+                };
+                if let Err(why) = same_planes(&planes, &copy_of(&copied)) {
                     panic!(
-                        "{}: frame {k}, view {i}: {} right after the decode renders other \
-                         bytes than the copy: {why}",
+                        "{}: frame {k}: {} holds other bytes than its download, though every \
+                         view renders as the copy: {why}",
                         path.display(),
                         how.taken()
                     );
                 }
+                let why = must_fail(
+                    "a plane of another frame",
+                    same_planes(&planes, &copy_of(before_copy)),
+                );
+                assert!(why.starts_with("plane "), "{why}");
+                controlled = true;
             }
             early += 1;
         }
         moved |= last.as_ref().is_some_and(|l| *l != want);
         last = Some(want.clone());
+        last_copy = (!controlled).then_some(copied);
         held.push_back((k, frame, want));
         if held.len() == SURFACE_CAP {
             check(&mut renderer, held.pop_front().expect("held"))?;
@@ -3037,6 +3281,12 @@ fn compare_zero_copy(
     }
     // Otherwise a frame from the wrong surface would match too.
     assert!(moved, "{}: every frame renders the same", path.display());
+    assert!(
+        controlled,
+        "{}: no frame taken right after its decode moved from the one before, so the \
+         controls never ran",
+        path.display()
+    );
     Ok((compared, early))
 }
 
@@ -3090,7 +3340,7 @@ fn compare_clips(rig: &Rig, how: &OnDevice) {
         match compare_zero_copy(rig, how, path, *stream, ZERO_COPY_FRAMES) {
             Ok((n, early)) => eprintln!(
                 "{name}: {n} frames, {} byte-identical to the copy, {early} of them taken \
-                 right after their decode too",
+                 and rendered right after their decode too",
                 how.taken()
             ),
             Err(NotCompared::Decode(why)) => left_out.push(format!("{name}: {decoder}: {why}")),
@@ -3116,9 +3366,11 @@ fn compare_clips(rig: &Rig, how: &OnDevice) {
 /// Zero copy against the copy (slice 5b): synthetic HEVC Main and Main
 /// 10 clips (NV12 and P010), and an X5 lens when the samples are there,
 /// each frame byte-identical through its import and its download, with
-/// as many frames held as the frame cache holds. Skips, with the reason,
-/// when the GPU can't import, or VA-API won't decode or export a clip,
-/// or the driver refuses its planes; never a pass with a clip left out.
+/// as many frames held as the frame cache holds, and every other frame
+/// imported and rendered before its download too ([`compare_zero_copy`]).
+/// Skips, with the reason, when the GPU can't import, or VA-API won't
+/// decode or export a clip, or the driver refuses its planes; never a
+/// pass with a clip left out.
 #[test]
 #[ignore = "tier2: needs a VA-API GPU that imports DMA-BUFs"]
 fn zero_copy_matches_copy_path() {
@@ -3137,10 +3389,11 @@ fn zero_copy_matches_copy_path() {
 /// [`zero_copy_matches_copy_path`] decoded by Vulkan Video on the
 /// renderer's own device, each frame byte-identical through the GPU's
 /// copy out of FFmpeg's image and through its download, as many frames
-/// held as the frame cache holds. Skips, with the reason, when the device
-/// can't be shared or FFmpeg won't take it, or Vulkan Video won't decode
-/// a clip, or the copier refuses its frames; never a pass with a clip
-/// left out.
+/// held as the frame cache holds, and every other frame copied out and
+/// rendered before its download too. Skips, with the reason, when the
+/// device can't be shared or FFmpeg won't take it, or Vulkan Video won't
+/// decode a clip, or the copier refuses its frames; never a pass with a
+/// clip left out.
 #[test]
 #[ignore = "tier2: needs a GPU with Vulkan Video decode"]
 fn shared_vulkan_matches_copy_path() {
@@ -5932,6 +6185,133 @@ fn nv12_and_i420_slots_read_back_as_one_picture() {
         d.planes.each_ref().map(|p| p.samples > 0),
         [false, true, true],
         "{wrong}"
+    );
+}
+
+/// A 70×130 NV12 frame in memory, its samples hashed from their place
+/// and `seed`; with U and V swapped when `swapped`.
+fn nv12_frame(seed: u32, swapped: bool) -> VideoFrame {
+    let size: (u32, u32) = (70, 130);
+    let chroma = (size.0.div_ceil(2), size.1.div_ceil(2));
+    let sample = move |p: u32, x: u32, y: u32| {
+        ((seed + p * 7919 + y * 104_729 + x * 31).wrapping_mul(2_654_435_761) >> 24) as u8
+    };
+    let (u, v) = if swapped { (2, 1) } else { (1, 2) };
+    let luma = (0..size.1)
+        .flat_map(|y| (0..size.0).map(move |x| sample(0, x, y)))
+        .collect();
+    let uv = (0..chroma.1)
+        .flat_map(|y| (0..chroma.0).flat_map(move |x| [sample(u, x, y), sample(v, x, y)]))
+        .collect();
+    let color = ColorInfo {
+        codes: ColorCodes::UNSPECIFIED,
+        range: Range::Limited,
+        matrix: Matrix::Bt709,
+        transfer: spherecut_core::video::Transfer::Sdr,
+        primaries: Primaries::Bt709,
+        siting: ChromaSiting::Left,
+        assumed: Assumed::default(),
+    };
+    let layout = Arc::new(layout_420("nv12", &[1, 2]));
+    let strides = vec![size.0 as usize, 2 * chroma.0 as usize];
+    VideoFrame::owned(
+        layout,
+        size,
+        vec![luma, uv],
+        strides,
+        color,
+        (0, Time::ZERO),
+    )
+    .unwrap()
+}
+
+/// `frame`'s planes as textures, as `dmabuf::Importer` makes them: whole,
+/// in the import's format and usage (and `COPY_DST`, to fill them here).
+fn as_imported(gpu: &Gpu, frame: &VideoFrame) -> Vec<wgpu::Texture> {
+    let shape = SlotShape::of(frame.layout(), frame.size()).unwrap();
+    let planes = planes_of(frame).unwrap();
+    shape
+        .planes
+        .iter()
+        .zip(&planes)
+        .map(|(p, texels)| {
+            let size = wgpu::Extent3d {
+                width: p.size.0,
+                height: p.size.1,
+                depth_or_array_layers: 1,
+            };
+            let t = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("plane as imported"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: dmabuf::imported_format(p.format),
+                usage: dmabuf::USAGE | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            gpu.queue.write_texture(
+                t.as_image_copy(),
+                &texels.data,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(texels.width * texels.bytes_per_texel),
+                    rows_per_image: None,
+                },
+                size,
+            );
+            t
+        })
+        .collect()
+}
+
+/// [`stage`], which names where a frame taken on the GPU first parts
+/// from its download when a zero-copy render differs ([`mismatch`]), on
+/// lavapipe: an NV12 frame's planes made textures as an import's are,
+/// and a renderer's slot once it has rendered them, are the frame's
+/// bytes, so the render is named. The controls: the take of the frame
+/// with U and V swapped is named, plane 1 from its first texel; and with
+/// this frame's take, a slot that rendered the swapped frame last is
+/// named, U and V wrong, Y right and so off odin's GFX11 R8 signature.
+#[test]
+fn a_zero_copy_mismatch_names_the_stage_that_parts_from_the_download() {
+    let gpu = common::gpu();
+    let frame = nv12_frame(0, false);
+    let swapped = nv12_frame(0, true);
+    let mut renderer = StillRenderer::new(gpu);
+    let (view, size) = &zero_copy_views()[0];
+    let opts = StillOptions::default();
+    let mut slot_after = |f: &VideoFrame, taken: &Taken| {
+        render_taken(gpu, &mut renderer, f, taken, view, *size, &opts).unwrap();
+        renderer.slot().map(|s| read_planes(gpu, s))
+    };
+    let taken = Taken::Imported(as_imported(gpu, &frame));
+    let other = Taken::Imported(as_imported(gpu, &swapped));
+    let named =
+        |taken: &Taken, slot| stage(&OnDevice::DmaBuf, taken_planes(gpu, taken), slot, &frame);
+
+    let slot = slot_after(&frame, &taken);
+    assert_eq!(
+        named(&taken, slot),
+        "the import and the slot are the download's bytes, so the render differs"
+    );
+
+    let slot = slot_after(&swapped, &other);
+    let import = named(&other, slot.clone());
+    assert!(
+        import.starts_with(
+            "the import already differs from the download: plane 1: 2275 of 2275 texels \
+             differ, the first at x 0 y 0"
+        ),
+        "{import}"
+    );
+    let at_slot = named(&taken, slot);
+    assert!(
+        at_slot.starts_with("the import is the download's bytes, but the slot differs: U in ")
+            && at_slot.contains(", V in ")
+            && !at_slot.contains("Y in ")
+            && at_slot.ends_with("not odin's GFX11 R8 signature: Y right"),
+        "{at_slot}"
     );
 }
 

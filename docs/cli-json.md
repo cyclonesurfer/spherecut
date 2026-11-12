@@ -152,7 +152,7 @@ its `time_base`.
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error; with `--file`, the file probes too, whether or not it can be stitched | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18); or, with `--file`, the file can't be probed (probe's code for it, in place of `doctor_errors`) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
 | 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` | An unknown preset, codec or choice, or a `--range` that doesn't parse |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--encoder vaapi` named the hardware and it failed to open or in its first second |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
@@ -177,7 +177,7 @@ The run's `error.code`:
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
 | `output_exists` | 1 | frame: something is at the output (a file, or a link, even a dangling one) and `--overwrite` wasn't given; or something appeared there while the frame was rendered, which is left alone |
-| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata), or it is Matroska or WebM, whose spherical metadata Spherecut doesn't read yet; the message says what it is. `--equirect` renders it as one anyway |
+| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway |
 | `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end, or so far past it that the stream's timestamps can't hold it. The message gives the clip's range, or its frame count |
 | `cancelled` | 4 | frame: interrupted by the first Ctrl+C (SIGINT); no output file is written, and the temporary file is removed |
 
@@ -311,7 +311,7 @@ and `decode_failed` as above:
 | `media_offline` | 1 | The clip's media file isn't where the project says (relinking a moved file is M5's); `path` is where it was looked for |
 | `cannot_export` | 1 | The project can't be exported as it is: an empty trim, a trim of more frames than an export holds, PCM ambiX copied into a 360 MP4 (YouTube takes it only in a MOV: ask for `--audio aac`) |
 | `no_encoder` | 3 | No encoder the run can use for the codec: `--encoder vaapi` without a render node or without the codec's VA-API encoder in this FFmpeg, or no software encoder for it |
-| `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job (or AV1 at a size VA-API would pad: not a multiple of 64 wide and 16 high), or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software |
+| `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job (or AV1 at a size VA-API would pad: not a multiple of 64 wide and 16 high), or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software, unless VA-API is the only encoder for the codec (as for H.264 with stock Fedora's ffmpeg-free, which has no libx264): then they fail the run with exit 3 as with `vaapi` |
 | `no_space` | 1 | The output's folder has less free space than two copies of the export at its preset's highest bitrate need (both are on the disk while the file is finished); the message gives both numbers, and `path` is the folder |
 | `decode_failed` | 1 | Opening the clip, or a frame of it, failed (or the decoder concealed damage in it); the message gives the frame's time |
 | `render_failed` | 1 | The GPU's projection, YUV pass or readback failed for a frame |
@@ -810,7 +810,7 @@ going on in software, or `software`), `--adapter` and `--overwrite`.
 Without `--json`, a line on stderr says what is rendering, then one a
 second how far it has got, and a run that wrote its file prints one
 line on stdout (`wrote out.mp4: 600 frames (20 s) at 3840×1920, HEVC
-10-bit in hevc_vaapi, aac audio, 45.1 MB, 14 checks passed`).
+10-bit in hevc_vaapi, aac audio, 45.1 MB, 13 checks passed`).
 
 The run, in order: the command line; the output (refused before any work
 if something is there, as frame's is); the project, loaded, and its
@@ -894,7 +894,7 @@ before the last have `ok` true and no warnings.
 | `audio` | object, or null | The audio track: `stream` (the source's, by FFmpeg's index), `encoder` (`aac`, or `copy` for the source's packets as they are), `codec` (FFmpeg's name for the track's codec: `aac`, or the copied one's such as `pcm_s16le`), `rate`, `channels`, `ambix` (first-order ambiX with an `SA3D` box) and `samples` (a channel's); null for none |
 | `bytes` | integer | The file's size |
 | `blur_capped` | integer | Frames whose motion blur needed more views than the cap of 64, and got 64 |
-| `checks` | array | The checks the file passed before it was put in place, in order, each `name` and `found` (for people): `probe` (it opens), `layout` (the moov before the media data), `codec`, `size`, `frames`, `duration` (within a frame), `rate`, then `st3d`, `sv3d` and `v1` for a 360 export or `spherical` (none) for a flat one, then `audio` and, for ambiX, `sa3d` |
+| `checks` | array | The checks the file passed before it was put in place, in order, each `name` and `found` (for people): `probe` (it opens), `layout` (the moov before the media data), `codec`, `size`, `frames`, `duration` (within a frame), `rate`, then `st3d`, `sv3d` and `v1` for a 360 export or `spherical` (none) for a flat one, then `audio` and, for ambiX, `sa3d`; then what FFmpeg's own demuxer reads of the file's header: `ffmpeg_sphere` (its spherical side data: the whole sphere, equirect, mono, at no pose for 360, and none for flat), for ambiX `ffmpeg_ambix` (the layout "ambisonic 1"), and `ffmpeg_log` (no complaint of a spherical box in its log) |
 | `stages` | object | Where the time went, in seconds of each stage's work over the try that made the file: `decode`, `render` (the upload and the draw), `readback` (the planes copied back from the GPU), `encode` (with the audio muxed between frames and the video encoder's flush) and `finish` (the audio's flush, the last pass and the checks). Decode, render and encode run at once, so the busiest of them sets the pace |
 | `elapsed` | number | Seconds from start to finish |
 
@@ -978,6 +978,20 @@ blur on and keys a pan of 90° in yaw over the 2 s for it to sample, as
 frames while the viewer plays (an 8K 360, and a 4K flat with blur; M2
 plan amendment 2 item 22).
 
+Three more flags (DECISIONS D40) let a run see the UI while decode
+falls behind, which hw-test's `gui_decode_behind` judges.
+`--smoke-decoder <DECODER>` (`auto`, `software`, `vaapi` or `vulkan`,
+as frame's `--decoder`) plays on that decoder over the settings'
+Automatic. `--smoke-decode-floor-ms <MS>` (1 to 500) lets each stream
+the run opens hand out at most one decoded frame in that many
+milliseconds, so that decode falls behind a clip whose frames come
+faster. `--smoke-control-ui-waits`, the control, makes each pass of the
+UI's logic wait, at most 250 ms, for the next decoded frame while the
+clip plays, as a UI that waited on decode would: it breaks the rule
+that the UI thread never waits (D34), on purpose and only here, and
+each wait counts in `blocked_on_ui_thread`, in any build. The
+document's `asked` says which of them the run had.
+
 A window the compositor doesn't draw (a locked or blanked screen, a
 minimized window, another virtual terminal) has no UI passes, and the
 run's own limits are checked in them. A watchdog thread ends such a
@@ -994,6 +1008,7 @@ and no `path` in its `error`. Its `result`:
 | Field | What |
 |---|---|
 | `version`, `clip`, `seconds`, `played_s`, `ended` | The build, the clip, the seconds asked for and played, and whether the clip ended first |
+| `asked` | What the run was asked to play with beside the clip (D40): `decoder` (`--smoke-decoder`'s value, or `null`), `decode_floor_ms` (`--smoke-decode-floor-ms`, or `null`) and `control_ui_waits` (whether `--smoke-control-ui-waits` was given) |
 | `adapter` | `name`, `vendor`, `device`, `device_type`, `driver`, `driver_info` as wgpu has them, and `cpu` for lavapipe |
 | `surface_format`, `scale`, `native_scale`, `window`, `viewer`, `refresh_hz` | The window surface's format, pixels a point and the window's own scale, the window's and the viewer's size in pixels, and the monitor's refresh rate (`null` when winit doesn't know it) |
 | `raw_view`, `streams[]` | Whether the viewer showed the raw view; each video stream's `format` (as the overlay has it), `fps`, `decoder` (`software`, `vaapi` or `vulkan`), `fell_back_from` and `decode` (the Info pane's words) |

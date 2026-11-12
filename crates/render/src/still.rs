@@ -322,6 +322,16 @@ impl StillRenderer {
         &self.projector
     }
 
+    /// The slot the last render uploaded its frame into, as that render
+    /// left it; `None` before the first. Only tests read it, back through
+    /// [`read_texture`](crate::readback::read_texture): the Tier 2
+    /// zero-copy check, to tell a slot that holds other bytes than the
+    /// frame's from a render that drew the right bytes wrong.
+    #[doc(hidden)]
+    pub fn slot(&self) -> Option<&GpuFrame> {
+        self.slot.as_ref()
+    }
+
     /// `frame` through `view`, `size` pixels large.
     pub fn render(
         &mut self,

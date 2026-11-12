@@ -33,7 +33,7 @@
               "type": "array"
             }
           ],
-          "description": "A time, as look's."
+          "description": "A file time."
         },
         "to": {
           "anyOf": [
@@ -44,7 +44,7 @@
               "type": "array"
             }
           ],
-          "description": "A time."
+          "description": "A file time."
         }
       }
     },

@@ -387,12 +387,25 @@ impl SpherecutApp {
     /// show picked. eframe calls only this while the window is minimized
     /// or occluded: the presenter moves the cache's playhead and ends the
     /// clip, so playback goes on hidden. It asks for the next pass while
-    /// anything moves. Never waits.
+    /// anything moves. Never waits, but for the smoke run's control
+    /// (`--smoke-control-ui-waits`, D40).
     pub fn logic(&mut self, ctx: &egui::Context) {
         let s = &mut self.state;
         // The last pass has presented, painted or not (D41).
         s.gpu.submit_gate().open();
         s.tick();
+        // The smoke run's control: a UI that waits for each decoded frame
+        // while the clip plays, as the UI must not (D40). The gate is
+        // open, so uploads go on meanwhile.
+        if self
+            .smoke
+            .as_ref()
+            .is_some_and(|d| d.args().control_ui_waits)
+            && s.snapshot.state == PlayState::Playing
+            && let Some(p) = &s.player
+        {
+            crate::smoke::wait_for_a_decoded_frame(p);
+        }
         s.presented = s.player.as_ref().and_then(|p| {
             // As eframe decides whether to paint: frames passed over
             // while nothing is painted aren't dropped.

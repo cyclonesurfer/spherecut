@@ -1,0 +1,330 @@
+===== full 2026-11-11T17:45:31-08:00 LockedHint=no
+ 17:45:31 up 31 days, 22:43,  1 user,  load average: 2.55, 5.06, 3.62
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4105193 pat       20   0  236284   6244   4032 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14344   9524 S   0.0   0.0   1:51.96 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.84 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+      4 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      5 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+      6 root       0 -20       0      0      0 I   0.0   0.0   0:00.00 kworker+
+===== behind2 2026-11-11T20:18:02-08:00 LockedHint=no
+ 20:18:02 up 32 days,  1:15,  1 user,  load average: 19.23, 13.29, 8.65
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 731984 256320 S  18.7   1.1  21:01.86 firefox
+4120468 pat       20   0 4013752 977.8m 131260 S  14.0   1.5  22:13.53 Isolate+
+   4536 pat       20   0   11.3g 412756 141484 S   4.7   0.6     36,02 gnome-s+
+ 383300 pat       20   0  236284   6256   4048 R   4.7   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.7   0.0   5:05.87 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.04 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-01 2026-11-11T20:24:38-08:00 LockedHint=no
+ 20:24:38 up 32 days,  1:22,  1 user,  load average: 2.62, 7.82, 7.86
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4536 pat       20   0   11.3g 413172 141484 S   9.3   0.6     36,03 gnome-s+
+4120468 pat       20   0 4021848 974956 131324 S   9.3   1.5  23:34.39 Isolate+
+   1506 root      20   0   16192   6744   6036 S   4.7   0.0   1:23.52 systemd+
+   1842 root      20   0  500100  16112  14348 S   4.7   0.0   2:20.91 tuned-p+
+ 400724 pat       20   0  236284   6176   3964 R   4.7   0.0   0:00.02 top
+4044487 pat       20   0 5684952 308600 120916 S   4.7   0.5   1:15.75 2.1.312
+4119444 pat       20   0   11.9g 742144 256664 S   4.7   1.1  22:16.54 firefox
+===== zc-02 2026-11-11T20:25:11-08:00 LockedHint=no
+ 20:25:11 up 32 days,  1:22,  1 user,  load average: 4.10, 7.59, 7.78
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 742260 256664 S  18.6   1.1  22:22.74 firefox
+4120468 pat       20   0 4021832 979244 131324 S  13.9   1.5  23:40.77 Isolate+
+   4536 pat       20   0   11.3g 412912 141484 S   9.3   0.6     36,03 gnome-s+
+ 403138 pat       20   0  236284   6344   4132 R   4.6   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.6   0.0   5:12.64 kworker+
+4162893 root      20   0       0      0      0 I   4.6   0.0   0:03.97 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.05 systemd
+===== zc-03 2026-11-11T20:25:44-08:00 LockedHint=no
+ 20:25:44 up 32 days,  1:23,  1 user,  load average: 3.84, 7.14, 7.62
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 742340 256664 S  18.6   1.1  22:28.69 firefox
+4120468 pat       20   0 4023864   1.0g 131516 S  18.6   1.6  23:48.12 Isolate+
+   4536 pat       20   0   11.3g 412860 141484 S   9.3   0.6     36,03 gnome-s+
+ 405508 pat       20   0  236284   6244   4032 R   4.7   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.7   0.0   5:13.17 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.06 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-04 2026-11-11T20:26:18-08:00 LockedHint=no
+ 20:26:18 up 32 days,  1:23,  1 user,  load average: 6.00, 7.33, 7.67
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4018760 972432 131516 R  18.6   1.5  23:55.99 Isolate+
+   4536 pat       20   0   11.3g 412748 141484 S  14.0   0.6     36,03 gnome-s+
+4119444 pat       20   0   11.9g 742416 256664 S  14.0   1.1  22:35.29 firefox
+   2277 pat       20   0 1054888 123216  11160 S   4.7   0.2  41:43.85 hermes
+ 407908 pat       20   0  236284   6228   4016 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.06 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-05 2026-11-11T20:26:51-08:00 LockedHint=no
+ 20:26:51 up 32 days,  1:24,  1 user,  load average: 6.82, 7.34, 7.65
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 757912 256664 S  14.0   1.2  22:41.57 firefox
+   4536 pat       20   0   11.3g 412824 141484 S   9.3   0.6     36,03 gnome-s+
+   2277 pat       20   0 1054888 123216  11160 S   4.7   0.2  41:43.88 hermes
+ 131508 pat       20   0 5634628 168336  34732 S   4.7   0.3  81:33.21 claude
+ 410294 pat       20   0  236284   6268   4040 R   4.7   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.7   0.0   5:14.14 kworker+
+4044487 pat       20   0 5684952 315856 120980 S   4.7   0.5   1:17.82 2.1.312
+===== zc-06 2026-11-11T20:27:24-08:00 LockedHint=no
+ 20:27:24 up 32 days,  1:24,  1 user,  load average: 6.20, 7.11, 7.56
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4026952 966220 131580 S  18.6   1.5  24:09.72 Isolate+
+4119444 pat       20   0   11.9g 732048 256664 S  14.0   1.1  22:48.09 firefox
+   4536 pat       20   0   11.3g 412904 141484 S   9.3   0.6     36,03 gnome-s+
+ 143598 pat       20   0 4815072 435148  42836 S   4.7   0.7 185:18.18 Telegram
+ 365909 pat       20   0 4418744 120348  27696 S   4.7   0.2      9,43 bridge
+ 412661 pat       20   0  236284   6260   4048 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.07 systemd
+===== zc-07 2026-11-11T20:27:57-08:00 LockedHint=no
+ 20:27:57 up 32 days,  1:25,  1 user,  load average: 6.32, 7.05, 7.53
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4026936 962136 131580 R  14.0   1.5  24:16.09 Isolate+
+   4536 pat       20   0   11.3g 412916 141484 S   9.3   0.6     36,03 gnome-s+
+4119444 pat       20   0   11.9g 731524 256664 S   9.3   1.1  22:54.23 firefox
+ 415040 pat       20   0  236284   6324   4108 R   4.7   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.7   0.0   5:15.14 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.08 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-08 2026-11-11T20:28:31-08:00 LockedHint=no
+ 20:28:31 up 32 days,  1:26,  1 user,  load average: 6.29, 6.97, 7.48
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 731452 256664 S  18.6   1.1  23:00.53 firefox
+4120468 pat       20   0 4027000 963928 131644 S  18.6   1.5  24:22.64 Isolate+
+   4536 pat       20   0   11.3g 412928 141484 S   9.3   0.6     36,03 gnome-s+
+ 417440 pat       20   0  236284   6256   4040 R   4.7   0.0   0:00.02 top
+2552712 pat       20   0 5656184 184396  79764 S   4.7   0.3   5:54.85 2.1.312
+4044487 pat       20   0 5684952 315700 120980 S   4.7   0.5   1:18.22 2.1.312
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.08 systemd
+===== zc-09 2026-11-11T20:29:04-08:00 LockedHint=no
+ 20:29:04 up 32 days,  1:26,  1 user,  load average: 6.20, 6.84, 7.42
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027000 964680 131644 S  23.3   1.5  24:29.14 Isolate+
+4119444 pat       20   0   11.9g 731560 256664 S  18.6   1.1  23:06.79 firefox
+   4536 pat       20   0   11.3g 412876 141484 S   9.3   0.6     36,03 gnome-s+
+   1743 root      20   0 2845792  25684  12040 S   4.7   0.0  11:36.63 contain+
+ 419806 pat       20   0  236284   6388   4176 R   4.7   0.0   0:00.02 top
+4181083 root      20   0       0      0      0 I   4.7   0.0   0:03.39 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.08 systemd
+===== zc-10 2026-11-11T20:29:37-08:00 LockedHint=no
+ 20:29:37 up 32 days,  1:27,  1 user,  load average: 8.86, 7.38, 7.58
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027000 965192 131644 S  18.6   1.5  24:35.55 Isolate+
+4119444 pat       20   0   11.9g 731604 256664 S  14.0   1.1  23:12.81 firefox
+   4536 pat       20   0   11.3g 412888 141484 S   9.3   0.6     36,03 gnome-s+
+   1510 root      20   0   17144   6740   6360 S   4.7   0.0   1:27.03 systemd+
+ 343259 pat       20   0   48.9g  54840  51500 S   4.7   0.1  26:03.08 mullvad+
+ 422170 pat       20   0  236284   6344   4128 R   4.7   0.0   0:00.02 top
+4162893 root      20   0       0      0      0 I   4.7   0.0   0:04.26 kworker+
+===== zc-11 2026-11-11T20:30:10-08:00 LockedHint=no
+ 20:30:10 up 32 days,  1:27,  1 user,  load average: 6.36, 6.92, 7.42
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4536 pat       20   0   11.3g 412748 141484 S   9.3   0.6     36,03 gnome-s+
+ 124196 pat       20   0 1448.4g 157548  51364 S   9.3   0.2  83:12.18 claude-+
+4119444 pat       20   0   11.9g 731644 256664 S   9.3   1.1  23:19.08 firefox
+ 424543 pat       20   0  236284   6164   3952 R   4.7   0.0   0:00.02 top
+4120468 pat       20   0 4027064 967176 131644 S   4.7   1.5  24:42.00 Isolate+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.10 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-12 2026-11-11T20:30:43-08:00 LockedHint=no
+ 20:30:43 up 32 days,  1:28,  1 user,  load average: 5.62, 6.68, 7.32
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027080 973652 131644 R  18.6   1.5  24:48.36 Isolate+
+   4536 pat       20   0   11.3g 412824 141484 S  13.9   0.6     36,03 gnome-s+
+4119444 pat       20   0   11.9g 731680 256664 S  13.9   1.1  23:25.18 firefox
+ 426905 pat       20   0  236284   6252   4040 R   4.6   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.6   0.0   5:17.68 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.10 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-13 2026-11-11T20:31:16-08:00 LockedHint=no
+ 20:31:16 up 32 days,  1:28,  1 user,  load average: 4.20, 6.22, 7.14
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027064 974644 131644 S  18.5   1.5  24:54.71 Isolate+
+4119444 pat       20   0   11.9g 731680 256664 S  13.9   1.1  23:31.41 firefox
+   4536 pat       20   0   11.3g 412748 141484 R   4.6   0.6     36,03 gnome-s+
+ 429316 pat       20   0  236284   6264   4048 R   4.6   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.11 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-14 2026-11-11T20:31:50-08:00 LockedHint=no
+ 20:31:50 up 32 days,  1:29,  1 user,  load average: 3.92, 5.92, 7.01
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027064 979.4m 131644 S  23.3   1.5  25:01.78 Isolate+
+4119444 pat       20   0   11.9g 731756 256664 S  14.0   1.1  23:37.70 firefox
+   4536 pat       20   0   11.3g 412824 141484 S   9.3   0.6     36,03 gnome-s+
+ 124196 pat       20   0 1448.4g 156152  51364 S   4.7   0.2  83:12.61 claude-+
+ 431684 pat       20   0  236284   6344   4132 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.11 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-15 2026-11-11T20:32:23-08:00 LockedHint=no
+ 20:32:23 up 32 days,  1:29,  1 user,  load average: 2.98, 5.50, 6.83
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 741448 256664 S  18.6   1.1  23:44.10 firefox
+4120468 pat       20   0 4027080 992.8m 131644 S  18.6   1.5  25:08.49 Isolate+
+   4536 pat       20   0   11.3g 412904 141484 S   4.7   0.6     36,04 gnome-s+
+  16025 pat       20   0 1906332  99972  59856 S   4.7   0.2  36:32.74 ptyxis
+ 124590 pat       20   0 1447.9g  30848  28648 S   4.7   0.0   0:55.22 claude-+
+ 434058 pat       20   0  236284   6320   4108 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.12 systemd
+===== zc-16 2026-11-11T20:32:56-08:00 LockedHint=no
+ 20:32:56 up 32 days,  1:30,  1 user,  load average: 3.39, 5.29, 6.71
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 740784 256664 S  14.0   1.1  23:50.35 firefox
+   4536 pat       20   0   11.3g 412916 141484 S   4.7   0.6     36,04 gnome-s+
+ 436440 pat       20   0  236284   6164   3952 R   4.7   0.0   0:00.02 top
+4120468 pat       20   0 4027128 995.3m 131644 R   4.7   1.6  25:14.97 Isolate+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.13 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-17 2026-11-11T20:33:30-08:00 LockedHint=no
+ 20:33:30 up 32 days,  1:31,  1 user,  load average: 5.11, 5.49, 6.72
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 740792 256664 S  18.6   1.1  23:56.70 firefox
+4120468 pat       20   0 4027128   1.0g 131644 S  18.6   1.6  25:21.51 Isolate+
+   4536 pat       20   0   11.3g 412864 141484 S  13.9   0.6     36,04 gnome-s+
+ 438807 pat       20   0  236284   6164   3952 R   4.6   0.0   0:00.02 top
+4182419 root      20   0       0      0      0 I   4.6   0.0   0:04.78 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.13 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-18 2026-11-11T20:34:03-08:00 LockedHint=no
+ 20:34:03 up 32 days,  1:31,  1 user,  load average: 6.40, 5.75, 6.77
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 740832 256664 S  18.6   1.1  24:02.89 firefox
+4120468 pat       20   0 4027128   1.0g 131644 R  18.6   1.6  25:27.82 Isolate+
+   4536 pat       20   0   11.3g 412880 141484 S   4.7   0.6     36,04 gnome-s+
+ 441208 pat       20   0  236284   6192   3980 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.13 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-19 2026-11-11T20:34:36-08:00 LockedHint=no
+ 20:34:36 up 32 days,  1:32,  1 user,  load average: 7.77, 6.12, 6.85
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027128   1.0g 131644 S  23.3   1.6  25:34.08 Isolate+
+4119444 pat       20   0   11.9g 740876 256664 S  18.6   1.1  24:09.01 firefox
+   4536 pat       20   0   11.3g 412892 141484 S   9.3   0.6     36,04 gnome-s+
+ 443568 pat       20   0  236284   6260   4044 R   9.3   0.0   0:00.02 top
+  16025 pat       20   0 1906332  99972  59856 S   4.7   0.2  36:33.29 ptyxis
+4171754 root      20   0       0      0      0 I   4.7   0.0   0:05.09 kworker+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.14 systemd
+===== zc-20 2026-11-11T20:35:09-08:00 LockedHint=no
+ 20:35:09 up 32 days,  1:32,  1 user,  load average: 5.08, 5.62, 6.65
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027144   1.0g 131644 S  14.0   1.6  25:40.55 Isolate+
+   4536 pat       20   0   11.3g 412768 141484 S   9.3   0.6     36,04 gnome-s+
+4119444 pat       20   0   11.9g 740948 256664 S   9.3   1.1  24:15.27 firefox
+ 445939 pat       20   0  236284   6340   4124 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.15 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-21 2026-11-11T20:35:43-08:00 LockedHint=no
+ 20:35:43 up 32 days,  1:33,  1 user,  load average: 7.19, 6.06, 6.77
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 740988 256664 S  18.7   1.1  24:21.39 firefox
+4120468 pat       20   0 4027192   1.0g 131644 S  18.7   1.6  25:46.90 Isolate+
+   4536 pat       20   0   11.3g 412928 141484 S   9.3   0.6     36,04 gnome-s+
+ 448299 pat       20   0  236284   6236   4024 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.16 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-22 2026-11-11T20:36:16-08:00 LockedHint=no
+ 20:36:16 up 32 days,  1:33,  1 user,  load average: 6.73, 6.04, 6.73
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4027192   1.0g 131644 S  23.3   1.6  25:53.19 Isolate+
+4119444 pat       20   0   11.9g 741040 256664 S  14.0   1.1  24:27.58 firefox
+   4536 pat       20   0   11.3g 412752 141484 S   9.3   0.6     36,04 gnome-s+
+ 450663 pat       20   0  236284   6348   4132 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.16 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-23 2026-11-11T20:36:49-08:00 LockedHint=no
+ 20:36:49 up 32 days,  1:34,  1 user,  load average: 6.52, 6.06, 6.71
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   11.9g 741080 256664 S  18.7   1.1  24:33.79 firefox
+4120468 pat       20   0 4027192   1.0g 131644 S  18.7   1.6  25:59.63 Isolate+
+   4536 pat       20   0   11.3g 412828 141484 S   9.3   0.6     36,04 gnome-s+
+   2277 pat       20   0 1054888 123216  11160 S   4.7   0.2  41:44.55 hermes
+ 453071 pat       20   0  236284   6160   3952 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.16 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-24 2026-11-11T20:37:22-08:00 LockedHint=no
+ 20:37:22 up 32 days,  1:34,  1 user,  load average: 6.42, 6.08, 6.70
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   12.0g 751236 256664 S  14.0   1.1  24:40.23 firefox
+ 455446 pat       20   0  236284   6372   4160 R   9.3   0.0   0:00.02 top
+4120468 pat       20   0 4026952   1.0g 131644 S   9.3   1.6  26:06.58 Isolate+
+   4536 pat       20   0   11.3g 412752 141484 R   4.7   0.6     36,04 gnome-s+
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.17 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== zc-25 2026-11-11T20:37:56-08:00 LockedHint=no
+ 20:37:56 up 32 days,  1:35,  1 user,  load average: 6.26, 6.06, 6.67
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4026952   1.0g 131644 R  23.3   1.6  26:12.99 Isolate+
+4119444 pat       20   0   12.0g 750480 256664 S  14.0   1.1  24:46.45 firefox
+   4536 pat       20   0   11.3g 412828 141484 S   9.3   0.6     36,04 gnome-s+
+  16025 pat       20   0 1906332  99972  59856 S   4.7   0.2  36:34.12 ptyxis
+ 365897 pat       20   0 3726588  81188  37644 S   4.7   0.1 132:17.86 bridge-+
+ 457825 pat       20   0  236284   6308   4096 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.18 systemd
+===== zc-26 2026-11-11T20:38:29-08:00 LockedHint=no
+ 20:38:29 up 32 days,  1:35,  1 user,  load average: 5.58, 5.94, 6.60
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+ 124453 pat       20   0 1461.2g 585288  51688 R 251.3   0.9  56:35.40 claude-+
+4119444 pat       20   0   12.0g 750500 256664 S  23.3   1.1  24:52.89 firefox
+4120468 pat       20   0 4019784 983728 131708 S  18.6   1.5  26:20.25 Isolate+
+   4536 pat       20   0   11.3g 412908 141484 S  14.0   0.6     36,04 gnome-s+
+  16025 pat       20   0 1906332  99972  59856 S   4.7   0.2  36:34.27 ptyxis
+ 143598 pat       20   0 4821468 435244  42880 S   4.7   0.7 185:21.29 Telegram
+ 343259 pat       20   0   48.9g  54840  51500 S   4.7   0.1  26:03.85 mullvad+
+===== zc-27 2026-11-11T20:39:03-08:00 LockedHint=no
+ 20:39:03 up 32 days,  1:36,  1 user,  load average: 6.57, 6.12, 6.64
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4019848 981404 131708 S  23.2   1.5  26:26.69 Isolate+
+4119444 pat       20   0   12.0g 750556 256664 S  18.6   1.1  24:59.32 firefox
+   1510 root      20   0   17144   6740   6360 S   4.6   0.0   1:27.10 systemd+
+   2112 root      20   0  609680   9496   8764 S   4.6   0.0   1:08.30 gdm
+   4536 pat       20   0   11.3g 412920 141484 S   4.6   0.6     36,04 gnome-s+
+ 462596 pat       20   0  236284   6384   4172 R   4.6   0.0   0:00.02 top
+3912311 root      20   0       0      0      0 I   4.6   0.0   5:25.09 kworker+
+===== zc-28 2026-11-11T20:39:36-08:00 LockedHint=no
+ 20:39:36 up 32 days,  1:37,  1 user,  load average: 6.75, 6.20, 6.64
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4019848 981832 131708 S  28.0   1.5  26:33.19 Isolate+
+4119444 pat       20   0   12.0g 750628 256664 S  14.0   1.1  25:05.47 firefox
+   4536 pat       20   0   11.3g 412868 141484 S   9.3   0.6     36,04 gnome-s+
+   1326 systemd+  20   0   16036   6160   5892 S   4.7   0.0  32:54.40 systemd+
+ 464963 pat       20   0  236284   6280   4064 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.20 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+===== zc-29 2026-11-11T20:40:09-08:00 LockedHint=no
+ 20:40:09 up 32 days,  1:37,  1 user,  load average: 6.04, 6.08, 6.59
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4120468 pat       20   0 4019848 980168 131708 S  18.7   1.5  26:39.55 Isolate+
+4119444 pat       20   0   12.0g 750668 256664 S  14.0   1.1  25:11.72 firefox
+   4536 pat       20   0   11.3g 412880 141484 S   9.3   0.6     36,04 gnome-s+
+   1916 root      20   0 3063964  28660   9908 S   4.7   0.0   5:04.90 dockerd
+ 131508 pat       20   0 5634628 168844  34732 S   4.7   0.3  81:35.61 claude
+ 467330 pat       20   0  236284   6244   4032 R   4.7   0.0   0:00.02 top
+2552712 pat       20   0 5656184 184400  79764 S   4.7   0.3   5:56.64 2.1.312
+===== zc-30 2026-11-11T20:40:42-08:00 LockedHint=no
+ 20:40:42 up 32 days,  1:38,  1 user,  load average: 6.52, 6.17, 6.60
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   12.0g 750712 256664 S  14.0   1.1  25:17.98 firefox
+4120468 pat       20   0 4019848 981800 131708 S  14.0   1.5  26:46.02 Isolate+
+   4536 pat       20   0   11.3g 412904 141484 S   9.3   0.6     36,04 gnome-s+
+ 469698 pat       20   0  236284   6328   4112 R   4.7   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.20 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+
+===== 125 2026-11-11T20:41:57-08:00 LockedHint=no
+ 20:41:57 up 32 days,  1:39,  1 user,  load average: 2.96, 5.25, 6.25
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+4119444 pat       20   0   12.0g 761624 270636 S  18.3   1.2  25:31.13 firefox
+4120468 pat       20   0 4020836 997592 132632 S  18.3   1.5  26:59.61 Isolate+
+   4536 pat       20   0   11.4g 426056 152784 S   9.1   0.6     36,05 gnome-s+
+ 473207 pat       20   0  236284   6184   3960 R   4.6   0.0   0:00.02 top
+      1 root      20   0   42048  14480   9628 S   0.0   0.0   1:52.21 systemd
+      2 root      20   0       0      0      0 S   0.0   0.0   0:02.86 kthreadd
+      3 root      20   0       0      0      0 S   0.0   0.0   0:00.00 pool_wo+

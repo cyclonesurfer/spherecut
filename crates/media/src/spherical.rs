@@ -224,9 +224,10 @@ pub fn read_track(trak: &Mp4Box) -> TrackSpherical {
     out
 }
 
-/// V2's metadata as FFmpeg's demuxer exported it, for a file whose boxes
-/// we don't read: Matroska and WebM's `Projection` and `StereoMode`
-/// elements. FFmpeg's stereo types beyond the three V2 names become
+/// V2's metadata as FFmpeg's demuxer exported it: for a file whose boxes
+/// we don't read, Matroska and WebM's `Projection` and `StereoMode`
+/// elements, and for [`probe::demuxer_view`](crate::probe::demuxer_view)
+/// of any file. FFmpeg's stereo types beyond the three V2 names become
 /// `StereoCustom` ("determined elsewhere"), and right-left is `st3d`'s
 /// value 4.
 pub(crate) fn from_ffmpeg(f: &crate::ffi::FfSpherical) -> SphericalV2 {
@@ -286,6 +287,12 @@ fn fixed16(v: i32) -> f64 {
     v as f64 / 65536.0
 }
 
+/// `sv3d` as the specification lays it out, read leniently: `svhd`,
+/// `proj` and `prhd` wherever they are among their siblings, any version,
+/// and the first box in `proj` other than `prhd` as the projection. So
+/// this can give a projection that FFmpeg's demuxer, which is strict
+/// about the order and the versions, ignores; the damage check says when
+/// it does (`mp4::lost_projections`, D15), and probe fails such a file.
 fn parse_sv3d(b: &Mp4Box) -> SphericalV2 {
     let metadata_source = b.child(b"svhd").map(|h| {
         let mut c = Cursor::new(&h.payload);
@@ -407,38 +414,46 @@ pub mod write {
 
     /// `sv3d` for a full-sphere equirect with zero pose.
     pub fn sv3d_equirect(metadata_source: &str) -> Vec<u8> {
-        sv3d(
-            metadata_source,
-            &Projection::Equirect {
-                top: 0,
-                bottom: 0,
-                left: 0,
-                right: 0,
-            },
-        )
+        sv3d_with(metadata_source, equi([0; 4]))
     }
 
     /// `sv3d` with zero pose for an equirect (with its bounds) or a
-    /// cubemap. A mesh or another projection has no box here, and gets a
-    /// `proj` with only its header, which readers ignore.
-    pub fn sv3d(metadata_source: &str, projection: &Projection) -> Vec<u8> {
-        let mut src = metadata_source.as_bytes().to_vec();
-        src.push(0);
-        let svhd = full(b"svhd", &src);
-        let prhd = full(b"prhd", &[0; 12]);
-        let words = |w: &[u32]| w.iter().flat_map(|w| w.to_be_bytes()).collect::<Vec<u8>>();
+    /// cubemap; `None` for a mesh or another projection, whose box this
+    /// doesn't write. A `proj` must hold one projection box, and FFmpeg
+    /// reads whatever follows a `proj` with only its header as the
+    /// projection, past the end of `sv3d` (F130).
+    pub fn sv3d(metadata_source: &str, projection: &Projection) -> Option<Vec<u8>> {
         let body = match *projection {
             Projection::Equirect {
                 top,
                 bottom,
                 left,
                 right,
-            } => full(b"equi", &words(&[top, bottom, left, right])),
+            } => equi([top, bottom, left, right]),
             Projection::Cubemap { layout, padding } => full(b"cbmp", &words(&[layout, padding])),
-            Projection::Mesh | Projection::Other { .. } => Vec::new(),
+            Projection::Mesh | Projection::Other { .. } => return None,
         };
+        Some(sv3d_with(metadata_source, body))
+    }
+
+    /// `sv3d` with zero pose and the projection box `body`.
+    fn sv3d_with(metadata_source: &str, body: Vec<u8>) -> Vec<u8> {
+        let mut src = metadata_source.as_bytes().to_vec();
+        src.push(0);
+        let svhd = full(b"svhd", &src);
+        let prhd = full(b"prhd", &[0; 12]);
         let proj = bx(b"proj", &[prhd, body].concat());
         bx(b"sv3d", &[svhd, proj].concat())
+    }
+
+    /// `equi` with its bounds: top, bottom, left and right.
+    fn equi(bounds: [u32; 4]) -> Vec<u8> {
+        full(b"equi", &words(&bounds))
+    }
+
+    /// Big-endian words.
+    fn words(w: &[u32]) -> Vec<u8> {
+        w.iter().flat_map(|w| w.to_be_bytes()).collect()
     }
 
     /// The V1 `uuid` box for a mono full-sphere equirect, for the video
@@ -577,11 +592,39 @@ mod tests {
                 padding: 16,
             },
         ] {
-            let b = write::sv3d("t", &p);
+            let b = write::sv3d("t", &p).unwrap();
             let tree = mp4::read(&mut std::io::Cursor::new(file_with(b, vec![], vec![]))).unwrap();
             let v2 = read_tracks(&tree)[0].v2.clone().unwrap();
             assert_eq!(v2.projection, Some(p));
         }
+    }
+
+    /// The writer writes no `sv3d` for a projection it has no box for
+    /// (F130): FFmpeg would read whatever follows a `proj` with only its
+    /// header as the projection.
+    ///
+    /// Control: an equirect, which it writes, as the writer of nothing.
+    #[test]
+    fn sv3d_writes_nothing_for_a_projection_it_cannot_box() {
+        use spherecut_testkit::control::must_fail;
+
+        for p in [
+            Projection::Mesh,
+            Projection::Other {
+                fourcc: "abcd".into(),
+            },
+        ] {
+            assert_eq!(write::sv3d("t", &p), None, "{p:?}");
+        }
+        let whole = Projection::Equirect {
+            top: 0,
+            bottom: 0,
+            left: 0,
+            right: 0,
+        };
+        let b = write::sv3d("t", &whole);
+        assert_eq!(b.as_deref(), Some(&write::sv3d_equirect("t")[..]));
+        must_fail("an equirect written as nothing", b.is_none());
     }
 
     #[test]

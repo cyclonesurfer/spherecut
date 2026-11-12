@@ -21,7 +21,12 @@ pub struct Server {
 
 impl Server {
     pub fn spawn(configure: impl FnOnce(&mut Command)) -> Server {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_spherecut"));
+        Server::spawn_with(Command::new(env!("CARGO_BIN_EXE_spherecut")), configure)
+    }
+
+    /// `program`, the binary or a command that runs it (strace's), with
+    /// `mcp` and the server's stdio and environment appended.
+    pub fn spawn_with(mut cmd: Command, configure: impl FnOnce(&mut Command)) -> Server {
         cmd.arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

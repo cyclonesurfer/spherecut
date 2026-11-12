@@ -2,7 +2,7 @@
 //! frame` (M1 plan section 5, D27), which `look` renders its tiles with
 //! (a1-plan section 2). The steps are frame's 4 to 8:
 //!
-//! 4. [`probe`]: the file probed through the confinement (D24), its video
+//! 4. [`probe()`]: the file probed through the confinement (D24), its video
 //!    stream chosen, and checked to be a stitched equirect unless the
 //!    caller says it is one;
 //! 5. [`gpu`] and [`check_gpu`]: a headless GPU, and whether it can keep
@@ -167,7 +167,7 @@ pub fn probe_report(src: Source<'_>, stop: &Stop) -> Result<ProbeReport, Failure
 }
 
 /// The rest of step 4, on a report [`probe_report`] made: its video
-/// stream chosen and checked as [`probe`] does, and its damage a warning.
+/// stream chosen and checked as [`probe()`] does, and its damage a warning.
 pub fn probed(
     report: ProbeReport,
     opts: &Options,
@@ -190,7 +190,7 @@ pub fn probed(
     Ok(Probed { report, stream })
 }
 
-/// Why `probed` may not be a stitched equirect, as [`probe`] without
+/// Why `probed` may not be a stitched equirect, as [`probe()`] without
 /// [`Options::equirect`] refuses it: `None` when it is tagged one.
 pub fn equirect_doubt(probed: &Probed) -> Option<String> {
     check_equirect(&probed.report, &probed.stream)
@@ -199,7 +199,7 @@ pub fn equirect_doubt(probed: &Probed) -> Option<String> {
 }
 
 /// The report's video streams that aren't cover pictures, which
-/// [`probe`] chooses from.
+/// [`probe()`] chooses from.
 pub fn video_streams(report: &ProbeReport) -> Vec<&StreamInfo> {
     report
         .streams
@@ -252,10 +252,10 @@ fn choose_stream<'r>(
 }
 
 /// Whether the file is a stitched equirect: tagged so (Spherical Video
-/// V2's `equi`, or V1's `equirectangular`, in an MP4 or MOV file), or
-/// else `not_equirect`, naming what it is, or that its Matroska spherical
-/// metadata isn't read. The message says what the file is, and the
-/// caller how to render it anyway.
+/// V2's `equi` in an MP4 or MOV file, the `Projection` element FFmpeg
+/// exports from a Matroska or WebM file, or V1's `equirectangular`), or
+/// else `not_equirect`, naming what it is. The message says what the file
+/// is, and the caller how to render it anyway.
 fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failure> {
     let file = report.path.display();
     let refuse = |what: String| {
@@ -307,14 +307,6 @@ fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failu
         .as_ref()
         .map(|v| format!("{}x{}", v.width, v.height))
         .unwrap_or_else(|| "of unknown size".into());
-    // probe reads spherical metadata from MP4 boxes only.
-    if report.container.format.starts_with("matroska") {
-        return Err(refuse(format!(
-            "a {size} Matroska/WebM file, and Spherecut doesn't read Matroska's spherical \
-             metadata yet (Spherical Video V2's Projection element), so it can't tell whether \
-             it is an equirect"
-        )));
-    }
     match report.camera.as_ref().map(|c| c.layout) {
         Some(Layout::Insta360DualFisheye) => Err(refuse(
             "Insta360 dual fisheye: stitching arrives in M3".into(),

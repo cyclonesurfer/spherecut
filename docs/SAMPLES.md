@@ -32,7 +32,7 @@ doesn't exist on your camera, skip it and note what the nearest one is called.
 | 9 | Handheld or selfie stick, 60 s: walk, turn quickly, tilt the camera past vertical, and do two full flips (roll it over end to end) | Gyro sync, stabilization, horizon through flips |
 | 10 | On the tripod, slowly rotate the camera by hand: a full turn in yaw, then pitch it forward ~90° and back, then roll ~90° and back | Gyro-to-video time sync and axis conventions |
 | 11 | Any single mode with in-camera stabilization/FlowState/HyperSmooth **off**, and the same with it **on** if that changes what is recorded | Whether the raw file is already stabilized |
-| 12 | One clip from 1 exported through the vendor's own app/desktop software as stitched equirect (any resolution) | Reference for comparing my stitch |
+| 12 | One clip from 1 exported through the vendor's own app/desktop software as stitched equirect (any resolution); for the X5, take 16's at 5.7K30 too (below) | Reference for comparing my stitch, and the 5.7K30 file M1's real-time row plays |
 | 13 | One recording longer than the camera's file-split point (usually ~4 GB, often 8–10 min at max resolution) | Chaptered/split recordings. Optional, it's large |
 
 ## For stitching the X5 (M3, added 2026-11-01)
@@ -52,7 +52,11 @@ copied untouched, with the `.lrv`.
 You agreed on 2026-11-01 (question 2 of `docs/design/m3-plan.md`) to clip 12
 for take 14: a stitched equirect export of it from Insta360 Studio. Spherecut
 only compares its own stitch against it when the fit leaves a question open;
-it never fits to it, and nothing from Studio goes into the code. Still
+it never fits to it, and nothing from Studio goes into the code. For M1's
+real-time row, please also export take 16 (5.7K30) from Studio as a stitched
+equirect at 5760×2880 and 29.97 fps: the playback bench judges only files at
+or under 5.7K30 (`crates/playback/tests/tier2_playback.rs:2648`) and only
+records an 8K export, so take 14's alone can't close that row. Still
 missing from the first set, if they're easy: clips 5 (I-Log or 10-bit), 6
 (360 audio on) and 11 (FlowState off and on).
 

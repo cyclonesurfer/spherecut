@@ -2342,7 +2342,18 @@ impl StreamFacts {
         let frame_count = mov
             .then(|| ffi::index_shown(input, index))
             .filter(|&n| n > 0);
-        let mapping = trak_facts.map(|(_, s)| mapping(&s)).unwrap_or_default();
+        // Our own reading of an MP4's boxes, else what FFmpeg's demuxer
+        // exported (Matroska and WebM), as probe reads them.
+        let mapping = match trak_facts {
+            Some((_, s)) => mapping(&s),
+            None => mapping(&spherical::TrackSpherical {
+                v2: st
+                    .as_ref()
+                    .and_then(|s| ffi::codecpar_fields(&s.parameters()).spherical)
+                    .map(|f| spherical::from_ffmpeg(&f)),
+                ..Default::default()
+            }),
+        };
         StreamFacts {
             end_pts,
             timing,
@@ -2555,6 +2566,8 @@ pub fn frame_address(
 /// Frame `n` of `dec`'s stream, by [`frame_address`]: a seek for a
 /// constant rate, or the first frame and `n` more for a variable one.
 /// `None` on a stop, and `Err` past the end of a variable-rate stream.
+/// A decoder doesn't know its file, so the errors made here name none:
+/// the caller names it ([`MediaError::or_path`]).
 pub fn seek_frame(
     dec: &mut dyn VideoDecode,
     n: u64,
