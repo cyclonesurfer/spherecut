@@ -212,11 +212,12 @@ fn priming_is_gone_and_the_audio_starts_on_the_video_axis() {
 /// before the video's first frame and no CodecDelay, as FFmpeg before
 /// 9.0 copies it from an MP4, and as the track's CodecDelay, as 9.0
 /// copies it. FFmpeg's Matroska demuxer takes a CodecDelay's priming away
-/// at open but not after a seek (8.1's and 9.0's do; 6.1's reads the
-/// CodecDelay and takes nothing away), so that a seek near the start
-/// decodes samples from before the stream's first. On any FFmpeg, the
-/// copy without one is opened that way too ([`AudioFault`]), and the
-/// controls hand those samples out.
+/// at open but not after a seek (8.1's and 9.0's do; 6.1's and 7.1's read
+/// the CodecDelay and take nothing away), so that a seek near the start
+/// decodes samples from before the stream's first. On any FFmpeg the
+/// copy without one is also opened that way ([`AudioFault`]), and so is
+/// the copy with one where the demuxer took nothing away; the controls
+/// hand those samples out, from each copy.
 #[test]
 fn a_seek_gives_a_sequential_decodes_samples() {
     for (name, rate) in [("seek-48", 48_000), ("seek-441", 44_100)] {
@@ -266,29 +267,41 @@ fn a_seek_gives_a_sequential_decodes_samples() {
         assert_eq!(opened, 0, "{name}: the priming dropped at open");
         seek_parity(&mut dec, &mkv).unwrap();
 
+        // The CodecDelay copy as 8.1's and 9.0's demuxers open it: where
+        // this FFmpeg's took nothing away at open (6.1's), the open drops
+        // the priming block.
+        let delay_dropped = if start == 0 {
+            AudioFault::default()
+        } else {
+            dropped
+        };
+        if start != 0 {
+            let mut dec = open_faulted(&delayed, delay_dropped);
+            let opened = at_48k(dec.info().start);
+            assert_eq!(
+                opened, 0,
+                "{name}: the CodecDelay's priming dropped at open"
+            );
+            seek_parity(&mut dec, &delayed).unwrap();
+        }
+
         // The controls: the same decodes, handing out what a seek decodes
         // from before the stream's first sample, give the priming where a
         // seek before the start must give silence.
-        let kept = AudioFault {
-            keeps_samples_before_first: true,
-            ..dropped
-        };
-        let mut dec = open_faulted(&mkv, kept);
-        let e = must_fail("the priming handed out", seek_parity(&mut dec, &mkv));
-        assert!(
-            e.contains("not silent before the stream's first sample, 0:"),
-            "{e}"
-        );
-        if start == 0 {
+        for (what, path, fault) in [
+            ("the priming handed out", &mkv, dropped),
+            (
+                "the CodecDelay's priming handed out",
+                &delayed,
+                delay_dropped,
+            ),
+        ] {
             let kept = AudioFault {
                 keeps_samples_before_first: true,
-                ..AudioFault::default()
+                ..fault
             };
-            let mut dec = open_faulted(&delayed, kept);
-            let e = must_fail(
-                "the CodecDelay's priming handed out",
-                seek_parity(&mut dec, &delayed),
-            );
+            let mut dec = open_faulted(path, kept);
+            let e = must_fail(what, seek_parity(&mut dec, path));
             assert!(
                 e.contains("not silent before the stream's first sample, 0:"),
                 "{e}"
@@ -302,7 +315,8 @@ fn at_48k(t: Time) -> i64 {
     (t.to_secs_f64() * 48_000.0).round() as i64
 }
 
-/// libavformat's major version: 60 for FFmpeg 6.1, 62 for 8.1 and 9.0.
+/// libavformat's major version: 60 for FFmpeg 6.1, 61 for 7.1, 62 for
+/// 8.1 and 63 for 9.0.
 fn avformat_major() -> u32 {
     spherecut_media::ff::format::version() >> 16
 }
