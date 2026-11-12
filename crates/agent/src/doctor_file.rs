@@ -7,27 +7,28 @@
 //! checks (D34) and on a discrete GPU where Vulkan Video works takes
 //! that.
 //!
-//! The built-in geometry table is M3.5's (plan 5.3) and the X5's fit
-//! M3.6's, so every file's geometry is provisional here, and the summary
-//! says so: "Insta360 X5 v1.1.22, geometry provisional".
+//! How sure the file's geometry is comes from the built-in geometry
+//! table's entry for its camera (`camera::insta360::known`, plan 5.3):
+//! probe's `geometry` when the file has a calibration a stitch reads,
+//! else the entry for the model and firmware the file names. Until
+//! M3.6's fit every entry is provisional, and the summary says so:
+//! "Insta360 X5 v1.1.22, geometry provisional".
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Serialize;
 use spherecut_camera::insta360::calib::Generation;
+use spherecut_camera::insta360::known;
 use spherecut_core::TimeSpec;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
+use spherecut_media::camera::{CameraFile, status_word};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{ProbeReport, codes, escape_controls};
 
 use crate::contract::{DecodeInfo, ErrorBody, SourceInfo, Warning};
 use crate::still::{self, Failure, Still, Stop};
-
-/// How sure a file's lens geometry is, until M3.5's table gives each
-/// model and firmware its own (plan 5.3).
-const GEOMETRY: &str = "provisional";
 
 /// What `doctor --file` found.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -39,8 +40,9 @@ pub struct FileCheck {
     pub camera: Option<String>,
     /// The firmware the trailer gives, as written (`v1.1.22_build1`).
     pub firmware: Option<String>,
-    /// Whether it can be stitched: two lens streams that decode, and the
-    /// calibration the camera says it uses, in its trailer.
+    /// Whether it can be stitched: two lens streams that decode, the
+    /// calibration the camera says it uses, in its trailer, and a camera
+    /// whose files the built-in table stitches.
     pub stitchable: bool,
     /// That calibration's generation, `v6` on the X5, or null.
     pub calibration: Option<String>,
@@ -48,8 +50,8 @@ pub struct FileCheck {
     /// first video stream alone for a file with no lens streams, and none
     /// for a file with no video stream.
     pub lenses: Vec<LensCheck>,
-    /// How sure its lenses' geometry is: `provisional` until M3.5's
-    /// built-in table and M3.6's fit.
+    /// How sure its lenses' geometry is: the status of the built-in
+    /// table's entry for its camera, `provisional` until M3.6's fit.
     pub geometry: &'static str,
     /// What keeps it from being stitched, in words; empty when nothing
     /// does.
@@ -136,8 +138,13 @@ pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<File
     }
     let camera = r.camera.as_ref().and_then(|c| c.name());
     let firmware = r.camera.as_ref().and_then(|c| c.firmware.clone());
+    let geometry = geometry_word(
+        &r.camera_file,
+        r.camera.as_ref().and_then(|c| c.model.as_deref()),
+        firmware.as_deref(),
+    );
     let summary = format!(
-        "{}{}, geometry {GEOMETRY}",
+        "{}{}, geometry {geometry}",
         camera.as_deref().unwrap_or("an unknown camera"),
         firmware
             .as_deref()
@@ -151,11 +158,28 @@ pub fn check(src: Source<'_>, opts: &still::Options, stop: &Stop) -> Result<File
         stitchable: missing.is_empty() && lenses.len() == 2,
         calibration: in_use,
         lenses,
-        geometry: GEOMETRY,
+        geometry,
         missing,
         summary,
         warnings,
     })
+}
+
+/// How sure the geometry of the file whose camera's records are `f` is:
+/// the status of the built-in table's entry for its camera, as probe's
+/// `geometry` gives it when the file has a calibration a stitch reads,
+/// else as [`known::lookup`] gives it for the `model` (the metadata's
+/// field 2, `Insta360 X5`) and `firmware` the file names, which for a
+/// file that names none is the X5's entry, assumed.
+fn geometry_word(f: &CameraFile, model: Option<&str>, firmware: Option<&str>) -> &'static str {
+    match &f.geometry {
+        Some(g) => g.status,
+        None => status_word(
+            known::lookup(model.unwrap_or_default(), firmware.unwrap_or_default())
+                .geometry
+                .status,
+        ),
+    }
 }
 
 /// What the probe of `r` warned of, as frame words it, each once: its
@@ -188,7 +212,10 @@ fn add_new(warnings: &mut Vec<Warning>, more: impl IntoIterator<Item = Warning>)
 /// What the camera's trailer leaves missing for a stitch, in words: the
 /// trailer itself, or the trailer when it can't be read, with the
 /// probe's own words on why; the two lens streams; the calibration the
-/// camera says it uses.
+/// camera says it uses; when that parses, one a stitch can read
+/// (`camera::insta360::stitching`'s refusal, as probe keeps it); and a
+/// camera the built-in table stitches, in the words frame's refusal of
+/// the pair gives (`known::Known::refusal`, as probe keeps it).
 fn trailer_missing(r: &ProbeReport) -> Vec<String> {
     let f = &r.camera_file;
     let mut missing = Vec::new();
@@ -233,7 +260,14 @@ fn trailer_missing(r: &ProbeReport) -> Vec<String> {
                 ),
             },
         }),
-        Some(_) => {}
+        Some(_) => {
+            if let Some(why) = &f.unstitched {
+                missing.push(format!("a calibration a stitch can read: {why}"));
+            }
+        }
+    }
+    if let Some(why) = &f.table_refusal {
+        missing.push(format!("a camera Spherecut stitches: {why}"));
     }
     missing
 }
@@ -338,4 +372,123 @@ pub fn render_text(f: &FileCheck) -> String {
         let _ = writeln!(s, "  warning: {}", escape_controls(&w.message));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use spherecut_media::camera::{Calibration, GeometryInfo, Lenses};
+    use spherecut_media::probe::{Container, StructureCheck};
+    use spherecut_testkit::control::must_fail;
+
+    use super::*;
+
+    /// A probe of an X5 master with both lens streams and its V6
+    /// calibration in use, whose camera the table's entry `known` is:
+    /// what `bind` keeps of it, the refusal among it, built by hand.
+    fn x5_master(known: &known::Known) -> ProbeReport {
+        ProbeReport {
+            path: "VID_20261022_101500_00_001.insv".into(),
+            file_size: 1,
+            container: Container {
+                format: "mov,mp4,m4a,3gp,3g2,mj2".into(),
+                format_long: String::new(),
+                duration: None,
+                start_time: None,
+                bit_rate: None,
+                tags: BTreeMap::new(),
+            },
+            streams: Vec::new(),
+            mp4: None,
+            camera: None,
+            camera_file: CameraFile {
+                lenses: Some(Lenses {
+                    tracks: [0, 1],
+                    binding: Some("reversed"),
+                    evidence: Some(known.geometry.evidence.clone()),
+                    screen_side: None,
+                }),
+                calibration: Some(Calibration {
+                    generations: vec!["v6".into()],
+                    in_use: Some("v6".into()),
+                    canvas: [7680, 3840],
+                    window: None,
+                    hash: "0123456789abcdef".into(),
+                    offset_version: Some(4),
+                }),
+                geometry: Some(GeometryInfo {
+                    status: status_word(known.geometry.status),
+                    evidence: known.geometry.evidence.clone(),
+                    notice: known.notice,
+                }),
+                records: Some(Vec::new()),
+                table_refusal: known.refusal(),
+                ..CameraFile::default()
+            },
+            structure: StructureCheck::Full,
+            damage: Vec::new(),
+            warnings: Vec::new(),
+            ffmpeg_log: Vec::new(),
+        }
+    }
+
+    /// A camera the table says isn't stitchable is missing from doctor
+    /// `--file`'s list, so the file isn't stitchable, in the words
+    /// frame's refusal of the pair gives (`Known::refusal`); no entry
+    /// says so until M3.6's fit, so the entry is made by hand.
+    ///
+    /// Control: the X5's own entry, which the table stitches, leaves
+    /// nothing missing, so a line pushed whatever the table says fails.
+    #[test]
+    fn the_table_s_refusal_is_missing() {
+        let x5 = known::lookup("Insta360 X5", "v1.1.22_build1");
+        let refused = known::Known {
+            stitchable: false,
+            ..x5.clone()
+        };
+        let why = refused.refusal().expect("the entry refuses");
+        assert_eq!(
+            trailer_missing(&x5_master(&refused)),
+            [format!("a camera Spherecut stitches: {why}")]
+        );
+        must_fail(
+            "the X5's own entry, missing a camera Spherecut stitches",
+            !trailer_missing(&x5_master(&x5)).is_empty(),
+        );
+    }
+
+    /// The geometry word is the table's entry's: probe's `geometry`'s
+    /// status when the file has one, else the entry for the model and
+    /// firmware the file names (the X5's, assumed, for a file that names
+    /// none). The control: a file whose entry is settled isn't worded as
+    /// the X5's provisional entry, which a word fixed in the code would
+    /// give.
+    #[test]
+    fn the_geometry_word_is_the_table_entry_s() {
+        let (model, firmware) = (Some("Insta360 X5"), Some("v1.1.22_build1"));
+        let settled = CameraFile {
+            geometry: Some(GeometryInfo {
+                status: "settled",
+                evidence: "settled by a test".into(),
+                notice: None,
+            }),
+            ..CameraFile::default()
+        };
+        assert_eq!(geometry_word(&settled, model, firmware), "settled");
+        let none = CameraFile::default();
+        let x5 = known::lookup("Insta360 X5", "v1.1.22_build1");
+        assert_eq!(status_word(x5.geometry.status), "provisional");
+        assert_eq!(geometry_word(&none, model, firmware), "provisional");
+        let assumed = known::lookup("", "");
+        assert_eq!(assumed.notice, Some("geometry assumed from the X5"));
+        assert_eq!(
+            geometry_word(&none, None, None),
+            status_word(assumed.geometry.status)
+        );
+        must_fail(
+            "a file whose entry is settled, worded as the X5's",
+            geometry_word(&settled, model, firmware) == status_word(x5.geometry.status),
+        );
+    }
 }

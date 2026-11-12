@@ -20,6 +20,7 @@ use spherecut_core::video::ColorInfo;
 use spherecut_export::warning::codes as export_warnings;
 use spherecut_export::{ExportError, Fallback};
 use spherecut_media::MediaError;
+pub use spherecut_media::camera::GeometryInfo;
 use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{self, ProbeError, ProbeReport};
 use spherecut_render::RenderError;
@@ -136,7 +137,8 @@ pub mod codes {
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with
-    /// the file's spherical metadata, and the filter it could use.
+    /// the file's spherical metadata, the filter it could use, and the
+    /// geometry it stitched a camera's pair by.
     pub mod warnings {
         /// A stereo source: its left eye is rendered.
         pub const STEREO_LEFT_EYE: &str = "stereo_left_eye";
@@ -154,6 +156,11 @@ pub mod codes {
         /// render: the clip's media file is there but isn't the one added
         /// (its size or first MiB differs); it is exported anyway.
         pub const MEDIA_CHANGED: &str = "media_changed";
+        /// A camera's pair whose model has no entry in the built-in
+        /// table: it is stitched by the X5's, provisional, and the
+        /// message gives the table's notice ("geometry assumed from the
+        /// X5") and evidence.
+        pub const GEOMETRY_ASSUMED: &str = "geometry_assumed";
 
         pub const ALL: &[&str] = &[
             STEREO_LEFT_EYE,
@@ -162,6 +169,7 @@ pub mod codes {
             POSE_NOT_APPLIED,
             ANISOTROPY_UNAVAILABLE,
             MEDIA_CHANGED,
+            GEOMETRY_ASSUMED,
         ];
     }
 }
@@ -342,6 +350,36 @@ pub struct FrameResult {
     pub source: SourceInfo,
     /// With `--project`, the sequence's frame rendered; null otherwise.
     pub sequence: Option<SequenceFrame>,
+    /// A camera's pair stitched (`--reference` on an Insta360 file, or
+    /// its `--seam`): the geometry, calibration and distance it was
+    /// stitched with, and each lens's frame. Null for any other source,
+    /// and under `--lens`.
+    pub stitch: Option<StitchInfo>,
+}
+
+/// How `frame` stitched a camera's pair of lenses.
+#[derive(Debug, Clone, Serialize)]
+pub struct StitchInfo {
+    /// The table's geometry, or `--geometry`'s over it (status `user`),
+    /// with the table's notice for the file's entry either way.
+    pub geometry: GeometryInfo,
+    /// The trailer's calibration, by the hash probe prints.
+    pub calibration: String,
+    /// `--stitch-distance` in metres (2 by default); null for `inf`.
+    pub distance_m: Option<f64>,
+    /// Lens 0 and lens 1, in that order.
+    pub lenses: Vec<LensFrame>,
+}
+
+/// One lens's frame of a stitched pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LensFrame {
+    /// The lens, by its index in probe's `lenses.tracks`.
+    pub track: usize,
+    /// Its video stream, by FFmpeg's index.
+    pub stream: usize,
+    /// The frame decoded, in ticks of that stream's time base.
+    pub pts: i64,
 }
 
 /// The frame of a project's sequence that `frame --project` rendered,

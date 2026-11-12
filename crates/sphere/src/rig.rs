@@ -732,7 +732,9 @@ pub enum RigError {
     /// focal, a lens's radius scale or θ_max, the canvas map's scale, or
     /// the calibration's src or dst. A focal of 0 leaves a lens no texels
     /// per radian, so that it covers nothing; a negative one mirrors or
-    /// turns its image.
+    /// turns its image. Or 1 + a block's ξ + its lens's `xi_delta` is: at
+    /// ξ ≤ −1 the unified model images no direction, as z + ξ > 0 would
+    /// need z > 1 (the project review's F038).
     NotPositive(&'static str),
     /// The Euler convention's axes or its order isn't a permutation, so
     /// it isn't one of the space's 1152 values.
@@ -779,8 +781,9 @@ impl Rig {
     /// both lenses turn 180° about +Y. `sides` are the tracks' sides, by
     /// track. Refuses a θ_max past a lens's `limit_theta`, and numbers it
     /// can't build a rig that weighs anything from: NaN or infinite ones,
-    /// a focal, scale, side or θ_max of 0 or below, an Euler convention
-    /// outside the space, and a fitted relative rotation of length 0.
+    /// a focal, scale, side or θ_max of 0 or below, a ξ plus `xi_delta`
+    /// of −1 or below, an Euler convention outside the space, and a fitted
+    /// relative rotation of length 0.
     ///
     /// Block b's lens_from_rig is E_b · F · Q_tune_bᵀ · T_b · S as the
     /// module's doc writes it, where Q_tune_b is the tune's yaw, pitch and
@@ -1043,8 +1046,9 @@ pub fn theta_frame(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[f6
 
 /// The blocks of the generation `geo` reads, checked: there, of that
 /// generation, read through one of the 21 V6 readings, finite, and with
-/// focals above 0, with the tune's numbers for each lens (its radius
-/// scale and θ_max above 0), the canvas map's scale and src and dst.
+/// focals above 0 and ξ plus the lens's ξ delta above −1, with the tune's
+/// numbers for each lens (its radius scale and θ_max above 0), the canvas
+/// map's scale and src and dst.
 fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 2], RigError> {
     if cal.src == 0 {
         return Err(RigError::NotPositive("the calibration's src"));
@@ -1066,6 +1070,10 @@ fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 
     const FY: [&str; 2] = ["block 0's fy", "block 1's fy"];
     const RADIUS: [&str; 2] = ["lens 0's radius scale", "lens 1's radius scale"];
     const THETA_MAX: [&str; 2] = ["lens 0's θ_max", "lens 1's θ_max"];
+    const XI: [&str; 2] = [
+        "1 + block 0's ξ + lens 0's ξ delta",
+        "1 + block 1's ξ + lens 1's ξ delta",
+    ];
     for (b, block) in blocks.iter().enumerate() {
         if block.terms.generation() != geo.generation {
             return Err(RigError::Terms {
@@ -1092,6 +1100,8 @@ fn blocks(cal: &Calibration, geo: &Geometry, tune: &Tune) -> Result<[LensCalib; 
         positive(FY[b], block.fy)?;
         positive(RADIUS[b], t.radius_scale)?;
         positive(THETA_MAX[b], t.theta_max_deg)?;
+        // The model's own ξ, as `slot_model` sums it, plus 1.
+        positive(XI[b], block.xi + t.xi_delta + 1.0)?;
     }
     if let CanvasMap::Fitted { scale } = geo.canvas {
         finite("the canvas map's scale", &[scale])?;

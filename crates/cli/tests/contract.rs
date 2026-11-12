@@ -22,7 +22,7 @@ use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
-use spherecut_synth::insv::{Field, InsvFault, TrailerLayout, print};
+use spherecut_synth::insv::{Field, InsvFault, InsvSpec, TrailerLayout, print, write_insv};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
 use spherecut_testkit::Fnv64;
@@ -56,6 +56,7 @@ const CODES: &[&str] = &[
     "encode_failed",
     "files_failed",
     "free_space_unknown",
+    "geometry_assumed",
     "gpu_failed",
     "h264_level_6",
     "hw_failed",
@@ -1261,11 +1262,14 @@ fn frame_documents_have_the_envelope_too() {
         "color",
         "source",
         "sequence",
+        "stitch",
     ];
     assert!(has_keys(r, &fields), "{r}");
     assert_eq!(r["output"], out.to_str().unwrap());
-    // Only `--project` renders a sequence's frame.
+    // Only `--project` renders a sequence's frame, and only a camera's
+    // pair of lenses a stitch.
     assert_eq!(r["sequence"], Value::Null);
+    assert_eq!(r["stitch"], Value::Null);
     assert!(has_keys(&r["frame"], &["pts", "time"]), "{r}");
     assert!(
         has_keys(&r["frame"]["time"], &["exact", "seconds", "frame"]),
@@ -1375,7 +1379,11 @@ fn frame_documents_have_the_envelope_too() {
 
 /// frame's exit statuses 0 to 3 (4 is SIGINT's, below), each with its
 /// document: no adapter at all, by running the child with
-/// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device.
+/// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device. The
+/// usage errors M3.5 adds are held to the exit table's status 2 too:
+/// `--fov` and `--morph-to` under `--projection equirect`, `--morph-to
+/// equirect`, a pair's flag on a file that isn't a pair, and a hardware
+/// decoder on a pair stitched with `--reference`, which is 2, not 3.
 #[test]
 fn frame_exits_0_to_3_with_one_document_each() {
     let dir = tmp("frame-exits");
@@ -1394,6 +1402,30 @@ fn frame_exits_0_to_3_with_one_document_each() {
             "out_of_range",
         ),
         (&["--size", "1x1"], &[], 2, "usage"),
+        // M3.5's: the whole sphere takes no --fov and morphs to nothing,
+        // nothing morphs to it, and a pair's flag needs a pair, which
+        // the equirect clip isn't.
+        (
+            &["--projection", "equirect", "--fov", "90"],
+            &[],
+            2,
+            "usage",
+        ),
+        (
+            &[
+                "--projection",
+                "equirect",
+                "--morph-to",
+                "fisheye",
+                "--morph",
+                "1",
+            ],
+            &[],
+            2,
+            "usage",
+        ),
+        (&["--morph-to", "equirect", "--morph", "1"], &[], 2, "usage"),
+        (&["--adapter", "cpu", "--lens", "0"], &[], 2, "usage"),
         (
             &["--size", "64x32"],
             &[("VK_DRIVER_FILES", no_icd), ("VK_ICD_FILENAMES", no_icd)],
@@ -1433,6 +1465,25 @@ fn frame_exits_0_to_3_with_one_document_each() {
     );
     let m = v["error"]["message"].as_str().unwrap();
     assert!(m.contains("spherecut doctor"), "{m}");
+    // A camera's pair stitched with --reference decodes in software
+    // until M3.7: a hardware decoder named is a usage error, exit 2, not
+    // the exit 3 of a decoder that is missing. The control: --decoder
+    // software renders.
+    let pair = insv::master(&dir, insv::MASTER, None).path;
+    for (decoder, status, code) in [
+        ("vaapi", 2, "usage"),
+        ("vulkan", 2, "usage"),
+        ("software", 0, ""),
+    ] {
+        std::fs::remove_file(&out).ok();
+        let args = ["--reference", "--size", "64x32", "--decoder", decoder];
+        let (got, v, stderr) = frame_json(&pair, &out, &args, &[]);
+        assert_eq!(got, Some(status), "{decoder}: {v} {stderr}");
+        if status != 0 {
+            assert_eq!(v["error"]["code"], code, "{decoder}: {v}");
+            assert_eq!(contract::frame_exit(code) as i32, status, "{decoder}");
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1787,11 +1838,11 @@ fn only_frame_handles_sigint() {
 /// Probe on a synthetic `.insv` (synth's trailer, M3 plan 5.4): the CLI's
 /// `camera` object gains `serial` and keeps `vendor`, `model`,
 /// `firmware`, `layout` and `evidence`; the agent's summary keeps
-/// `camera` a name and gains `camera_detail`; both gain `lenses`,
-/// `calibration` (with the snapshot's hash), `companion`,
-/// `exposure_entries` and `records`, as `docs/cli-json.md` gives them.
-/// Each pairs a master by name only with an LRV whose exposure record
-/// (4) has lost its last item.
+/// `camera` a name and gains `camera_detail`; both gain `lenses` (with
+/// its `binding`), `calibration` (with the snapshot's hash),
+/// `geometry`, `companion`, `exposure_entries` and `records`, as
+/// `docs/cli-json.md` gives them. Each pairs a master by name only with
+/// an LRV whose exposure record (4) has lost its last item.
 #[test]
 fn probe_pins_the_camera_shapes() {
     let started = Instant::now();
@@ -1826,6 +1877,7 @@ fn probe_pins_the_camera_shapes() {
     let new = [
         "lenses",
         "calibration",
+        "geometry",
         "companion",
         "exposure_entries",
         "records",
@@ -1860,11 +1912,28 @@ fn probe_pins_the_camera_shapes() {
     assert_eq!(camera["layout"], "insta360_dual_fisheye");
     assert_eq!(l["camera"]["layout"], "low_res_companion");
 
-    // The lenses: the master's two tracks; none in the LRV's one picture.
-    assert_eq!(m["lenses"], serde_json::json!({"tracks": [0, 1]}));
-    must_fail(
-        "the LRV's lenses",
-        l["lenses"] == serde_json::json!({"tracks": [0, 1]}),
+    // The lenses: the master's two tracks, bound as the X5's entry in
+    // the geometry table says; none in the LRV's one picture. The
+    // geometry is the entry's, the master's and the LRV's, which holds
+    // the master's strings.
+    let lenses = serde_json::json!({
+        "tracks": [0, 1],
+        "binding": "reversed",
+        "evidence": "placeholder until the fit",
+        "screen_side": null,
+    });
+    let geometry = serde_json::json!({
+        "status": "provisional",
+        "evidence": "placeholder until the fit",
+        "notice": null,
+    });
+    assert_eq!(m["lenses"], lenses);
+    must_fail("the LRV's lenses", l["lenses"] == lenses);
+    assert_eq!(l["lenses"], Value::Null, "{l}");
+    assert_eq!(m["geometry"], geometry);
+    assert_eq!(
+        l["geometry"], geometry,
+        "the LRV holds the master's strings"
     );
 
     // The calibration, with the snapshot's hash (M3 plan 11.1): FNV-1a 64
@@ -1942,6 +2011,18 @@ fn probe_pins_the_camera_shapes() {
         "a master with no calibration strings, calibrated",
         files[1]["report"]["calibration"] != Value::Null,
     );
+    // Neither has a geometry, nor lenses bound; the bad strings keep
+    // their warnings, and gain none for the stitch they don't make.
+    let unbound = serde_json::json!({
+        "tracks": [0, 1],
+        "binding": null,
+        "evidence": null,
+        "screen_side": null,
+    });
+    for r in [&files[1]["report"], &files[2]["report"]] {
+        assert_eq!(r["lenses"], unbound, "{r}");
+        assert_eq!(r["geometry"], Value::Null, "{r}");
+    }
     let r = &files[2]["report"];
     assert_eq!(r["calibration"], Value::Null, "{r}");
     let codes: Vec<&str> = r["warnings"]
@@ -2009,8 +2090,10 @@ fn probe_pins_the_camera_shapes() {
         m["camera_detail"],
         serde_json::json!({"vendor": "Insta360", "model": "Insta360 X5", "firmware": "v1.1.22_build1", "serial": "SYNTH00001"})
     );
-    assert_eq!(m["lenses"], serde_json::json!({"tracks": [0, 1]}));
+    assert_eq!(m["lenses"], lenses);
     assert_eq!(m["calibration"], want);
+    assert_eq!(m["geometry"], geometry);
+    assert_eq!(l["geometry"], geometry);
     assert_eq!(
         m["companion"],
         serde_json::json!({"path": insv::LRV, "verified": true, "why": null})
@@ -2266,4 +2349,283 @@ fn the_readme_shows_how_to_run_every_command() {
         readme_runs(&readme, &more),
     );
     assert!(failed.contains("nosuch"), "{failed}");
+}
+
+/// `spherecut probe` of a synthetic `.insv` reports `lenses.binding` and
+/// the `geometry` block (`status`, `evidence`, `notice`) of the file's
+/// `Known` entry (M3 plan 5.3, 5.4), as `docs/cli-json.md` documents
+/// them: the X5's row on the firmware it was measured on; the row,
+/// provisional and saying why, on other firmware and for a model with
+/// no row of its own, which alone has the notice "geometry assumed from
+/// the X5"; and neither for a master whose calibration parses but can't
+/// be stitched, which a `bad_trailer` warning says. The text says the
+/// same. Each master is the first's tracks with another trailer.
+///
+/// The control: those tracks without a trailer, a plain MP4, have
+/// neither block, so the pinned check fails on them, in JSON and in text.
+#[test]
+fn probe_reports_binding_and_geometry() {
+    let started = Instant::now();
+    let dir = tmp("binding-geometry");
+    let master = insv::master(&dir, insv::MASTER, None);
+    // The master's tracks with its metadata's field `n` set to `value`.
+    let with = |name: &str, n: u32, value: Field| {
+        let mut records = insv::records();
+        let field = records.metadata.iter_mut().find(|f| f.number == n).unwrap();
+        *field = value;
+        insv::retrailed(&dir, insv::MASTER, name, &records, None).path
+    };
+    let firmware = with(
+        "VID_20261022_101500_00_002.insv",
+        3,
+        Field::string(3, "v9.9.9"),
+    );
+    let model = with(
+        "VID_20261022_101500_00_003.insv",
+        2,
+        Field::string(2, "Insta360 X9"),
+    );
+    // Field 27's src, dst and offset, the dst 5312 wide and 5000 high.
+    let window = [5376, 5376, 5312, 5000, 0, 0]
+        .into_iter()
+        .zip(1..)
+        .map(|(v, n)| Field::varint(n, v))
+        .collect();
+    let oblong = with(
+        "VID_20261022_101500_00_004.insv",
+        27,
+        Field::message(27, window),
+    );
+    let plain = insv::tracks(&dir, insv::MASTER);
+
+    let (status, doc) = probe_json(&[&master.path, &firmware, &model, &oblong, &plain]);
+    assert_eq!(status, Some(0), "{doc}");
+    let files = &doc["result"]["files"];
+    let report = |k: usize| &files[k]["report"];
+    let lenses = |evidence: &str| {
+        serde_json::json!({
+            "tracks": [0, 1],
+            "binding": "reversed",
+            "evidence": evidence,
+            "screen_side": null,
+        })
+    };
+    let geometry = |evidence: &str, notice: Option<&str>| serde_json::json!({"status": "provisional", "evidence": evidence, "notice": notice});
+    // The pinned check: a report's lenses and geometry are the entry's,
+    // with its evidence and notice.
+    let pinned = |r: &Value, evidence: &str, notice: Option<&str>| {
+        r["lenses"] == lenses(evidence) && r["geometry"] == geometry(evidence, notice)
+    };
+    let placeholder = "placeholder until the fit";
+    let other_firmware =
+        "placeholder until the fit; measured on firmware v1.1.22_build1, not this file's";
+    let no_row = "placeholder until the fit; the X5's row, as no row is for this file's model";
+    let assumed = Some("geometry assumed from the X5");
+    for (k, evidence, notice) in [
+        (0, placeholder, None),
+        (1, other_firmware, None),
+        (2, no_row, assumed),
+    ] {
+        let r = report(k);
+        assert!(pinned(r, evidence, notice), "{evidence}: {r}");
+        assert_eq!(r["warnings"], serde_json::json!([]), "{r}");
+    }
+    // The notice is the model's with no row, not the firmware's.
+    must_fail(
+        "the X5's report, with the notice",
+        pinned(report(0), placeholder, assumed),
+    );
+    assert_eq!(report(1)["camera"]["firmware"], "v9.9.9");
+    assert_eq!(report(2)["camera"]["model"], "Insta360 X9");
+
+    // The oblong window: the calibration is reported as it is, but no
+    // stitch reads it, so the lenses aren't bound and there is no
+    // geometry, and a warning says why.
+    let r = report(3);
+    assert_eq!(
+        r["calibration"]["window"]["dst"],
+        serde_json::json!([5312, 5000]),
+        "{r}"
+    );
+    assert_eq!(
+        r["lenses"],
+        serde_json::json!({"tracks": [0, 1], "binding": null, "evidence": null, "screen_side": null}),
+        "{r}"
+    );
+    assert_eq!(r["geometry"], Value::Null, "{r}");
+    assert_eq!(
+        r["warnings"],
+        serde_json::json!([{
+            "code": "bad_trailer",
+            "message": "the Insta360 trailer's calibration can't be stitched: the metadata's \
+                        field 27 can't be a calibration: its window isn't square",
+        }]),
+        "{r}"
+    );
+
+    // The control: the tracks alone.
+    let p = report(4);
+    assert_eq!(p["lenses"], Value::Null, "{p}");
+    assert_eq!(p["geometry"], Value::Null, "{p}");
+    must_fail(
+        "the pinned lenses and geometry, of the master's tracks without its trailer",
+        pinned(p, placeholder, None),
+    );
+
+    // The text: the binding beside the tracks, and the geometry.
+    let probe_text = |path: &Path| {
+        let out = spherecut(&[OsStr::new("probe"), path.as_os_str()]);
+        assert_eq!(out.status.code(), Some(0));
+        text(&out.stdout)
+    };
+    let wants = [
+        "\n  lenses     streams #0 and #1, binding reversed (placeholder until the fit)\n",
+        "\n  geometry   provisional: placeholder until the fit\n",
+    ];
+    let t = probe_text(&master.path);
+    for want in wants {
+        assert!(t.contains(want), "no {want:?} in:\n{t}");
+    }
+    assert!(!t.contains("isn't read yet"), "{t}");
+    assert!(!t.contains("geometry assumed"), "{t}");
+    let t = probe_text(&model);
+    let want = format!("\n  geometry   provisional: {no_row} (geometry assumed from the X5)\n");
+    assert!(t.contains(&want), "no {want:?} in:\n{t}");
+    let t = probe_text(&oblong);
+    assert!(
+        t.contains("\n  lenses     streams #0 and #1, not bound: no calibration a stitch reads\n"),
+        "{t}"
+    );
+    assert!(!t.contains("\n  geometry "), "{t}");
+    let t = probe_text(&plain);
+    assert!(
+        !t.contains("\n  lenses ") && !t.contains("\n  geometry "),
+        "{t}"
+    );
+    must_fail(
+        "the pinned lines in the text of the tracks alone",
+        wants.iter().all(|want| t.contains(want)),
+    );
+    eprintln!(
+        "probe_reports_binding_and_geometry: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Whether `s` has the shape of frame's `stitch` object: `geometry`
+/// (`status` and `evidence`), `calibration` (probe's 16 hex digits),
+/// `distance_m` (a number, or null for infinitely far) and `lenses`, two
+/// of `track`, `stream` and `pts`.
+fn stitch_shape(s: &Value) -> Result<(), String> {
+    let shaped = s.is_object()
+        && has_keys(s, &["geometry", "calibration", "distance_m", "lenses"])
+        && s["geometry"].is_object()
+        && has_keys(&s["geometry"], &["status", "evidence", "notice"])
+        && s["geometry"]["status"].is_string()
+        && s["geometry"]["evidence"].is_string()
+        && (s["geometry"]["notice"].is_string() || s["geometry"]["notice"].is_null())
+        && s["calibration"]
+            .as_str()
+            .is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        && (s["distance_m"].is_number() || s["distance_m"].is_null())
+        && s["lenses"].as_array().is_some_and(|l| {
+            l.len() == 2
+                && l.iter().all(|l| {
+                    l.is_object()
+                        && has_keys(l, &["track", "stream", "pts"])
+                        && l["track"].is_u64()
+                        && l["stream"].is_u64()
+                        && l["pts"].is_i64()
+                })
+        });
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!("not the stitch object's shape: {s}"))
+    }
+}
+
+/// `spherecut frame <insv>`'s JSON result carries the stitch it used (M3
+/// plan 14's frame row), as `docs/cli-json.md` documents it: on
+/// `InsvSpec::small()` under `--reference`, the result keeps every field
+/// it had and gains `stitch`, with the table's geometry, the
+/// calibration's hash as probe prints it, the default distance of 2 m,
+/// and each lens's track, stream and pts, both at the frame's pts. The
+/// control: an equirect file's `stitch`, null, isn't that shape.
+#[test]
+fn frame_pins_the_stitch_object() {
+    let started = Instant::now();
+    let dir = tmp("stitch-object");
+    let master = write_insv(&InsvSpec::small(), &dir.join("small"))
+        .unwrap()
+        .master;
+    let clip = sphere_clip(&dir);
+    let args = |extra: &[&'static str]| {
+        let mut a = vec!["--reference", "--size", "64x32"];
+        a.extend_from_slice(extra);
+        a
+    };
+    let (status, v, stderr) = frame_json(
+        &master,
+        &dir.join("insv.png"),
+        &args(&["--projection", "equirect", "--frame", "5"]),
+        &[],
+    );
+    assert_eq!(status, Some(0), "{v} {stderr}");
+    let r = &v["result"];
+    let fields = [
+        "output",
+        "frame",
+        "requested",
+        "exactness",
+        "size",
+        "depth",
+        "view",
+        "filter",
+        "renderer",
+        "decode",
+        "gpu",
+        "color",
+        "source",
+        "sequence",
+        "stitch",
+    ];
+    assert!(has_keys(r, &fields), "{r}");
+    let stitch = &r["stitch"];
+    stitch_shape(stitch).unwrap();
+    assert_eq!(
+        stitch["geometry"],
+        serde_json::json!({
+            "status": "provisional",
+            "evidence": "placeholder until the fit",
+            "notice": null,
+        })
+    );
+    let (_, probed) = probe_json(&[&master]);
+    let report = &probed["result"]["files"][0]["report"];
+    assert_eq!(stitch["calibration"], report["calibration"]["hash"]);
+    assert_eq!(stitch["distance_m"], 2.0);
+    let tracks = &report["lenses"]["tracks"];
+    for (t, lens) in stitch["lenses"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(lens["track"], t, "{stitch}");
+        assert_eq!(lens["stream"], tracks[t], "{stitch}");
+        assert_eq!(lens["pts"], r["frame"]["pts"], "{stitch}");
+    }
+    // The frame and the source are track 0's.
+    assert_eq!(r["source"]["stream"], tracks[0], "{r}");
+
+    // The control: an equirect file has no stitch.
+    let (status, v, stderr) = frame_json(&clip, &dir.join("plain.png"), &args(&[]), &[]);
+    assert_eq!(status, Some(0), "{v} {stderr}");
+    assert_eq!(v["result"]["stitch"], Value::Null);
+    must_fail(
+        "an equirect file's stitch",
+        stitch_shape(&v["result"]["stitch"]),
+    );
+    eprintln!(
+        "frame_pins_the_stitch_object: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

@@ -23,7 +23,9 @@ tracing.workspace = true
 [dev-dependencies]
 image.workspace = true
 proptest.workspace = true
+spherecut-boundary.workspace = true
 spherecut-synth.workspace = true
+spherecut-testkit.workspace = true
 
 [lints]
 workspace = true

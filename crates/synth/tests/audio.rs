@@ -1,11 +1,13 @@
 //! The audio decoder (M1 plan sections 9.1 and 12.1, DECISIONS D35), on
 //! clips synth writes: exact sample counts and rates, the tones' pitches,
 //! AAC's priming gone and the audio on the video's time axis, seeks that
-//! give a sequential decode's samples in MP4 and Matroska, a Matroska
-//! remux with every sample of the MP4's, 44.1 kHz resampled to 48 kHz to the
-//! sample, mono duplicated, ambiX decoded to two cardioids, the output's
-//! channels, origins before and after the audio, `sync-flash-beep`'s
-//! beeps on its white frames, and raw and unmixed decoding.
+//! give a sequential decode's samples in MP4 and Matroska (its priming a
+//! first block or a CodecDelay, and nothing from before the stream's
+//! first sample handed out after a seek), a Matroska remux with every
+//! sample of the MP4's, 44.1 kHz resampled to 48 kHz to the sample, mono
+//! duplicated, ambiX decoded to two cardioids, the output's channels,
+//! origins before and after the audio, `sync-flash-beep`'s beeps on its
+//! white frames, and raw and unmixed decoding.
 
 // Test helpers outside #[test] functions; panicking is the point here.
 #![allow(clippy::unwrap_used)]
@@ -16,13 +18,14 @@ use std::sync::atomic::AtomicBool;
 
 use spherecut_core::{FrameRate, Rational, StopToken, Time};
 use spherecut_media::MediaError;
-use spherecut_media::audio::FfmpegAudio;
+use spherecut_media::audio::{AudioFault, FfmpegAudio};
 use spherecut_media::backend::{
     AudioDecode, AudioOutFormat, AudioRequest, FfmpegBackend, MediaBackend, NextAudio, NextFrame,
     VideoRequest,
 };
 use spherecut_synth::audio::{AMBIX_TONES_HZ, tone_level};
 use spherecut_synth::media::{self, Audio, Spec};
+use spherecut_testkit::control::must_fail;
 
 const STEREO_48K: AudioOutFormat = AudioOutFormat {
     rate: 48_000,
@@ -204,25 +207,195 @@ fn priming_is_gone_and_the_audio_starts_on_the_video_axis() {
     assert_eq!(best, Some(0));
 }
 
+/// Seeks in the MP4 and in two Matroska copies, which hold AAC's priming
+/// two ways ([`Priming`](spherecut_media::encode::Priming)): as samples
+/// before the video's first frame and no CodecDelay, as FFmpeg before
+/// 9.0 copies it from an MP4, and as the track's CodecDelay, as 9.0
+/// copies it. FFmpeg's Matroska demuxer takes a CodecDelay's priming away
+/// at open but not after a seek (8.1's and 9.0's do; 6.1's and 7.1's read
+/// the CodecDelay and take nothing away), so that a seek near the start
+/// decodes samples from before the stream's first. On any FFmpeg the
+/// copy without one is also opened that way ([`AudioFault`]), and so is
+/// the copy with one where the demuxer took nothing away; the controls
+/// hand those samples out, from each copy.
 #[test]
 fn a_seek_gives_a_sequential_decodes_samples() {
     for (name, rate) in [("seek-48", 48_000), ("seek-441", 44_100)] {
         let path = clip(name, Audio::Stereo, rate, 3);
-        let mkv = media::remux_to_mkv(&path, &dir(&format!("{name}-mkv"))).unwrap();
-        for path in [path, mkv] {
-            seek_parity(&path);
+        let d = dir(&format!("{name}-mkv"));
+        let mkv = media::remux_to_mkv_primed(&path, &d.join(format!("{name}.mkv")), 0).unwrap();
+        let delayed =
+            media::remux_to_mkv_primed(&path, &d.join(format!("{name}-delay.mkv")), 1024).unwrap();
+        // 1024 samples in nanoseconds, rounded as FFmpeg's muxer rounds.
+        let delay_ns = (1024 * 1_000_000_000 + u64::from(rate) / 2) / u64::from(rate);
+        assert_eq!(codec_delay_ns(&mkv), None, "{name}");
+        assert_eq!(codec_delay_ns(&delayed), Some(delay_ns), "{name}");
+
+        let mut dec = open_at_origin(&path);
+        assert_eq!(
+            dec.info().start,
+            Time::ZERO,
+            "{name}: the edit list's start"
+        );
+        seek_parity(dec.as_mut(), &path).unwrap();
+
+        // Starts in output samples: Matroska's milliseconds put the one
+        // after the priming within a sample of 0, not on it, at 44.1 kHz.
+        let mut dec = open_at_origin(&mkv);
+        let block = at_48k(dec.info().start);
+        assert!(block <= -1000, "{name}: the priming block at {block}");
+        seek_parity(dec.as_mut(), &mkv).unwrap();
+
+        let mut dec = open_at_origin(&delayed);
+        let start = at_48k(dec.info().start);
+        match avformat_major() {
+            60 => assert_eq!(start, block, "{name}: 6.1 keeps the CodecDelay's priming"),
+            62.. => assert_eq!(
+                start, 0,
+                "{name}: the CodecDelay's priming taken away at open"
+            ),
+            _ => {}
+        }
+        seek_parity(dec.as_mut(), &delayed).unwrap();
+
+        let dropped = AudioFault {
+            frames_dropped_at_open: 1,
+            ..AudioFault::default()
+        };
+        let mut dec = open_faulted(&mkv, dropped);
+        let opened = at_48k(dec.info().start);
+        assert_eq!(opened, 0, "{name}: the priming dropped at open");
+        seek_parity(&mut dec, &mkv).unwrap();
+
+        // The CodecDelay copy as 8.1's and 9.0's demuxers open it: where
+        // this FFmpeg's took nothing away at open (6.1's), the open drops
+        // the priming block.
+        let delay_dropped = if start == 0 {
+            AudioFault::default()
+        } else {
+            dropped
+        };
+        if start != 0 {
+            let mut dec = open_faulted(&delayed, delay_dropped);
+            let opened = at_48k(dec.info().start);
+            assert_eq!(
+                opened, 0,
+                "{name}: the CodecDelay's priming dropped at open"
+            );
+            seek_parity(&mut dec, &delayed).unwrap();
+        }
+
+        // The controls: the same decodes, handing out what a seek decodes
+        // from before the stream's first sample, give the priming where a
+        // seek before the start must give silence.
+        for (what, path, fault) in [
+            ("the priming handed out", &mkv, dropped),
+            (
+                "the CodecDelay's priming handed out",
+                &delayed,
+                delay_dropped,
+            ),
+        ] {
+            let kept = AudioFault {
+                keeps_samples_before_first: true,
+                ..fault
+            };
+            let mut dec = open_faulted(path, kept);
+            let e = must_fail(what, seek_parity(&mut dec, path));
+            assert!(
+                e.contains("not silent before the stream's first sample, 0:"),
+                "{e}"
+            );
         }
     }
 }
 
-/// Seeks into `path`: each gives the samples a decode from the start
-/// gives, from the seek's sample on.
-fn seek_parity(path: &Path) {
+/// `t` in output samples at 48 kHz.
+fn at_48k(t: Time) -> i64 {
+    (t.to_secs_f64() * 48_000.0).round() as i64
+}
+
+/// libavformat's major version: 60 for FFmpeg 6.1, 61 for 7.1, 62 for
+/// 8.1 and 63 for 9.0.
+fn avformat_major() -> u32 {
+    spherecut_media::ff::format::version() >> 16
+}
+
+/// The CodecDelay of the first of a Matroska file's tracks that has one,
+/// in nanoseconds, read from its EBML elements (Segment, Tracks,
+/// TrackEntry, CodecDelay) rather than through FFmpeg, whose demuxers
+/// read it differently.
+fn codec_delay_ns(path: &Path) -> Option<u64> {
+    let b = std::fs::read(path).unwrap();
+    // An EBML variable-length number at `at`: its length and its value,
+    // with the length marker for an ID and without it for a size.
+    let vint = |at: usize, id: bool| {
+        let len = b[at].leading_zeros() as usize + 1;
+        let first = if id {
+            b[at]
+        } else {
+            b[at] & (0xFF_u16 >> len) as u8
+        };
+        let v = b[at + 1..at + len]
+            .iter()
+            .fold(u64::from(first), |v, &x| v << 8 | u64::from(x));
+        (len, v)
+    };
+    // The data of each child of the element whose data is `from..to`,
+    // with its ID; a size of all ones (unknown) runs to `to`.
+    let children = |from: usize, to: usize| {
+        let mut out = Vec::new();
+        let mut at = from;
+        while at < to {
+            let (n, id) = vint(at, true);
+            let (m, size) = vint(at + n, false);
+            let start = at + n + m;
+            let end = if size == (1 << (7 * m)) - 1 {
+                to
+            } else {
+                start + size as usize
+            };
+            out.push((id, start, end.min(to)));
+            at = end;
+        }
+        out
+    };
+    let child = |id: u64, (from, to): (usize, usize)| {
+        children(from, to)
+            .into_iter()
+            .filter(move |c| c.0 == id)
+            .map(|c| (c.1, c.2))
+    };
+    let segment = child(0x1853_8067, (0, b.len())).next().unwrap();
+    let tracks = child(0x1654_AE6B, segment).next().unwrap();
+    child(0xAE, tracks)
+        .flat_map(|entry| child(0x56AA, entry))
+        .map(|(from, to)| b[from..to].iter().fold(0, |v, &x| v << 8 | u64::from(x)))
+        .next()
+}
+
+/// `path` opened with `fault`, at its video's clip time 0, at 48 kHz
+/// stereo.
+fn open_faulted(path: &Path, fault: AudioFault) -> FfmpegAudio {
+    let req = request(STEREO_48K, Some(video_origin(path)));
+    FfmpegAudio::open_faulted(path, &req, fault).unwrap()
+}
+
+/// `path` opened at its video's clip time 0, at 48 kHz stereo.
+fn open_at_origin(path: &Path) -> Box<dyn AudioDecode> {
+    open(path, STEREO_48K, Some(video_origin(path)))
+}
+
+/// Seeks into `path`, opened as `dec`: each gives the samples a decode
+/// from the start gives, from the seek's sample on, a seek before the
+/// start gives silence before the stream's first sample, and one past the
+/// end gives none.
+fn seek_parity(dec: &mut dyn AudioDecode, path: &Path) -> Result<(), String> {
     let name = path.file_name().unwrap().to_string_lossy();
-    let origin = Some(video_origin(path));
-    let mut dec = open(path, STEREO_48K, origin);
-    let (first, all) = drain(dec.as_mut(), None);
-    assert_eq!(first, 0, "{name}");
+    let (first, all) = drain(dec, None);
+    if first != 0 {
+        return Err(format!("{name}: the decode starts at {first}"));
+    }
     let never = StopToken::never();
     for at in [
         Time::seconds(Rational::new(1, 10).unwrap()),
@@ -232,39 +405,56 @@ fn seek_parity(path: &Path) {
         Time::from_secs(2),
     ] {
         dec.seek(at, &never).unwrap();
-        let (start, data) = drain(dec.as_mut(), Some(9600));
+        let (start, data) = drain(dec, Some(9600));
         let want = (at.to_secs_f64() * 48_000.0).round() as i64;
-        assert_eq!(start, want, "{name} at {at:?}");
+        if start != want {
+            return Err(format!("{name} at {at:?}: starts at {start}, not {want}"));
+        }
         let from = start as usize * 2;
         let worst = data
             .iter()
             .zip(&all[from..])
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
-        assert!(worst <= 1e-6, "{name} at {at:?}: off by {worst}");
-        assert_eq!(data.len(), 9600 * 2, "{name} at {at:?}");
+        if worst > 1e-6 {
+            return Err(format!("{name} at {at:?}: off by {worst}"));
+        }
+        if data.len() != 9600 * 2 {
+            return Err(format!("{name} at {at:?}: {} samples", data.len() / 2));
+        }
     }
     // Before the start, the samples before the stream's first are
-    // silence (Matroska's start before 0 with AAC's priming in it); past
-    // the end there are none.
+    // silence (the stream's first is before 0 in a Matroska copy whose
+    // priming is its first block); past the end there are none.
     dec.seek(Time::seconds(Rational::new(-1, 10).unwrap()), &never)
         .unwrap();
-    let (start, data) = drain(dec.as_mut(), Some(9600));
-    assert_eq!(start, -4800, "{name}");
-    let first = (dec.info().start.to_secs_f64() * 48_000.0).round() as i64;
+    let (start, data) = drain(dec, Some(9600));
+    if start != -4800 {
+        return Err(format!("{name} from before 0: starts at {start}"));
+    }
+    let first = at_48k(dec.info().start);
     let silent = (first.clamp(-4800, 0) + 4800) as usize;
-    assert!(data[..silent * 2].iter().all(|&x| x == 0.0), "{name}");
+    if let Some(i) = data[..silent * 2].iter().position(|&x| x != 0.0) {
+        return Err(format!(
+            "{name} from before 0: not silent before the stream's first sample, {first}: \
+             {} at output sample {}",
+            data[i],
+            i as i64 / 2 - 4800
+        ));
+    }
     let worst = data[4800 * 2..]
         .iter()
         .zip(&all)
         .map(|(a, b)| (a - b).abs())
         .fold(0.0f32, f32::max);
-    assert!(worst <= 1e-6, "{name} from before 0: off by {worst}");
+    if worst > 1e-6 {
+        return Err(format!("{name} from before 0: off by {worst}"));
+    }
     dec.seek(Time::from_secs(5), &never).unwrap();
-    assert!(
-        matches!(dec.next_chunk(&never).unwrap(), NextAudio::End),
-        "{name}"
-    );
+    if !matches!(dec.next_chunk(&never).unwrap(), NextAudio::End) {
+        return Err(format!("{name}: samples past the end"));
+    }
+    Ok(())
 }
 
 #[test]

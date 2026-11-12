@@ -10,6 +10,9 @@ publish.workspace = true
 [dependencies]
 spherecut-camera.workspace = true
 spherecut-core.workspace = true
+# The binding and status of the geometry camera's built-in table gives,
+# which probe reports (M3 plan 5.4). camera depends on it already.
+spherecut-sphere.workspace = true
 ffmpeg-next.workspace = true
 ffmpeg-sys-next.workspace = true
 libc.workspace = true
@@ -20,8 +23,10 @@ thiserror.workspace = true
 
 [features]
 # Tests only: `VideoRequest::fault` fails a frame "as hardware", to test
-# the fallback to software (DECISIONS D30). Only synth's dev-dependency
-# turns it on.
+# the fallback to software (DECISIONS D30), and `FfmpegAudio::open_faulted`
+# drops the priming at open as some demuxers do, or hands out what a seek
+# decodes before the stream's first sample, for a control. Only test
+# builds turn it on, through dev-dependencies.
 fault-injection = []
 
 [dev-dependencies]

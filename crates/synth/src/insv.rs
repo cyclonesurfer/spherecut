@@ -7,9 +7,10 @@
 //! `spherecut_camera`'s reader and parser, which it is there to check
 //! (4.1 rule 2): a bug a shared writer mirrored would go unseen. M3.2
 //! writes the trailer, gives the records of a master and of its LRV and
-//! prints the strings; M3.5 adds `write_insv` and its `InsvSpec`, which
-//! write both files and call [`append_trailer`] once `Mp4Writer` has
-//! written the tracks.
+//! prints the strings; M3.5 adds [`write_insv`] and its [`InsvSpec`],
+//! which write both files: each lens coded on its own, the two tracks
+//! muxed with a silent AAC stream into one MP4 (not one `Mp4Writer` of N
+//! tracks), and then [`append_trailer`] on it.
 //!
 //! The trailer is laid out as the X5's (§3.1 and §3.2): records in
 //! descending id order, each its payload and then six bytes giving its
@@ -30,17 +31,28 @@
 use std::cmp::Reverse;
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use spherecut_core::FrameRate;
 use spherecut_core::fs::TempFile;
+use spherecut_core::{FrameRate, Rational, Time};
+use spherecut_media::encode::{
+    AudioSettings, ColorTags, EncodeError, Mp4Writer, PixelLayout, VideoSettings,
+    mux_video_streams_with_audio,
+};
 
-use crate::lens::{CalibTruth, Generation, Planted};
+use crate::code::corner_code;
+use crate::lens::{
+    CalibTruth, Coding, Generation, Planted, RenderCache, RigTruth, X5_LIKE_SIDE, check_clear_at,
+    compose, lens_planes, render_lens_coded_in, x5_like, x5_like_planted,
+};
 use crate::media::SynthError;
+use crate::yuv::YuvPlanes;
+use crate::{Pattern, RgbImage};
 
 /// What a synthetic `.insv` gets wrong on purpose (7.2). The trailer's
 /// faults, [`InsvFault::in_trailer`], are planted by [`inst_box`] (M3.2);
-/// the others are the MP4's, which `write_insv` plants (M3.5).
+/// the others are the MP4's, which [`write_insv`] plants in lens 1's
+/// track (M3.5), lens 0's coded as without the fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InsvFault {
     /// The tail's size E is more than the file holds, as when a copy lost
@@ -61,13 +73,27 @@ pub enum InsvFault {
     /// A varint in the metadata of eleven bytes: a field 7 put first,
     /// whose value is ten bytes with their top bit set and a zero.
     VarintOverflow,
-    /// Lens 1's track one frame shorter than lens 0's.
+    /// Lens 1's track one frame shorter than lens 0's: it ends a frame
+    /// early, and its `stts` and its edit with it.
     LensOneFrameShort,
-    /// The tracks' first presentation times differ.
+    /// The tracks' first presentation times differ: lens 1's track is
+    /// muxed a frame later than lens 0's
+    /// ([`mux_video_streams_with_audio`]'s delay), so the muxer gives it
+    /// an empty edit of exactly a frame, on every FFmpeg, before the same
+    /// media edit as lens 0's: at 29.97 its first pts is 1001 ticks of
+    /// 1/30000 s.
     StartPtsDiffer,
-    /// The tracks' keyframes (`stss`) differ.
+    /// The tracks' keyframes (`stss`) differ: lens 1's IDRs come every
+    /// g − 1 frames, where g is lens 0's GOP or the frame count if fewer,
+    /// so that its second IDR comes a frame before lens 0's, or on its
+    /// last frame when lens 0 has one IDR; every second frame when lens
+    /// 0's are every frame.
     StssDiffer,
-    /// The tracks' frame rates differ.
+    /// The tracks' frame rates differ: lens 1's track at another rate,
+    /// both tracks in one time base in which either rate's frame is
+    /// whole ticks. At n/1001 fps lens 1's is n/1200 in 1/n, the X5's
+    /// time base (25 against 29.97 in 1/30000); at a whole n fps, it is
+    /// 1200 n/1001 in 1/(1200 n), which lens 0's track takes too.
     RateDiffer,
     /// The metadata without its calibration strings: every generation's
     /// working string and original left out.
@@ -737,10 +763,11 @@ pub fn inst_box(
 /// Writes `mp4`'s bytes and then [`inst_box`] at the X5's alignment to
 /// `out`, whole or not at all (`core::fs::TempFile`), so `out` exists
 /// only once it is complete; a file at `out` is replaced, even `mp4`
-/// itself. `write_insv` (M3.5) writes the tracks with `Mp4Writer` to a
-/// file of its own and calls `append_trailer(&tracks,
-/// &dir.join("VID_…_00_001.insv"), &spec.records, spec.fault)`, and the
-/// same for the LRV with its records.
+/// itself. [`write_insv`] (M3.5) codes each lens on its own, muxes the
+/// two tracks with a silent AAC stream into a file of its own and calls
+/// `append_trailer(&muxed, &dir.join(&spec.name), &spec.records,
+/// spec.fault)`, and the same for the LRV with [`Records::x5_lrv`] of
+/// those records and no fault.
 pub fn append_trailer(
     mp4: &Path,
     out: &Path,
@@ -792,9 +819,10 @@ fn fixed(v: f64, decimals: usize) -> String {
 /// token depends on it: the strings are `cal`'s canvas numbers as stored,
 /// never scaled to a track, as the X5 writes the same strings in every
 /// master, LRV and mode (plan 3.1). Only [`crate::lens::compose`] scales
-/// a block to a track. The files M3.5 writes print a rig's stored numbers
-/// through this unchanged; plan 7.2's "scaled to the lens size" is stale
-/// on this.
+/// a block to a track. The files [`write_insv`] writes hold their spec's
+/// records as given, whose strings [`Records::x5_like`] prints through
+/// this from the stored numbers, unchanged, as the plan's amendment 7
+/// corrects 7.2's "scaled to the lens size" (the project review's F141).
 pub fn print(cal: &CalibTruth, planted: &Planted) -> String {
     // The stored numbers are printed as they are, whatever is planted.
     let _ = planted;
@@ -819,120 +847,743 @@ pub fn print(cal: &CalibTruth, planted: &Planted) -> String {
     tokens.join("_")
 }
 
+// The files (M3.5): a master and its LRV, written whole.
+
+/// How [`write_insv`] codes each lens (7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Quality {
+    /// Mathematically lossless: libx265 `lossless=1` for the master's
+    /// tracks and x264 at qp 0 for the LRV's, so that the planes decoded
+    /// are the planes coded, bit for bit, and a test can hash them (4.2's
+    /// rung 3).
+    Lossless,
+    /// Lossy, at the constant rate factor `crf`, for a test that needs a
+    /// camera's coding loss.
+    CameraLike { crf: u8 },
+}
+
+/// What a master's LRV needs that the master doesn't fix (plan 3.1's LRV
+/// lines). The rest follows from the master by the X5's rules: one H.264
+/// track holding both lenses side by side at the same scale, track 1 on
+/// the left and track 0 on the right; 25 frames a second for a 25 fps
+/// master and 29.97 otherwise; the master's frame count at 25 and 29.97,
+/// half of it at 59.94 and a quarter, rounded up, at 119.88; and the
+/// master's trailer with the LRV's own fields ([`Records::x5_lrv`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LrvSpec {
+    /// Each half's side: the LRV is 2 · side wide and side high, as the
+    /// X5's 1664 × 832 is at 832.
+    pub side: u32,
+    /// How its track is coded.
+    pub quality: Quality,
+}
+
+/// A synthetic X5 recording (7.2): a master of two square HEVC tracks
+/// coded as the X5 codes them (3.1), a silent AAC track and synth's
+/// trailer, and its LRV if it has one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsvSpec {
+    /// The master's file name, `VID_<date>_<time>_00_<NNN>.insv`. The
+    /// LRV's follows by the X5's rule (insta360.md §2.3):
+    /// `LRV_<date>_<time>_01_<NNN>.lrv`.
+    pub name: String,
+    /// The camera: what each track shows, by track, and how the rig moves.
+    pub rig: RigTruth,
+    /// The scene the rig sees.
+    pub pattern: Pattern,
+    /// Frames a track.
+    pub frames: u32,
+    pub rate: FrameRate,
+    pub quality: Quality,
+    /// The conventions the camera's files leave open, as `rig` was
+    /// composed under them. No token of the strings in `records` depends
+    /// on them: those are printed as stored ([`print()`]).
+    pub calib: Planted,
+    /// The master's trailer records; the LRV's are [`Records::x5_lrv`] of
+    /// them.
+    pub records: Records,
+    /// What the files get wrong on purpose, or nothing.
+    pub fault: Option<InsvFault>,
+    /// The LRV, or none.
+    pub lrv: Option<LrvSpec>,
+    /// An IDR every `keyint` frames, or `None` for the X5's GOP at `rate`
+    /// (3.1): every 60 frames at 29.97, 50 at 25, and 120 at 59.94 and
+    /// 119.88. 8.4's file with an IDR every 2 frames sets it.
+    pub keyint: Option<u32>,
+    /// The supersampling each lens's picture is rendered at, per axis
+    /// ([`crate::lens::render_lens`]).
+    pub ss: u32,
+}
+
+/// What [`write_insv`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsvFiles {
+    /// The master, `dir` joined with the spec's name.
+    pub master: PathBuf,
+    /// The LRV beside it, when the spec asked for one.
+    pub lrv: Option<PathBuf>,
+    /// Where the master's trailer put each part.
+    pub layout: TrailerLayout,
+}
+
+/// Writes `spec`'s master into `dir`, and its LRV beside it when the spec
+/// has one, each whole or not at all: each lens's track coded on its own
+/// from [`InsvSpec::planes`] into a folder of its own beside the files,
+/// the two tracks and the LRV side by side on threads of their own, each
+/// to the bytes it would have alone (its encoder runs one thread), then
+/// the two muxed with a silent AAC stream
+/// ([`mux_video_streams_with_audio`]), the muxer's `free` box
+/// after `ftyp` renamed `wide` as the X5 has it, and the trailer appended
+/// ([`append_trailer`]); then the folder is removed. Both files are coded
+/// before either trailer is appended, so a spec refused for its LRV
+/// leaves no master.
+///
+/// The master's tracks are HEVC (`hvc1`), coded as the X5 codes them
+/// (3.1): in the X5's colour (full range, BT.709, chroma sited left), its
+/// time base at the rate (1/30000 at 29.97, 1/25000 at 25, 1/60000 at
+/// 59.94, 1/120000 at 119.88: 1/n at n/1001 fps and 1/(1000 n) at a
+/// whole n), an IDR every `spec.keyint` frames or the X5's GOP (2 s at up
+/// to 60 fps and 1 s above, in whole frames rounded up), a closed GOP and
+/// no B-frames. The AAC track is 48 kHz stereo silence as long as track
+/// 0, after the two video tracks, as in Pat's files. FFmpeg's `ftyp` is
+/// kept: the X5's (`avc1`, minor version 0x20140200, brands `avc1` and
+/// `isom`) isn't copied. The movie's timescale (`mvhd`) is the least
+/// common multiple of the three tracks' (240000 at 29.97: 30000 and the
+/// audio's 48000), whatever FFmpeg's own, so that every edit is exact
+/// ([`mux_video_streams_with_audio`]).
+///
+/// The LRV ([`LrvSpec`]) is one H.264 (`avc1`) track of 2 · side × side,
+/// track 1's picture scaled to side² by area on the left and track 0's on
+/// the right, each with its own corner code for the master frame it
+/// shows, at 25 fps for a 25 fps master and 29.97 otherwise, every
+/// master frame at those rates, every second at 59.94 and every fourth
+/// at 119.88, an IDR every second, in the X5's colour and its time base
+/// at the LRV's rate; and an AAC track as the master's. Its trailer holds
+/// [`Records::x5_lrv`] of the master's records for its frame count, and
+/// no fault.
+///
+/// `spec.fault` is planted in the file it belongs to: a trailer's in the
+/// master's trailer ([`inst_box`]), and the MP4's in the tracks, track 0
+/// coded as without the fault and track 1 changed, each as its
+/// [`InsvFault`] doc says. A spec is refused (`EncodeError::Invalid`)
+/// with no frames or a `keyint` of 0; under `LensOneFrameShort` or
+/// `StssDiffer`, with fewer than 2 frames; under `RateDiffer`, at a rate
+/// neither n/1001 nor whole; with an LRV, at a rate whose LRV doesn't
+/// take a whole number of its frames, or with a name not
+/// `VID_<date>_<time>_00_<NNN>.insv`; and with a lens or LRV picture
+/// whose corner code blocks would reach the image circle
+/// ([`crate::code::check_clear`]).
+pub fn write_insv(spec: &InsvSpec, dir: &Path) -> Result<InsvFiles, SynthError> {
+    let plans = track_plans(spec)?;
+    let lrv = match &spec.lrv {
+        Some(l) => Some(lrv_plan(spec, l)?),
+        None => None,
+    };
+    std::fs::create_dir_all(dir).map_err(|error| SynthError::Io {
+        path: dir.to_path_buf(),
+        error,
+    })?;
+    let work = dir.join(format!(".{}-lenses", spec.name));
+    let written = (|| {
+        std::fs::create_dir_all(&work).map_err(|error| SynthError::Io {
+            path: work.clone(),
+            error,
+        })?;
+        let lenses = [work.join("lens0.mp4"), work.join("lens1.mp4")];
+        let lrv_path = work.join("lrv.mp4");
+        // The two tracks and the LRV are coded side by side, each into a
+        // file of its own by an encoder of one thread (`x5_settings`), so
+        // each file's bytes are those it has coded alone; their errors
+        // are taken in the order they were coded in one after another.
+        let (tracks, lrv_coded) = std::thread::scope(|s| {
+            let tracks: Vec<_> = plans
+                .iter()
+                .zip(&lenses)
+                .map(|(plan, path)| s.spawn(move || write_track(spec, plan, path)))
+                .collect();
+            let lrv_coded = lrv
+                .as_ref()
+                .map(|plan| s.spawn(|| write_lrv(spec, plan, &lrv_path)));
+            let tracks: Vec<Result<(), SynthError>> = tracks.into_iter().map(joined).collect();
+            (tracks, lrv_coded.map(joined))
+        });
+        tracks.into_iter().collect::<Result<Vec<()>, _>>()?;
+        let muxed = work.join("master.mp4");
+        let srcs: Vec<(&Path, Time)> = lenses
+            .iter()
+            .zip(&plans)
+            .map(|(path, plan)| (path.as_path(), plan.delay))
+            .collect();
+        mux_video_streams_with_audio(&srcs, &lenses[0], &muxed)?;
+        mark_wide(&muxed)?;
+        let lrv_mp4 = match (&lrv, lrv_coded) {
+            (Some(plan), Some(coded)) => {
+                coded?;
+                mark_wide(&lrv_path)?;
+                Some((plan, lrv_path))
+            }
+            _ => None,
+        };
+        let master = dir.join(&spec.name);
+        let layout = append_trailer(&muxed, &master, &spec.records, spec.fault)?;
+        let lrv = match lrv_mp4 {
+            Some((plan, path)) => {
+                let out = dir.join(&plan.name);
+                let records = Records::x5_lrv(&spec.records, plan.frames);
+                append_trailer(&path, &out, &records, None)?;
+                Some(out)
+            }
+            None => None,
+        };
+        Ok(InsvFiles {
+            master,
+            lrv,
+            layout,
+        })
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    written
+}
+
+/// What a scoped thread gave, or its panic, resumed on this thread.
+fn joined<T>(thread: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    thread
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+/// The X5's colour (3.1): full range, BT.709 primaries, transfer and
+/// matrix, chroma sited left, as [`Coding::X5`] codes the planes.
+const X5_COLOR: ColorTags = ColorTags {
+    range: 2,
+    matrix: 1,
+    transfer: 1,
+    primaries: 1,
+    chroma_location: 1,
+};
+
+/// The silent AAC-LC track of the master and the LRV: 48 kHz, 2 channels,
+/// as in every one of Pat's files ("Pat's X5 samples").
+const AUDIO_RATE: u32 = 48_000;
+const AUDIO_CHANNELS: u32 = 2;
+
+/// One lens's track of the master, as [`write_insv`] codes it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TrackPlan {
+    /// The lens whose pictures it holds, corner codes and all.
+    lens: usize,
+    /// The frames it holds: the spec's frames 0 to `frames` − 1.
+    frames: u32,
+    rate: FrameRate,
+    time_base: Rational,
+    /// An IDR every `keyint` frames.
+    keyint: u32,
+    /// How much later than track 0's its first frame shows: the mux moves
+    /// the track this much later, as its own file starts at 0.
+    delay: Time,
+}
+
+/// `why`, as the spec named `name` is refused for it.
+fn refused(name: &str, why: impl std::fmt::Display) -> SynthError {
+    EncodeError::Invalid(format!("{name}: {why}")).into()
+}
+
+/// The two tracks of `spec`'s master, with its MP4 fault planted in track
+/// 1, as each [`InsvFault`] doc says.
+fn track_plans(spec: &InsvSpec) -> Result<[TrackPlan; 2], SynthError> {
+    let no = |why: &str| refused(&spec.name, why);
+    if spec.frames == 0 {
+        return Err(no("an .insv needs a frame"));
+    }
+    let keyint = match spec.keyint {
+        Some(0) => return Err(no("an IDR every 0 frames")),
+        Some(k) => k,
+        None => x5_gop(spec.rate),
+    };
+    let time_base = x5_time_base(spec.rate).ok_or_else(|| no("no time base for its rate"))?;
+    let plan = |lens| TrackPlan {
+        lens,
+        frames: spec.frames,
+        rate: spec.rate,
+        time_base,
+        keyint,
+        delay: Time::ZERO,
+    };
+    let (mut a, mut b) = (plan(0), plan(1));
+    match spec.fault {
+        Some(InsvFault::LensOneFrameShort) => {
+            if spec.frames < 2 {
+                return Err(no("LensOneFrameShort needs 2 frames"));
+            }
+            b.frames -= 1;
+        }
+        Some(InsvFault::StartPtsDiffer) => b.delay = spec.rate.frame_duration(),
+        Some(InsvFault::StssDiffer) => {
+            if spec.frames < 2 {
+                return Err(no("StssDiffer needs 2 frames"));
+            }
+            // Track 1's second IDR comes a frame before track 0's, or
+            // within the clip where track 0 has one IDR: frame
+            // min(keyint, frames) − 1. Under an IDR a frame, every second.
+            b.keyint = match keyint {
+                1 => 2,
+                k => k.min(spec.frames) - 1,
+            };
+        }
+        Some(InsvFault::RateDiffer) => {
+            let (other, common) = rate_differ(spec.rate)
+                .ok_or_else(|| no("RateDiffer needs a rate of n/1001 or a whole one"))?;
+            (a.time_base, b.time_base) = (common, common);
+            b.rate = other;
+        }
+        _ => {}
+    }
+    Ok([a, b])
+}
+
+/// The X5's time base at `rate` ("Pat's X5 samples": 1/30000 at 29.97,
+/// 1/25000 at 25, 1/60000 at 59.94, 1/120000 at 119.88): 1/n at n/1001
+/// fps, and 1/(1000 n) at n/d otherwise, in which a frame is 1000 d
+/// ticks.
+fn x5_time_base(rate: FrameRate) -> Option<Rational> {
+    let r = rate.as_rational();
+    let den = match r.den() {
+        1001 => r.num(),
+        _ => r.num().checked_mul(1000)?,
+    };
+    Rational::new(1, den).ok()
+}
+
+/// The X5's GOP at `rate`, in frames (3.1, "Pat's X5 samples"): 2 s at
+/// up to 60 fps and 1 s above, rounded up to whole frames, so 60 frames
+/// at 29.97, 50 at 25 and 120 at 59.94 and 119.88.
+fn x5_gop(rate: FrameRate) -> u32 {
+    let r = rate.as_rational();
+    let secs = if r.num() <= 60 * r.den() { 2 } else { 1 };
+    frames_in(rate, secs)
+}
+
+/// Whole frames at `rate` in `secs` seconds, rounded up.
+fn frames_in(rate: FrameRate, secs: u64) -> u32 {
+    let r = rate.as_rational();
+    let (num, den) = (r.num().unsigned_abs(), r.den().unsigned_abs().max(1));
+    u32::try_from((secs * num).div_ceil(den)).unwrap_or(u32::MAX)
+}
+
+/// A frame at `rate` in ticks of `time_base`, when it is whole.
+fn frame_ticks(rate: FrameRate, time_base: Rational) -> Option<i64> {
+    let t = rate
+        .frame_duration()
+        .as_rational()
+        .checked_div(time_base)
+        .ok()?;
+    (t.den() == 1).then_some(t.num())
+}
+
+/// The rate [`InsvFault::RateDiffer`] gives track 1 against track 0's
+/// `rate`, and the time base both tracks then take, in which a frame at
+/// either rate is whole: n/1200 fps in 1/n for n/1001 (25 against 29.97
+/// in 1/30000, 50 against 59.94 in 1/60000), and 1200 n/1001 in
+/// 1/(1200 n) for a whole n (29.97 against 25 in 1/30000). At 29.97 the
+/// time base is the X5's, so track 0 is as without the fault.
+fn rate_differ(rate: FrameRate) -> Option<(FrameRate, Rational)> {
+    let r = rate.as_rational();
+    let num = r.num();
+    let (other, time_base) = match r.den() {
+        1001 => (Rational::new(num, 1200), Rational::new(1, num)),
+        1 => {
+            let n = num.checked_mul(1200)?;
+            (Rational::new(n, 1001), Rational::new(1, n))
+        }
+        _ => return None,
+    };
+    Some((FrameRate::new(other.ok()?).ok()?, time_base.ok()?))
+}
+
+/// How [`write_insv`] codes a picture of `width` × `height` at `rate`, as
+/// the X5 codes its tracks (3.1): with `encoder`, libx265 for the
+/// master's tracks and libx264 for the LRV's, at `quality`, an IDR every
+/// `keyint` frames, a closed GOP, no B-frames, in the X5's colour and
+/// `time_base`. One thread, so that the bitstream is the same on every
+/// run.
+fn x5_settings(
+    encoder: &str,
+    (width, height): (u32, u32),
+    rate: FrameRate,
+    time_base: Rational,
+    quality: Quality,
+    keyint: u32,
+) -> VideoSettings {
+    let x265 = encoder == "libx265";
+    let mut options = vec![
+        ("preset".to_owned(), "veryfast".to_owned()),
+        ("threads".to_owned(), "1".to_owned()),
+    ];
+    // x264 and x265 spell these the same.
+    let mut params = vec![format!(
+        "keyint={keyint}:min-keyint={keyint}:bframes=0:scenecut=0:open-gop=0"
+    )];
+    match quality {
+        Quality::Lossless if x265 => params.push("lossless=1".to_owned()),
+        Quality::Lossless => options.push(("qp".to_owned(), "0".to_owned())),
+        Quality::CameraLike { crf } => options.push(("crf".to_owned(), crf.to_string())),
+    }
+    let key = match x265 {
+        true => {
+            params.push("log-level=error".to_owned());
+            "x265-params"
+        }
+        false => "x264-params",
+    };
+    options.push((key.to_owned(), params.join(":")));
+    VideoSettings {
+        encoder: encoder.to_owned(),
+        width,
+        height,
+        rate,
+        layout: PixelLayout::Yuv420p,
+        options,
+        color: X5_COLOR,
+        edit_start: 0,
+        time_base: Some(time_base),
+        crop_left: 0,
+        device: None,
+    }
+}
+
+/// The silent AAC track's settings: AAC-LC at 192 kb/s, and no
+/// perceptual noise substitution, as synth's other clips have it.
+fn silent_aac() -> AudioSettings {
+    AudioSettings {
+        encoder: "aac".to_owned(),
+        sample_rate: AUDIO_RATE,
+        channels: AUDIO_CHANNELS,
+        bit_rate: 192_000,
+        options: vec![("aac_pns".to_owned(), "0".to_owned())],
+    }
+}
+
+/// The audio samples before frame `i` at `rate`, rounded down.
+fn samples_before(rate: FrameRate, i: u32) -> usize {
+    let r = rate.as_rational();
+    let n = u128::from(i) * u128::from(AUDIO_RATE) * r.den().unsigned_abs() as u128
+        / r.num().unsigned_abs().max(1) as u128;
+    usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+/// Pushes frame `i` at `rate`'s share of silence to `w`.
+fn push_silence(w: &mut Mp4Writer, rate: FrameRate, i: u32) -> Result<(), EncodeError> {
+    let n = samples_before(rate, i + 1) - samples_before(rate, i);
+    w.push_audio(&vec![vec![0.0; n]; AUDIO_CHANNELS as usize])
+}
+
+/// Writes track `plan` of `spec`'s master to `path` as an MP4 of its own,
+/// with the silent AAC track when it is track 0's.
+fn write_track(spec: &InsvSpec, plan: &TrackPlan, path: &Path) -> Result<(), SynthError> {
+    let side = spec.rig.lenses[plan.lens].side;
+    let settings = x5_settings(
+        "libx265",
+        (side, side),
+        plan.rate,
+        plan.time_base,
+        spec.quality,
+        plan.keyint,
+    );
+    let ticks = frame_ticks(plan.rate, plan.time_base)
+        .ok_or_else(|| refused(&spec.name, "a frame isn't whole ticks of its time base"))?;
+    let audio = (plan.lens == 0).then(silent_aac);
+    let mut w = Mp4Writer::create(path, &settings, audio.as_ref())?;
+    for i in 0..plan.frames {
+        let planes = spec.planes(plan.lens, i)?;
+        w.push_video_at(&planes, i64::from(i) * ticks)?;
+        if audio.is_some() {
+            push_silence(&mut w, plan.rate, i)?;
+        }
+    }
+    w.finish()?;
+    Ok(())
+}
+
+/// The LRV of a master, as [`write_insv`] writes it.
+#[derive(Debug, Clone, PartialEq)]
+struct LrvPlan {
+    /// Its file name, beside the master.
+    name: String,
+    /// Each half's side.
+    side: u32,
+    quality: Quality,
+    rate: FrameRate,
+    time_base: Rational,
+    /// Frame j shows the master's frame `step` · j.
+    step: u32,
+    frames: u32,
+}
+
+/// `spec`'s LRV by the X5's rules ([`write_insv`]), or why it can't have
+/// one.
+fn lrv_plan(spec: &InsvSpec, lrv: &LrvSpec) -> Result<LrvPlan, SynthError> {
+    let no = |why: &str| refused(&spec.name, why);
+    let name = lrv_name(&spec.name)
+        .ok_or_else(|| no("an LRV needs a master named VID_<date>_<time>_00_<NNN>.insv"))?;
+    let rate = match spec.rate == FrameRate::FPS_25 {
+        true => FrameRate::FPS_25,
+        false => FrameRate::FPS_29_97,
+    };
+    let step = rate
+        .frame_duration()
+        .as_rational()
+        .checked_div(spec.rate.frame_duration().as_rational())
+        .ok()
+        .filter(|s| s.den() == 1)
+        .and_then(|s| u32::try_from(s.num()).ok())
+        .filter(|&s| s > 0)
+        .ok_or_else(|| no("its LRV takes no whole number of its frames"))?;
+    let time_base = x5_time_base(rate).ok_or_else(|| no("no time base for its LRV"))?;
+    for truth in &spec.rig.lenses {
+        check_clear_at(truth, lrv.side)?;
+    }
+    Ok(LrvPlan {
+        name,
+        side: lrv.side,
+        quality: lrv.quality,
+        rate,
+        time_base,
+        step,
+        frames: spec.frames.div_ceil(step),
+    })
+}
+
+/// The LRV's name beside the master named `master`, by the X5's rule
+/// (insta360.md §2.3): `VID_<date>_<time>_00_<NNN>.insv` gives
+/// `LRV_<date>_<time>_01_<NNN>.lrv`. `None` for a name not of that form.
+fn lrv_name(master: &str) -> Option<String> {
+    let stem = master.strip_prefix("VID_")?.strip_suffix(".insv")?;
+    let (stamp, take) = stem.rsplit_once("_00_")?;
+    Some(format!("LRV_{stamp}_01_{take}.lrv"))
+}
+
+/// Writes `spec`'s LRV, as `plan` lays it out, to `path` as an MP4 of its
+/// own.
+fn write_lrv(spec: &InsvSpec, plan: &LrvPlan, path: &Path) -> Result<(), SynthError> {
+    let side = plan.side;
+    // A keyframe every second, as on Pat's LRVs (insta360.md, the LRV
+    // table): 30 frames at 29.97 and 25 at 25.
+    let keyint = frames_in(plan.rate, 1);
+    let settings = x5_settings(
+        "libx264",
+        (2 * side, side),
+        plan.rate,
+        plan.time_base,
+        plan.quality,
+        keyint,
+    );
+    let ticks = frame_ticks(plan.rate, plan.time_base).ok_or_else(|| {
+        refused(
+            &spec.name,
+            "an LRV frame isn't whole ticks of its time base",
+        )
+    })?;
+    let audio = silent_aac();
+    let mut w = Mp4Writer::create(path, &settings, Some(&audio))?;
+    let cache = RenderCache::shared();
+    for j in 0..plan.frames {
+        let frame = j * plan.step;
+        let mut halves = Vec::with_capacity(2);
+        for lens in 0..2 {
+            let picture = cache.render(spec.pattern, &spec.rig, lens, frame, spec.ss);
+            let mut half = area_resample(&picture, side);
+            corner_code(&mut half, lens, frame)?;
+            halves.push(half);
+        }
+        // Track 1 on the left, track 0 on the right.
+        let packed = side_by_side(&halves[1], &halves[0]);
+        w.push_video_at(&lens_planes(&packed, Coding::X5), i64::from(j) * ticks)?;
+        push_silence(&mut w, plan.rate, j)?;
+    }
+    w.finish()?;
+    Ok(())
+}
+
+/// `img`, a square picture, scaled to `side` square by area: each pixel
+/// the mean of the pixels it covers, each weighted by how much of it the
+/// pixel covers, across and then down. A display value's mean, as
+/// [`crate::lens::render_lens`]'s samples are.
+fn area_resample(img: &RgbImage, side: u32) -> RgbImage {
+    let (n, m) = (img.width as usize, side as usize);
+    let scale = n as f64 / m.max(1) as f64;
+    // The pixels output pixel i covers, and their weights, which sum to 1.
+    let taps: Vec<Vec<(usize, f64)>> = (0..m)
+        .map(|i| {
+            let (a, b) = (i as f64 * scale, (i + 1) as f64 * scale);
+            let last = (b.ceil() as usize).min(n);
+            (a.floor() as usize..last)
+                .map(|s| (s, (b.min(s as f64 + 1.0) - a.max(s as f64)) / scale))
+                .filter(|&(_, w)| w > 0.0)
+                .collect()
+        })
+        .collect();
+    let mut across = vec![[0.0; 3]; n * m];
+    for y in 0..n {
+        for (x, t) in taps.iter().enumerate() {
+            let mut sum = [0.0; 3];
+            for &(s, w) in t {
+                let p = img.pixels[y * n + s];
+                for c in 0..3 {
+                    sum[c] += w * p[c];
+                }
+            }
+            across[y * m + x] = sum;
+        }
+    }
+    let mut pixels = vec![[0.0; 3]; m * m];
+    for (y, t) in taps.iter().enumerate() {
+        for x in 0..m {
+            let mut sum = [0.0; 3];
+            for &(s, w) in t {
+                let p = across[s * m + x];
+                for c in 0..3 {
+                    sum[c] += w * p[c];
+                }
+            }
+            pixels[y * m + x] = sum;
+        }
+    }
+    RgbImage {
+        width: side,
+        height: side,
+        pixels,
+    }
+}
+
+/// `left` and `right`, two pictures of one height, side by side.
+fn side_by_side(left: &RgbImage, right: &RgbImage) -> RgbImage {
+    let (wl, wr) = (left.width as usize, right.width as usize);
+    let rows = left
+        .pixels
+        .chunks(wl.max(1))
+        .zip(right.pixels.chunks(wr.max(1)));
+    RgbImage {
+        width: left.width + right.width,
+        height: left.height,
+        pixels: rows.flat_map(|(l, r)| l.iter().chain(r)).copied().collect(),
+    }
+}
+
+/// Renames the 8-byte `free` box FFmpeg's MP4 muxer writes after `ftyp`,
+/// the room it keeps for a 64-bit `mdat` header, to `wide`, QuickTime's
+/// name for the same room and the X5's: the same size, so nothing moves.
+/// A file whose `mdat` took the room, at 4 GiB or more, which no
+/// synthetic file comes near, is left as it is.
+fn mark_wide(path: &Path) -> Result<(), SynthError> {
+    use std::io::{Read, Seek, SeekFrom};
+    let io_err = |error| SynthError::Io {
+        path: path.to_path_buf(),
+        error,
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(io_err)?;
+    let mut head = [0; 8];
+    f.read_exact(&mut head).map_err(io_err)?;
+    if head[4..] != *b"ftyp" {
+        return Err(SynthError::Read {
+            path: path.to_path_buf(),
+            why: "the muxer's file doesn't start with ftyp".into(),
+        });
+    }
+    let at = u64::from(u32::from_be_bytes([head[0], head[1], head[2], head[3]]));
+    f.seek(SeekFrom::Start(at)).map_err(io_err)?;
+    f.read_exact(&mut head).map_err(io_err)?;
+    if head == [0, 0, 0, 8, b'f', b'r', b'e', b'e'] {
+        f.seek(SeekFrom::Start(at + 4)).map_err(io_err)?;
+        f.write_all(b"wide").map_err(io_err)?;
+    }
+    Ok(())
+}
+
+/// A rung-3-like spec of `frames` frames at 29.97 with lenses of `side`²:
+/// [`x5_like`] under [`x5_like_planted`], composed at front track 0, seeing
+/// `SeamLines` infinitely far, lossless at ss 2, with [`Records::x5_like`]
+/// of the same calibration and no LRV.
+fn x5_like_spec(name: &str, side: u32, frames: u32) -> InsvSpec {
+    let (cal, planted) = (x5_like(), x5_like_planted());
+    let rate = FrameRate::FPS_29_97;
+    InsvSpec {
+        name: name.to_owned(),
+        rig: compose(&cal, &planted, 0, [side; 2]),
+        pattern: Pattern::SeamLines,
+        frames,
+        rate,
+        quality: Quality::Lossless,
+        records: Records::x5_like(std::slice::from_ref(&cal), &planted, frames, rate),
+        calib: planted,
+        fault: None,
+        lrv: None,
+        keyint: None,
+        ss: 2,
+    }
+}
+
+impl InsvSpec {
+    /// Rung 3's file (4.2): [`x5_like`] under [`x5_like_planted`], composed
+    /// at front track 0 and `[X5_LIKE_SIDE; 2]` (2 × 768²) as rung 1's
+    /// camera is, seeing `SeamLines` infinitely far, 8 frames at 29.97,
+    /// lossless, at ss 2, with [`Records::x5_like`] of the same
+    /// calibration and no LRV.
+    pub fn rung3() -> InsvSpec {
+        x5_like_spec("VID_20250101_120000_00_001.insv", X5_LIKE_SIDE, 8)
+    }
+
+    /// The file the other app and agent tests open (7.2's sizes): rung 3's
+    /// at 2 × 384², 30 frames.
+    pub fn small() -> InsvSpec {
+        x5_like_spec("VID_20250101_120000_00_002.insv", 384, 30)
+    }
+
+    /// The planes [`write_insv`] codes for track `track`'s frame `frame`,
+    /// its corner code and all, as the X5 codes them
+    /// ([`crate::lens::Coding::X5`]): what a lossless file's decoded frame
+    /// must hash equal to. The picture is rendered through
+    /// [`RenderCache::shared`], so that a test that writes a file and
+    /// then hashes its planes renders each picture once; a rig at rest
+    /// seeing a still scene is one picture a lens, whatever the frame. An
+    /// error for a track past the rig's two, and for a truth whose image
+    /// circle reaches the corner code's blocks
+    /// ([`crate::lens::render_lens_coded`]).
+    pub fn planes(&self, track: usize, frame: u32) -> Result<YuvPlanes, SynthError> {
+        if track >= self.rig.lenses.len() {
+            return Err(refused(&self.name, format_args!("no track {track}")));
+        }
+        let cache = RenderCache::shared();
+        let picture = render_lens_coded_in(cache, self.pattern, &self.rig, track, frame, self.ss)?;
+        Ok(lens_planes(&picture, Coding::X5))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use spherecut_testkit::control::must_fail;
+    use spherecut_testkit::pats;
 
     use super::*;
+    use crate::lens::tests::pats_truth;
     use crate::lens::{
-        Angle, Axis, BlockTruth, QuarterTurn, Sign, StoredDist, TruthBinding, TruthCanvas,
-        TruthEuler, TruthTurn, TruthTz, TruthV6,
+        Angle, Axis, QuarterTurn, Sign, TruthBinding, TruthCanvas, TruthEuler, TruthTurn, TruthTz,
+        TruthV6,
     };
 
-    // Pat's V3 and V6 strings, byte-identical in all 14 of Pat's files
-    // (insta360.md, "Pat's X5 samples").
-    const PATS_V3: &str = "2_2.000000_4284.620_4284.280_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_0.18632051_2.04984355_-3.24446917_-0.00143576_-0.00339240_10752_5376_113_2.000000_4291.030_4291.030_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_0.18940836_2.07073069_-3.24103332_0.00013831_-0.00299873_10752_5376_113_197632";
-    const PATS_V6: &str = "2_2.000000_4277.520_4277.270_2713.050_2689.210_-0.310_-0.271_90.255_0.000000_0.000000_0.000000_0.28032997_0.89045405_2.04927588_-8.05179787_0.00000000_0.00120200_-0.00259487_0.02324706_0.00533920_-0.01560208_0.00019357_-0.04580523_0.00197187_10752_5376_113_2.000000_4284.400_4284.760_8075.730_2680.350_0.120_-0.173_89.112_0.000637_0.000001_-0.031525_0.27665332_0.98522973_1.83605266_-7.99374485_0.00000000_0.00021056_-0.00147626_0.01940425_0.00331838_-0.01330665_0.00074511_-0.02859299_0.00888746_10752_5376_113_394240";
-
-    /// Pat's V3 calibration, number for number as the format notes lay it
-    /// out.
+    /// Pat's V3 calibration (`testkit::pats::V3`), number for number as
+    /// the format notes lay it out.
     fn pats_v3() -> CalibTruth {
-        let blocks = [
-            BlockTruth {
-                xi: 2.0,
-                fx: 4284.62,
-                fy: 4284.28,
-                cx: 2701.13,
-                cy: 2692.13,
-                ypr_deg: [-0.198, 0.211, 90.28],
-                t_m: [0.0; 3],
-            },
-            BlockTruth {
-                xi: 2.0,
-                fx: 4291.03,
-                fy: 4291.03,
-                cx: 8069.0,
-                cy: 2684.95,
-                ypr_deg: [0.239, 0.113, 89.107],
-                t_m: [-0.00446, 0.000017, -0.03192],
-            },
-        ];
-        let dist = StoredDist::V3 {
-            k: [
-                [0.18632051, 2.04984355, -3.24446917],
-                [0.18940836, 2.07073069, -3.24103332],
-            ],
-            p: [[-0.00143576, -0.0033924], [0.00013831, -0.00299873]],
-        };
-        CalibTruth {
-            blocks,
-            dist,
-            canvas: [10752, 5376],
-            dst: 5312,
-            lens_type: 113,
-            body: 4,
-        }
+        pats_truth(pats::V3)
     }
 
-    /// Pat's V6 calibration, a separate one from V3's.
+    /// Pat's V6 calibration (`testkit::pats::V6`), a separate one from
+    /// V3's.
     fn pats_v6() -> CalibTruth {
-        let blocks = [
-            BlockTruth {
-                xi: 2.0,
-                fx: 4277.52,
-                fy: 4277.27,
-                cx: 2713.05,
-                cy: 2689.21,
-                ypr_deg: [-0.31, -0.271, 90.255],
-                t_m: [0.0; 3],
-            },
-            BlockTruth {
-                xi: 2.0,
-                fx: 4284.4,
-                fy: 4284.76,
-                cx: 8075.73,
-                cy: 2680.35,
-                ypr_deg: [0.12, -0.173, 89.112],
-                t_m: [0.000637, 0.000001, -0.031525],
-            },
-        ];
-        let d = [
-            [
-                0.28032997,
-                0.89045405,
-                2.04927588,
-                -8.05179787,
-                0.0,
-                0.001202,
-                -0.00259487,
-                0.02324706,
-                0.0053392,
-                -0.01560208,
-                0.00019357,
-                -0.04580523,
-                0.00197187,
-            ],
-            [
-                0.27665332,
-                0.98522973,
-                1.83605266,
-                -7.99374485,
-                0.0,
-                0.00021056,
-                -0.00147626,
-                0.01940425,
-                0.00331838,
-                -0.01330665,
-                0.00074511,
-                -0.02859299,
-                0.00888746,
-            ],
-        ];
-        CalibTruth {
-            dist: StoredDist::V6 { d },
-            blocks,
-            ..pats_v3()
-        }
+        pats_truth(pats::V6)
     }
 
     /// One value of each convention; `print` reads none of them yet.
@@ -963,15 +1614,16 @@ mod tests {
         }
     }
 
-    /// Printing Pat's V3 and V6 numbers ("Pat's X5 samples") gives
-    /// Pat's strings, token for token.
+    /// Printing Pat's V3 and V6 numbers ("Pat's X5 samples"), parsed
+    /// from `testkit::pats`, gives `testkit::pats`'s strings back, token
+    /// for token and byte for byte.
     #[test]
     fn print_gives_pats_strings_back() {
         let p = planted();
-        assert_eq!(same_tokens(&print(&pats_v3(), &p), PATS_V3), Ok(()));
-        assert_eq!(same_tokens(&print(&pats_v6(), &p), PATS_V6), Ok(()));
-        assert_eq!(print(&pats_v3(), &p), PATS_V3);
-        assert_eq!(print(&pats_v6(), &p), PATS_V6);
+        assert_eq!(same_tokens(&print(&pats_v3(), &p), pats::V3), Ok(()));
+        assert_eq!(same_tokens(&print(&pats_v6(), &p), pats::V6), Ok(()));
+        assert_eq!(print(&pats_v3(), &p), pats::V3);
+        assert_eq!(print(&pats_v6(), &p), pats::V6);
         // No token depends on what is planted yet: under every value of
         // the other conventions, the same strings.
         let others = TruthBinding::all().flat_map(|binding| {
@@ -989,7 +1641,7 @@ mod tests {
         });
         for q in others {
             assert_eq!(
-                same_tokens(&print(&pats_v6(), &q), PATS_V6),
+                same_tokens(&print(&pats_v6(), &q), pats::V6),
                 Ok(()),
                 "{q:?}"
             );
@@ -1002,14 +1654,14 @@ mod tests {
         swapped.blocks.swap(0, 1);
         let at = must_fail(
             "Pat's V3 blocks swapped",
-            same_tokens(&print(&swapped, &p), PATS_V3),
+            same_tokens(&print(&swapped, &p), pats::V3),
         );
         assert_eq!(at, 2);
         let mut off = pats_v6();
         off.blocks[1].t_m[2] -= 0.000001;
         let at = must_fail(
             "block 1's tz a unit off",
-            same_tokens(&print(&off, &p), PATS_V6),
+            same_tokens(&print(&off, &p), pats::V6),
         );
         assert_eq!(at, 38);
     }
@@ -1254,7 +1906,7 @@ mod tests {
                 InsvFault::WrongTokenCount | InsvFault::NoCalibration => {
                     let less = match fault {
                         InsvFault::WrongTokenCount => 4 * 7,
-                        _ => 2 * (2 + 2 + PATS_V3.len()) + 2 * (2 + 2 + PATS_V6.len()),
+                        _ => 2 * (2 + 2 + pats::V3.len()) + 2 * (2 + 2 + pats::V6.len()),
                     };
                     assert_eq!(
                         l.slots[0].size as usize,
@@ -1593,7 +2245,7 @@ mod tests {
         );
         assert_eq!(
             text(&planted_one, 111),
-            Some(Value::Bytes(PATS_V6.as_bytes().to_vec()))
+            Some(Value::Bytes(pats::V6.as_bytes().to_vec()))
         );
         must_fail(
             "the working string, the planted original",
@@ -1610,5 +2262,118 @@ mod tests {
             numbers.contains(&112) && !numbers.contains(&111),
             "{numbers:?}"
         );
+    }
+
+    /// The X5's rules by rate ("Pat's X5 samples", 3.1), as `write_insv`
+    /// codes them: the time base, the master's GOP, a second's frames
+    /// (the LRV's GOP at 25 and 29.97), and the rate and time base
+    /// `RateDiffer` gives lens 1. The control holds each row to the next
+    /// row's numbers.
+    #[test]
+    fn the_x5s_rules_by_rate() {
+        let fps = |num, den| FrameRate::new(Rational::new(num, den).unwrap()).unwrap();
+        let tb = |den| Rational::new(1, den).unwrap();
+        let rows = [
+            (FrameRate::FPS_25, 25_000, 50, 25, fps(30_000, 1001), 30_000),
+            (
+                FrameRate::FPS_29_97,
+                30_000,
+                60,
+                30,
+                FrameRate::FPS_25,
+                30_000,
+            ),
+            (
+                FrameRate::FPS_59_94,
+                60_000,
+                120,
+                60,
+                FrameRate::FPS_50,
+                60_000,
+            ),
+            (fps(120_000, 1001), 120_000, 120, 120, fps(100, 1), 120_000),
+        ];
+        type Rules = (Option<Rational>, u32, u32, Option<(FrameRate, Rational)>);
+        let rules = |rate| -> Rules {
+            (
+                x5_time_base(rate),
+                x5_gop(rate),
+                frames_in(rate, 1),
+                rate_differ(rate),
+            )
+        };
+        let wanted = |&(_, base, gop, second, other, common): &(
+            FrameRate,
+            i64,
+            u32,
+            u32,
+            FrameRate,
+            i64,
+        )|
+         -> Rules { (Some(tb(base)), gop, second, Some((other, tb(common)))) };
+        for row in &rows {
+            assert_eq!(rules(row.0), wanted(row), "{:?}", row.0);
+            // Each frame is whole ticks of the time base, at both rates.
+            let (other, common) = rate_differ(row.0).unwrap();
+            assert!(frame_ticks(row.0, common).is_some() && frame_ticks(other, common).is_some());
+        }
+        // A rate neither n/1001 nor whole has no RateDiffer pair.
+        assert_eq!(rate_differ(fps(25, 2)), None);
+        assert_eq!(x5_time_base(fps(25, 2)), Some(tb(25_000)));
+
+        // Its control: each row held to the next one's numbers.
+        for (row, next) in rows.iter().zip(rows.iter().cycle().skip(1)) {
+            must_fail(
+                &format!("{:?} by {:?}'s rules", row.0, next.0),
+                rules(row.0) == wanted(next),
+            );
+        }
+    }
+
+    /// The LRV's name follows the master's by the X5's rule (insta360.md
+    /// §2.3), and a master named otherwise has none.
+    #[test]
+    fn the_lrv_is_named_after_its_master() {
+        assert_eq!(
+            lrv_name("VID_20261022_165451_00_004.insv").as_deref(),
+            Some("LRV_20261022_165451_01_004.lrv")
+        );
+        for other in [
+            "VID_20261022_165451_10_004.insv",
+            "lens.insv",
+            "VID_a_00_1.mp4",
+        ] {
+            must_fail(other, lrv_name(other).ok_or(()));
+        }
+    }
+
+    /// Scaling a picture by area: each pixel the mean of the 2 × 2 it
+    /// covers at half the side, and at 2/3 a weighted mean whose weights
+    /// are the shares of the pixels covered. The control is the top left
+    /// pixel of each block, which isn't the mean.
+    #[test]
+    fn area_resample_takes_each_pixels_share() {
+        let grey = |v: f64| [v; 3];
+        let img = RgbImage {
+            width: 4,
+            height: 4,
+            pixels: (0..16).map(|i| grey(f64::from(i))).collect(),
+        };
+        let half = area_resample(&img, 2);
+        // Block (0, 0) holds 0, 1, 4, 5; block (1, 1) 10, 11, 14, 15.
+        let means = [2.5, 4.5, 10.5, 12.5].map(grey);
+        assert_eq!(half.pixels, means);
+        let corners = [0.0, 2.0, 8.0, 10.0].map(grey);
+        must_fail("the top left pixels as the means", half.pixels == corners);
+
+        // 3 to 2 across a row of 0, 3, 6: the first pixel covers 0 whole
+        // and half of 3, the second half of 3 and 6 whole.
+        let row = RgbImage {
+            width: 3,
+            height: 3,
+            pixels: (0..9).map(|i| grey(f64::from(3 * (i % 3)))).collect(),
+        };
+        let two = area_resample(&row, 2);
+        assert_eq!(two.pixels, [1.0, 5.0, 1.0, 5.0].map(grey));
     }
 }

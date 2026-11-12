@@ -45,6 +45,7 @@ use spherecut_synth::lens::{
     TruthCanvas, TruthEuler, TruthTurn, TruthTz, TruthV6,
 };
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats::tokens;
 use spherecut_testkit::{Fnv64, fnv64};
 
 /// The suite's budget in seconds, at the default number of cases: all of
@@ -106,103 +107,16 @@ fn planted() -> Planted {
     }
 }
 
-/// Pat's V3 calibration, from insta360.md's "Pat's X5 samples".
+/// Pat's V3 calibration: the boundary crate's, which it parses from
+/// `testkit::pats::V3`, the one copy of Pat's strings (the project
+/// review's F137).
 fn pats_v3() -> CalibTruth {
-    let blocks = [
-        BlockTruth {
-            xi: 2.0,
-            fx: 4284.62,
-            fy: 4284.28,
-            cx: 2701.13,
-            cy: 2692.13,
-            ypr_deg: [-0.198, 0.211, 90.28],
-            t_m: [0.0; 3],
-        },
-        BlockTruth {
-            xi: 2.0,
-            fx: 4291.03,
-            fy: 4291.03,
-            cx: 8069.0,
-            cy: 2684.95,
-            ypr_deg: [0.239, 0.113, 89.107],
-            t_m: [-0.00446, 0.000017, -0.03192],
-        },
-    ];
-    CalibTruth {
-        blocks,
-        dist: StoredDist::V3 {
-            k: [
-                [0.18632051, 2.04984355, -3.24446917],
-                [0.18940836, 2.07073069, -3.24103332],
-            ],
-            p: [[-0.00143576, -0.0033924], [0.00013831, -0.00299873]],
-        },
-        canvas: [10752, 5376],
-        dst: 5312,
-        lens_type: 113,
-        body: 4,
-    }
+    spherecut_boundary::pats(spherecut_synth::lens::Generation::V3)
 }
 
-/// Pat's V6 calibration, from the same table.
+/// Pat's V6 calibration, from `testkit::pats::V6` the same way.
 fn pats_v6() -> CalibTruth {
-    let blocks = [
-        BlockTruth {
-            xi: 2.0,
-            fx: 4277.52,
-            fy: 4277.27,
-            cx: 2713.05,
-            cy: 2689.21,
-            ypr_deg: [-0.31, -0.271, 90.255],
-            t_m: [0.0; 3],
-        },
-        BlockTruth {
-            xi: 2.0,
-            fx: 4284.4,
-            fy: 4284.76,
-            cx: 8075.73,
-            cy: 2680.35,
-            ypr_deg: [0.12, -0.173, 89.112],
-            t_m: [0.000637, 0.000001, -0.031525],
-        },
-    ];
-    let d = [
-        [
-            0.28032997,
-            0.89045405,
-            2.04927588,
-            -8.05179787,
-            0.0,
-            0.001202,
-            -0.00259487,
-            0.02324706,
-            0.0053392,
-            -0.01560208,
-            0.00019357,
-            -0.04580523,
-            0.00197187,
-        ],
-        [
-            0.27665332,
-            0.98522973,
-            1.83605266,
-            -7.99374485,
-            0.0,
-            0.00021056,
-            -0.00147626,
-            0.01940425,
-            0.00331838,
-            -0.01330665,
-            0.00074511,
-            -0.02859299,
-            0.00888746,
-        ],
-    ];
-    CalibTruth {
-        blocks,
-        dist: StoredDist::V6 { d },
-        ..pats_v3()
-    }
+    spherecut_boundary::pats(spherecut_synth::lens::Generation::V6)
 }
 
 /// What `parse_metadata` reads from `Records::x5_like` of Pat's two
@@ -1281,26 +1195,42 @@ fn calib_parses_synths_print() {
     }
     let v3 = pats_v3();
     let s = insv::print(&v3, &p);
+    // Block 0's fx as printed (token 2), and the string with another
+    // text in its place.
+    let fx = s.split('_').nth(2).unwrap();
+    let with_fx = |text: &str| {
+        let mut t: Vec<&str> = s.split('_').collect();
+        t[2] = text;
+        t.join("_")
+    };
     let mut swapped = v3;
     swapped.blocks.swap(0, 1);
     let e = must_fail(
         "each block held to the other's truth",
         cross_parses(&swapped, &s),
     );
+    // Off by the gap between block 1's fx (token 21) and block 0's.
+    let gap = (tokens(&s)[21] - tokens(&s)[2]).abs();
     assert!(
-        matches!(&e, Miss::Off { block: 0, name, off, .. } if name == "fx" && (off - 6.41).abs() < 1e-9),
+        matches!(&e, Miss::Off { block: 0, name, off, .. } if name == "fx" && (off - gap).abs() < 1e-9),
         "{e:?}"
     );
-    let unit_off = s.replacen("_4284.620_", "_4284.621_", 1);
+    // A unit off in its last digit (9 going to 8), a decimal short, and
+    // with a zero more.
+    let (short, last) = fx.split_at(fx.len() - 1);
+    let last: u8 = last.parse().unwrap();
+    let unit_off = with_fx(&format!("{short}{}", if last == 9 { 8 } else { last + 1 }));
     let e = must_fail("fx a unit off", cross_parses(&pats_v3(), &unit_off));
     assert!(
         matches!(&e, Miss::Off { block: 0, name, off, bound } if name == "fx" && *off > 1.9 * bound),
         "{e:?}"
     );
-    let short = s.replacen("_4284.620_", "_4284.62_", 1);
-    let e = must_fail("fx a decimal short", cross_parses(&pats_v3(), &short));
+    let e = must_fail(
+        "fx a decimal short",
+        cross_parses(&pats_v3(), &with_fx(short)),
+    );
     assert!(
-        matches!(&e, Miss::Decimals { block: 0, name, text } if name == "fx" && text == "4284.62"),
+        matches!(&e, Miss::Decimals { block: 0, name, text } if name == "fx" && text == short),
         "{e:?}"
     );
     let e = must_fail(
@@ -1325,7 +1255,7 @@ fn calib_parses_synths_print() {
         matches!(&e, Miss::Read(why) if why == "((10752, 5376), 113, 197632), not ((10752, 5376), 113, 197888)"),
         "{e:?}"
     );
-    let padded = s.replacen("_4284.620_", "_4284.6200_", 1);
+    let padded = with_fx(&format!("{fx}0"));
     let e = must_fail(
         "fx with a zero more, reprinted",
         reprints(&pats_v3(), &padded, &s),
@@ -1367,9 +1297,9 @@ fn the_calibration_hash_is_over_the_working_strings() {
     // each other's generations, V3's string held as V2's, and the strings
     // hashed with no NULs, each another hash.
     let mut changed = calib.clone();
-    changed.v6.working = Some(v6.replacen("4277.52", "4277.53", 1));
+    changed.v6.working = Some(format!("3{}", &v6[1..]));
     must_fail(
-        "a working string with a byte changed",
+        "a working string with its first byte changed",
         changed.hash() == want,
     );
     let swapped = Calibrations {

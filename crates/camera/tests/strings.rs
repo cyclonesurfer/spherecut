@@ -6,8 +6,9 @@
 //! strings assembled from insta360.md §4.1's table of each block's
 //! tokens; synth's writer and printer, which share nothing with the
 //! parsers either, are held to them in `synth_insv.rs` (unit (d)). Pat's
-//! four strings are copied from the bytes of Pat's files, in all 14 of
-//! which they are byte-identical.
+//! four strings are `testkit::pats`'s, the bytes of Pat's files, in all
+//! 14 of which they are byte-identical (`tier2_samples.rs` holds the
+//! files to them).
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): camera's suite ≤ 1 s at the default
 //! 256 cases, which each test prints its time against; the properties
@@ -30,6 +31,7 @@ use spherecut_camera::insta360::{
 use spherecut_camera::pb::{Field, Value, Walker};
 use spherecut_camera::{CameraError, Part};
 use spherecut_testkit::control::must_fail;
+use spherecut_testkit::pats::{V1, V2, V3, V6};
 
 /// The suite's budget in seconds, at the default number of cases: all of
 /// camera's (19.6).
@@ -72,13 +74,10 @@ fn cases() -> u32 {
         .unwrap_or(256)
 }
 
-// Pat's four strings, as the X5 writes them, copied from fields 5, 53, 54
-// and 111 of Pat's files (byte-identical in all 14), and the generations
-// they are. insta360.md's "Pat's X5 samples" lays them out by token.
-const V1: &str = "2_2653.545_2701.130_2692.130_-0.198_0.211_90.280_2661.203_8069.000_2684.950_0.239_0.113_89.107_10752_5376_1137";
-const V2: &str = "2_2660.372_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_1.00000000_-0.18756898_0.27067676_-0.08894466_10752_5376_113_2670.937_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_1.00000000_-0.18880324_0.27227741_-0.08904964_10752_5376_113_132096";
-const V3: &str = "2_2.000000_4284.620_4284.280_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_0.18632051_2.04984355_-3.24446917_-0.00143576_-0.00339240_10752_5376_113_2.000000_4291.030_4291.030_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_0.18940836_2.07073069_-3.24103332_0.00013831_-0.00299873_10752_5376_113_197632";
-const V6: &str = "2_2.000000_4277.520_4277.270_2713.050_2689.210_-0.310_-0.271_90.255_0.000000_0.000000_0.000000_0.28032997_0.89045405_2.04927588_-8.05179787_0.00000000_0.00120200_-0.00259487_0.02324706_0.00533920_-0.01560208_0.00019357_-0.04580523_0.00197187_10752_5376_113_2.000000_4284.400_4284.760_8075.730_2680.350_0.120_-0.173_89.112_0.000637_0.000001_-0.031525_0.27665332_0.98522973_1.83605266_-7.99374485_0.00000000_0.00021056_-0.00147626_0.01940425_0.00331838_-0.01330665_0.00074511_-0.02859299_0.00888746_10752_5376_113_394240";
+// Pat's four strings, as the X5 writes them (fields 5, 53, 54 and 111 of
+// Pat's files, byte-identical in all 14), from testkit's one copy (the
+// project review's F137), and the generations they are. insta360.md's
+// "Pat's X5 samples" lays them out by token.
 const PATS: [(Generation, &str); 4] = [
     (Generation::V1, V1),
     (Generation::V2, V2),
@@ -305,6 +304,9 @@ fn offset(e: &CameraError) -> u64 {
         | CameraError::TokenCount { offset, .. }
         | CameraError::BadToken { offset, .. }
         | CameraError::Io { offset, .. } => *offset,
+        // Strings that parsed but can't be a calibration: no parser of the
+        // bytes gives it, and it has no byte.
+        CameraError::NotCalibration { .. } => panic!("{e}: no parser gives this"),
     }
 }
 
@@ -748,17 +750,27 @@ fn strings_round_trip() {
             2 * block_names(g).len() - if g == Generation::V1 { 0 } else { 6 }
         );
     }
-    // A few of Pat's tokens by name (insta360.md, "Pat's X5 samples").
+    // A few of Pat's tokens by name (insta360.md, "Pat's X5 samples"),
+    // each the text of the token the format puts it at: V3's block 1 cx
+    // (token 23) and tz (30) and block 0's p1 (15), V6's block 1 d12
+    // (51) and word (55), and V1's word (15) and block 1 roll (12).
+    let nth = |s: &'static str, k: usize| s.split('_').nth(k).unwrap();
     let v3 = calib::parse(Generation::V3, V3).unwrap();
-    assert_eq!(v3.lenses[1].cx.text(), "8069.000");
-    assert_eq!(v3.lenses[1].t.as_ref().unwrap()[2].text(), "-0.031920");
-    assert_eq!(v3.lenses[0].coefficients[3].text(), "-0.00143576");
+    assert_eq!(v3.lenses[1].cx.text(), nth(V3, 23));
+    assert_eq!(v3.lenses[1].t.as_ref().unwrap()[2].text(), nth(V3, 30));
+    assert_eq!(v3.lenses[0].coefficients[3].text(), nth(V3, 15));
     let v6 = calib::parse(Generation::V6, V6).unwrap();
     assert_eq!(v6.lenses[1].coefficients.len(), 13);
-    assert_eq!(v6.lenses[1].coefficients[12].text(), "0.00888746");
-    assert_eq!(v6.word, 0x60400);
+    assert_eq!(v6.lenses[1].coefficients[12].text(), nth(V6, 51));
+    assert_eq!(v6.word.to_string(), nth(V6, 55));
     let v1 = calib::parse(Generation::V1, V1).unwrap();
-    assert_eq!((v1.word, v1.lenses[1].ypr[2].text()), (0x471, "89.107"));
+    assert_eq!(v1.word.to_string(), nth(V1, 15));
+    assert_eq!(v1.lenses[1].ypr[2].text(), nth(V1, 12));
+    // Their control: block 1's cx held to block 0's token (4).
+    must_fail(
+        "V3's block 1 cx read as block 0's",
+        v3.lenses[1].cx.text() == nth(V3, 4),
+    );
     // The control: printed from its values alone, V3 isn't itself
     // ("2.000000" prints as "2"): the identity is the tokens' text.
     let from_values = {
@@ -1300,9 +1312,10 @@ fn each_bad_token_is_an_error_at_its_byte() {
     // V2's in V1, and codes 4 (0x40400) and 0x104.
     let other = "is a packed word of another generation";
     let none = "is a packed word of none of the four generations";
-    let (s, at) = replaced(V3, 39, "394240");
+    let word = |s: &'static str| s.rsplit('_').next().unwrap();
+    let (s, at) = replaced(V3, 39, word(V6));
     bad(Generation::V3, &s, other, at);
-    let (s, at) = replaced(V1, 15, "132096");
+    let (s, at) = replaced(V1, 15, word(V2));
     bad(Generation::V1, &s, other, at);
     for word in ["263168", "17040384"] {
         let (s, at) = replaced(V3, 39, word);
@@ -1315,7 +1328,7 @@ fn each_bad_token_is_an_error_at_its_byte() {
         );
     }
     // The control: V6's word in V3 isn't worded as a word of none.
-    let (s, at) = replaced(V3, 39, "394240");
+    let (s, at) = replaced(V3, 39, word(V6));
     let e = calib::parse(Generation::V3, &s).unwrap_err();
     must_fail(
         "V6's word in V3 worded as a word of none",

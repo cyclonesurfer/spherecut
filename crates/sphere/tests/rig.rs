@@ -8,7 +8,9 @@
 //! by its property; the hand-worked frames are written here with glam's
 //! matrices from 6.2's text, apart from `sphere::rig`'s code. Pat's
 //! numbers are docs/formats/insta360.md's ("Pat's X5 samples"), in canvas
-//! pixels with block 1's cx local to its square.
+//! pixels with block 1's cx local to its square, and
+//! `pats_copies_match_testkit_pats` holds them to `testkit::pats`, the one
+//! copy of Pat's strings (F137).
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): sphere's properties and rung 0
 //! take at most 30 s together at `PROPTEST_CASES=100000`, shared with
@@ -41,6 +43,7 @@ use spherecut_sphere::rig::{
 };
 use spherecut_sphere::{angle_between, rotation_angle};
 use spherecut_testkit::control::{above, at_least, at_most, must_fail};
+use spherecut_testkit::pats::{self, tokens};
 
 /// The suite's budget in seconds, at 100,000 cases, shared as the module
 /// doc says.
@@ -225,7 +228,7 @@ fn pats() -> Calibration {
                 8075.730 - 5376.0,
                 2680.350,
                 [0.120, -0.173, 89.112],
-                [0.000637, 0.000001, -0.031525],
+                PATS_T1,
                 CalibTerms::V6 { d: PATS_D[1] },
             ),
         ]),
@@ -1234,7 +1237,7 @@ fn changed(small: Small, ext: Extrinsics, field: usize, pick: usize) -> (Small, 
             );
             e = Extrinsics::Fitted {
                 relative: tilt * DQuat::from_rotation_y(PI),
-                translation_m: DVec3::new(0.000637, 0.000001, -0.031525),
+                translation_m: DVec3::from(PATS_T1),
             };
         }
     }
@@ -1586,8 +1589,10 @@ fn rig_canvas_maps_invert() {
         }
     }
     canvas_maps_invert_cases();
-    // Control: map B's inverse taken of map A's output.
-    let p = DVec2::new(2713.05, 2689.21);
+    // Control: map B's inverse taken of map A's output, at V6 block 0's
+    // stored centre.
+    let block = cal.v6.unwrap()[0];
+    let p = DVec2::new(block.cx, block.cy);
     let back = CanvasMap::B.to_canvas(CanvasMap::A.to_slot(p, SRC, DST, 768), SRC, DST, 768);
     must_fail(
         "B's inverse of A's output",
@@ -1902,7 +1907,7 @@ fn rig_centre_turns_with_lens_0s_tune() {
     assert!(worst <= 1e-15, "{worst:e} m");
     // Untuned, c_1 is t_1 read through lens 0 along −Z: behind lens 0 by
     // 31.5 mm.
-    assert!((untuned - DVec3::new(0.000637, -0.000001, 0.031525)).length() <= 1e-18);
+    assert!((untuned - DVec3::new(t.x, -t.y, -t.z)).length() <= 1e-18);
     // Control: c_1 by lens 0's untuned rotation, with lens 0 yawed.
     must_fail(
         "c_1 by lens 0's untuned rotation",
@@ -2267,6 +2272,51 @@ fn rig_build_refuses_what_it_cannot_build() {
         "a canvas scale just above 0, refused",
         at(4, 0, 1e-6).is_err(),
     );
+    // ξ plus the tune's ξ delta at −1 or below, where the model images no
+    // direction (the project review's F038): ξ −1 and −2 on Pat's V3 and
+    // V6 terms, and ξ 0 with a ξ delta of −1.5, each refused by
+    // `Rig::build` and `theta_frame` with the block and the lens's ξ delta
+    // named. Control: ξ −0.9999, which the model still images a little
+    // of, isn't refused as `NotPositive` (its θ_max is past the limit).
+    let xi_names = [
+        "1 + block 0's ξ + lens 0's ξ delta",
+        "1 + block 1's ξ + lens 1's ξ delta",
+    ];
+    let with_xi = |generation: Generation, b: usize, xi: f64, delta: f64| {
+        let (mut c, mut t) = (cal, tune);
+        let blocks = match generation {
+            Generation::V3 => c.v3.as_mut(),
+            Generation::V6 => c.v6.as_mut(),
+        };
+        if let Some(blocks) = blocks {
+            blocks[b].xi = xi;
+        }
+        t.lenses[b].xi_delta = delta;
+        (c, t)
+    };
+    for (generation, g) in [(Generation::V3, &v3), (Generation::V6, &geo)] {
+        for (b, name) in xi_names.into_iter().enumerate() {
+            for (xi, delta) in [(-1.0, 0.0), (-2.0, 0.0), (0.0, -1.5)] {
+                let (c, t) = with_xi(generation, b, xi, delta);
+                let want = RigError::NotPositive(name);
+                let what = format!("{generation:?} block {b}, ξ {xi}, ξ delta {delta}");
+                assert_eq!(refuse(&c, g, &t, 0, [768; 2]), want, "{what}");
+                assert_eq!(theta_frame(&c, g, &t), Err(want), "{what}");
+            }
+            let (c, t) = with_xi(generation, b, -0.9999, 0.0);
+            must_fail(
+                &format!("{generation:?} block {b} at ξ −0.9999, refused as NotPositive"),
+                matches!(
+                    Rig::build(&c, g, &t, 0, [768; 2]),
+                    Err(RigError::NotPositive(_))
+                ),
+            );
+            must_fail(
+                &format!("{generation:?} block {b} at ξ −0.9999, θ_frame refused"),
+                theta_frame(&c, g, &t).is_err(),
+            );
+        }
+    }
     for (name, c, one) in [
         (
             "the calibration's src",
@@ -3434,5 +3484,117 @@ fn theta_frame_matches_an_edge_scan() {
     must_fail(
         "the farthest edge alone",
         at_most((farthest - lens.theta_frame).abs(), SCAN),
+    );
+}
+
+/// `s` with token `k`'s last digit one more, 9 going to 0.
+fn last_digit_changed(s: &str, k: usize) -> String {
+    let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
+    let token = &mut tokens[k];
+    let last = token.pop().and_then(|c| c.to_digit(10)).unwrap();
+    token.push(char::from_digit((last + 1) % 10, 10).unwrap());
+    tokens.join("_")
+}
+
+/// Whether each of this file's copies of Pat's numbers (`pats()`, with
+/// `PATS_D` and `PATS_T1`, which the file's other uses of them read) is
+/// exactly its token of `v3` or `v6`, as `testkit::pats::tokens` reads
+/// them, block 1's local cx as its token less src, and src the canvas's
+/// height; or the first that isn't, named. The strings are
+/// `testkit::pats::V3` and `V6` but in the control.
+fn copies_match(v3: &str, v6: &str) -> Result<(), String> {
+    let cal = pats();
+    let (v3, v6) = (tokens(v3), tokens(v6));
+    // Token k of block b in a string of `block`-token blocks, after the
+    // lens count (insta360.md §4.1: 19 in V3, 27 in V6).
+    let token = |t: &[f64], block: usize, b: usize, k: usize| t[1 + b * block + k];
+    let mut copies: Vec<(String, f64, f64)> = Vec::new();
+    for (g, blocks, t, block) in [("V3", cal.v3, &v3, 19), ("V6", cal.v6, &v6, 27)] {
+        let blocks = blocks.ok_or(format!("pats() has no {g} blocks"))?;
+        // The canvas's height, the last token but two of a block.
+        copies.push((
+            format!("{g}'s src"),
+            f64::from(cal.src),
+            token(t, block, 0, block - 2),
+        ));
+        for (b, l) in blocks.iter().enumerate() {
+            let left = if b == 0 { 0.0 } else { f64::from(cal.src) };
+            let mut push = |name: &str, copy: f64, k: usize, less: f64| {
+                copies.push((
+                    format!("{g} block {b}'s {name}"),
+                    copy,
+                    token(t, block, b, k) - less,
+                ));
+            };
+            push("ξ", l.xi, 0, 0.0);
+            push("fx", l.fx, 1, 0.0);
+            push("fy", l.fy, 2, 0.0);
+            push("cx", l.cx, 3, left);
+            push("cy", l.cy, 4, 0.0);
+            for (k, name) in ["yaw", "pitch", "roll"].into_iter().enumerate() {
+                push(name, l.ypr_deg[k], 5 + k, 0.0);
+            }
+            for (k, name) in ["tx", "ty", "tz"].into_iter().enumerate() {
+                push(name, l.t_m[k], 8 + k, 0.0);
+            }
+            match l.terms {
+                CalibTerms::V3 { k, p } => {
+                    let terms = k.iter().chain(&p);
+                    for (i, (name, v)) in ["k1", "k2", "k3", "p1", "p2"]
+                        .into_iter()
+                        .zip(terms)
+                        .enumerate()
+                    {
+                        push(name, *v, 11 + i, 0.0);
+                    }
+                }
+                CalibTerms::V6 { d } => {
+                    for (i, v) in d.into_iter().enumerate() {
+                        push(&format!("d{i}"), v, 11 + i, 0.0);
+                    }
+                }
+            }
+        }
+    }
+    for (k, (name, v)) in ["tx", "ty", "tz"].into_iter().zip(PATS_T1).enumerate() {
+        copies.push((format!("PATS_T1's {name}"), v, token(&v6, 27, 1, 8 + k)));
+    }
+    match copies
+        .into_iter()
+        .find(|(_, copy, token)| copy.to_bits() != token.to_bits())
+    {
+        Some((name, copy, token)) => Err(format!("{name} is {copy}, not {token}")),
+        None => Ok(()),
+    }
+}
+
+/// Each of Pat's numbers this file copies is `testkit::pats`'s to the
+/// bit (the project review's F137): a drift test of the copy, which
+/// sphere's tests keep because they can't take the boundary crate (it
+/// depends on sphere, and would bring synth and FFmpeg into their
+/// build).
+///
+/// Control: against V6 with block 1's tz (token 38) a unit off in its
+/// last digit, and V3 with block 1's cx (token 23) so, the copies fail,
+/// naming the field.
+#[test]
+fn pats_copies_match_testkit_pats() {
+    let _time = timed("pats_copies_match_testkit_pats");
+    copies_match(pats::V3, pats::V6).unwrap();
+    let e = must_fail(
+        "the copies against V6 with block 1's tz changed",
+        copies_match(pats::V3, &last_digit_changed(pats::V6, 1 + 27 + 10)),
+    );
+    assert!(
+        e.starts_with("V6 block 1's tz is -0.031525, not -0.031526"),
+        "{e}"
+    );
+    let e = must_fail(
+        "the copies against V3 with block 1's cx changed",
+        copies_match(&last_digit_changed(pats::V3, 1 + 19 + 3), pats::V6),
+    );
+    assert!(
+        e.starts_with("V3 block 1's cx is 2693, not 2693.001"),
+        "{e}"
     );
 }

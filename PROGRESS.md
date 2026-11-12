@@ -10,7 +10,7 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because huginn's Mesa is Fedora's build, without RPM Fusion's `mesa-vulkan-drivers-freeworld`, which leaves H.264 and HEVC out of Vulkan Video. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S (`hw-run-8.md`, sent 2026-11-01), Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12 at 5.7K30, a Studio export of take 16 (`docs/SAMPLES.md`), for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). D25 decided 2026-10-30: path B on odin by default; VA-API's import stays opt-in until huginn's numbers. How it got here: below, "M1: how it got here" |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn (`hw-run-8.md`, sent 2026-11-01). Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). Next, M3.5, and beside it a short slice that traces and fixes that stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12). Waiting on Pat: that card, huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). Next, M3.9, M3.7 and M3.6 (plan 22.2), and the short slice that traces and fixes that stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12). Waiting on Pat: that card, huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
 | M4–M9 | Not started |
 | Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,245 of its 12,288 bytes (the review-fix slice). How it got here: below, "Agent integration (track A): how it got here" |
 
@@ -22,7 +22,7 @@ decisions and their reasons in `DECISIONS.md`.
 |---|---|
 | OS | Ubuntu 24.04.5 LTS, 4 CPUs, 15 GB RAM |
 | Rust | 1.97.0 stable (rustup) with rustfmt, clippy, cargo-deny 0.20.2, cargo-audit 0.22.2; 1.95 for the MSRV check (1.88.0 before slice 3a). clang 18.1.3, strace 6.8 |
-| FFmpeg | 6.1.1 (Ubuntu), with -dev headers, libx264, libx265, libdav1d, SVT-AV1. Also built from upstream tags for the compatibility checks in D2: minimal 7.1, 8.1 and 9.0.2; 9.0.2 with VA-API, libx264, libx265 and libdav1d; and 8.1.3 (libavcodec 62.28.103, as on odin and huginn) and 7.1.3 (libavcodec 61.19.101; Fedora 43 has 7.1) with VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, SVT-AV1, Opus, Vorbis and libshaderc, as `scripts/build-ffmpeg.sh` builds them, on Khronos Vulkan-Headers 1.4.354 over the system loader (Ubuntu's 1.3.275 headers are older than 8.1's Vulkan needs). The libdrm, Opus, Vorbis, shaderc and SVT-AV1 -dev packages it needs were installed on 2026-10-24; the 6.1 bindings and link lines built after are byte for byte those built before. No `glslc`, so no SPIR-V compiler at build time |
+| FFmpeg | 6.1.1 (Ubuntu), with -dev headers, libx264, libx265, libdav1d, SVT-AV1. Also built from upstream tags for the compatibility checks in D2: minimal 7.1, 8.1 and 9.0.2; and 9.0.2 (`n9.0.2-full`, rebuilt on 2026-11-12, before M3.5's fix round; before that, with VA-API, libx264, libx265 and libdav1d only), 8.1.3 (libavcodec 62.28.103, as on odin and huginn) and 7.1.3 (libavcodec 61.19.101; Fedora 43 has 7.1) with VA-API, Vulkan, libdrm, libx264, libx265, libdav1d, SVT-AV1, Opus, Vorbis and, before FFmpeg 9, which has no such option, libshaderc, as `scripts/build-ffmpeg.sh` builds them, on Khronos Vulkan-Headers 1.4.354 over the system loader (Ubuntu's 1.3.275 headers are older than 8.1's Vulkan needs). The libdrm, Opus, Vorbis, shaderc and SVT-AV1 -dev packages it needs were installed on 2026-10-24; the 6.1 bindings and link lines built after are byte for byte those built before. No `glslc`, so no SPIR-V compiler at build time |
 | Vulkan | lavapipe only: llvmpipe, Mesa 25.2.8, Vulkan 1.4.318 |
 | Devices | no `/dev/dri`, no GPU, so no VA-API and no Vulkan Video; no sound card (ALSA's `default` PCM isn't there) and no sound server, so audio plays on the null output; ALSA's headers (libasound2-dev 1.2.11) for the build |
 | Network | crates.io, GitHub and Ubuntu apt reachable through a proxy; ffmpeg.org blocked (recorded at setup) |
@@ -931,8 +931,10 @@ turn; a reviewer each, and each review's findings fixed.
 - 5.4's shapes as built: `companion` is `{path, verified, why}`;
   `lenses` is `{tracks}` only until M3.5 adds binding, evidence,
   screen side and geometry (doctor's geometry is "provisional" until
-  then); `calibration.in_use` is null, with a `bad_trailer` warning,
-  when field 136's generation doesn't parse.
+  then; M3.5 added `lenses.binding`, `evidence` and `screen_side` and
+  the report's `geometry`, and doctor's word is now the table's);
+  `calibration.in_use` is null, with a `bad_trailer` warning, when
+  field 136's generation doesn't parse.
 - doctor --file decodes on `frame --decoder auto`'s path (D39:
   VA-API on the render node, else software), not the viewer's choice
   (D34, Vulkan Video on a discrete GPU). Lining the two up needs a
@@ -1345,7 +1347,8 @@ decision record and docs.
   `tests/common`.
 - 10.5: `dfish_lod_heatmap` needs a rig's LOD map, which the reference
   doesn't have; M3.7 builds it. sphere::rig's docs cite D64, which M3.5
-  writes; D63's note holds the weights rule until then.
+  writes; D63's note holds the weights rule until then. (M3.5 drafted
+  D64, which now holds the rule.)
 
 **Deviations from 4.2 and 22.1** (amendments included):
 - The band check's control. 4.2 names lens 1 turned 0.13° about +Y (3.6
@@ -3336,6 +3339,304 @@ lists in a movie timescale that is the tracks' least common multiple,
 samples before the stream's first are not silent after a seek to
 -0.1 s). Both are under Known issues.
 
+### M3.5, the X5 file (2026-11-12)
+
+Branch `m3/file`, from b0df927 (main after the review-fix slice) to
+7f444b6: 63 commits (2 of them merges), 62 files, 10,900 lines added and
+1,725 removed, before this note's commit. The types the units share came
+first (0e1bf6e to 6b207e2), then units (a) and (b) side by side on
+branches and worktrees of their own (`m3/file-a` and `m3/file-b`, merged
+at e2cba7c and a5ab15b), then (c) and (d) on the merge, each unit with a
+reviewer and a fixer: 39 commits to f63b783. A fresh review of the whole
+slice, which ran nothing, then found eight minors (R1 to R8, each upheld
+by a skeptic) and eleven nits (R9 to R19), and diagnosed the one Tier 1
+test that failed on FFmpeg 9.0.2. A fix round of four units, each with a
+reviewer, checked every finding against the code and answered all of
+them: (a) the audio seek and FFmpeg 9, (b) the tests and `write_insv`'s
+speed, (c) camera, agent and CLI, and (d) this note, plan amendment 8
+and the check (24 commits, 613f2fb to 7f444b6, then (d)'s). Amendment 8
+holds what the slice settled and where it departed from the plan. Pat
+sees nothing new: the X5's geometry is the placeholder until M3.6
+("placeholder geometry", 22.2).
+
+- **Types (0e1bf6e to 6b207e2).** `testkit::pats` is the one copy of
+  Pat's V1, V2, V3 and V6 strings, byte for byte, with `tokens()`
+  (F137). A new dev-only crate, `spherecut-boundary` (`crates/boundary`,
+  no unsafe code), holds `pats(generation)`, parsed from those strings
+  by insta360.md §4.1's token layout, and the boundary with
+  `sphere_rig`, moved out of synth's `lens_against_sphere.rs` and
+  render's `tests/common/rig.rs`, which re-exports them. camera and
+  media now depend on sphere. The stage put synth's `InsvSpec`,
+  `Quality`, `LrvSpec` and `InsvFiles`, camera's `to_calibration`,
+  `known` and `stitching` (with `CameraError::NotCalibration`) and
+  agent's `Still::open_pair`, `PairOptions` and `StillPair` in place,
+  with every unit's tests named and ignored.
+- **(a) The synthetic X5 file (57920d5 to ee04e44).**
+  `synth::insv::write_insv` writes a synthetic X5 master and its LRV.
+  Each lens is coded alone by `Mp4Writer` (lossless, or coded like the
+  camera), and media's new `encode::mux_video_streams_with_audio(srcs:
+  &[(&Path, Time)], audio, dst)` muxes the two HEVC tracks with a silent
+  AAC track; then Pat's `inst` trailer is appended, its strings printed
+  through `synth::insv::print` unchanged (F141). The LRV is H.264, side
+  by side, and carries no fault. A track's delay is whole ticks of its
+  source's time base (one that isn't, and a negative one, are refused),
+  and the mux writes the least common multiple of its tracks' timescales
+  as the movie timescale on every FFmpeg (240000 at 29.97), so
+  `StartPtsDiffer`'s lens 1 starts exactly a frame (1001 ticks of
+  1/30000 s) late, where FFmpeg's default of 1000 had made it 990.
+  `InsvSpec::planes` gives a lens's planes at any frame; `rung3()` (two
+  768² lenses, 8 frames) and `small()` (384², 30 frames) are the
+  fixtures. `InsvFault` plants the trailer's faults (`TruncatedTrailer`
+  to `VarintOverflow`, and `NoCalibration`) and the MP4's
+  (`LensOneFrameShort`, `StartPtsDiffer`, `StssDiffer`, `RateDiffer`).
+  synth's tests read Pat's strings from testkit, and its library's
+  copies have a drift test. The muxer half of amendment 7's FFmpeg 9
+  duty: `tests/mux.rs` compares edit lists in seconds, so FFmpeg 9's
+  movie timescale (the tracks' least common multiple, where 6.1 writes
+  1000) no longer matters.
+- **(b) Calibration, the table and probe's blocks (f5a385b, dcdab5d to
+  2287f8a, aa4a064 to 9b5fb98).** F038: `Unified::limit_theta` is total
+  (with no steps its scan returns the end, 0), and `Rig::build` refuses
+  ξ + `xi_delta` ≤ −1 for each block as `NotPositive`; both new tests
+  had panicked on a u32 overflow at fisheye.rs:382.
+  `camera::insta360::to_calibration(v3, v6, window)` turns the V3 and V6
+  strings and field 27's window into sphere's `Calibration` (with no
+  window, dst = src; an empty window is refused). `known::lookup` is the
+  built-in table, and total: one X5 row (binding reversed, canvas C, the
+  placeholder `EulerConv` with the −90° roll, turn Y, V6, provisional,
+  "placeholder until the fit", `stitchable: true`), which an unlisted
+  firmware or model gets as provisional, with evidence saying why and,
+  for another model, the notice "geometry assumed from the X5".
+  `stitching(meta)` is the one entry probe and the stitch share: field
+  136 must be 3 or 4 and name a string the file holds, else
+  `NotCalibration`; a file with no V3 or V6 string is `Ok(None)`.
+  probe's `lenses` gains `binding`, `evidence` and `screen_side` (null
+  until M3.12), and the report gains `geometry {status, evidence}`, null
+  without a calibration a stitch reads (an LRV carries its master's
+  geometry, its `lenses` null); doctor `--file`'s geometry word is the
+  table's. camera's tests keep no copy of Pat's lens numbers; sphere's
+  copies stay, each tied by `pats_copies_match_testkit_pats`; Tier 2c
+  holds V3 and V6 token by token and V1 and V2 byte for byte against the
+  14 files.
+- **(c) The pair and rung 3 (170dd42 to 4e6baab).** `synth::rung` holds
+  rung 1's camera, far tune, tracks and pairs, shots and views.
+  `Still::open_pair` opens probe's two lens tracks, each a `Still`
+  decoded in software, reads the stitch from the trailer through
+  `still::pair_stitching` (which calls `may_block` before it opens the
+  file), and builds the rig with `Rig::build` from the calibration,
+  `PairOptions`' geometry or else the file's `Known` entry, the tune,
+  front track 0 and each track's coded side. `StillPair::seek` seeks
+  each track exactly to the time, in its own clip time (with
+  `SeekMode::Keyframe`, track 1 to the time track 0's keyframe shows),
+  and calls the pair `damaged` when the two frames' times in the file
+  differ; `StillPair::render` keeps one `reference::LensPair` for the
+  frames and runs `render_rig_of` with unit gains, for one view. Every
+  can't-stitch refusal is `not_equirect`, an unreadable trailer
+  included, with the reason in the message; a file that can't be opened
+  fails with media's code. Rung 3 (`agent/tests/rung3.rs`):
+  `write_insv`'s rung 3 file, opened and seeked, hashes plane for plane
+  equal to rung 1's lossless frames (8 frames, 2 tracks), and its stitch
+  equals rung 1's render byte for byte (the 512 × 256 equirect and
+  `whole_view(0)` at 256², with the rig and colour equal), corner codes
+  and all.
+- **(d) frame on a camera's pair (1342ada to f63b783).** `spherecut
+  frame <insv>` takes the pair path when probe calls the file Insta360
+  dual fisheye. With `--reference` it opens both lenses through
+  `Still::open_pair`, seeks both exactly to one pts, stitches on the CPU
+  with the trailer's calibration and the `Known` geometry, and writes
+  the PNG, with `result.stitch` in its JSON; without it the run is
+  refused as `not_equirect`, with hints for `--reference`, M3.7 and
+  `--equirect`. New flags: `--projection equirect` (on any file the run
+  renders), `--lens 0|1` (probe's `lenses.tracks`, drawn flat, with no
+  calibration needed), `--seam weights|difference`, `--geometry k=v,...`
+  (binding, canvas, turn, tz, upright and generation, status `user`) and
+  `--stitch-distance <n>m|inf` (0.3 m or more; 2 m by default). A pair
+  under `--reference` decodes in software, and `--decoder vaapi` or
+  `vulkan` there is a usage error. Each trailer `InsvFault` fails as a
+  clear `not_equirect` that names the record, field or tail at fault.
+  cli's test `.insv` is `write_insv`'s. Tier 2c's
+  `samples_frame_clip8_renders` stitches Pat's clip 8 (tripod_seam, a
+  1024 × 512 equirect at 1 s, both lenses at pts 29029): the mean luma
+  over each lens's side is 0.362 and 0.481 against a floor of 0.2, and
+  its `RigDebug::Lens0` control's 0.354 and 0.069 fails the floor as it
+  must. D64 is drafted.
+
+**The fix round** (R1 to R19 and FFmpeg 9's audio seek; each finding
+checked against the code first, and each fix shown failing first where
+it could be):
+- **(a) Audio and FFmpeg 9 (613f2fb to 2b94917).** FFmpeg 9.0's MP4
+  demuxer reports AAC's 1024 priming samples as `initial_padding`, so a
+  Matroska remux carries them as a CodecDelay; 8.1's and 9.0's Matroska
+  demuxers drop them at open but not after a seek, and `FfmpegAudio`
+  handed them out after a seek to before 0. It now keeps where its open
+  found the stream's first sample and never starts a run before it (the
+  `first_at` clamp, D35's note). `remux_to_matroska_at` takes a
+  `Priming` (`AsSource` for every existing caller, whose files are
+  unchanged, or `Samples(n)`), and
+  `a_seek_gives_a_sequential_decodes_samples` runs the MP4, a copy with
+  no CodecDelay and one with 1024 samples' at 48 and 44.1 kHz, both
+  through the open-time drop (emulated through media's fault-injection
+  feature where the demuxer drops nothing: 6.1, and 7.1 by its source);
+  its controls (`AudioFault::keeps_samples_before_first`) must fail with
+  the priming handed out. Before the fix the emulated case failed on
+  6.1.1 with "not silent before the stream's first sample, 0:
+  -0.00000028 at output sample -1024" (−960 at 44.1 kHz). R9: the mux's
+  two delay refusals are held to their messages, with cross controls.
+  `scripts/build-ffmpeg.sh` passes `--enable-libshaderc` only where
+  configure lists it, which FFmpeg 9's doesn't. D30 and D35 have dated
+  notes.
+- **(b) Tests and speed (3a06c85 to 5f8129c).** R3, R5 and R15:
+  `tests/instrument.rs` takes rung 1's camera, far tune, pairs, shots
+  and views from `synth::rung`, so there is one copy, and
+  `tests/rung_copy.rs`, which had held the copy to literals of its own,
+  is gone; `instrument.json` and the binary's 335 printed values are
+  unchanged, and D65's update says so, the views included. R4:
+  `insv_file.rs` writes a 61-frame file at 29.97 and holds the X5's
+  default GOP (the master's key frames at 1 and 61, the LRV's at 1, 31
+  and 61), each track held to its 61 frames. R6: the pats test's control
+  prints a truth a digit off. R9: each refusal `write_insv` documents is
+  run. R10: amendment 8 states `StssDiffer`'s rule as the code has it.
+  R11, R18: the docs list every file that still writes out the X5's
+  format (the canvas, lens type 113, the packed words and field 27's
+  window) and the two doc samples. `rung3.rs` sweeps the folders of runs
+  that have ended. `write_insv` codes the two lens tracks and the LRV
+  side by side (`std::thread::scope`, a one-thread encoder each): the
+  same files byte for byte (18 files, 8 specs, 3 runs), errors in the
+  old order.
+- **(c) Camera, agent and CLI (636fbd2 to 7f444b6).** R2:
+  `Known::refusal()` words the table's "not stitchable", and
+  `media::camera::bind` carries it to doctor `--file`, whose `missing`
+  line uses frame's words. R17: the table's notice reaches a user, as
+  probe's `geometry.notice`, frame's `stitch.geometry.notice` and a new
+  warning code, `geometry_assumed`. R7: `still::damage_warnings` serves
+  `open_pair` too, so a pair's damage warns on frame's stitched and
+  `--lens` paths. R1: frame_insv's one `clear_error` is five predicates
+  (`refused`, `exits_by_table`, `no_panic`, `wrote_nothing` and
+  `names_in`), each with a control that reaches it (the panic control
+  only in a debug build, where `SPHERECUT_DEBUG_PANIC` works). R8:
+  cli-json's exit table and usage text list M3.5's usage errors, and
+  `contract.rs` runs each and holds its status to
+  `contract::frame_exit`. R12: `PairOptions::rig`'s doc names
+  `RigOptions`'s real fields. R13: the bad `--geometry` and
+  `--stitch-distance` values are checked for Spherecut's own words,
+  which clap's echo of the value doesn't hold.
+  R14: the "default distance" run gives no `--stitch-distance`. R16:
+  `--decoder`'s help says a pair refuses VA-API and Vulkan only when
+  stitched with `--reference` (exit 2). frame's refusal of a pair
+  without `--reference` no longer says "stitching arrives in M3"; look,
+  compare and the project tools keep it, through
+  `still::INSTA360_UNSTITCHED`, until M3.7. The agent's probe summary of
+  an X5 master is 1112 bytes (944 before M3.5), and `tools/list` is
+  unchanged at 12,245 of 12,288 bytes.
+- **(d) The note and the check (682fb5c on).** Unit (d) wrote this note
+  and plan amendment 8, as R19 asked, and ran the check: Status, the
+  M3.2 and M3.4 notes' forward references, Next and Known issues are
+  brought up to date. DECISIONS needed no note beyond the units': D63,
+  D64 and D65, which the slice touched, were checked against the code
+  as fixed.
+
+**Open, and known limits:**
+- The M3.5 row's Tier 1 time is over its 3 s (Known issues); amendment 8
+  raises the row to 4.5 s. `rung3.rs` and `frame_insv.rs` still print
+  their old shares (`BUDGET_S` 2.0 and 1.0 s), so both print over budget
+  until a later commit moves them (2.5 and 2.0 s fit the row).
+- `write_insv`'s eighth documented refusal (a lens picture whose corner
+  code reaches the image circle) is raised after the folder is made, so
+  it leaves an empty folder; no test reaches it through `write_insv`.
+- `open_pair`'s `stitchable: false` refusal has no test of its own: no
+  table row is unstitchable, and synth can write no such file.
+- `frame --projection equirect` draws at `--size`, so the default 1920 ×
+  1080 stretches it; a 2:1 default is left for a later slice.
+- `StillPair::seek` with `SeekMode::Keyframe` lands track 0 on its
+  keyframe and decodes track 1 exactly to that time. frame has no
+  `--keyframe`; docs/agents.md's look section takes the rule when M3.7
+  lets look reach a pair.
+- ARCHITECTURE.md:1058 and the app (`app.rs:657`, `panes.rs:386`) still
+  say "stitching arrives in M3" of non-equirect sources, for M3.7 or
+  M3.10 to reword with look's; ARCHITECTURE.md:330 says only synth's
+  tests turn on media's fault-injection feature, and playback's do too
+  (D30). Both predate M3.5.
+- synth's `tests/audio.rs` leaves a `/tmp/spherecut-audio-<pid>-<name>`
+  folder each run (3668 on the cloud box); a drop guard like media's
+  `tests/mux.rs`'s would end it. It predates M3.5.
+- Two of Pat's numbers stay in docs as samples nothing depends on:
+  -0.198 (camera's `Token::new` and `strings.rs`'s grammar test) and
+  8075.73 (sphere's `rig.rs`). `testkit::pats`'s doc lists them, with
+  the files that write out the X5's format.
+- On FFmpeg 9.0.2 one more Tier 1 test fails, in synth's writers
+  (Known issues). On 7.1 the seek test
+  checks seek parity on the CodecDelay copy without pinning where it
+  starts, and whether 9.0's Matroska muxer also trims the AAC track's
+  end with a DiscardPadding is unchecked.
+- The orchestrator settled the units' questions for Pat within the plan
+  (amendment 8), and Pat may overrule any: `write_insv` keeps FFmpeg's
+  `ftyp` and handler names (nothing reads the X5's); the LRV stays
+  unfaulted and without its LRV-only `inst` fields until a consumer
+  needs them; a lossless LRV as H.264 High 4:4:4 Predictive is fine for
+  tests; a trailer without field 136 is refused; `screen_side` is the
+  FFmpeg stream index of `tracks[screen_side_track]`, for M3.12 to
+  confirm; Tier 2c's clip 8 frame stays at 1 s; and the row's budget as
+  above. Pat has no new question from M3.5.
+
+**Measured**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
+lavapipe), at 7f444b6 unless named:
+- Tier 1 against 19.6's budgets. The M3.5 row: 3.60 to 3.67 s, run by
+  run, in three runs of each suite (`rung3.rs`, 5 tests, 2.05 to 2.09 s
+  of its 2 s share, CPU-bound at about 7.3 CPU-s, its three fault files
+  8 frames long; `frame_insv.rs`, 7 tests, 1.51 to 1.62 s of its 1 s,
+  about 1 s of it writing `InsvSpec::small()`), against 3 s (4.5 s by
+  amendment 8); unit (b) measured 3.42 to 3.61 s at its tip, before
+  (c)'s warnings test. camera's ≤ 1 s: companions 0.07 s,
+  geometry 0.00 s, strings 0.01 s, synth_insv 0.04 s, trailer 0.10 s.
+  sphere's ≤ 30 s: `rig.rs` 2.10 s, `unified.rs` 0.11 s. M3.4's row:
+  `instrument.rs` 10.38 s of its 11 s share (10.69 s before the fix
+  round), and `rung_copy.rs`'s 0.57 s is gone. Suites with budgets of
+  their own: synth `insv_file.rs`, 8 tests, 0.71 to 0.76 s of 2 s (R4's
+  GOP test 0.34 to 0.38 s of it, 0.153 s alone); media `mux.rs`, 5
+  tests, 0.13 s of 3 s; boundary `pats.rs` 0.00 s of 1 s. Others M3.5
+  touched: synth `audio.rs`, 15 tests, 30.04 s (28.56 s at the
+  review-fix slice; the seek test alone 1.25 to 1.39 s); cli
+  `contract.rs`, 28 tests, 14.91 s; `frame.rs`, 15 tests, 19.67 s;
+  `doctor.rs` 1.29 s; `probe.rs` 1.82 s; `tier2_frame.rs`'s Tier 1 test
+  2.75 s; agent `probe.rs` 0.46 s. Unit (d) counted Tier 1's growth from
+  M3.5 at about 7 s at d943b3f (rung3 2.16 s, frame_insv 1.08 s,
+  insv_file 0.79 s, rung_copy 0.57 s, contract 2.16 s); since then
+  frame_insv has grown to 1.5 to 1.6 s (the briefed fixtures, then (c)'s
+  test), frame.rs by about 0.4 s and the audio suite by about 1.5 s
+  (the seek test, which now runs a CodecDelay copy too, takes 1.25 to
+  1.39 s alone), and rung_copy's 0.57 s has gone.
+- `write_insv` alone, 3 runs: rung 3's file 0.89 to 0.92 s cold and 0.34
+  to 0.40 s warm, against 1.18 to 1.25 and 0.54 to 0.64 s with its
+  tracks coded one after another; `small()` with an LRV 0.25 to 0.27 s
+  warm.
+- Tier 2c (`SPHERECUT_SAMPLES` set, `SPHERECUT_TIER2` unset):
+  `samples_frame_clip8_renders`, three renders of clip 8 at 1 s, 14.9 s
+  (15.1 s wall) at a peak RSS of 1.31 GB; one stitched render 4.8 s and
+  1.31 GB. `samples_calibrations_build_rigs` 1.415 s cold; the trailer
+  string check 0.036 s; `samples_probe_names_the_camera`, 7 takes, 6.4 s
+  cold.
+- Property tests at `PROPTEST_CASES=100000` at 7f444b6, wall times:
+  sphere `rig.rs` 16.1 s (20.5 s at unit (b)), `unified.rs` 5.6 s, the
+  lib's `fisheye::` tests 0.24 s; camera `strings.rs` 4.4 s,
+  `synth_insv.rs` 4.7 s, `trailer.rs` 1.6 s.
+- `cargo xtask check` at d943b3f (unit (d)'s tip before its review fix)
+  passed in 1163 s: 1658 tests passed, 0 failed and 60 ignored on 141
+  result lines, against 1618, 0 and 58 on 133 at the review-fix slice's
+  0b3ab9b. At f63b783 it failed on one playback test while an FFmpeg
+  build ran beside it (Known issues, the lock test). At 30ad23a, the fix
+  round's last code commit, it passed in 844 s: 1663 tests passed, 0
+  failed and 60 ignored on 140 result lines.
+- `cargo xtask compat` at 7bc2745 built and linked against FFmpeg 9.0.2
+  and 8.1.3 (clippy, link and binding passed on both). Tier 1 on 8.1.3
+  failed once on `never_blocks`'s seek storm (one 12.6 ms UI iteration
+  against a 10 ms ceiling) while analysis agents loaded the box, and
+  passed on a rerun with the box quiet (140 result lines, 1207 s).
+  Tier 1 on 9.0.2 passed every binary up to synth's `tests/writers.rs`,
+  including both tests M3.5 fixed and the ones that failed on the old
+  install for want of Vulkan and libsvtav1, and failed there on one
+  test (Known issues); cargo stopped at that binary, so testkit, xtask
+  and the doctests didn't run on 9.0.2.
+
 ## Agent integration (track A): how it got here
 
 Moved byte for byte from the Status table's track A row (F072).
@@ -5017,7 +5318,7 @@ On `m1/slice9` (D37, D40):
 
 ## Known issues and limits
 
-Last reviewed 2026-11-12, in the review-fix slice. Each entry's date is the
+Last reviewed 2026-11-12, in M3.5's fix round. Each entry's date is the
 day its text last changed, or the review's for the entries it rewrote;
 each slice's merge sweeps the list.
 
@@ -5365,9 +5666,10 @@ each slice's merge sweeps the list.
 - Fedora's `ffmpeg-free` lacks libx264 and libx265, which `gen-media` and
   the Tier 1 media tests need. Use RPM Fusion's `ffmpeg`. Tier 1 also needs
   libdav1d, an FFmpeg built with Vulkan, Mesa's lavapipe and strace.
-  Against the 9.0.2 prefix, built without Vulkan or libsvtav1, 19 Tier 1
-  tests fail for want of them, beside FFmpeg 9's own two (D2; the FFmpeg
-  9.0.2 entry below). (as of 2026-11-12)
+  The 9.0.2 prefix the checks built against had no Vulkan or
+  libsvtav1, so 19 Tier 1 tests failed there for want of them; it was
+  rebuilt on 2026-11-12, before M3.5's fix round, as 8.1.3's is built
+  (D2; the FFmpeg 9.0.2 entry below). (as of 2026-11-12)
 - `cargo xtask check` builds only against the FFmpeg pkg-config finds,
   unless `SPHERECUT_FFMPEG_COMPAT` lists other prefixes, and a fresh
   checkout has none: other builds are checked only where someone has
@@ -5516,19 +5818,87 @@ each slice's merge sweeps the list.
   is 132.7 MB against wgpu's default storage binding limit of 128 MiB
   (134.2 MB), 1 % under (M2.9's review). Every preset fits; a larger
   flat output would need the limit raised or the buffer split. (as of 2026-10-31)
-- On FFmpeg 9.0.2 two Tier 1 tests fail, the same at 073715b as at the
-  review-fix slice: `mp4_output_keeps_each_track_s_tables` (media
-  `tests/mux.rs`), because FFmpeg 9's MP4 muxer writes edit lists in a
-  movie timescale that is the tracks' least common multiple (2880000 for
-  30000, 90000 and 12800), not the first track's, with the same
-  durations; and `a_seek_gives_a_sequential_decodes_samples` (synth
-  `tests/audio.rs:256`), where on the Matroska copy the samples before
-  the stream's first are not silent after a seek to -0.1 s. Neither
-  shows on 6.1 or 8.1.3, Pat's Fedora 44 version. The 9.0.2 prefix the
-  checks build against has no Vulkan or libsvtav1, so 19 more fail there
-  by precondition; compat runs Tier 1 on 8.1.3. Rebuilding that prefix
-  like 8.1.3's, and settling both, is handed on in amendment 7.
+- A stitched still of an X5 file (`frame <insv> --reference`) decodes
+  both 3840² lens tracks in software from the keyframe before its time,
+  and stitches on the CPU: 4.8 s and 1.31 GB for clip 8 at 1 s on the
+  cloud box (debug build), so Tier 2c's `samples_frame_clip8_renders`,
+  three renders, takes 14.9 s. M3.7's GPU stitch is the fast path.
   (as of 2026-11-12)
+- A camera's pair decodes in software only until M3.7. `frame <insv>`
+  without `--reference` is refused (`not_equirect`, with hints for
+  `--reference`, M3.7 and `--equirect`); with it, `--decoder vaapi` or
+  `vulkan` is a usage error (exit 2) naming `--decoder`, and `auto`
+  decodes in software. `--lens N` decodes its lens as any stream is
+  decoded. look, compare and the project tools refuse a pair as before.
+  (as of 2026-11-12)
+- Plan 19.6's M3.5 row (rung 3 and `frame --reference`, 3 s) isn't met
+  on the 4-core cloud box: 3.42 to 3.61 s at unit (b)'s tip in the fix
+  round, and 3.60 to 3.67 s run by run at 7f444b6, with `rung3.rs` at
+  2.05 to 2.09 s of its 2 s share and `frame_insv.rs` at 1.51 to 1.62 s
+  of its 1 s. rung3 is CPU-bound (about 7.3 CPU-s on 4 cores), and
+  frame_insv spends about 1 s writing `InsvSpec::small()`. Coding
+  `write_insv`'s tracks side by side took about 0.3 s off the row. No
+  clean fixture was shrunk and no check cut; rung3's three fault files
+  (`StartPtsDiffer`, `NoCalibration`, `WrongTokenCount`) were cut in
+  M3.5 (c) to 8 frames from `small()`'s 30, which still reach frame 5
+  (the refusals don't depend on length), saving about 0.25 s. Plan
+  amendment 8 raises the row to 4.5 s (the highest run, 3.67 s, and 20
+  %, rounded up), inside M3's 135 s; the two suites still print their
+  old shares. (as of 2026-11-12)
+- `a_locked_pair_paces_to_its_slowest_lens` (playback
+  `tests/lock/play.rs`) failed once, in `cargo xtask check` at f63b783,
+  while an FFmpeg build ran beside it on the 4-core box: its "lens 1
+  slow" case trailed (`Trailed { at: 46, shown: Some(3/5s), target:
+  17/15s, frames: 16 }`, play.rs:877). It then passed 8 of 8 runs alone
+  and the lock suite 10 of 10. M3.5 didn't touch playback, so it is
+  taken as a timing flake under load; another failure would need a look
+  at the test's margins. (as of 2026-11-12)
+- On FFmpeg 9.0.2 two Tier 1 tests failed, at 073715b as at the
+  review-fix slice. M3.5 fixed both, and both pass in compat's Tier 1
+  on 9.0.2 at 7bc2745 (and on 8.1.3).
+  `mp4_output_keeps_each_track_s_tables` (media `tests/mux.rs`) failed
+  because FFmpeg 9's MP4 muxer writes edit lists in a movie timescale
+  that is the least common multiple of the tracks' timescales, where 6.1
+  writes 1000, with the same durations in seconds; the test now compares
+  edits in seconds (M3.5 (a)).
+  `a_seek_gives_a_sequential_decodes_samples` (synth `tests/audio.rs`)
+  failed because FFmpeg 9.0's MP4 demuxer reports AAC's priming, so a
+  Matroska remux carries it as a CodecDelay, and 8.1's and 9.0's
+  Matroska demuxers drop that priming at open but not after a seek, so
+  the decoder handed it out after a seek to before 0. `FfmpegAudio` no
+  longer hands out anything from before the stream's first sample (the
+  `first_at` clamp, D35), and the test makes copies with and without a
+  1024-sample CodecDelay on every FFmpeg and runs both through the
+  open-time drop, emulated where the demuxer drops nothing (6.1, and 7.1
+  by its source). On 2026-11-12, before the fix round, the orchestrator
+  rebuilt the 9.0.2 install as `n9.0.2-full` with
+  `scripts/build-ffmpeg.sh` (a copy carrying the libshaderc fix that the
+  fix round then committed), as 8.1.3's is built (VA-API, Vulkan,
+  libdrm, libx264, libx265, libdav1d, libsvtav1, Opus and Vorbis, on
+  Vulkan-Headers 1.4.354), but without
+  `--enable-libshaderc`, which FFmpeg 9 doesn't have, and without
+  `glslc`: its spirv_compiler is off, and with it the Vulkan parts of
+  ffv1, prores, apv and dpx, while H.264, HEVC and AV1 Vulkan decode are
+  unaffected. The old install had no Vulkan or libsvtav1, so 19 more
+  tests failed there for want of them; on the new one they pass. Also
+  unchecked on 9.0.2: whether its Matroska muxer trims the AAC track's
+  end with a DiscardPadding. (as of 2026-11-12)
+- On FFmpeg 9.0.2 one test in synth's `tests/writers.rs` fails,
+  `audio_encoders_with_small_fixed_frames_get_exact_frames`:
+  `Mp4Writer::finish` returns "Invalid data found when processing input"
+  from writing the MP4 trailer. It is most likely Vorbis in MP4: on the
+  old 9.0.2 install, which had no libvorbis, the test passed with
+  FFmpeg's own Opus encoder alone. It passes on 6.1 and 8.1.3. Cargo
+  stopped at that binary, so testkit, xtask and the doctests haven't run
+  on 9.0.2. Not M3.5's: the next slice that touches synth's writers or
+  media's muxing takes it, with a Tier 1 run on 9.0.2 that doesn't stop
+  at the first failure. (as of 2026-11-12)
+- FFmpeg 6.1's MP4 demuxer gives the last packet of a track that starts
+  with an empty edit of its own the track's media duration less its
+  shifted timestamp (11 ticks for a 1001-tick frame 990 ticks late), so
+  a remux of such a source loses that frame's duration.
+  `mux_video_streams_with_audio` delays a track by moving its packets
+  instead (M3.5's `StartPtsDiffer`). (as of 2026-11-12)
 
 ## Next
 
@@ -5545,15 +5915,16 @@ each slice's merge sweeps the list.
    and `gui_decode_behind`'s run 1 may be inconclusive there if VA-API
    keeps up. On odin that run fails (Known issues); under the working
    default (item 2), huginn's run follows the slice that fixes it.
-2. **M3**: M3.0 to M3.4, M3.8 and the review-fix slice are in. Next M3.5
-   (the file), M3.9 (schema 2), M3.7 (GPU stitch) and M3.6 (the fit),
-   per `docs/design/m3-plan.md` 22.2, with what amendment 7 hands each
-   of them. Beside M3.5, a short slice traces `gui_decode_behind`'s
-   run 1 stall on odin and fixes it before huginn's run (Known issues;
-   the working default until Pat answers the card of 2026-11-12). Plan
-   amendments 5 to 7 record what M3.4, M3.8 and the review-fix slice
-   settled for the slices after them. The agent briefs for M3.5, M3.9,
-   M3.7 and M3.6 are drafted and reviewed. Pat's takes 14 to 17 and the
+2. **M3**: M3.0 to M3.5, M3.8 and the review-fix slice are in. Next
+   M3.9 (schema 2), M3.7 (GPU stitch) and M3.6 (the fit), per
+   `docs/design/m3-plan.md` 22.2, with what amendments 7 and 8 hand
+   each of them. The short slice that traces `gui_decode_behind`'s run 1
+   stall on odin and fixes it before huginn's run is still to come
+   (Known issues; the working default until Pat answers the card of
+   2026-11-12). Plan amendments 5 to 8 record what M3.4, M3.8, the
+   review-fix slice and M3.5 settled for the slices after them. The
+   agent briefs for M3.9, M3.7 and M3.6 were drafted and reviewed
+   before amendment 8. Pat's takes 14 to 17 and the
    plan's questions 3 and 4 are open, and nothing waits on them. Filing
    D77's drafted Mesa report is Pat's call. Pat answered whether to cap
    the lock's all-trailing catch-up on 2026-11-11: no cap for now

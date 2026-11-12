@@ -329,8 +329,10 @@ impl Unified {
     /// when ξ lies within about 1e-10 of 1 and cos θ + ξ rounds to 0 at
     /// the hair, the slope is read by its highest non-zero term, whose
     /// sign it takes for every m large enough. r(θ) is the radial curve
-    /// m R(m²), which the tangential and prism terms don't change.
-    /// `Rig::build` refuses a θ_max beyond it.
+    /// m R(m²), which the tangential and prism terms don't change. For
+    /// ξ ≤ −1 the model images no direction, as z + ξ > 0 would need
+    /// z > 1, so its end and its limit are 0. `Rig::build` refuses a θ_max
+    /// beyond the limit, and ξ plus the tune's `xi_delta` at −1 or below.
     pub fn limit_theta(&self) -> f64 {
         let end = self.end_theta();
         let xi = self.xi;
@@ -363,6 +365,11 @@ impl Unified {
         // where z + ξ vanishes.
         let tail = if xi > 1.0 { end } else { end * (1.0 - 1e-12) };
         let steps = (tail / SCAN_STEP).ceil() as u32;
+        if steps == 0 {
+            // The end is 0, for ξ ≤ −1: there is no step to scan (the
+            // project review's F038).
+            return end;
+        }
         for k in 1..steps {
             (s, c) = (s * cd + c * sd, c * cd - s * sd);
             let m = s / (c + xi);

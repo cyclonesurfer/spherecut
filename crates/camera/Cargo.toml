@@ -9,14 +9,20 @@ publish.workspace = true
 
 [dependencies]
 spherecut-core.workspace = true
+# The types a file's calibration and the built-in geometry become
+# (insta360::to_calibration, insta360::known; D61's "from M3.5 on").
+spherecut-sphere.workspace = true
 thiserror.workspace = true
 
 # synth writes the trailers the integration tests read with its own
-# writer and printer (M3 plan 4.1 rule 2, 7.2). Only the integration
-# tests use it: synth depends on media, which depends on this crate, so
-# a unit test that used it would see a second copy of this crate's types.
+# writer and printer (M3 plan 4.1 rule 2, 7.2), and boundary holds Pat's
+# truths and their conversion to sphere's types (F137). Only the
+# integration tests use them: synth depends on media, which depends on
+# this crate, so a unit test that used either would see a second copy of
+# this crate's types.
 [dev-dependencies]
 proptest.workspace = true
+spherecut-boundary.workspace = true
 spherecut-synth.workspace = true
 spherecut-testkit.workspace = true
 

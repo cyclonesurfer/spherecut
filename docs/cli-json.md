@@ -151,8 +151,8 @@ its `time_base`.
 |---:|---|---|---|---|---|
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error; with `--file`, the file probes too, whether or not it can be stitched | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18); or, with `--file`, the file can't be probed (probe's code for it, in place of `doctor_errors`) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
-| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software` | An unknown preset, codec or choice, or a `--range` that doesn't parse |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware, and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software`; `--fov` or `--morph-to` (and so `--morph`) with `--projection equirect`, and `--morph-to equirect` on any projection; and, once probe has seen the file, `--lens`, `--seam`, `--geometry` or `--stitch-distance` on a file that isn't a camera's pair, and `--decoder vaapi` or `vulkan` on a camera's pair stitched with `--reference`, which decodes in software until M3.7 | An unknown preset, codec or choice, or a `--range` that doesn't parse |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware (on a camera's pair stitched with `--reference`, those two are a usage error instead, exit 2, until M3.7), and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
@@ -172,12 +172,12 @@ The run's `error.code`:
 
 | Code | Exit | Meaning |
 |---|---:|---|
-| `usage` | 2 | The command line doesn't parse; the message is clap's, with the usage line |
+| `usage` | 2 | The command line doesn't parse, or frame's own check of the flags fails (the exit table's status 2); the message is clap's, or names the flag, with the usage line. frame's checks made once probe has seen the file (a pair's flag on a file that isn't a pair, a hardware decoder on a pair stitched with `--reference`) name the flag and the file, with no usage line |
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
 | `output_exists` | 1 | frame: something is at the output (a file, or a link, even a dangling one) and `--overwrite` wasn't given; or something appeared there while the frame was rendered, which is left alone |
-| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway |
+| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway. A camera's pair of lenses (an Insta360 file) without `--reference` is refused so too, the message saying that `--reference` stitches it on the CPU until M3.7; with it, a pair that can't be stitched (no calibration, a trailer, record or calibration string that can't be read, a camera the table says isn't stitchable, a rig that can't be built) is `not_equirect`, the message naming the part at fault |
 | `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end, or so far past it that the stream's timestamps can't hold it. The message gives the clip's range, or its frame count |
 | `cancelled` | 4 | frame: interrupted by the first Ctrl+C (SIGINT); no output file is written, and the temporary file is removed |
 
@@ -278,6 +278,8 @@ frame's `warnings[].code`, which don't fail the run:
 | `crop_applied` | Spherical Video V2 crop bounds: the picture covers part of the sphere, which the message gives, and the rest is black |
 | `pose_not_applied` | A non-zero Spherical Video V2 pose, which M1 doesn't apply (M2 does); the message gives it |
 | `anisotropy_unavailable` | `--filter aniso` on a device without anisotropic filtering: the render is isotropic, and `result.filter` is `iso` |
+| `bad_trailer` | probe's warning of an Insta360 trailer, record or calibration string that can't be read (above), naming the file: frame carries it on every run of such a file, whether the run renders or fails |
+| `geometry_assumed` | A camera's pair whose model has no entry in Spherecut's table of cameras, stitched with `--reference` by the X5's entry, provisional: the message names the file and gives the table's notice, `geometry assumed from the X5`, and its evidence, as probe's `geometry` and `stitch.geometry.notice` do |
 
 `truncated` and `damaged` (and `io_error`, a read error the decoder
 meets) are warnings too, for damage probe finds before the seek and for
@@ -369,8 +371,9 @@ A report:
 | `streams` | array | One per FFmpeg stream, below |
 | `mp4` | object, or null | For MP4/MOV files: `brand` (string or null), `top_level` (the first 64 top-level boxes, as `[type, size]` pairs in file order), `top_level_omitted` (how many more there are; a fragmented recording has thousands), `trailing_bytes` (after the last whole box, where some cameras put vendor data), `truncated` (the top-level box cut off by the end of the file: `fourcc` (string or null), `offset`, `header_len`, `size` (or null), `present`; or null), `warnings` (the box reader's own, as strings; each is also in `damage`) |
 | `camera` | object, or null | `vendor`, `model`, `firmware`, `serial` (strings or null; an Insta360 file's model, firmware and serial are its trailer's), `layout` (one of `equirect_tagged`, `equirect_likely`, `insta360_dual_fisheye`, `go_pro_eac`, `dji_dual_fisheye`, `low_res_companion`, `unknown`), `evidence` (strings) |
-| `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order). Null for any other file, an LRV among them, whose one picture holds both lenses |
+| `lenses` | object, or null | An Insta360 dual-fisheye master's two lens streams: `tracks` (their FFmpeg indices, in file order); `binding`, which track each calibration block describes, as Spherecut's table of cameras has it for the file's model and firmware (`direct`: block b, track b; `reversed`: block b, track 1 − b, the X5's); `evidence` (how the table knows: `placeholder until the fit` for the X5 until M3.6 fits it); and `screen_side` (the FFmpeg index of the lens on the screen's side, once a take settles it; null until then). `binding` and `evidence` are null when the trailer has no calibration a stitch reads (see `geometry`). Null for any other file, an LRV among them, whose one picture holds both lenses |
 | `calibration` | object, or null | The calibration an Insta360 file's trailer holds, when a string of it parses: `generations` (those whose working string parses, oldest first, of `v1`, `v2`, `v3` and `v6`), `in_use` (the one the camera says it uses, when its string parses: `v6` on the X5; or null), `canvas` (`[width, height]` of the side-by-side picture the strings are in: the one in use's, else the newest's), `window` (the part of each lens's square the tracks show: `src` (the square on the canvas), `dst` (the track's) and `offset`, each a pair; or null), `hash` (16 hex digits: FNV-1a 64 over the working strings of `v1`, `v2`, `v3` and `v6` in that order, each followed by a NUL byte, a missing one by the NUL alone; a project's snapshot of the calibration records the same hash, M3 plan 11.1) |
+| `geometry` | object, or null | How sure the lenses' geometry is, from the entry for the file's camera in Spherecut's table of cameras (M3 plan 5.3): `status` (`provisional`, `settled`, `fitted` or `user`), `evidence` (a sentence from the table, never the file's text: `placeholder until the fit` for the X5; on firmware the entry wasn't measured on, or a model with no entry, which gets the X5's, it is provisional and says so) and `notice` (what a user is told of the entry, as the table words it: `geometry assumed from the X5` for a model with no entry of its own, null otherwise; the text gives it after the evidence, in brackets). On an Insta360 master and its LRV, which holds the master's strings. Null when the trailer holds no V3 or V6 calibration that a stitch reads: none; a V3 or V6 string that doesn't parse (a `bad_trailer` warning says which); field 136 missing, or naming none of them, or one the trailer doesn't hold (`calibration.in_use` null); or what a stitch can't hold, such as a window that isn't square or field 136 naming V1 or V2 (a `bad_trailer` warning, `the Insta360 trailer's calibration can't be stitched: ...`, says why) |
 | `companion` | object, or null | The recording's other file, by its name, when it is there: an Insta360 master's LRV (`LRV_…_01_NNN.lrv` beside `VID_…_00_NNN.insv`) or an LRV's master. `path` (beside the file, as the file's path was given), `verified` (whether the two files' exposure records (4) are byte for byte the same, so the bytes say they are one recording's; records that are empty in both, or of more than 64 MiB, aren't compared), `why` (when not verified, why: the two are paired by name only, and a record that can't be read is named by its file, master or LRV; else null). Null when there is no such file, the file has no trailer, its name isn't an Insta360 camera's, or it is lens 1's file (`_10_`) of a camera that writes one file a lens; the agent's `probe` also leaves it out when the other file isn't beneath a root |
 | `exposure_entries` | integer, or null | How many 16-byte items an Insta360 trailer's exposure record (4) holds: one a frame the camera exposed, from a few before the tracks' first. Null when the file has no trailer, its trailer no exposure record, or the record can't be read (a `bad_trailer` warning says why) |
 | `records` | array, or null | The records an Insta360 trailer's index lists that lie inside the trailer: `id` and `size` (the record's bytes, without its footer). A slot whose record runs into the index or past the file is left out, with a `bad_trailer` warning. Null when the file has no trailer or its trailer can't be read (a `bad_trailer` warning says why) |
@@ -475,7 +478,7 @@ indented:
             "vendor": null, "model": null, "firmware": null, "serial": null, "layout": "equirect_tagged",
             "evidence": ["spherical video metadata present", "encoder = Lavf60.16.100"]
           },
-          "lenses": null, "calibration": null, "companion": null, "exposure_entries": null, "records": null,
+          "lenses": null, "calibration": null, "geometry": null, "companion": null, "exposure_entries": null, "records": null,
           "structure": {"check": "full"},
           "damage": [],
           "warnings": [],
@@ -509,21 +512,16 @@ hidden:
   "vendor": "Insta360", "model": "Insta360 X5", "firmware": "v1.1.22_build1", "serial": "<serial>", "layout": "insta360_dual_fisheye",
   "evidence": ["Insta360 trailer magic at end of file, inside an `inst` box", "the trailer's metadata (record 1) gives model Insta360 X5, firmware v1.1.22_build1, its serial"]
 },
-"lenses": {"tracks": [0, 1]},
+"lenses": {"tracks": [0, 1], "binding": "reversed", "evidence": "placeholder until the fit", "screen_side": null},
 "calibration": {
   "generations": ["v1", "v2", "v3", "v6"], "in_use": "v6", "canvas": [10752, 5376],
   "window": {"src": [5376, 5376], "dst": [5312, 5312], "offset": [0, 0]}, "hash": "840fcc4eb186a389"
 },
+"geometry": {"status": "provisional", "evidence": "placeholder until the fit", "notice": null},
 "companion": {"path": "LRV_20261022_165451_01_004.lrv", "verified": true, "why": null},
 "exposure_entries": 122,
 "records": [{"id": 1, "size": 3965}, {"id": 2, "size": 1228840}, {"id": 3, "size": 81280}, {"id": 4, "size": 1952}, {"id": 9, "size": 5520}, {"id": 10, "size": 35}, {"id": 11, "size": 30705}, {"id": 22, "size": 8306836}, {"id": 28, "size": 12793}, {"id": 29, "size": 189}]
 ```
-
-Which stream holds which lens, how sure that is and which side of the
-picture each lens is on (`lenses.binding`, `lenses.evidence`,
-`lenses.screen_side`), and the lenses' geometry (`geometry`), are fields
-still to come within `spherecut.probe/1`, with Spherecut's own table of
-cameras (M3 plan 5.3).
 
 A file cut short, which FFmpeg still opens, has both its report and its
 error; parts of that entry:
@@ -622,11 +620,11 @@ Video, on a discrete GPU where it works. Without `--file` there is no `file`.
 | `path` | string | The file, as given |
 | `camera` | string or null | The camera as probe names it: its model, with the vendor in front when the model doesn't start with it (`Insta360 X5`) |
 | `firmware` | string or null | The firmware the file names, as written (`v1.1.22_build1`) |
-| `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, and in its trailer the calibration the camera says it uses |
+| `stitchable` | boolean | Whether it can be stitched: two lens streams that decode, in its trailer the calibration the camera says it uses, one a stitch can read, and a camera whose files Spherecut's table of cameras (M3 plan 5.3) stitches, which every entry does until M3.6's fit |
 | `calibration` | string or null | That calibration's generation (`v6` on the X5), as probe's `calibration.in_use` |
 | `lenses` | array | Each lens stream (probe's `lenses.tracks`; the first video stream alone for a file without them, and none for a file with no video stream): `stream` (FFmpeg's index), `decodes` (whether its first frame decoded), `source` and `decode` (as frame's, below; null when it wasn't opened or decoded), `error` (why not, an error as in the envelope; or null) |
-| `geometry` | string | How sure the lenses' geometry is: `provisional` until Spherecut's own table of cameras gives the model and firmware theirs (M3 plan 5.3) |
-| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does. A trailer that is there but can't be read says so with probe's `bad_trailer` message, and a calibration the camera names (field 136) that doesn't parse is told apart from one it doesn't name |
+| `geometry` | string | How sure the lenses' geometry is: the `status` of the entry for the file's camera in Spherecut's table of cameras (M3 plan 5.3), as probe's `geometry` gives it, or for a file without one (no calibration a stitch reads) the entry for the model and firmware the file names, the X5's for a file that names none. `provisional` for every camera until M3.6 fits the X5's |
+| `missing` | array of strings | What keeps it from being stitched, for people; empty when nothing does. A trailer that is there but can't be read says so with probe's `bad_trailer` message, a calibration the camera names (field 136) that doesn't parse is told apart from one it doesn't name, one that parses but that a stitch can't read says why (`a calibration a stitch can read: ...`), and a camera the table says isn't stitchable is `a camera Spherecut stitches: ...` in the words frame's refusal of the pair gives |
 | `summary` | string | One line for people: the camera, its firmware and the geometry, such as `Insta360 X5 v1.1.22, geometry provisional` |
 | `warnings` | array of warnings | What probing the file warned of (its damage, and its warnings with `bad_trailer` among them, each naming the file) and what decoding its lenses warned of, each once, as frame's warnings |
 
@@ -674,7 +672,8 @@ One frame of a stitched equirect, rendered through a virtual camera
 into a PNG (`spherecut frame --help` lists the options; the README shows
 them in use); or with `--project <P>` instead of the file, the frame of
 the project's sequence at a time, as `spherecut render` renders it
-before its encode (below, and D51). Without `--json`, a run that wrote the frame prints one
+before its encode (below, and D51); or, with `--reference`, a camera's
+pair of lenses stitched on the CPU (M3.5, below). Without `--json`, a run that wrote the frame prints one
 line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
 (frame 12, pts 12012), decoded on VA-API, rendered on ...`), and its
 warnings and errors go to stderr, as log lines and an `error:` line.
@@ -697,7 +696,70 @@ frame through (several over the shutter with motion blur), the
 sequence's output size, and the export's filter, `aniso` where the GPU
 has it. So `--yaw`, `--pitch`, `--roll`, `--fov`, `--projection`,
 `--morph-to`, `--morph`, `--size`, `--filter`, `--equirect`, `--stream`,
-`--reference` and a FILE are usage errors with it.
+`--reference`, the pair's flags (below) and a FILE are usage errors
+with it.
+
+**`--projection equirect`.** The whole sphere, turned by `--yaw`,
+`--pitch` and `--roll` (`ViewParams::equirect`) and drawn at `--size`,
+which it doesn't hold to 2:1 (a standard equirect is 2:1, such as
+`--size 2048x1024`; the default 1920x1080 stretches it), on any file
+the run renders: a stitched equirect on the GPU or with `--reference`,
+and a camera's pair. `--fov`, `--morph-to` and `--morph` are usage
+errors with it, and `--morph-to equirect` is one on any projection.
+`view` then says `projection` `equirect`, `fov` 360, `morph_to` null
+and `morph` 0.
+
+**A camera's pair of lenses (M3.5).** A file probe calls Insta360 dual
+fisheye (`camera.layout` `insta360_dual_fisheye`), given without
+`--equirect`, `--stream` or `--project`, is a pair. Without
+`--reference` it is refused with `not_equirect`, whose message says
+that `--reference` stitches it on the CPU, that the GPU's stitch
+arrives in M3.7, and that `--equirect` renders its first stream as an
+equirect anyway. With `--reference`, both lens tracks (probe's
+`lenses.tracks`) are decoded in software until M3.7 (`--decoder
+vaapi` or `vulkan` is a usage error), each seeks exactly to the time
+asked for, the two frames must show one time (else `damaged`), and the
+CPU reference stitches them through the view by the trailer's
+calibration and the geometry of the camera's entry in Spherecut's
+table, at a stitch distance of 2 m, with track 0 in front;
+`result.stitch` says how. A trailer that can't be read or holds no
+calibration fails the run with `not_equirect`, naming the record or
+field at fault, and probe's `bad_trailer` warnings are the run's too,
+as its damage is (`truncated`, `damaged`), as on any file. A pair whose
+model has no entry in the table is stitched by the X5's, with a
+`geometry_assumed` warning.
+The pair's flags, each a usage error with `--project`, `--equirect` or
+`--stream` and on a file that is no camera's pair:
+
+- `--geometry key=value,...` changes the table's entry for the file
+  (never the table's row alone) key by key: `binding=direct|reversed`,
+  `canvas=a|b|c`, `turn=y|x`, `tz=as-stored|negated`,
+  `upright=zero|plus90|minus90|half` and `generation=v3|v6`. Each key
+  at most once; a key or value Spherecut doesn't know is a usage error
+  naming it. `stitch.geometry.status` is then `user`, and its
+  `evidence` names the flag and the entry's own evidence. A geometry
+  the calibration can't build a rig under (`generation=v6` on a file
+  with only V3) is `not_equirect`.
+- `--stitch-distance <n>m|inf`: where the lenses are stitched to meet,
+  0.3 m or more, or infinitely far (q = 1/D, 0 for `inf`); 2 m by
+  default.
+- `--seam weights|difference` renders the stitch's debug picture
+  through the view instead of the stitch: `weights` paints calibration
+  block 0's weight red and block 1's blue (they sum to 1 wherever a
+  lens covers, D64; the mask's margin grows as the picture coarsens, so
+  an equirect coarser than about 2.5° a pixel leaves a gap at the seam
+  that no lens covers, black there, which none from 160 pixels wide
+  has: M3 plan amendment 5); `difference` paints |lens 0 − lens 1| × 8
+  in linear light, the frame's gains applied, where both lenses see,
+  and black elsewhere. That mode is unclamped, so the PNG clips it at
+  1.
+- `--lens 0|1` renders one lens's track raw, as it is coded (the flat
+  pass, with no view: the view flags go unused, and `view` reports them
+  as given), with no stitch and no calibration, on the GPU or with
+  `--reference` on the CPU. N counts probe's `lenses.tracks` (the
+  file's first two video streams, also when its trailer can't be read),
+  never calibration blocks. A usage error with the other three, and
+  `stitch` is null.
 
 `result`, only when the PNG was written:
 
@@ -709,19 +771,20 @@ has it. So `--yaw`, `--pitch`, `--roll`, `--fov`, `--projection`,
 | `exactness` | string | `exact`: the frame is the one asked for. The only value in version 1; a seek that can't be exact fails the run instead |
 | `size` | object | `width`, `height`: the PNG's, as `--size` asked (16 to 16384 each, and within the GPU's texture limit); with `--project`, the sequence's output size |
 | `depth` | integer | Bits per channel of the PNG: 8 or 16 (`--depth`) |
-| `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye` or `stereographic`), `morph_to` (one of those, or null) and `morph` (0 is `projection`, 1 is `morph_to`). With `--project`, the keyed camera at the frame's time, its `fov` the output frame's, to a millionth of a degree; for a 360 output, `projection` is `equirect`, `fov` 360, and the angles are the output's turn |
+| `view` | object | The virtual camera as given: `yaw` (degrees to the right), `pitch` (up), `roll` (clockwise as seen from behind the camera), `fov` (horizontal, degrees), `projection` (`rectilinear`, `fisheye`, `stereographic` or `equirect`), `morph_to` (one of the first three, or null) and `morph` (0 is `projection`, 1 is `morph_to`). `--projection equirect` has `fov` 360. With `--project`, the keyed camera at the frame's time, its `fov` the output frame's, to a millionth of a degree; for a 360 output, `projection` is `equirect`, `fov` 360, and the angles are the output's turn. Under `--lens`, the flags as given, unused |
 | `filter` | string | `iso` or `aniso`: the filter rendered with, `iso` where `--filter aniso` met a device without anisotropy (a warning says so); with `--project`, the export's |
 | `renderer` | string | `gpu`, or `reference` for `--reference`'s CPU render |
 | `decode` | object | `path` (`software`, `vaapi` or `vulkan`: where the frame was decoded), `transfer` (how it left the decoder: `system`, decoded in system memory; `downloaded`, copied from the device; `drm_prime`, exported as DMA-BUFs and imported by the GPU; `vulkan`, decoded by Vulkan Video on the renderer's own device and copied out there; only `--zero-copy` asks for these two) and, when a hardware decode went on in software, `fallback`: `from` (`vaapi` or `vulkan`), `code` (`hw_unavailable`, no device; `hw_unsupported`, the device turned the stream down; `hw_failed`, it failed on a frame) and `reason` (for people). `--decoder auto` on a machine without a render node has `fallback` without trying the device |
 | `gpu` | object, or null | The adapter rendered on: `name`, `driver`, `driver_info` (strings, as Vulkan gives them), `device_type` (`discrete_gpu`, `integrated_gpu`, `virtual_gpu`, `cpu` for a software rasterizer such as lavapipe, or `other`). Null for `--reference` |
 | `color` | object | The colour the frame was decoded as: `codes` (the file's H.273 codes as FFmpeg numbers them: `primaries`, `transfer`, `matrix`, `range`, `chroma_location`, integers), and what the renderer used: `range` (`limited` or `full`), `matrix` (`bt709`, `bt601`, `bt2020_ncl`, `smpte240m`, `fcc` or `identity`), `transfer` (`sdr`, `pq`, `hlg` or `linear`), `primaries` (`bt709`, `bt2020` or `other`), `siting` (`left`, `center`, `top_left`, `top`, `bottom_left` or `bottom`), and `assumed`: for each of those five, whether a default rule chose it because the file left it unspecified (D30) |
-| `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise, and with `--project` the clip's), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
+| `source` | object | The stream the frame came from: `stream` (FFmpeg's index; `--stream` picks one, the first video stream otherwise, with `--project` the clip's, with `--lens` the lens's, and for a stitched pair track 0's, whose frame `frame`, `decode` and `color` also are), `codec` (FFmpeg's name, such as `hevc`), `size` (`width`, `height`: the decoded picture, after the codec's cropping) and `pix_fmt` (the decoder's pixel format, as FFmpeg names it, such as `yuv420p10le`; a hardware decode names the format it downloads, such as `nv12` or `p010le`) |
 | `sequence` | object, or null | With `--project`, the sequence's frame rendered: `project` (the file, as given), `frame` (a frame time in sequence time, with `frame` its index at the sequence's rate), `output` (`flat` or `equirect`), `views` (the views averaged over the shutter for motion blur: 1 without it) and `capped` (true when blur needed more than 64 views and has 64). Null without `--project` |
+| `stitch` | object, or null | A camera's pair stitched (above): `geometry` (`status`, `provisional`, `settled`, `fitted` or `user`, `evidence` and `notice`, as probe words them; `user` under `--geometry`, whose edits start from the file's entry, so that its `notice` stays), `calibration` (the trailer's calibration, by the 16 hex digits of `calibration.hash` probe prints), `distance_m` (`--stitch-distance` in metres, 2 by default; null for `inf`) and `lenses`: lens 0's then lens 1's `track` (its index in probe's `lenses.tracks`), `stream` (FFmpeg's index) and `pts` (the frame decoded, in ticks of that stream's time base: both equal `frame.pts` on a file whose tracks share a time base, as the X5's do). Null for any other source, and under `--lens` |
 
-Every field is there in every result; `morph_to`, `gpu` and `sequence`
-are the fields that may be null, and `fallback`, `frame.time.frame` and
-`requested.frame` (there only for `--frame N` or `--time Nf`) the ones
-that may be absent.
+Every field is there in every result; `morph_to`, `gpu`, `sequence`,
+`stitch` and `stitch.distance_m` are the fields that may be null, and
+`fallback`, `frame.time.frame` and `requested.frame` (there only for
+`--frame N` or `--time Nf`) the ones that may be absent.
 
 **The output.** Without `--overwrite`, anything at `-o` fails the run
 with `output_exists` before any work, a link included (even one to
@@ -779,10 +842,25 @@ line, shown here indented:
       "assumed": {"range": false, "matrix": false, "transfer": false, "primaries": false, "siting": false}
     },
     "source": {"stream": 0, "codec": "hevc", "size": {"width": 1024, "height": 512}, "pix_fmt": "yuv420p10le"},
-    "sequence": null
+    "sequence": null,
+    "stitch": null
   },
   "warnings": []
 }
+```
+
+A camera's pair under `--reference --projection equirect` (the X5's
+file, at its table's provisional geometry) ends its `result` so, the
+fields above it as in the example, `renderer` `reference` and `gpu`
+null:
+
+```json
+    "stitch": {
+      "geometry": {"status": "provisional", "evidence": "placeholder until the fit", "notice": null},
+      "calibration": "840fcc4eb186a389",
+      "distance_m": 2.0,
+      "lenses": [{"track": 0, "stream": 0, "pts": 29029}, {"track": 1, "stream": 1, "pts": 29029}]
+    }
 ```
 
 A failed run has no `result`:
@@ -1073,10 +1151,16 @@ $ echo $?
 The schema is the subcommand's when the first argument that isn't an
 option names one (`probe`, `doctor`, `frame`, `render`, `call`), and
 `spherecut/1` otherwise. `call`'s are JSON without `--json`.
-frame's own usage errors, which clap can't find (a `--fov` past the
-projection's limit, a `--size` past the GPU's, a `--stream` that isn't a
-video stream), are `usage` errors with exit 2 too, under
-`spherecut.frame/1`.
+frame's own usage errors, which clap can't find, are `usage` errors
+with exit 2 too, under `spherecut.frame/1`, each message naming the
+flag: a `--fov` past the projection's limit, a `--size` past the GPU's,
+a `--stream` that isn't a video stream, `--reference` with `--filter
+aniso`, `--zero-copy` with `--decoder software`, `--fov` or
+`--morph-to` with `--projection equirect`, `--morph-to equirect`, and,
+once probe has seen the file, `--lens`, `--seam`, `--geometry` or
+`--stitch-distance` on a file that isn't a camera's pair and `--decoder
+vaapi` or `vulkan` on a camera's pair stitched with `--reference` (until
+M3.7).
 `--json` counts only before a `--`: in `spherecut probe -- --json`,
 `--json` is a file name. Without `--json`, a usage error is clap's text
 on stderr, with exit 2.

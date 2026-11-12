@@ -4,8 +4,10 @@
 //! - `samples_probe_names_the_camera` (M3 plan 5.4): every master and its
 //!   LRV, by the CLI and by the agent's `probe` (all 14 files in one
 //!   call), name the X5, its firmware and serial, the master's two lens
-//!   tracks, the four calibrations with V6 in use (one snapshot, one hash,
-//!   in all of them), and each other as companions verified by record 4,
+//!   tracks bound as the X5's entry in the geometry table says, the four
+//!   calibrations with V6 in use (one snapshot, one hash, in all of
+//!   them), the entry's geometry, the master's and the LRV's (M3.5), and
+//!   each other as companions verified by record 4,
 //!   the agent's companion as the CLI's; the exposure entries are record
 //!   4's 16-byte items. One master's report is printed with its serial
 //!   hidden. Its control pairs a master with another take's LRV.
@@ -43,6 +45,16 @@ fn text<'a>(r: &'a Value, pointer: &str) -> &'a str {
     r.pointer(pointer)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("no string at {pointer} in {r}"))
+}
+
+/// The binding the agent's summary of the file `name` gives its lenses:
+/// a master's is the X5's entry's; an LRV has no lenses.
+fn binding_of(name: &str) -> Value {
+    if name.starts_with("VID_") {
+        json!("reversed")
+    } else {
+        Value::Null
+    }
 }
 
 /// The size record `id` has in report `r`'s `records`.
@@ -117,8 +129,25 @@ fn samples_probe_names_the_camera() {
         }
         assert_eq!(m["camera"]["layout"], "insta360_dual_fisheye");
         assert_eq!(l["camera"]["layout"], "low_res_companion");
-        assert_eq!(m["lenses"], json!({"tracks": [0, 1]}));
+        assert_eq!(
+            m["lenses"],
+            json!({
+                "tracks": [0, 1],
+                "binding": "reversed",
+                "evidence": "placeholder until the fit",
+                "screen_side": null,
+            })
+        );
         assert_eq!(l["lenses"], Value::Null, "the LRV's one picture");
+        // The X5's entry, on the firmware it was measured on; the LRV,
+        // which holds the master's strings, has it too.
+        let geometry = json!({
+            "status": "provisional",
+            "evidence": "placeholder until the fit",
+            "notice": null,
+        });
+        assert_eq!(m["geometry"], geometry);
+        assert_eq!(l["geometry"], geometry);
         // The master's strings are its LRV's, so the snapshot is one.
         assert_eq!(m["calibration"], l["calibration"]);
         eprintln!(
@@ -196,7 +225,18 @@ fn samples_probe_names_the_camera() {
         );
         assert_eq!(s["companion"]["verified"], true, "{name}");
         assert_eq!(s["calibration"]["in_use"], "v6", "{name}");
+        assert_eq!(
+            s["geometry"]["evidence"], "placeholder until the fit",
+            "{name}"
+        );
+        assert_eq!(s["lenses"]["binding"], binding_of(name), "{name}");
     }
+    // A master's summary's size, which the agent's summary doc gives.
+    eprintln!(
+        "the agent's summary of {}: {} bytes",
+        summary[0]["file"],
+        summary[0].to_string().len()
+    );
 
     // The control: a master beside another take's LRV, under its own
     // LRV's name, is paired by name only, since record 4 differs.

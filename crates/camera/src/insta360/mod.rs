@@ -16,6 +16,12 @@
 //! a recording's other files from a file's name alone, and
 //! [`verify_companion`] checks a master and its LRV by their bytes.
 //!
+//! From M3.5 (plan 5.2 and 5.3), [`to_calibration`] turns the V3 and V6
+//! strings and field 27's window into sphere's `Calibration`, [`known`]
+//! is the built-in table of the conventions a camera's files leave open,
+//! as sphere's `Geometry`, and [`stitching`] gives both for a file's
+//! metadata, the one entry probe and `agent::still` share.
+//!
 //! Every function that reads calls [`spherecut_core::may_block`] first, so
 //! one called on the UI thread panics in a debug build (D34);
 //! [`companions`] and the parsers read nothing. The [`limits`] bound what
@@ -23,8 +29,10 @@
 
 pub mod calib;
 mod companions;
+pub mod known;
 mod metadata;
 mod records;
+mod stitching;
 mod trailer;
 
 pub use companions::{
@@ -36,6 +44,7 @@ pub use metadata::{
     parse_metadata,
 };
 pub use records::{Exposure, ImuSpan, Nv12Image, imu_span, parse_exposure, thumbnail};
+pub use stitching::{Stitching, stitching, to_calibration};
 pub use trailer::{RecordRef, Trailer, read_record, read_trailer};
 
 /// The 32 ASCII bytes an Insta360 trailer ends with (insta360.md §3.1).

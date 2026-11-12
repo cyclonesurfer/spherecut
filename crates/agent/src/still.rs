@@ -15,11 +15,23 @@
 //! Each step fails with D27's [`ErrorBody`], in the words frame has
 //! always used; what a caller adds to them (frame's flags, look's `next`)
 //! it adds itself. Warnings go to the list the caller passes.
+//!
+//! A file of two lenses, an Insta360 `.insv` (M3.5), opens with
+//! [`Still::open_pair`] in place of steps 4's choice and 6: from
+//! [`probe_report`]'s report, not a [`Probed`], since [`probed`] picks
+//! one stream and refuses the layout unless [`Options::equirect`]. Its
+//! [`StillPair`] seeks both lenses to one time and stitches them through
+//! a view on the CPU reference (`render::reference::render_rig_of`),
+//! which M3.7 joins with the GPU. [`pair_stitching`] reads the stitch
+//! the file's trailer gives, for a caller that changes the geometry.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use spherecut_camera::insta360::limits::MAX_METADATA;
+use spherecut_camera::insta360::{Stitching, parse_metadata, read_record, read_trailer, stitching};
 use spherecut_core::cancel::{StopSource, StopToken};
 use spherecut_core::video::VideoPlanes;
 use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
@@ -35,11 +47,13 @@ use spherecut_media::seek::{FrameAddress, frame_address};
 use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
 use spherecut_media::{HwDevice, MediaError, Source};
 use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::reference::RigOptions;
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
     AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
     StillOptions, StillRenderer, ViewParams, reference, upload, wgpu,
 };
+use spherecut_sphere::rig::{Geometry, Rig, Tune};
 
 use crate::contract::{
     DecodeInfo, ErrorBody, FallbackInfo, GpuInfo, Size, SourceInfo, Warning, codes,
@@ -179,15 +193,23 @@ pub fn probed(
     if !opts.equirect {
         check_equirect(&report, &stream)?;
     }
+    damage_warnings(&report, warnings);
+    stop.go_on()?;
+    Ok(Probed { report, stream })
+}
+
+/// The damage probe found in `report`, each a warning naming the file,
+/// added to `warnings`: damage the seek may not reach, which fails the
+/// run only if the seek does reach it. [`probed`] and
+/// [`Still::open_pair`] give it, once the file is one they go on with.
+pub fn damage_warnings(report: &ProbeReport, warnings: &mut Vec<Warning>) {
     for d in &report.damage {
         warn(
             warnings,
             d.code,
-            format!("{} is damaged: {}", file.display(), d.message),
+            format!("{} is damaged: {}", report.path.display(), d.message),
         );
     }
-    stop.go_on()?;
-    Ok(Probed { report, stream })
 }
 
 /// Why `probed` may not be a stitched equirect, as [`probe()`] without
@@ -251,6 +273,13 @@ fn choose_stream<'r>(
     }
 }
 
+/// What `not_equirect` says an Insta360 file is, after "{file} is ":
+/// look's, compare's and the project tools' words, as none of them
+/// stitches a pair. frame, whose `--reference` does, words its refusal
+/// of a pair without the clause after the colon (`cli::frame`'s
+/// `flags`).
+pub const INSTA360_UNSTITCHED: &str = "Insta360 dual fisheye: stitching arrives in M3";
+
 /// Whether the file is a stitched equirect: tagged so (Spherical Video
 /// V2's `equi` in an MP4 or MOV file, the `Projection` element FFmpeg
 /// exports from a Matroska or WebM file, or V1's `equirectangular`), or
@@ -308,9 +337,7 @@ fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failu
         .map(|v| format!("{}x{}", v.width, v.height))
         .unwrap_or_else(|| "of unknown size".into());
     match report.camera.as_ref().map(|c| c.layout) {
-        Some(Layout::Insta360DualFisheye) => Err(refuse(
-            "Insta360 dual fisheye: stitching arrives in M3".into(),
-        )),
+        Some(Layout::Insta360DualFisheye) => Err(refuse(INSTA360_UNSTITCHED.into())),
         Some(Layout::DjiDualFisheye) => Err(refuse(
             "DJI dual fisheye, one stream per lens: stitching arrives in M3".into(),
         )),
@@ -443,6 +470,18 @@ impl<'g> Still<'g> {
         stop: &Stop,
         warnings: &mut Vec<Warning>,
     ) -> Result<Self, Failure> {
+        Self::open_stream(src, &probed.stream, gpu, opts, stop, warnings)
+    }
+
+    /// [`Still::open`] of `stream`, one of `src`'s.
+    fn open_stream(
+        src: Source<'_>,
+        stream: &StreamInfo,
+        gpu: Option<&'g Gpu>,
+        opts: &Options,
+        stop: &Stop,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Self, Failure> {
         let ids = gpu
             .filter(|g| !g.caps.is_cpu)
             .map(|g| gpu_ids(&g.caps.info));
@@ -458,7 +497,7 @@ impl<'g> Still<'g> {
         }
         let backend = FfmpegBackend::on_node(node);
         let req = VideoRequest {
-            stream: Some(probed.stream.index),
+            stream: Some(stream.index),
             decode,
             output: match (opts.zero_copy, shared) {
                 (true, true) => HwOutput::Vulkan,
@@ -476,7 +515,7 @@ impl<'g> Still<'g> {
             gpu,
             renderer: None,
             dec,
-            stream: probed.stream.clone(),
+            stream: stream.clone(),
             placement: Placement::default(),
             skipped,
             opts: opts.clone(),
@@ -946,11 +985,12 @@ impl<'g> Still<'g> {
         }
     }
 
-    /// Step 8: `decoded` through `views` (or flat, as `look.draw` says),
-    /// `size` pixels large, on the GPU (one [`StillRenderer`] a still, so
-    /// that its pipelines are made once) or the CPU reference, which
-    /// draws only through one view. Several views are a frame's over the
-    /// shutter, averaged for motion blur (`frame --project`).
+    /// Step 8: `decoded` through `views` (or flat, as `look.draw` says,
+    /// when `views` goes unused), `size` pixels large, on the GPU (one
+    /// [`StillRenderer`] a still, so that its pipelines are made once) or
+    /// the CPU reference ([`reference::render_flat`] for flat, else
+    /// through one view). Several views are a frame's over the shutter,
+    /// averaged for motion blur (`frame --project`).
     pub fn render(
         &mut self,
         decoded: &Decoded,
@@ -971,28 +1011,22 @@ impl<'g> Still<'g> {
         };
         let frame = decoded.frame.as_ref();
         let Some(gpu) = self.gpu else {
+            let cpu = reference::Options {
+                level0: false,
+                placement,
+            };
+            if look.draw != Draw::View {
+                // The flat pass, as `StillOptions::flat` draws it: no view.
+                let f64s = reference::render_flat(frame, size, &cpu).map_err(render_error)?;
+                return Ok(quantize(&f64s, look.depth));
+            }
             let [view] = views else {
                 return Err(failure(
                     codes::INTERNAL,
                     "the CPU reference draws through one view, with no motion blur",
                 ));
             };
-            if look.draw != Draw::View {
-                return Err(failure(
-                    codes::INTERNAL,
-                    "the CPU reference draws only through a view",
-                ));
-            }
-            let f64s = reference::render(
-                frame,
-                view,
-                size,
-                &reference::Options {
-                    level0: false,
-                    placement,
-                },
-            )
-            .map_err(render_error)?;
+            let f64s = reference::render(frame, view, size, &cpu).map_err(render_error)?;
             return Ok(quantize(&f64s, look.depth));
         };
         let renderer = self.renderer.get_or_insert_with(|| StillRenderer::new(gpu));
@@ -1188,6 +1222,432 @@ fn decode_info(
     }
 }
 
+// A pair of lenses (M3.5).
+
+/// How a two-lens file is stitched for a still.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PairOptions {
+    /// The geometry, whole, or `None` for the file's own: the table's
+    /// entry as `camera::insta360::stitching` gives it, its generation the
+    /// one field 136 names. A `Some` replaces that entry whole, so a caller
+    /// that changes one field starts from [`pair_stitching`]'s entry,
+    /// never from `known::lookup`'s row, which reads V6 and which
+    /// `Rig::build` refuses on a trailer with only V3
+    /// (`RigError::NoGeneration`).
+    pub geometry: Option<Geometry>,
+    pub tune: Tune,
+    /// How the stitch renders: its debug mode (`RigOptions::debug`,
+    /// `RigDebug`'s 4 to 7) and level 0 alone (`RigOptions::level0`).
+    /// M3.7 reaches the GPU's stitch through this field.
+    pub rig: RigOptions,
+}
+
+/// Both lenses' frames of one time, by track, and what was asked for.
+#[derive(Debug, Clone)]
+pub struct DecodedPair {
+    /// Track t's decoded frame, whose planes ([`VideoPlanes`]) a test
+    /// hashes.
+    pub frames: [Arc<VideoFrame>; 2],
+    pub requested: FrameTime,
+    /// The time both frames show.
+    pub shown: FrameTime,
+}
+
+/// A two-lens file open for stills: each track's decoder and the rig its
+/// calibration and geometry build. Each [`seek`](Self::seek) decodes
+/// both lenses' frames of one time, which [`render`](Self::render)
+/// stitches through a view.
+pub struct StillPair<'g> {
+    /// The path messages name the file by.
+    name: PathBuf,
+    /// By track: each a still of its own track, decoded in software, so
+    /// that a lens seeks, counts and fails as a one-stream file does.
+    lenses: [Still<'g>; 2],
+    /// What the rig was built of: `PairOptions`' geometry, or the file's.
+    geometry: Geometry,
+    rig: Rig,
+    options: RigOptions,
+    /// The last pair of frames made ready to sample, which another view
+    /// of the same frames samples again.
+    ready: Option<([Arc<VideoFrame>; 2], reference::LensPair)>,
+}
+
+impl std::fmt::Debug for StillPair<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StillPair")
+            .field("name", &self.name)
+            .field("streams", &self.lenses.each_ref().map(|l| l.stream.index))
+            .field("geometry", &self.geometry)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The stitch `src`'s trailer gives, read through the confinement as
+/// probe reads it (D24): its metadata (record 1) through
+/// `camera::insta360::stitching`, the calibration and the table's entry
+/// for the camera, with the entry's generation the one field 136 names.
+/// A caller that changes one field of the geometry starts from this
+/// entry's ([`PairOptions::geometry`]).
+///
+/// Each failure is `not_equirect`, the code frame gives a file it can't
+/// render as a stitched picture, since probe's `bad_trailer` is a
+/// warning, never an error: a file with no calibration to stitch by (no
+/// trailer, no metadata, or neither a V3 nor a V6 string) says "no
+/// calibration", and a trailer, record or string that can't be read says
+/// "can't be stitched" with probe's words and camera's, which name the
+/// part at fault.
+///
+/// It calls [`spherecut_core::may_block`] first, before it opens the
+/// file, so on the UI thread it panics in a debug build.
+pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
+    /// The trailer's metadata record.
+    const METADATA: u8 = 1;
+    spherecut_core::may_block("reading an Insta360 file's trailer");
+    let file = src.name.display();
+    let refuse = |code, message: String| about(failure(code, message), src.name);
+    let none = |why: &str| {
+        refuse(
+            codes::NOT_EQUIRECT,
+            format!("{file} has no calibration to stitch by: {why}"),
+        )
+    };
+    let bad = |why: String| {
+        refuse(
+            codes::NOT_EQUIRECT,
+            format!("{file} can't be stitched: {why}"),
+        )
+    };
+    let io = |error| {
+        media_error(
+            MediaError::Io {
+                path: src.name.to_path_buf(),
+                error,
+            },
+            src.name,
+        )
+    };
+    let mut f = File::open(src.open).map_err(io)?;
+    let len = f.metadata().map_err(io)?.len();
+    let trailer = match read_trailer(&mut f, len) {
+        Ok(Some(t)) => t,
+        Ok(None) => return Err(none("it has no Insta360 trailer")),
+        Err(e) => {
+            return Err(bad(format!("the Insta360 trailer can't be read: {e}")));
+        }
+    };
+    let metadata = match read_record(&mut f, &trailer, METADATA, MAX_METADATA) {
+        Ok(Some(m)) => m,
+        Ok(None) => return Err(none("its Insta360 trailer has no metadata (record 1)")),
+        Err(e) => {
+            return Err(bad(format!(
+                "the Insta360 trailer's record {METADATA} can't be read: {e}"
+            )));
+        }
+    };
+    let metadata = parse_metadata(&metadata).map_err(|e| {
+        bad(format!(
+            "the Insta360 trailer's metadata (record {METADATA}): {e}"
+        ))
+    })?;
+    match stitching(&metadata) {
+        Ok(Some(s)) => Ok(s),
+        Ok(None) => Err(none(
+            "its Insta360 trailer holds neither a V3 nor a V6 calibration string",
+        )),
+        Err(e) => Err(bad(format!(
+            "the Insta360 trailer's calibration can't be read: {e}"
+        ))),
+    }
+}
+
+/// `e`, a lens's failure, saying which track it is about.
+fn on_track(track: usize, stream: usize, mut e: Failure) -> Failure {
+    if e.code != codes::CANCELLED {
+        e.message = format!("track {track} (stream {stream}): {}", e.message);
+    }
+    e
+}
+
+impl<'g> Still<'g> {
+    /// Steps 4 and 6 for a file of two lenses: `report`'s two lens tracks
+    /// of `src` (`lenses.tracks`), each with its own decoder, in software,
+    /// and the rig `sphere::rig::Rig::build` makes of the file's
+    /// calibration ([`pair_stitching`]), `pair`'s geometry or the file's
+    /// own, and `pair`'s tune, with track 0 in front and each track's
+    /// coded side.
+    ///
+    /// Each fails with a code `docs/cli-json.md` lists: `internal` for a
+    /// GPU, since the stitch is the CPU reference's until M3.7, and for a
+    /// decoder or zero copy `opts` asks for that isn't software;
+    /// `not_equirect` for a file that isn't a camera's pair of lenses,
+    /// one with no calibration ("no calibration"), one whose trailer
+    /// can't be read ("can't be stitched", as [`pair_stitching`] says,
+    /// before "isn't a camera's pair" for an Insta360 file whose trailer
+    /// probe couldn't read for its lens tracks),
+    /// one whose camera the table says isn't stitchable, and a rig that
+    /// can't be built ("build no rig", with sphere's `RigError`); and a
+    /// lens's own failure to open, naming its track. The tables' open
+    /// checks are the player's (M3.8's lock), not this one's: a pair whose
+    /// lenses don't show one time fails at [`StillPair::seek`].
+    ///
+    /// Once those checks pass, before the lenses open, `warnings` gains
+    /// probe's damage ([`damage_warnings`], as [`probed`] gives it) and,
+    /// for a model the table has no entry for, `geometry_assumed` with
+    /// the table's notice ("geometry assumed from the X5").
+    pub fn open_pair(
+        src: Source<'_>,
+        report: &ProbeReport,
+        gpu: Option<&'g Gpu>,
+        opts: &Options,
+        pair: &PairOptions,
+        stop: &Stop,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<StillPair<'g>, Failure> {
+        let file = src.name.display();
+        let refuse = |code, message: String| about(failure(code, message), src.name);
+        if gpu.is_some() {
+            return Err(refuse(
+                codes::INTERNAL,
+                format!(
+                    "{file} is a camera's pair of lenses, which the CPU reference stitches \
+                     until M3.7 brings the GPU's stitch: it opens with no GPU"
+                ),
+            ));
+        }
+        let hardware = match (opts.decoder, opts.zero_copy) {
+            (_, true) => Some("zero copy"),
+            (Decoder::Vaapi, _) => Some("VA-API"),
+            (Decoder::Vulkan, _) => Some("Vulkan Video"),
+            (Decoder::Auto | Decoder::Software, false) => None,
+        };
+        if let Some(hardware) = hardware {
+            return Err(refuse(
+                codes::INTERNAL,
+                format!(
+                    "{file} is a camera's pair of lenses, which decode in software until \
+                     M3.7: {hardware} isn't built for them"
+                ),
+            ));
+        }
+        let Some(lenses) = &report.camera_file.lenses else {
+            // An Insta360 file whose trailer probe couldn't read for its
+            // tracks: the trailer's own failure, naming the part at fault.
+            let insta360 = report
+                .camera
+                .as_ref()
+                .is_some_and(|c| c.layout == Layout::Insta360DualFisheye);
+            if insta360 {
+                pair_stitching(src)?;
+            }
+            return Err(refuse(
+                codes::NOT_EQUIRECT,
+                format!(
+                    "{file} isn't a camera's pair of lenses: probe finds no Insta360 dual \
+                     fisheye's two lens tracks in it"
+                ),
+            ));
+        };
+        let mut streams = Vec::with_capacity(2);
+        for index in lenses.tracks {
+            match report.streams.iter().find(|s| s.index == index) {
+                Some(s) => streams.push(s),
+                None => {
+                    return Err(refuse(
+                        codes::INTERNAL,
+                        format!("probe's report of {file} names lens stream {index} but has none"),
+                    ));
+                }
+            }
+        }
+        let stitched = pair_stitching(src)?;
+        if let Some(why) = stitched.known.refusal() {
+            return Err(refuse(
+                codes::NOT_EQUIRECT,
+                format!("{file} can't be stitched: {why}"),
+            ));
+        }
+        damage_warnings(report, warnings);
+        if let Some(notice) = stitched.known.notice {
+            warn(
+                warnings,
+                codes::warnings::GEOMETRY_ASSUMED,
+                format!("{file}: {notice} ({})", stitched.known.geometry.evidence),
+            );
+        }
+        stop.go_on()?;
+        let lens_opts = Options {
+            decoder: Decoder::Software,
+            render_node: opts.render_node.clone(),
+            ..Options::default()
+        };
+        let mut open = |track: usize| {
+            let stream = streams[track];
+            Still::open_stream(src, stream, None, &lens_opts, stop, warnings)
+                .map_err(|e| on_track(track, stream.index, e))
+        };
+        let lenses = [open(0)?, open(1)?];
+        let geometry = pair
+            .geometry
+            .clone()
+            .unwrap_or_else(|| stitched.known.geometry.clone());
+        let sides = lenses.each_ref().map(|l| l.info().size.0);
+        // Track 0 in front, the default, until the plan's question 3
+        // settles which lens is the front one (6.2, 11.1).
+        let rig =
+            Rig::build(&stitched.calibration, &geometry, &pair.tune, 0, sides).map_err(|e| {
+                refuse(
+                    codes::NOT_EQUIRECT,
+                    format!("{file}'s calibration, geometry and tune build no rig: {e}"),
+                )
+            })?;
+        Ok(StillPair {
+            name: src.name.to_path_buf(),
+            lenses,
+            geometry,
+            rig,
+            options: pair.rig,
+            ready: None,
+        })
+    }
+}
+
+impl<'g> StillPair<'g> {
+    /// The rig the pair is stitched by.
+    pub fn rig(&self) -> &Rig {
+        &self.rig
+    }
+
+    /// The geometry the rig was built under: [`PairOptions::geometry`],
+    /// or the file's own entry.
+    pub fn geometry(&self) -> &Geometry {
+        &self.geometry
+    }
+
+    /// Track `track`'s still, for its stream and decoder's report.
+    ///
+    /// # Panics
+    ///
+    /// For a track other than 0 or 1.
+    pub fn lens(&self, track: usize) -> &Still<'g> {
+        &self.lenses[track]
+    }
+
+    /// Step 7 for both lenses: the frame `when` names on each track,
+    /// exactly, both at one time, or with [`SeekMode::Keyframe`] the
+    /// keyframe a seek on track 0 lands on and track 1's frame at its
+    /// time. Each track seeks in its own clip time, from its own first
+    /// frame, and fails as [`Still::seek`] does, naming the track; then
+    /// the two frames' timestamps, as times in the file, must be equal,
+    /// or the pair is `damaged` and the message names both. A track that
+    /// starts late shows its frames late by as much, and is never paired
+    /// with the nearer frame.
+    pub fn seek(
+        &mut self,
+        when: TimeSpec,
+        mode: SeekMode,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<DecodedPair, Failure> {
+        let streams = self.lenses.each_ref().map(|l| l.stream.index);
+        let first = self.lenses[0]
+            .seek(when, mode, warnings)
+            .map_err(|e| on_track(0, streams[0], e))?;
+        let then = match mode {
+            SeekMode::Exact => when,
+            _ => TimeSpec::Time(first.frame.time),
+        };
+        let second = self.lenses[1]
+            .seek(then, SeekMode::Exact, warnings)
+            .map_err(|e| on_track(1, streams[1], e))?;
+        let frames = [first.frame, second.frame];
+        let at = |track: usize| {
+            let tb = self.lenses[track].info().time_base;
+            Time::from_pts(frames[track].pts, tb).ok()
+        };
+        let times = [at(0), at(1)];
+        if times[0].is_none() || times[0] != times[1] {
+            let said = |track: usize| {
+                let time = times[track].map_or_else(
+                    || "a time out of range".into(),
+                    |t| format!("{} s", seconds(t)),
+                );
+                format!(
+                    "track {track} (stream {}) at pts {}, {time}",
+                    streams[track], frames[track].pts
+                )
+            };
+            return Err(about(
+                failure(
+                    DamageCause::Corrupt.code(),
+                    format!(
+                        "{}'s lenses don't show one time at {}: {} and {}",
+                        self.name.display(),
+                        describe(when),
+                        said(0),
+                        said(1)
+                    ),
+                ),
+                &self.name,
+            ));
+        }
+        Ok(DecodedPair {
+            frames,
+            requested: first.requested,
+            shown: first.shown,
+        })
+    }
+
+    /// Step 8: `decoded` stitched through the view, `size` pixels large,
+    /// on the CPU reference: the two frames made ready once
+    /// (`render::reference::LensPair`, kept for the next view of the same
+    /// frames), then `render_rig_of` with unit gains and the pair's
+    /// `RigOptions`, quantized as [`Still::render`] quantizes. As there,
+    /// the CPU reference draws only through one view: several, which
+    /// would be a frame's over the shutter, are `internal`, as is a draw
+    /// other than [`Draw::View`].
+    pub fn render(
+        &mut self,
+        decoded: &DecodedPair,
+        views: &[ViewParams],
+        size: (u32, u32),
+        look: Look,
+    ) -> Result<Image, Failure> {
+        let [view] = views else {
+            return Err(failure(
+                codes::INTERNAL,
+                "the CPU reference stitches a pair through one view, with no motion blur",
+            ));
+        };
+        if look.draw != Draw::View {
+            return Err(failure(
+                codes::INTERNAL,
+                "the CPU reference stitches a pair only through a view",
+            ));
+        }
+        let same = |(frames, _): &([Arc<VideoFrame>; 2], reference::LensPair)| {
+            Arc::ptr_eq(&frames[0], &decoded.frames[0])
+                && Arc::ptr_eq(&frames[1], &decoded.frames[1])
+        };
+        if !self.ready.as_ref().is_some_and(same) {
+            // The last pair goes before the next is made, so that two
+            // pairs' mip chains are never held at once.
+            self.ready = None;
+            let lenses = decoded
+                .frames
+                .each_ref()
+                .map(|f| f.as_ref() as &dyn VideoPlanes);
+            let pair = reference::LensPair::new(lenses).map_err(render_error)?;
+            self.ready = Some((decoded.frames.clone(), pair));
+        }
+        let Some((_, pair)) = &self.ready else {
+            return Err(failure(codes::INTERNAL, "no pair made ready"));
+        };
+        let unit = [[1.0; 3]; 2];
+        let f64s = reference::render_rig_of(pair, &self.rig, unit, view, size, &self.options)
+            .map_err(render_error)?;
+        Ok(quantize(&f64s, look.depth))
+    }
+}
+
 /// The ids hardware decoding finds the adapter's render node by.
 fn gpu_ids(info: &wgpu::AdapterInfo) -> GpuIds {
     GpuIds {
@@ -1217,8 +1677,9 @@ pub fn render_error(e: RenderError) -> Failure {
 }
 
 /// The reference's picture at `depth`'s codes, rounded to nearest as the
-/// GPU stores them.
-fn quantize(img: &reference::ImageF64, depth: Depth) -> Image {
+/// GPU stores them: what [`Still::render`] and [`StillPair::render`] make
+/// of the CPU reference's picture, for a test that renders its own.
+pub fn quantize(img: &reference::ImageF64, depth: Depth) -> Image {
     let code = |v: f64, max: f64| (v.clamp(0.0, 1.0) * max).round();
     let pixels = match depth {
         Depth::Sixteen => {

@@ -25,6 +25,7 @@ spherecut-app = { path = "crates/app" }
 spherecut-agent = { path = "crates/agent" }
 spherecut-export = { path = "crates/export" }
 spherecut-camera = { path = "crates/camera" }
+spherecut-boundary = { path = "crates/boundary" }
 
 anyhow = "1.0.100"
 # Vulkan's types, for asking the driver what DMA-BUFs it imports (slice

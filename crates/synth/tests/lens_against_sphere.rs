@@ -1,9 +1,12 @@
 //! synth's lens truth against sphere's lens maths (M3 plan 4.1 rule 2,
 //! 4.2's rung 0 and 6.3's Against synth): the two share no code, and
-//! these tests convert between their types only here, at the boundary,
-//! field by field. Pat's numbers are docs/formats/insta360.md's ("Pat's
-//! X5 samples"), as the calibration string holds them: block 1's cx on
-//! the whole canvas.
+//! these tests convert between their types only at the boundary, field
+//! by field, which `spherecut-boundary` holds (`calibration`, `geometry`,
+//! `euler_conv`, `v6_reading`, `lens_model`), with Pat's numbers as the
+//! calibration strings hold them (`pats`, parsed from `testkit::pats`:
+//! block 1's cx on the whole canvas). The project review's F137 moved
+//! them there from this file, so that render's stitching tests and rung 3
+//! share the one copy this file holds `Rig::build` to.
 //!
 //! Budget (M3 plan 4.1 rule 5, 19.6): these two share the 30 s that
 //! sphere's properties and rung 0 take at `PROPTEST_CASES=100000` with
@@ -19,14 +22,12 @@ use std::f64::consts::PI;
 use std::time::Instant;
 
 use glam::{DQuat, DVec2, DVec3};
+use spherecut_boundary::{calibration, euler_conv, geometry, lens_model, pats, v6_reading};
 use spherecut_sphere::fisheye::{self, Canonical, KbLens, LensModel, Unified, V6Reading};
-use spherecut_sphere::rig::{
-    self, Binding, CalibTerms, Calibration, CanvasMap, EulerConv, Extrinsics, Geometry, LensCalib,
-    Rig, Status, Tune, TurnAxis, TzSign,
-};
+use spherecut_sphere::rig::{EulerConv, Geometry, Rig, Tune, TzSign};
 use spherecut_synth::lens::{
-    self as truth, BlockTruth, CalibTruth, KbBase, Planted, RigTruth, StoredDist, TruthBinding,
-    TruthCanvas, TruthEuler, TruthModel, TruthTurn, TruthTz, TruthV6,
+    self as truth, CalibTruth, KbBase, Planted, RigTruth, TruthBinding, TruthCanvas, TruthEuler,
+    TruthModel, TruthTurn, TruthTz, TruthV6,
 };
 use spherecut_testkit::control::{Comparison, at_least, at_most, must_fail};
 
@@ -106,280 +107,6 @@ const RUNG0_PX: f64 = 1e-6;
 const RUNG0_RAD: f64 = 1e-7;
 /// Rung 0's points a truth model.
 const RUNG0_POINTS: usize = 10_000;
-
-/// A block's square on the X5's canvas, and field 27's window.
-const SRC: u32 = 5376;
-const DST: u32 = 5312;
-
-/// Pat's X5 calibration of one generation, as the string holds it.
-fn pats(generation: truth::Generation) -> CalibTruth {
-    let block = |xi, fx, fy, cx, cy, ypr_deg, t_m| BlockTruth {
-        xi,
-        fx,
-        fy,
-        cx,
-        cy,
-        ypr_deg,
-        t_m,
-    };
-    let (blocks, dist) = match generation {
-        truth::Generation::V3 => (
-            [
-                block(
-                    2.0,
-                    4284.620,
-                    4284.280,
-                    2701.130,
-                    2692.130,
-                    [-0.198, 0.211, 90.280],
-                    [0.0; 3],
-                ),
-                block(
-                    2.0,
-                    4291.030,
-                    4291.030,
-                    8069.000,
-                    2684.950,
-                    [0.239, 0.113, 89.107],
-                    [-0.004460, 0.000017, -0.031920],
-                ),
-            ],
-            StoredDist::V3 {
-                k: [
-                    [0.18632051, 2.04984355, -3.24446917],
-                    [0.18940836, 2.07073069, -3.24103332],
-                ],
-                p: [[-0.00143576, -0.00339240], [0.00013831, -0.00299873]],
-            },
-        ),
-        truth::Generation::V6 => (
-            [
-                block(
-                    2.0,
-                    4277.520,
-                    4277.270,
-                    2713.050,
-                    2689.210,
-                    [-0.310, -0.271, 90.255],
-                    [0.0; 3],
-                ),
-                block(
-                    2.0,
-                    4284.400,
-                    4284.760,
-                    8075.730,
-                    2680.350,
-                    [0.120, -0.173, 89.112],
-                    [0.000637, 0.000001, -0.031525],
-                ),
-            ],
-            StoredDist::V6 {
-                d: truth::PATS_V6_D,
-            },
-        ),
-    };
-    CalibTruth {
-        blocks,
-        dist,
-        canvas: [2 * SRC, SRC],
-        dst: DST,
-        lens_type: 113,
-        body: 4,
-    }
-}
-
-// The boundary: synth's types to sphere's, field by field.
-
-/// sphere's calibration for synth's stored numbers, as the camera crate
-/// fills it: src is the canvas's height, block 1's cx is made local to
-/// its square, and the blocks go under their generation.
-fn calibration(cal: &CalibTruth) -> Calibration {
-    let src = cal.canvas[1];
-    let blocks: [LensCalib; 2] = std::array::from_fn(|b| {
-        let block = &cal.blocks[b];
-        LensCalib {
-            xi: block.xi,
-            fx: block.fx,
-            fy: block.fy,
-            cx: if b == 0 {
-                block.cx
-            } else {
-                block.cx - f64::from(src)
-            },
-            cy: block.cy,
-            ypr_deg: block.ypr_deg,
-            t_m: block.t_m,
-            terms: match cal.dist {
-                StoredDist::V3 { k, p } => CalibTerms::V3 { k: k[b], p: p[b] },
-                StoredDist::V6 { d } => CalibTerms::V6 { d: d[b] },
-            },
-        }
-    });
-    let (v3, v6) = match cal.generation() {
-        truth::Generation::V3 => (Some(blocks), None),
-        truth::Generation::V6 => (None, Some(blocks)),
-    };
-    Calibration {
-        src,
-        dst: cal.dst,
-        v3,
-        v6,
-    }
-}
-
-/// sphere's geometry for synth's planted conventions, reading the blocks
-/// of `generation`.
-fn geometry(planted: &Planted, generation: truth::Generation) -> Geometry {
-    Geometry {
-        binding: match planted.binding {
-            TruthBinding::Direct => Binding::Direct,
-            TruthBinding::Reversed => Binding::Reversed,
-        },
-        canvas: match planted.canvas {
-            TruthCanvas::A => CanvasMap::A,
-            TruthCanvas::B => CanvasMap::B,
-            TruthCanvas::C => CanvasMap::C,
-            TruthCanvas::Fitted { scale } => CanvasMap::Fitted { scale },
-        },
-        extrinsics: Extrinsics::Stored(euler_conv(&planted.euler)),
-        turn: match planted.turn {
-            TruthTurn::Y => TurnAxis::Y,
-            TruthTurn::X => TurnAxis::X,
-        },
-        tz: match planted.tz {
-            TruthTz::AsStored => TzSign::AsStored,
-            TruthTz::Negated => TzSign::Negated,
-        },
-        upright: quarter_turn(planted.upright),
-        generation: match generation {
-            truth::Generation::V3 => rig::Generation::V3,
-            truth::Generation::V6 => rig::Generation::V6,
-        },
-        v6: v6_reading(planted.v6),
-        status: Status::Provisional,
-        evidence: String::new(),
-    }
-}
-
-fn quarter_turn(q: truth::QuarterTurn) -> rig::QuarterTurn {
-    match q {
-        truth::QuarterTurn::Zero => rig::QuarterTurn::Zero,
-        truth::QuarterTurn::Plus90 => rig::QuarterTurn::Plus90,
-        truth::QuarterTurn::Minus90 => rig::QuarterTurn::Minus90,
-        truth::QuarterTurn::Half => rig::QuarterTurn::Half,
-    }
-}
-
-/// The `EulerConv` whose fields read as the `TruthEuler`'s do: the same
-/// axes and signs by angle, the same order and roll offset.
-fn euler_conv(e: &TruthEuler) -> EulerConv {
-    EulerConv {
-        axes: e.axes.map(|axis| match axis {
-            truth::Axis::X => rig::Axis::X,
-            truth::Axis::Y => rig::Axis::Y,
-            truth::Axis::Z => rig::Axis::Z,
-        }),
-        order: e.order.map(|angle| match angle {
-            truth::Angle::Yaw => rig::Angle::Yaw,
-            truth::Angle::Pitch => rig::Angle::Pitch,
-            truth::Angle::Roll => rig::Angle::Roll,
-        }),
-        signs: e.signs.map(|sign| match sign {
-            truth::Sign::Plus => rig::Sign::Plus,
-            truth::Sign::Minus => rig::Sign::Minus,
-        }),
-        roll_offset: quarter_turn(e.roll_offset),
-    }
-}
-
-fn v6_reading(r: TruthV6) -> V6Reading {
-    V6Reading {
-        tangential: r.tangential.map(|t| fisheye::Tangential {
-            pair: match t.pair {
-                truth::PairOrder::D5D6 => fisheye::PairOrder::D5D6,
-                truth::PairOrder::D6D5 => fisheye::PairOrder::D6D5,
-            },
-            extension: t.extension,
-        }),
-        prism: r.prism.map(|p| fisheye::Prism {
-            at: match p.at {
-                truth::PrismAt::D7 => fisheye::PrismAt::D7,
-                truth::PrismAt::D9 => fisheye::PrismAt::D9,
-            },
-            order: match p.order {
-                truth::PrismOrder::ByAxis => fisheye::PrismOrder::ByAxis,
-                truth::PrismOrder::Interleaved => fisheye::PrismOrder::Interleaved,
-            },
-        }),
-    }
-}
-
-/// sphere's model for a truth model, term for term: V3's terms through
-/// `Canonical::v3`, V6's through `Canonical::v6` under the same reading,
-/// and Kannala–Brandt's focals, polynomial, tangential and prism terms
-/// each to its own field.
-fn lens_model(m: &TruthModel) -> LensModel {
-    match *m {
-        TruthModel::Mei {
-            xi,
-            fx,
-            fy,
-            cx,
-            cy,
-            k,
-            p,
-        } => LensModel::Mei(Unified {
-            xi,
-            fx,
-            fy,
-            cx,
-            cy,
-            dist: Canonical::v3(k, p),
-        }),
-        TruthModel::MeiV6 {
-            xi,
-            fx,
-            fy,
-            cx,
-            cy,
-            d,
-            reading,
-        } => LensModel::Mei(Unified {
-            xi,
-            fx,
-            fy,
-            cx,
-            cy,
-            dist: Canonical::v6(d, v6_reading(reading)),
-        }),
-        TruthModel::Kb {
-            base,
-            fx,
-            fy,
-            cx,
-            cy,
-            k,
-            p,
-            pe,
-            s,
-        } => LensModel::Kb(KbLens {
-            base: match base {
-                KbBase::Equidistant => fisheye::Model::Equidistant,
-                KbBase::Equisolid => fisheye::Model::Equisolid,
-                KbBase::Stereographic => fisheye::Model::Stereographic,
-                KbBase::Orthographic => fisheye::Model::Orthographic,
-            },
-            k,
-            fx,
-            fy,
-            cx,
-            cy,
-            p,
-            pe,
-            s,
-        }),
-    }
-}
 
 // The measures, the test's own.
 
