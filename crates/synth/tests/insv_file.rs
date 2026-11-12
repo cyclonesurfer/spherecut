@@ -262,8 +262,9 @@ const X5_COLOR: ColorCodes = ColorCodes {
 /// track, `ftyp wide mdat moov`, and the `inst` box holding synth's
 /// trailer where `InsvFiles::layout` says, whose serial probe reads. Both
 /// tracks' tables are the same, read by the box reader and by the backend
-/// the frame lock asks. The control is `write_pair`'s file, which has no
-/// `wide`, no audio and no trailer.
+/// the frame lock asks, and their edits are exact in the movie's
+/// timescale. The control is `write_pair`'s file, which has no `wide`, no
+/// audio and no trailer, and FFmpeg's movie timescale.
 #[test]
 fn write_insv_writes_the_x5s_container() {
     let _t = timed("write_insv_writes_the_x5s_container");
@@ -307,6 +308,11 @@ fn write_insv_writes_the_x5s_container() {
         let edit = t.edit.as_ref().unwrap();
         assert_eq!(edit.edits.len(), 1);
         assert_eq!(edit.edits[0].media_time, 0);
+        // The movie's timescale is the least common multiple of the
+        // tracks' (30000 and the audio's 48000) on every FFmpeg, so that
+        // the edit is the track's 8 frames exactly.
+        assert_eq!(edit.movie_timescale, 240_000);
+        assert_eq!(edit.edits[0].duration, 8 * 1001 * 8);
         timings.push(t);
 
         let (info, keys) = each_frame(&files.master, k, |f| f.key);
@@ -350,6 +356,13 @@ fn write_insv_writes_the_x5s_container() {
     let pair = write_pair(&pairs_64()[0], &dir.0).unwrap();
     let why = must_fail("write_pair's file as the X5's", x5_container(&pair));
     assert!(why.starts_with("top-level boxes"), "{why}");
+    // Its movie timescale is FFmpeg's own, 1000 before 9 and its video
+    // tracks' least common multiple from 9, not the master's.
+    let pair_timing = mp4::track_timing(&pair, 0).unwrap();
+    must_fail(
+        "write_pair's movie timescale as the master's",
+        pair_timing.edit.unwrap().movie_timescale == 240_000,
+    );
 }
 
 /// A `Quality::Lossless` file's decoded planes hash equal to
@@ -448,6 +461,29 @@ fn edits_in_seconds(t: &TrackTiming) -> Vec<((u64, u64), i64)> {
         .collect()
 }
 
+/// Whether `t` starts exactly `ticks` of its timescale late: its edit
+/// list's first edit an empty one of that time in seconds, whatever the
+/// movie's timescale, and its first pts `ticks`.
+fn starts_late_by(t: &TrackTiming, ticks: u32) -> Result<(), String> {
+    let list = t.edit.as_ref().ok_or("no edit list")?;
+    let Some(empty) = list.edits.first().filter(|e| e.media_time == -1) else {
+        return Err(format!("no empty edit first: {list:?}"));
+    };
+    // d/movie s is ticks/timescale s when d·timescale = ticks·movie.
+    if u128::from(empty.duration) * u128::from(t.timescale)
+        != u128::from(ticks) * u128::from(list.movie_timescale)
+    {
+        return Err(format!(
+            "the empty edit isn't {ticks}/{} s: {list:?}",
+            t.timescale
+        ));
+    }
+    if t.first_pts != i64::from(ticks) {
+        return Err(format!("the first pts is {}, not {ticks}", t.first_pts));
+    }
+    Ok(())
+}
+
 /// Each of `InsvFault`'s MP4 faults (`LensOneFrameShort`,
 /// `StartPtsDiffer`, `StssDiffer`, `RateDiffer`) is in the tracks as its
 /// name says, as `track_timing` reads them: of the timescale, the first
@@ -507,15 +543,29 @@ fn write_insv_plants_each_mp4_fault() {
                         ..Differ::default()
                     }
                 );
-                // Track 1 starts a frame late, to the movie's tick: an
-                // empty edit before the same media edit as track 0's.
+                // Track 1 starts exactly a frame late, 1001 ticks of
+                // 1/30000 s: an empty edit of a frame before the same
+                // media edit as track 0's.
+                starts_late_by(b, 1001).unwrap();
                 let (ea, eb) = (edits_in_seconds(a), edits_in_seconds(b));
                 assert_eq!(eb.len(), 2, "{eb:?}");
-                assert_eq!(eb[0].1, -1, "{eb:?}");
                 assert_eq!(eb[1..], ea[..]);
-                let late = b.first_pts as f64 / f64::from(b.timescale);
-                assert!((late - 1001.0 / 30_000.0).abs() < 0.001, "{late}");
                 assert_eq!(a.stts, b.stts);
+                // Its control: track 1 as a movie timescale of 1000,
+                // FFmpeg's own before 9, has it: each edit rounded down
+                // to the millisecond, so that it starts 990 ticks late.
+                let mut rounded = b.clone();
+                let list = rounded.edit.as_mut().unwrap();
+                let movie = u64::from(list.movie_timescale);
+                for e in &mut list.edits {
+                    e.duration = e.duration * 1000 / movie;
+                }
+                list.movie_timescale = 1000;
+                rounded.first_pts = 990;
+                must_fail(
+                    "track 1 a frame late in a movie timescale of 1000",
+                    starts_late_by(&rounded, 1001),
+                );
             }
             InsvFault::StssDiffer => {
                 // Track 0 has the X5's one IDR in 10 frames; track 1 a

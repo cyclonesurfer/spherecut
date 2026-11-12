@@ -78,9 +78,10 @@ pub enum InsvFault {
     LensOneFrameShort,
     /// The tracks' first presentation times differ: lens 1's track is
     /// muxed a frame later than lens 0's
-    /// ([`mux_video_streams_with_audio`]'s delay), so the muxer
-    /// gives it an empty edit of a frame, to the movie timescale's tick,
-    /// before the same media edit as lens 0's.
+    /// ([`mux_video_streams_with_audio`]'s delay), so the muxer gives it
+    /// an empty edit of exactly a frame, on every FFmpeg, before the same
+    /// media edit as lens 0's: at 29.97 its first pts is 1001 ticks of
+    /// 1/30000 s.
     StartPtsDiffer,
     /// The tracks' keyframes (`stss`) differ: lens 1's IDRs come every
     /// g − 1 frames, where g is lens 0's GOP or the frame count if fewer,
@@ -944,7 +945,10 @@ pub struct InsvFiles {
 /// no B-frames. The AAC track is 48 kHz stereo silence as long as track
 /// 0, after the two video tracks, as in Pat's files. FFmpeg's `ftyp` is
 /// kept: the X5's (`avc1`, minor version 0x20140200, brands `avc1` and
-/// `isom`) isn't copied.
+/// `isom`) isn't copied. The movie's timescale (`mvhd`) is the least
+/// common multiple of the three tracks' (240000 at 29.97: 30000 and the
+/// audio's 48000), whatever FFmpeg's own, so that every edit is exact
+/// ([`mux_video_streams_with_audio`]).
 ///
 /// The LRV ([`LrvSpec`]) is one H.264 (`avc1`) track of 2 · side × side,
 /// track 1's picture scaled to side² by area on the left and track 0's on
