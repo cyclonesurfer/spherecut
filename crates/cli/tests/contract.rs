@@ -22,7 +22,7 @@ use spherecut_core::{FrameRate, FrameTime, Rational, Time};
 use spherecut_media::doctor::{self, DoctorReport, Issue, Severity};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings};
 use spherecut_media::ff;
-use spherecut_synth::insv::{Field, InsvFault, TrailerLayout, print};
+use spherecut_synth::insv::{Field, InsvFault, InsvSpec, TrailerLayout, print, write_insv};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
 use spherecut_synth::{Pattern, render_equirect, yuv};
 use spherecut_testkit::Fnv64;
@@ -1261,11 +1261,14 @@ fn frame_documents_have_the_envelope_too() {
         "color",
         "source",
         "sequence",
+        "stitch",
     ];
     assert!(has_keys(r, &fields), "{r}");
     assert_eq!(r["output"], out.to_str().unwrap());
-    // Only `--project` renders a sequence's frame.
+    // Only `--project` renders a sequence's frame, and only a camera's
+    // pair of lenses a stitch.
     assert_eq!(r["sequence"], Value::Null);
+    assert_eq!(r["stitch"], Value::Null);
     assert!(has_keys(&r["frame"], &["pts", "time"]), "{r}");
     assert!(
         has_keys(&r["frame"]["time"], &["exact", "seconds", "frame"]),
@@ -2445,10 +2448,114 @@ fn probe_reports_binding_and_geometry() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Whether `s` has the shape of frame's `stitch` object: `geometry`
+/// (`status` and `evidence`), `calibration` (probe's 16 hex digits),
+/// `distance_m` (a number, or null for infinitely far) and `lenses`, two
+/// of `track`, `stream` and `pts`.
+fn stitch_shape(s: &Value) -> Result<(), String> {
+    let shaped = s.is_object()
+        && has_keys(s, &["geometry", "calibration", "distance_m", "lenses"])
+        && s["geometry"].is_object()
+        && has_keys(&s["geometry"], &["status", "evidence"])
+        && s["geometry"]["status"].is_string()
+        && s["geometry"]["evidence"].is_string()
+        && s["calibration"]
+            .as_str()
+            .is_some_and(|h| h.len() == 16 && h.chars().all(|c| c.is_ascii_hexdigit()))
+        && (s["distance_m"].is_number() || s["distance_m"].is_null())
+        && s["lenses"].as_array().is_some_and(|l| {
+            l.len() == 2
+                && l.iter().all(|l| {
+                    l.is_object()
+                        && has_keys(l, &["track", "stream", "pts"])
+                        && l["track"].is_u64()
+                        && l["stream"].is_u64()
+                        && l["pts"].is_i64()
+                })
+        });
+    if shaped {
+        Ok(())
+    } else {
+        Err(format!("not the stitch object's shape: {s}"))
+    }
+}
+
 /// `spherecut frame <insv>`'s JSON result carries the stitch it used (M3
-/// plan 14's frame row), as `docs/cli-json.md` documents it.
+/// plan 14's frame row), as `docs/cli-json.md` documents it: on
+/// `InsvSpec::small()` under `--reference`, the result keeps every field
+/// it had and gains `stitch`, with the table's geometry, the
+/// calibration's hash as probe prints it, the default distance of 2 m,
+/// and each lens's track, stream and pts, both at the frame's pts. The
+/// control: an equirect file's `stitch`, null, isn't that shape.
 #[test]
-#[ignore = "M3.5 unit (d)"]
 fn frame_pins_the_stitch_object() {
-    todo!()
+    let started = Instant::now();
+    let dir = tmp("stitch-object");
+    let master = write_insv(&InsvSpec::small(), &dir.join("small"))
+        .unwrap()
+        .master;
+    let clip = sphere_clip(&dir);
+    let args = |extra: &[&'static str]| {
+        let mut a = vec!["--reference", "--size", "64x32"];
+        a.extend_from_slice(extra);
+        a
+    };
+    let (status, v, stderr) = frame_json(
+        &master,
+        &dir.join("insv.png"),
+        &args(&["--projection", "equirect", "--frame", "5"]),
+        &[],
+    );
+    assert_eq!(status, Some(0), "{v} {stderr}");
+    let r = &v["result"];
+    let fields = [
+        "output",
+        "frame",
+        "requested",
+        "exactness",
+        "size",
+        "depth",
+        "view",
+        "filter",
+        "renderer",
+        "decode",
+        "gpu",
+        "color",
+        "source",
+        "sequence",
+        "stitch",
+    ];
+    assert!(has_keys(r, &fields), "{r}");
+    let stitch = &r["stitch"];
+    stitch_shape(stitch).unwrap();
+    assert_eq!(
+        stitch["geometry"],
+        serde_json::json!({"status": "provisional", "evidence": "placeholder until the fit"})
+    );
+    let (_, probed) = probe_json(&[&master]);
+    let report = &probed["result"]["files"][0]["report"];
+    assert_eq!(stitch["calibration"], report["calibration"]["hash"]);
+    assert_eq!(stitch["distance_m"], 2.0);
+    let tracks = &report["lenses"]["tracks"];
+    for (t, lens) in stitch["lenses"].as_array().unwrap().iter().enumerate() {
+        assert_eq!(lens["track"], t, "{stitch}");
+        assert_eq!(lens["stream"], tracks[t], "{stitch}");
+        assert_eq!(lens["pts"], r["frame"]["pts"], "{stitch}");
+    }
+    // The frame and the source are track 0's.
+    assert_eq!(r["source"]["stream"], tracks[0], "{r}");
+
+    // The control: an equirect file has no stitch.
+    let (status, v, stderr) = frame_json(&clip, &dir.join("plain.png"), &args(&[]), &[]);
+    assert_eq!(status, Some(0), "{v} {stderr}");
+    assert_eq!(v["result"]["stitch"], Value::Null);
+    must_fail(
+        "an equirect file's stitch",
+        stitch_shape(&v["result"]["stitch"]),
+    );
+    eprintln!(
+        "frame_pins_the_stitch_object: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

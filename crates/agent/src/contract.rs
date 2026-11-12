@@ -20,6 +20,7 @@ use spherecut_core::video::ColorInfo;
 use spherecut_export::warning::codes as export_warnings;
 use spherecut_export::{ExportError, Fallback};
 use spherecut_media::MediaError;
+pub use spherecut_media::camera::GeometryInfo;
 use spherecut_media::doctor::{DoctorReport, Severity};
 use spherecut_media::probe::{self, ProbeError, ProbeReport};
 use spherecut_render::RenderError;
@@ -342,6 +343,35 @@ pub struct FrameResult {
     pub source: SourceInfo,
     /// With `--project`, the sequence's frame rendered; null otherwise.
     pub sequence: Option<SequenceFrame>,
+    /// A camera's pair stitched (`--reference` on an Insta360 file, or
+    /// its `--seam`): the geometry, calibration and distance it was
+    /// stitched with, and each lens's frame. Null for any other source,
+    /// and under `--lens`.
+    pub stitch: Option<StitchInfo>,
+}
+
+/// How `frame` stitched a camera's pair of lenses.
+#[derive(Debug, Clone, Serialize)]
+pub struct StitchInfo {
+    /// The table's geometry, or `--geometry`'s over it (status `user`).
+    pub geometry: GeometryInfo,
+    /// The trailer's calibration, by the hash probe prints.
+    pub calibration: String,
+    /// `--stitch-distance` in metres (2 by default); null for `inf`.
+    pub distance_m: Option<f64>,
+    /// Lens 0 and lens 1, in that order.
+    pub lenses: Vec<LensFrame>,
+}
+
+/// One lens's frame of a stitched pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LensFrame {
+    /// The lens, by its index in probe's `lenses.tracks`.
+    pub track: usize,
+    /// Its video stream, by FFmpeg's index.
+    pub stream: usize,
+    /// The frame decoded, in ticks of that stream's time base.
+    pub pts: i64,
 }
 
 /// The frame of a project's sequence that `frame --project` rendered,

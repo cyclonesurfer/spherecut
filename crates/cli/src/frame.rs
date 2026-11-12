@@ -19,7 +19,12 @@
 //!    the source frame it shows, the output's size, and its views, as
 //!    [`frame_views`] gives the export them; then probe, through the
 //!    confinement (D24), and the layout: only a stitched equirect
-//!    renders, unless `--equirect` says it is one (a project's clip is);
+//!    renders, unless `--equirect` says it is one (a project's clip is),
+//!    or a camera's pair of lenses (an Insta360 file): stitched on the
+//!    CPU under `--reference` until M3.7 ([`Still::open_pair`], with
+//!    `--geometry`, `--stitch-distance` and `--seam`), or one lens raw
+//!    with `--lens`; the pair's flags on any other file are a usage
+//!    error, and probe's `bad_trailer` warnings are the run's too;
 //! 5. the GPU, unless `--reference` renders on the CPU (exit 3 without
 //!    one);
 //! 6. the decoder, on the render node of the GPU that renders (D39 has the
@@ -37,9 +42,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Args, ValueEnum};
-use spherecut_agent::still::{self, Failure, Still, about, failure, number, seconds};
+use spherecut_agent::still::{self, Failure, PairOptions, Still, about, failure, number, seconds};
 use spherecut_cli::contract::{
-    self, Envelope, Exit, FrameResult, FrameShown, SequenceFrame, Size, ViewInfo, Warning, codes,
+    self, Envelope, Exit, FrameResult, FrameShown, GeometryInfo, LensFrame, SequenceFrame, Size,
+    StitchInfo, ViewInfo, Warning, codes,
 };
 use spherecut_core::cancel::StopSource;
 use spherecut_core::fs::{TempFile, follow_links, replaceable};
@@ -50,11 +56,18 @@ use spherecut_core::{FrameTime, Rounding, Time, TimeSpec};
 use spherecut_export::FramePlan;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
+use spherecut_media::camera::status_word;
+use spherecut_media::detect::Layout;
+use spherecut_media::probe::{ProbeReport, codes as probe_codes};
 use spherecut_render::output::{frame_views, view_at};
 use spherecut_render::project::OutKind;
-use spherecut_render::{AdapterChoice, Depth, Filter, ViewParams};
+use spherecut_render::reference::{RigDebug, RigOptions};
+use spherecut_render::{AdapterChoice, Depth, Filter, Image, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_sphere::rig::{
+    Binding, CanvasMap, Generation, Geometry, QuarterTurn, Status, Tune, TurnAxis, TzSign,
+};
 
 use crate::{emit, interrupt, print_json, render, to_stderr};
 
@@ -80,7 +93,8 @@ pub struct FrameArgs {
         value_name = "PROJECT",
         conflicts_with_all = [
             "file", "yaw", "pitch", "roll", "fov", "projection", "morph_to", "morph", "size",
-            "filter", "equirect", "stream", "reference",
+            "filter", "equirect", "stream", "reference", "lens", "seam", "geometry",
+            "stitch_distance",
         ],
     )]
     pub project: Option<PathBuf>,
@@ -108,9 +122,12 @@ pub struct FrameArgs {
     #[arg(long, value_name = "DEG", default_value_t = 0.0, value_parser = angle, allow_negative_numbers = true)]
     pub roll: f64,
     /// The horizontal field of view in degrees: at most 170 rectilinear,
-    /// 360 fisheye and 340 stereographic.
-    #[arg(long, value_name = "DEG", default_value_t = 100.0, value_parser = angle, allow_negative_numbers = true)]
-    pub fov: f64,
+    /// 360 fisheye and 340 stereographic [default: 100]. Not with
+    /// --projection equirect, which is the whole sphere.
+    #[arg(long, value_name = "DEG", value_parser = angle, allow_negative_numbers = true)]
+    pub fov: Option<f64>,
+    /// The virtual camera's projection; equirect is the whole sphere, 2:1,
+    /// turned by --yaw, --pitch and --roll.
     #[arg(long, value_enum, default_value_t = ProjectionArg::Rectilinear)]
     pub projection: ProjectionArg,
     /// A projection to morph towards, by --morph.
@@ -149,9 +166,48 @@ pub struct FrameArgs {
     /// The video stream, by FFmpeg's index [default: the first].
     #[arg(long, value_name = "N")]
     pub stream: Option<usize>,
-    /// Render with the CPU reference (f64, slow) instead of the GPU.
+    /// Render with the CPU reference (f64, slow) instead of the GPU. A
+    /// camera's pair of lenses (an Insta360 file) is stitched only so
+    /// until M3.7 brings the GPU's stitch.
     #[arg(long)]
     pub reference: bool,
+    /// A camera's pair: lens N alone (0 or 1, by probe's lenses.tracks),
+    /// raw, as its track codes it, with no stitch and no calibration;
+    /// the view flags go unused.
+    #[arg(
+        long,
+        value_name = "N",
+        value_parser = clap::value_parser!(u8).range(0..=1),
+        conflicts_with_all = ["seam", "geometry", "stitch_distance", "equirect", "stream"],
+    )]
+    pub lens: Option<u8>,
+    /// A camera's pair's seam, through the view, with --reference:
+    /// weights paints calibration block 0's weight red and block 1's
+    /// blue; difference paints |lens 0 − lens 1| × 8 in linear light where
+    /// both see, black elsewhere, clipped at 1 in the PNG.
+    #[arg(long, value_enum, conflicts_with_all = ["equirect", "stream"])]
+    pub seam: Option<SeamArg>,
+    /// A camera's pair's geometry, key by key over the built-in table's
+    /// entry for the camera: binding=direct|reversed, canvas=a|b|c,
+    /// turn=y|x, tz=as-stored|negated, upright=zero|plus90|minus90|half,
+    /// generation=v3|v6. Its status is then user.
+    #[arg(
+        long,
+        value_name = "K=V,...",
+        value_parser = geometry_edits,
+        conflicts_with_all = ["equirect", "stream"],
+    )]
+    pub geometry: Option<GeometryEdits>,
+    /// How far away a camera's pair's lenses are stitched to meet: metres,
+    /// 0.3 or more, such as 2m, or inf [default: 2m].
+    #[arg(
+        long,
+        value_name = "Nm|inf",
+        value_parser = distance,
+        allow_hyphen_values = true,
+        conflicts_with_all = ["equirect", "stream"],
+    )]
+    pub stitch_distance: Option<Distance>,
     /// Keep the frame on the device, with no copy through the CPU (slice
     /// 5b): VA-API exports it as DMA-BUFs and the GPU imports them, or,
     /// with `--decoder vulkan`, Vulkan Video decodes on the renderer's own
@@ -172,14 +228,18 @@ pub enum ProjectionArg {
     Rectilinear,
     Fisheye,
     Stereographic,
+    /// The whole sphere, through the turn alone (`--projection` only).
+    Equirect,
 }
 
 impl ProjectionArg {
-    fn projection(self) -> Projection {
+    /// The lens's projection; `None` for equirect, which is no lens.
+    fn projection(self) -> Option<Projection> {
         match self {
-            ProjectionArg::Rectilinear => Projection::Rectilinear,
-            ProjectionArg::Fisheye => Projection::Fisheye,
-            ProjectionArg::Stereographic => Projection::Stereographic,
+            ProjectionArg::Rectilinear => Some(Projection::Rectilinear),
+            ProjectionArg::Fisheye => Some(Projection::Fisheye),
+            ProjectionArg::Stereographic => Some(Projection::Stereographic),
+            ProjectionArg::Equirect => None,
         }
     }
 
@@ -188,12 +248,85 @@ impl ProjectionArg {
             ProjectionArg::Rectilinear => "rectilinear",
             ProjectionArg::Fisheye => "fisheye",
             ProjectionArg::Stereographic => "stereographic",
+            ProjectionArg::Equirect => "equirect",
         }
     }
 
-    /// The widest `--fov`, in degrees.
-    fn max_fov(self) -> f64 {
-        self.projection().max_hfov().to_degrees().round()
+    /// The widest `--fov`, in degrees; `None` for equirect, which takes
+    /// none.
+    fn max_fov(self) -> Option<f64> {
+        self.projection().map(|p| p.max_hfov().to_degrees().round())
+    }
+}
+
+/// What `--seam` paints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SeamArg {
+    /// Each lens's weight: lens 0's red, lens 1's blue.
+    Weights,
+    /// How far the two lenses disagree where both see.
+    Difference,
+}
+
+/// `--stitch-distance`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Distance {
+    Metres(f64),
+    Infinite,
+}
+
+impl Distance {
+    /// The stitch's q, in 1/m: 1/D, and 0 at infinity.
+    fn q_per_m(self) -> f64 {
+        match self {
+            Distance::Metres(m) => 1.0 / m,
+            Distance::Infinite => 0.0,
+        }
+    }
+}
+
+/// `--geometry`'s keys, each over the table's entry where given.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct GeometryEdits {
+    /// The flag's value, as given, for the evidence.
+    given: String,
+    binding: Option<Binding>,
+    canvas: Option<CanvasMap>,
+    turn: Option<TurnAxis>,
+    tz: Option<TzSign>,
+    upright: Option<QuarterTurn>,
+    generation: Option<Generation>,
+}
+
+impl GeometryEdits {
+    /// `entry` with each key given changed, its status `user` and its
+    /// evidence saying so.
+    fn apply(&self, entry: &Geometry) -> Geometry {
+        let mut g = entry.clone();
+        if let Some(v) = self.binding {
+            g.binding = v;
+        }
+        if let Some(v) = self.canvas {
+            g.canvas = v;
+        }
+        if let Some(v) = self.turn {
+            g.turn = v;
+        }
+        if let Some(v) = self.tz {
+            g.tz = v;
+        }
+        if let Some(v) = self.upright {
+            g.upright = v;
+        }
+        if let Some(v) = self.generation {
+            g.generation = v;
+        }
+        g.status = Status::User;
+        g.evidence = format!(
+            "--geometry {} over the table's entry ({})",
+            self.given, entry.evidence
+        );
+        g
     }
 }
 
@@ -266,18 +399,164 @@ fn size(s: &str) -> Result<(u32, u32), String> {
     Ok((w, h))
 }
 
+/// The nearest `--stitch-distance`, in metres: plan 11.2's bound on q,
+/// 1/D at most 3.34.
+const NEAREST_M: f64 = 0.3;
+
+/// The field of view without `--fov`, in degrees.
+const DEFAULT_FOV: f64 = 100.0;
+
+fn distance(s: &str) -> Result<Distance, String> {
+    if s == "inf" {
+        return Ok(Distance::Infinite);
+    }
+    let metres = s
+        .strip_suffix('m')
+        .and_then(|n| n.parse::<f64>().ok())
+        .filter(|n| n.is_finite());
+    match metres {
+        Some(m) if m >= NEAREST_M => Ok(Distance::Metres(m)),
+        Some(_) => Err(format!(
+            "{s} is nearer than the stitch reaches: give {NEAREST_M}m or more, or inf"
+        )),
+        None => Err(format!("expected metres such as 2m, or inf, not {s}")),
+    }
+}
+
+/// `--geometry`'s value: `key=value` pairs, comma-separated, each key
+/// once. A key or value Spherecut doesn't know is named in the error,
+/// with the ones it does.
+fn geometry_edits(s: &str) -> Result<GeometryEdits, String> {
+    fn pick<T: Copy>(key: &str, value: &str, values: &[(&str, T)]) -> Result<T, String> {
+        values
+            .iter()
+            .find(|(name, _)| *name == value)
+            .map(|(_, v)| *v)
+            .ok_or_else(|| {
+                let names: Vec<&str> = values.iter().map(|(name, _)| *name).collect();
+                format!("{key}={value}: {key} is one of {}", names.join(", "))
+            })
+    }
+    fn once<T>(slot: &mut Option<T>, key: &str, v: T) -> Result<(), String> {
+        if slot.replace(v).is_some() {
+            return Err(format!("{key} is given twice"));
+        }
+        Ok(())
+    }
+    const KEYS: &str = "binding, canvas, turn, tz, upright and generation";
+    let mut e = GeometryEdits {
+        given: s.to_string(),
+        ..GeometryEdits::default()
+    };
+    for pair in s.split(',') {
+        let Some((key, value)) = pair.split_once('=') else {
+            return Err(format!(
+                "{pair}: expected key=value, such as binding=direct"
+            ));
+        };
+        match key {
+            "binding" => {
+                let v = pick(
+                    key,
+                    value,
+                    &[("direct", Binding::Direct), ("reversed", Binding::Reversed)],
+                )?;
+                once(&mut e.binding, key, v)?;
+            }
+            "canvas" => {
+                let v = pick(
+                    key,
+                    value,
+                    &[
+                        ("a", CanvasMap::A),
+                        ("b", CanvasMap::B),
+                        ("c", CanvasMap::C),
+                    ],
+                )?;
+                once(&mut e.canvas, key, v)?;
+            }
+            "turn" => {
+                let v = pick(key, value, &[("y", TurnAxis::Y), ("x", TurnAxis::X)])?;
+                once(&mut e.turn, key, v)?;
+            }
+            "tz" => {
+                let v = pick(
+                    key,
+                    value,
+                    &[
+                        ("as-stored", TzSign::AsStored),
+                        ("negated", TzSign::Negated),
+                    ],
+                )?;
+                once(&mut e.tz, key, v)?;
+            }
+            "upright" => {
+                let v = pick(
+                    key,
+                    value,
+                    &[
+                        ("zero", QuarterTurn::Zero),
+                        ("plus90", QuarterTurn::Plus90),
+                        ("minus90", QuarterTurn::Minus90),
+                        ("half", QuarterTurn::Half),
+                    ],
+                )?;
+                once(&mut e.upright, key, v)?;
+            }
+            "generation" => {
+                let v = pick(
+                    key,
+                    value,
+                    &[("v3", Generation::V3), ("v6", Generation::V6)],
+                )?;
+                once(&mut e.generation, key, v)?;
+            }
+            other => {
+                return Err(format!("no key {other}: the keys are {KEYS}"));
+            }
+        }
+    }
+    Ok(e)
+}
+
 impl FrameArgs {
     /// What clap can't check alone: the field of view the projection
     /// allows, and the filter the CPU reference has. The message is a
     /// usage error's.
     pub fn check(&self) -> Result<(), String> {
-        let max = self.projection.max_fov();
-        if self.fov <= 0.0 || self.fov > max {
-            return Err(format!(
-                "--fov {}: {} takes more than 0 and at most {max} degrees",
-                number(self.fov),
-                self.projection.name()
-            ));
+        if self.morph_to == Some(ProjectionArg::Equirect) {
+            return Err(
+                "--morph-to equirect: a lens morphs to rectilinear, fisheye or stereographic; \
+                 --projection equirect is the whole sphere"
+                    .into(),
+            );
+        }
+        match self.projection.max_fov() {
+            None => {
+                if let Some(fov) = self.fov {
+                    return Err(format!(
+                        "--fov {}: --projection equirect is the whole sphere, and takes no --fov",
+                        number(fov)
+                    ));
+                }
+                if self.morph_to.is_some() {
+                    return Err(
+                        "--morph: --projection equirect is the whole sphere, and morphs to \
+                         nothing"
+                            .into(),
+                    );
+                }
+            }
+            Some(max) => {
+                let fov = self.fov();
+                if fov <= 0.0 || fov > max {
+                    return Err(format!(
+                        "--fov {}: {} takes more than 0 and at most {max} degrees",
+                        number(fov),
+                        self.projection.name()
+                    ));
+                }
+            }
         }
         if self.reference && self.filter == FilterArg::Aniso {
             return Err("--reference renders with --filter iso only".into());
@@ -300,32 +579,76 @@ impl FrameArgs {
         }
     }
 
-    fn lens(&self) -> Lens {
-        let from = self.projection.projection();
-        Lens {
+    /// `--fov`, or its default.
+    fn fov(&self) -> f64 {
+        self.fov.unwrap_or(DEFAULT_FOV)
+    }
+
+    /// The virtual camera's lens; `None` for `--projection equirect`.
+    fn lens(&self) -> Option<Lens> {
+        let from = self.projection.projection()?;
+        Some(Lens {
             from,
-            to: self.morph_to.map_or(from, ProjectionArg::projection),
+            to: self
+                .morph_to
+                .and_then(ProjectionArg::projection)
+                .unwrap_or(from),
             morph: self.morph.unwrap_or(0.0),
-            hfov: self.fov.to_radians(),
+            hfov: self.fov().to_radians(),
+        })
+    }
+
+    /// The view: the turn through the lens, or with `--projection
+    /// equirect` the whole sphere through the turn.
+    fn view(&self) -> ViewParams {
+        let turn = Ypr::from_degrees(self.yaw, self.pitch, self.roll).to_quat();
+        match self.lens() {
+            Some(lens) => ViewParams::new(turn, lens),
+            None => ViewParams::equirect(turn),
         }
     }
 
-    fn view(&self) -> ViewParams {
-        ViewParams::new(
-            Ypr::from_degrees(self.yaw, self.pitch, self.roll).to_quat(),
-            self.lens(),
-        )
+    fn view_info(&self) -> ViewInfo {
+        match self.projection {
+            ProjectionArg::Equirect => ViewInfo {
+                yaw: self.yaw,
+                pitch: self.pitch,
+                roll: self.roll,
+                fov: 360.0,
+                projection: self.projection.name(),
+                morph_to: None,
+                morph: 0.0,
+            },
+            _ => ViewInfo {
+                yaw: self.yaw,
+                pitch: self.pitch,
+                roll: self.roll,
+                fov: self.fov(),
+                projection: self.projection.name(),
+                morph_to: self.morph_to.map(ProjectionArg::name),
+                morph: self.morph.unwrap_or(0.0),
+            },
+        }
     }
 
-    fn view_info(&self) -> ViewInfo {
-        ViewInfo {
-            yaw: self.yaw,
-            pitch: self.pitch,
-            roll: self.roll,
-            fov: self.fov,
-            projection: self.projection.name(),
-            morph_to: self.morph_to.map(ProjectionArg::name),
-            morph: self.morph.unwrap_or(0.0),
+    /// The first flag given that only a camera's pair takes.
+    fn pair_flag(&self) -> Option<&'static str> {
+        [
+            (self.lens.is_some(), "--lens"),
+            (self.seam.is_some(), "--seam"),
+            (self.geometry.is_some(), "--geometry"),
+            (self.stitch_distance.is_some(), "--stitch-distance"),
+        ]
+        .into_iter()
+        .find_map(|(given, flag)| given.then_some(flag))
+    }
+
+    /// The distance the stitch reports, in metres: null for `inf`.
+    fn distance_m(&self) -> Option<f64> {
+        match self.stitch_distance {
+            Some(Distance::Metres(m)) => Some(m),
+            Some(Distance::Infinite) => None,
+            None => Some(1.0 / Tune::default().q_per_m),
         }
     }
 
@@ -764,7 +1087,7 @@ impl Job {
         self.warnings.push(Warning::new(code, message));
     }
 
-    fn run(&mut self, mut tmp: TempFile) -> Result<Done, Failure> {
+    fn run(&mut self, tmp: TempFile) -> Result<Done, Failure> {
         let stop = still::Stop::of(&self.stop);
 
         // Step 4.
@@ -773,10 +1096,47 @@ impl Job {
             None => self.args.shot()?,
         };
         stop.go_on()?;
-        let opts = &shot.opts;
         let src = Source::path(&shot.file);
-        let probed =
-            still::probe(src, opts, &stop, &mut self.warnings).map_err(|e| self.flags(e))?;
+        let report = still::probe_report(src, &stop)?;
+        let file = shot.file.display().to_string();
+        // The trailer's faults, which a stitch or a lens's track would
+        // have read, said on the run that renders the file.
+        for w in &report.warnings {
+            if w.code == probe_codes::BAD_TRAILER {
+                self.warn(w.code, format!("{file}: {}", w.message));
+            }
+        }
+        let pair = shot.sequence.is_none()
+            && !shot.opts.equirect
+            && shot.opts.stream.is_none()
+            && report
+                .camera
+                .as_ref()
+                .is_some_and(|c| c.layout == Layout::Insta360DualFisheye);
+        if let (false, Some(flag)) = (pair, self.args.pair_flag()) {
+            return Err(failure(
+                codes::USAGE,
+                format!(
+                    "{flag}: {file} isn't a camera's pair of lenses (an Insta360 dual fisheye \
+                     file), the only file {flag} takes"
+                ),
+            ));
+        }
+        let lens = self.args.lens.filter(|_| pair);
+        if pair && self.args.reference && lens.is_none() {
+            return self.run_pair(tmp, &shot, src, &report, &stop);
+        }
+        let opts = match lens {
+            // One lens's own track, raw: no equirect to check.
+            Some(n) => still::Options {
+                equirect: true,
+                stream: Some(lens_stream(&report, n)?),
+                ..shot.opts.clone()
+            },
+            None => shot.opts.clone(),
+        };
+        let probed = still::probed(report, &opts, &stop, &mut self.warnings)
+            .map_err(|e| self.flags(e, pair))?;
 
         // Step 5. The filter is the one rendered with: iso where aniso was
         // asked for and the device can't; with --project, the export's.
@@ -784,12 +1144,12 @@ impl Job {
         let gpu = if self.args.reference {
             None
         } else {
-            let gpu = still::gpu(&self.args.adapter(), opts)?;
+            let gpu = still::gpu(&self.args.adapter(), &opts)?;
             gpu.check_size(shot.size).map_err(|e| match shot.sequence {
                 None => failure(codes::USAGE, format!("--size: {e}")),
                 Some(_) => still::render_error(e),
             })?;
-            still::check_gpu(&gpu, opts)?;
+            still::check_gpu(&gpu, &opts)?;
             filter = match shot.filter {
                 Some(FilterArg::Aniso) if !gpu.caps.anisotropy => {
                     self.warn(
@@ -810,17 +1170,20 @@ impl Job {
         stop.go_on()?;
 
         // Step 6.
-        let mut still = Still::open(src, &probed, gpu.as_ref(), opts, &stop, &mut self.warnings)?;
+        let mut still = Still::open(src, &probed, gpu.as_ref(), &opts, &stop, &mut self.warnings)?;
         stop.go_on()?;
 
         // Step 7.
         let decoded = still.seek(shot.when, SeekMode::Exact, &mut self.warnings)?;
         stop.go_on()?;
 
-        // Step 8.
+        // Step 8. --lens draws the track as it is coded, with no view.
         let size = shot.size;
         let look = still::Look {
-            draw: still::Draw::View,
+            draw: match lens {
+                Some(_) => still::Draw::Coded,
+                None => still::Draw::View,
+            },
             filter: match filter {
                 FilterArg::Iso => Filter::Isotropic,
                 FilterArg::Aniso => Filter::Anisotropic,
@@ -831,11 +1194,170 @@ impl Job {
         stop.go_on()?;
 
         // Step 9.
+        self.publish(tmp, &image)?;
+
+        // Step 10.
+        let result = FrameResult {
+            output: self.args.output.to_string_lossy().into_owned(),
+            frame: FrameShown {
+                pts: decoded.frame.pts,
+                time: decoded.shown,
+            },
+            requested: shot.requested.unwrap_or(decoded.requested),
+            exactness: "exact",
+            size: Size {
+                width: size.0,
+                height: size.1,
+            },
+            depth: self.depth_bits(),
+            view: shot.view,
+            filter: match filter {
+                FilterArg::Iso => "iso",
+                FilterArg::Aniso => "aniso",
+            },
+            renderer: if gpu.is_some() { "gpu" } else { "reference" },
+            decode: still.decode_info(&decoded),
+            gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
+            color: *decoded.frame.color(),
+            source: still.source_info(),
+            sequence: shot.sequence,
+            stitch: None,
+        };
+        let line = summary(&result, lens);
+        Ok(Done { result, line })
+    }
+
+    /// Steps 5 to 10 for a camera's pair under `--reference`: no GPU,
+    /// both lens tracks decoded in software and stitched on the CPU
+    /// reference ([`Still::open_pair`]), by the file's calibration and
+    /// the table's geometry, or `--geometry`'s over it, at
+    /// `--stitch-distance`, through the view or `--seam`'s debug mode.
+    fn run_pair(
+        &mut self,
+        tmp: TempFile,
+        shot: &Shot,
+        src: Source<'_>,
+        report: &ProbeReport,
+        stop: &still::Stop,
+    ) -> Result<Done, Failure> {
+        let pair_opts = self.pair_options(src)?;
+        let mut pair = Still::open_pair(
+            src,
+            report,
+            None,
+            &shot.opts,
+            &pair_opts,
+            stop,
+            &mut self.warnings,
+        )?;
+        stop.go_on()?;
+        // A pair opens only on a calibration that parses, which probe
+        // hashes too.
+        let Some(calibration) = report.camera_file.calibration.as_ref() else {
+            return Err(failure(
+                codes::INTERNAL,
+                format!(
+                    "{}'s pair opened, but probe's report has no calibration",
+                    src.name.display()
+                ),
+            ));
+        };
+        let decoded = pair.seek(shot.when, SeekMode::Exact, &mut self.warnings)?;
+        stop.go_on()?;
+        let look = still::Look {
+            draw: still::Draw::View,
+            filter: Filter::Isotropic,
+            depth: self.args.depth(),
+        };
+        let image = pair.render(&decoded, &shot.views, shot.size, look)?;
+        stop.go_on()?;
+        self.publish(tmp, &image)?;
+        let geometry = pair.geometry();
+        let stitch = StitchInfo {
+            geometry: GeometryInfo {
+                status: status_word(geometry.status),
+                evidence: geometry.evidence.clone(),
+            },
+            calibration: calibration.hash.clone(),
+            distance_m: self.args.distance_m(),
+            lenses: (0..2)
+                .map(|t| LensFrame {
+                    track: t,
+                    stream: pair.lens(t).stream().index,
+                    pts: decoded.frames[t].pts,
+                })
+                .collect(),
+        };
+        let first = pair.lens(0);
+        let result = FrameResult {
+            output: self.args.output.to_string_lossy().into_owned(),
+            frame: FrameShown {
+                pts: decoded.frames[0].pts,
+                time: decoded.shown,
+            },
+            requested: decoded.requested,
+            exactness: "exact",
+            size: Size {
+                width: shot.size.0,
+                height: shot.size.1,
+            },
+            depth: self.depth_bits(),
+            view: shot.view.clone(),
+            filter: "iso",
+            renderer: "reference",
+            decode: first.frame_decode_info(&decoded.frames[0]),
+            gpu: None,
+            color: *decoded.frames[0].color(),
+            source: first.source_info(),
+            sequence: None,
+            stitch: Some(stitch),
+        };
+        let line = summary(&result, None);
+        Ok(Done { result, line })
+    }
+
+    /// How the pair is stitched: `--geometry` over the file's own entry
+    /// ([`still::pair_stitching`]'s, never the table's row alone),
+    /// `--stitch-distance`'s q, and `--seam`'s debug mode.
+    fn pair_options(&self, src: Source<'_>) -> Result<PairOptions, Failure> {
+        let geometry = match &self.args.geometry {
+            Some(edits) => Some(edits.apply(&still::pair_stitching(src)?.known.geometry)),
+            None => None,
+        };
+        let mut tune = Tune::default();
+        if let Some(d) = self.args.stitch_distance {
+            tune.q_per_m = d.q_per_m();
+        }
+        Ok(PairOptions {
+            geometry,
+            tune,
+            rig: RigOptions {
+                debug: match self.args.seam {
+                    None => RigDebug::Off,
+                    Some(SeamArg::Weights) => RigDebug::Weights,
+                    Some(SeamArg::Difference) => RigDebug::SeamDiff,
+                },
+                ..RigOptions::default()
+            },
+        })
+    }
+
+    fn depth_bits(&self) -> u8 {
+        match self.args.depth {
+            DepthArg::Eight => 8,
+            DepthArg::Sixteen => 16,
+        }
+    }
+
+    /// Step 9: `image` as a PNG, written to the temporary file and
+    /// published only if nothing has appeared at the output meanwhile
+    /// (D16), or over it with `--overwrite`.
+    fn publish(&self, mut tmp: TempFile, image: &Image) -> Result<(), Failure> {
         let out = &self.args.output;
         let io = |e: std::io::Error| cannot_write(out, &e);
         let png = image.to_png().map_err(still::render_error)?;
         tmp.file_mut().write_all(&png).map_err(io)?;
-        stop.go_on()?;
+        self.stop_go_on()?;
         if self.args.overwrite {
             tmp.persist_replace().map_err(io)?;
         } else {
@@ -859,45 +1381,25 @@ impl Job {
                 }
             })?;
         }
-
-        // Step 10.
-        let result = FrameResult {
-            output: out.to_string_lossy().into_owned(),
-            frame: FrameShown {
-                pts: decoded.frame.pts,
-                time: decoded.shown,
-            },
-            requested: shot.requested.unwrap_or(decoded.requested),
-            exactness: "exact",
-            size: Size {
-                width: size.0,
-                height: size.1,
-            },
-            depth: match self.args.depth {
-                DepthArg::Eight => 8,
-                DepthArg::Sixteen => 16,
-            },
-            view: shot.view,
-            filter: match filter {
-                FilterArg::Iso => "iso",
-                FilterArg::Aniso => "aniso",
-            },
-            renderer: if gpu.is_some() { "gpu" } else { "reference" },
-            decode: still.decode_info(&decoded),
-            gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
-            color: *decoded.frame.color(),
-            source: still.source_info(),
-            sequence: shot.sequence,
-        };
-        let line = summary(&result);
-        Ok(Done { result, line })
+        Ok(())
     }
 
-    /// Step 4's errors with the flags that answer them: `--equirect` for a
-    /// file that isn't one, and `--stream` for a stream it hasn't.
-    fn flags(&self, mut e: Failure) -> Failure {
+    fn stop_go_on(&self) -> Result<(), Failure> {
+        still::Stop::of(&self.stop).go_on()
+    }
+
+    /// Step 4's errors with the flags that answer them: for a file that
+    /// isn't an equirect, `--equirect`, and for a camera's pair
+    /// `--reference` first; `--stream` for a stream it hasn't.
+    fn flags(&self, mut e: Failure, pair: bool) -> Failure {
         match (e.code, self.args.stream) {
             (codes::NOT_EQUIRECT, _) => {
+                if pair {
+                    e.message.push_str(
+                        "; --reference stitches it on the CPU, and the GPU's stitch arrives in \
+                         M3.7",
+                    );
+                }
                 e.message
                     .push_str("; --equirect renders it as equirect anyway");
             }
@@ -908,18 +1410,58 @@ impl Job {
     }
 }
 
+/// Lens `n`'s stream: probe's `lenses.tracks[n]`, or, when the trailer
+/// can't be read for them, the file's video stream `n` as probe would
+/// have named it (the first two that aren't cover pictures).
+fn lens_stream(report: &ProbeReport, n: u8) -> Result<usize, Failure> {
+    let k = usize::from(n);
+    match &report.camera_file.lenses {
+        Some(l) => Ok(l.tracks[k]),
+        None => still::video_streams(report)
+            .get(k)
+            .map(|s| s.index)
+            .ok_or_else(|| {
+                about(
+                    failure(
+                        codes::NOT_EQUIRECT,
+                        format!(
+                            "--lens {n}: {} has no lens {n}: it has fewer than two video \
+                             streams",
+                            report.path.display()
+                        ),
+                    ),
+                    &report.path,
+                )
+            }),
+    }
+}
+
 /// The report's line: "wrote out.png: 1920×1080 rectilinear 100° at
 /// 62.233 s (frame 1867, pts 186700), decoded on VA-API, rendered on AMD
 /// Radeon 8060S (RADV)"; with `--project`, "... 1920×1080 rectilinear
 /// 90° at 2.5 s of p.spherecut (its frame 75; the source's at 4.5 s,
-/// frame 135, pts 135135), ...".
-fn summary(r: &FrameResult) -> String {
+/// frame 135, pts 135135), ..."; a camera's pair, "... 1024×512 equirect
+/// stitched at 2 m (geometry provisional) at 1 s ..."; `--lens 0`, "...
+/// 384×384 lens 0 raw (stream 0) at ...".
+fn summary(r: &FrameResult, raw: Option<u8>) -> String {
     let mut lens = match r.view.projection {
         "equirect" => "equirect".to_string(),
         p => format!("{p} {}°", number(r.view.fov)),
     };
     if let Some(to) = r.view.morph_to {
         lens.push_str(&format!(" morphed {} to {to}", number(r.view.morph)));
+    }
+    if let Some(n) = raw {
+        lens = format!("lens {n} raw (stream {})", r.source.stream);
+    }
+    if let Some(s) = &r.stitch {
+        let at = s
+            .distance_m
+            .map_or_else(|| "infinity".to_string(), |m| format!("{} m", number(m)));
+        lens.push_str(&format!(
+            " stitched at {at} (geometry {})",
+            s.geometry.status
+        ));
     }
     let frame = match r.frame.time.frame {
         Some(n) => format!("frame {n}, pts {}", r.frame.pts),
