@@ -166,7 +166,11 @@ fn a_media_without_source_is_refused_by_path() {
 }
 
 /// `deny_unknown_fields` still refuses a misspelt key in a source's
-/// `tune` (11.5), with its line and column.
+/// `tune` (11.5), with a message that names the key and gives a line and
+/// column. serde reads a source whole to find its `kind` before its
+/// fields, so an error inside one is placed at the source's closing
+/// brace, not on the key's own line: the test checks that a position is
+/// given, not which.
 #[test]
 #[ignore = "M3.9 unit (a)"]
 fn a_misspelt_key_in_tune_is_refused() {

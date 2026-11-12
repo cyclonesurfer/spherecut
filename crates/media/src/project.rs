@@ -52,10 +52,13 @@ pub fn project_media(
 
 /// The two-lens source of the camera file `source` opens, which `report`
 /// probed (M3 plan 11.5): the calibration `camera::insta360` finds in its
-/// trailer, kept raw and parsed with its hash, the geometry table's
-/// entry for its model and firmware (`known::lookup`), `Tune::default()`,
-/// gains off and the default front track, its camera's make, model,
-/// firmware and serial as the file names them. `None` for a file with no
+/// trailer, kept raw and parsed with its hash; the geometry of
+/// `camera::insta360::stitching`'s entry, the table's row for its model
+/// and firmware with the generation its field 136 names (never
+/// `known::lookup`'s row as it stands, which reads V6 and which a rig
+/// refuses on a trailer of V3 alone); `Tune::default()`, gains off and
+/// the default front track; and its camera's make, model, firmware and
+/// serial as the file names them. `None` for a file with no
 /// calibration a stitch reads, which stays equirect, keeping
 /// `not_equirect`'s doubt so it shows as lenses. An error, in words, when
 /// the trailer can't be read again or its calibration can't be one.
