@@ -49,10 +49,11 @@
 //! 4.2's "no channel more than 0.1 off the CPU reference" isn't held
 //! here, where the pictures are the CPU reference's: it is rung 2's rule,
 //! the shader against these pictures (M3.7). Rung 1's camera, far tune,
-//! pairs and views are copied in `synth::rung` (M3.5), and the boundary
-//! and `sphere_rig` are in the boundary crate (M3.5, F137), where rung 3
-//! and M3.7's rung 2 reach them; `tests/rung_copy.rs` ties the copy to
-//! this file's. [`Scene`], [`Masks`], the stitches, the ideals and the
+//! frames and views are `synth::rung`'s (M3.5), which this file takes
+//! and adds to (the camera's near scene and its rigs, the other cameras),
+//! and the boundary and `sphere_rig` are in the boundary crate (M3.5,
+//! F137): rung 3 and M3.7's rung 2 reach both, so every rung's camera is
+//! this one. [`Scene`], [`Masks`], the stitches, the ideals and the
 //! attribution ([`Plant`], [`Lands`], [`attribute_to`], [`apart_deg`])
 //! stay private to this file until M3.7 lifts what rung 2 needs.
 //!
@@ -75,7 +76,6 @@
 mod common;
 
 use std::collections::BTreeMap;
-use std::f64::consts::FRAC_PI_2;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -93,24 +93,24 @@ use spherecut_render::seam::{
 };
 use spherecut_render::{Framing, ViewParams};
 use spherecut_sphere::fisheye::{self, KbLens, LensModel};
-use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::rig::{Rig, RigLens, Tune};
 use spherecut_synth::lens::{
-    CalibTruth, Coding, Generation, IMAGE_CIRCLE_DEG, Motion, PairOrder, Planted, Prism, PrismAt,
-    PrismOrder, RenderCache, RigTruth, Sign, Tangential, TruthBinding, TruthCanvas, TruthEuler,
-    TruthTz, TruthV6, Turn, X5_LIKE_SIDE, compose, kb_like, lens_planes, seen, x5_like,
-    x5_like_planted, x5_like_v6,
+    CalibTruth, Generation, IMAGE_CIRCLE_DEG, Motion, PairOrder, Planted, Prism, PrismAt,
+    PrismOrder, RigTruth, Sign, Tangential, TruthBinding, TruthCanvas, TruthEuler, TruthTz,
+    TruthV6, Turn, compose, kb_like, seen, x5_like_v6,
+};
+use spherecut_synth::rung::{
+    self, FRONT_TRACK, LensFrame, SIDE, SIDES, SS, VIEW_SIDE, far, pair_through, track_through,
 };
 use spherecut_synth::{Pattern, render_view_ideal};
 use spherecut_testkit::control::{at_least, at_most, below, must_fail};
 
-use common::Frame;
 use common::budget::{
     A0, A1, ACROSS_PX, ALONG_PX, B1, Budget, C0, C1, CENTRE_ACROSS_DEG, CENTRE_ALONG_DEG, D1,
     NAMES, SMALL_PX, centres_apart, harmonics, seam_radius, sizes, small, terms, worse,
 };
 use common::predict::predict_bins;
-use common::rig::{lens_frame, pats, rig_of_truth, sphere_rig};
+use common::rig::{pats, rig_of_truth, sphere_rig};
 
 // The clock, and what a run blesses.
 
@@ -472,12 +472,9 @@ fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-// The cameras and their pictures.
-
-/// The side of a lens's track, and how many samples a side synth takes
-/// for each of its pixels (rung 1's: 2).
-const SIDE: u32 = X5_LIKE_SIDE;
-const SS: u32 = 2;
+// The cameras and their pictures: rung 1's camera, its far tune, its
+// frames and its views are `synth::rung`'s ([`SIDE`]² a lens, [`SS`]²
+// samples a pixel, track [`FRONT_TRACK`] in front, [`far`]).
 
 /// Unit gains.
 const UNIT: [[f64; 3]; 2] = [[1.0; 3]; 2];
@@ -488,14 +485,7 @@ const SPEC: StripSpec = StripSpec::TIER1;
 /// The scene's radius where it isn't infinitely far, in metres (4.2).
 const NEAR_M: f64 = 1.5;
 
-/// The default tune stitched infinitely far, and at the near scene.
-fn far() -> Tune {
-    Tune {
-        q_per_m: 0.0,
-        ..Tune::default()
-    }
-}
-
+/// The default tune stitched at the near scene.
 fn near() -> Tune {
     Tune {
         q_per_m: 1.0 / NEAR_M,
@@ -503,8 +493,8 @@ fn near() -> Tune {
     }
 }
 
-/// Rung 1's camera (4.2): synth's X5-like calibration under its planted
-/// conventions, and sphere's rig of the same numbers.
+/// Rung 1's camera (4.2), `synth::rung`'s: synth's X5-like calibration
+/// under its planted conventions, and sphere's rig of the same numbers.
 struct X5 {
     cal: CalibTruth,
     planted: Planted,
@@ -519,25 +509,25 @@ struct X5 {
 fn x5() -> &'static X5 {
     static X5: OnceLock<X5> = OnceLock::new();
     X5.get_or_init(|| {
-        let (cal, planted) = (x5_like(), x5_like_planted());
-        let truth = compose(&cal, &planted, 0, [SIDE; 2]);
+        let camera = rung::camera();
+        let (cal, planted) = (&camera.cal, &camera.planted);
         X5 {
             near: RigTruth {
                 scene_radius_m: Some(NEAR_M),
-                ..truth.clone()
+                ..camera.truth.clone()
             },
-            rig: sphere_rig(&cal, &planted, &far(), 0, [SIDE; 2]).unwrap(),
-            near_rig: sphere_rig(&cal, &planted, &near(), 0, [SIDE; 2]).unwrap(),
-            truth,
-            cal,
-            planted,
+            rig: rig_as(cal, planted, &far()),
+            near_rig: rig_as(cal, planted, &near()),
+            truth: camera.truth.clone(),
+            cal: *cal,
+            planted: *planted,
         }
     })
 }
 
 /// sphere's rig of `cal` as `planted` reads it, under `tune`.
 fn rig_as(cal: &CalibTruth, planted: &Planted, tune: &Tune) -> Rig {
-    sphere_rig(cal, planted, tune, 0, [SIDE; 2]).unwrap()
+    sphere_rig(cal, planted, tune, FRONT_TRACK, SIDES).unwrap()
 }
 
 /// The X5-like rig stitched infinitely far, with its tune changed.
@@ -548,47 +538,32 @@ fn tuned(change: impl FnOnce(&mut Tune)) -> Rig {
 }
 
 /// The two tracks' frames of one moment, by track.
-type Pair = [&'static Frame; 2];
+type Pair = [&'static LensFrame; 2];
 
-fn both(frames: &'static [Frame; 2]) -> Pair {
+fn both(frames: &'static [LensFrame; 2]) -> Pair {
     [&frames[0], &frames[1]]
 }
 
-/// Track `track`'s frame 0 of `pattern` through `truth`, from the
-/// binary's cache, coded as the X5 codes it.
-fn track(pattern: Pattern, truth: &RigTruth, track: usize) -> Frame {
-    let picture = RenderCache::shared().render(pattern, truth, track, 0, SS);
-    lens_frame(&lens_planes(&picture, Coding::X5), SIDE)
-}
-
-/// Both tracks' frames, rendered side by side.
-fn pair(pattern: Pattern, truth: &RigTruth) -> [Frame; 2] {
-    std::thread::scope(|s| {
-        let tracks = [0, 1].map(|t| s.spawn(move || track(pattern, truth, t)));
-        tracks.map(|t| t.join().unwrap())
-    })
-}
-
 /// The X5-like camera's frames of `SeamLines` and of `Grid`, infinitely
-/// far, and of each [`NEAR_M`] away.
-fn lines() -> &'static [Frame; 2] {
-    static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
-    FRAMES.get_or_init(|| pair(Pattern::SeamLines, &x5().truth))
+/// far (`synth::rung`'s pairs), and of each [`NEAR_M`] away.
+fn lines() -> &'static [LensFrame; 2] {
+    static FRAMES: OnceLock<[LensFrame; 2]> = OnceLock::new();
+    FRAMES.get_or_init(|| rung::pair(Pattern::SeamLines))
 }
 
-fn grid() -> &'static [Frame; 2] {
-    static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
-    FRAMES.get_or_init(|| pair(Pattern::Grid, &x5().truth))
+fn grid() -> &'static [LensFrame; 2] {
+    static FRAMES: OnceLock<[LensFrame; 2]> = OnceLock::new();
+    FRAMES.get_or_init(|| rung::pair(Pattern::Grid))
 }
 
-fn near_lines() -> &'static [Frame; 2] {
-    static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
-    FRAMES.get_or_init(|| pair(Pattern::SeamLines, &x5().near))
+fn near_lines() -> &'static [LensFrame; 2] {
+    static FRAMES: OnceLock<[LensFrame; 2]> = OnceLock::new();
+    FRAMES.get_or_init(|| pair_through(Pattern::SeamLines, &x5().near))
 }
 
-fn near_grid() -> &'static [Frame; 2] {
-    static FRAMES: OnceLock<[Frame; 2]> = OnceLock::new();
-    FRAMES.get_or_init(|| pair(Pattern::Grid, &x5().near))
+fn near_grid() -> &'static [LensFrame; 2] {
+    static FRAMES: OnceLock<[LensFrame; 2]> = OnceLock::new();
+    FRAMES.get_or_init(|| pair_through(Pattern::Grid, &x5().near))
 }
 
 /// The camera with lens 1 a frame late while the rig turns 10° a second
@@ -610,14 +585,14 @@ fn late(axis: DVec3) -> RigTruth {
     }
 }
 
-fn late_in_a_pan() -> &'static Frame {
-    static FRAME: OnceLock<Frame> = OnceLock::new();
-    FRAME.get_or_init(|| track(Pattern::SeamLines, &late(DVec3::Y), 1))
+fn late_in_a_pan() -> &'static LensFrame {
+    static FRAME: OnceLock<LensFrame> = OnceLock::new();
+    FRAME.get_or_init(|| track_through(Pattern::SeamLines, &late(DVec3::Y), 1))
 }
 
-fn late_in_a_roll() -> &'static Frame {
-    static FRAME: OnceLock<Frame> = OnceLock::new();
-    FRAME.get_or_init(|| track(Pattern::SeamLines, &late(DVec3::Z), 1))
+fn late_in_a_roll() -> &'static LensFrame {
+    static FRAME: OnceLock<LensFrame> = OnceLock::new();
+    FRAME.get_or_init(|| track_through(Pattern::SeamLines, &late(DVec3::Z), 1))
 }
 
 /// The camera with lens 1 at +0.5 EV and +5 % red (4.2).
@@ -628,9 +603,9 @@ fn gained() -> RigTruth {
     truth
 }
 
-fn gained_lens() -> &'static Frame {
-    static FRAME: OnceLock<Frame> = OnceLock::new();
-    FRAME.get_or_init(|| track(Pattern::SeamLines, &gained(), 1))
+fn gained_lens() -> &'static LensFrame {
+    static FRAME: OnceLock<LensFrame> = OnceLock::new();
+    FRAME.get_or_init(|| track_through(Pattern::SeamLines, &gained(), 1))
 }
 
 /// A V6 reading with both of its parts.
@@ -652,7 +627,7 @@ fn rendered_reading() -> TruthV6 {
 struct V6 {
     cal: CalibTruth,
     truth: RigTruth,
-    frames: [Frame; 2],
+    frames: [LensFrame; 2],
 }
 
 fn v6() -> &'static V6 {
@@ -663,9 +638,9 @@ fn v6() -> &'static V6 {
             v6: rendered_reading(),
             ..x5().planted
         };
-        let truth = compose(&cal, &planted, 0, [SIDE; 2]);
+        let truth = compose(&cal, &planted, FRONT_TRACK, SIDES);
         V6 {
-            frames: pair(Pattern::SeamLines, &truth),
+            frames: pair_through(Pattern::SeamLines, &truth),
             truth,
             cal,
         }
@@ -686,7 +661,7 @@ fn v6_rig(reading: TruthV6) -> Rig {
 /// Pat's V6 blocks: 3.4's "V3 against V6".
 struct Pats {
     truth: RigTruth,
-    frames: [Frame; 2],
+    frames: [LensFrame; 2],
     as_v3: Rig,
     as_v6: Rig,
 }
@@ -696,9 +671,9 @@ fn pats_v3() -> &'static Pats {
     PATS.get_or_init(|| {
         let planted = &x5().planted;
         let (v3, v6) = (pats(Generation::V3), pats(Generation::V6));
-        let truth = compose(&v3, planted, 0, [SIDE; 2]);
+        let truth = compose(&v3, planted, FRONT_TRACK, SIDES);
         Pats {
-            frames: pair(Pattern::SeamLines, &truth),
+            frames: pair_through(Pattern::SeamLines, &truth),
             truth,
             as_v3: rig_as(&v3, planted, &far()),
             as_v6: rig_as(&v6, planted, &far()),
@@ -711,7 +686,7 @@ fn pats_v3() -> &'static Pats {
 /// rig of that truth.
 struct Kb {
     truth: RigTruth,
-    frames: [Frame; 2],
+    frames: [LensFrame; 2],
     rig: Rig,
 }
 
@@ -720,7 +695,7 @@ fn kb() -> &'static Kb {
     KB.get_or_init(|| {
         let truth = kb_like(&x5().truth);
         Kb {
-            frames: pair(Pattern::SeamLines, &truth),
+            frames: pair_through(Pattern::SeamLines, &truth),
             rig: rig_of_truth(&truth, &far()),
             truth,
         }
@@ -903,7 +878,7 @@ impl Plant {
             frames: both(near_lines()),
             rig,
         };
-        let lens_1 = |frame: &'static Frame, truth: RigTruth| Setup {
+        let lens_1 = |frame: &'static LensFrame, truth: RigTruth| Setup {
             truth,
             frames: [&lines()[0], frame],
             rig: x5.rig,
@@ -1408,29 +1383,31 @@ fn attribute_to(want: &Signature, got: &Signature, lands: Lands) -> Attributed {
 /// A view and the size of its picture.
 type Shot = (ViewParams, (u32, u32));
 
-/// 4.2's equirect.
-fn equirect() -> Shot {
-    (ViewParams::equirect(DQuat::IDENTITY), (512, 256))
+/// One of `synth::rung`'s views as render's type.
+fn shot(view: rung::Shot) -> Shot {
+    let params = match view.lens {
+        None => ViewParams::equirect(view.turn),
+        Some(lens) => ViewParams::new(view.turn, lens),
+    };
+    (params, view.size)
 }
 
-/// 4.2's rectilinear views: 90° at 256², on each side seam and each
-/// pole of the rig, where the seam's circle crosses ±X and ±Y.
+/// 4.2's equirect, `synth::rung`'s.
+fn equirect() -> Shot {
+    shot(rung::equirect())
+}
+
+/// 4.2's rectilinear views, `synth::rung`'s: 90° at [`VIEW_SIDE`]², on
+/// each side seam and each pole of the rig, where the seam's circle
+/// crosses ±X and ±Y.
 const VIEWS: [&str; 4] = ["+X", "−X", "+Y", "−Y"];
-const VIEW_SIDE: u32 = 256;
 
 /// The views in the manifest's keys.
 const VIEW_KEYS: [&str; 4] = ["pos_x", "neg_x", "pos_y", "neg_y"];
 
 /// View `k`, whole.
 fn whole_view(k: usize) -> Shot {
-    let turn = match k {
-        0 => DQuat::from_rotation_y(-FRAC_PI_2),
-        1 => DQuat::from_rotation_y(FRAC_PI_2),
-        2 => DQuat::from_rotation_x(FRAC_PI_2),
-        _ => DQuat::from_rotation_x(-FRAC_PI_2),
-    };
-    let lens = Lens::new(Projection::Rectilinear, FRAC_PI_2);
-    (ViewParams::new(turn, lens), (VIEW_SIDE, VIEW_SIDE))
+    shot(rung::whole_view(k))
 }
 
 /// How many of a view's columns (on a pole, its rows) hold the band: the

@@ -10588,16 +10588,21 @@ here that 10.3 to 10.5 and 13.4 don't say.
   (luma's and chroma's LOD as sampled, and luma's before clamping) is
   M3.7's to build.
 - Rung 2 is rung 1's planes through the shader. Rung 1's camera, far
-  tune, pairs and views are copied in `synth::rung` (M3.5), and the
-  boundary and `sphere_rig` are in the boundary crate (M3.5, F137),
-  where rung 3 and M3.7's rung 2 reach them; render's
-  `tests/rung_copy.rs` ties the copy to `tests/instrument.rs`'s.
-  `Scene`, `Masks`, the stitches, the ideals and the attribution
-  (`Plant`, `Lands`, `attribute_to`, `apart_deg`) stay private to
-  `tests/instrument.rs` until M3.7 lifts what rung 2 needs, and M3.7
-  costs its own render of the pairs inside the 7 s that 19.6 gives it.
-  *Updated 2026-11-12 (M3.5):* this said M3.7 lifts the camera and the
-  pairs into `tests/common` too; rung 3 needed them first.
+  tune, frames and views are `synth::rung`'s (M3.5), which
+  `tests/instrument.rs` takes them from, and the boundary and
+  `sphere_rig` are in the boundary crate (M3.5, F137): rung 3 and M3.7's
+  rung 2 reach both, so there is one copy of each and every rung's
+  camera is rung 1's. `Scene`, `Masks`, the stitches, the ideals and the
+  attribution (`Plant`, `Lands`, `attribute_to`, `apart_deg`) stay
+  private to `tests/instrument.rs` until M3.7 lifts what rung 2 needs,
+  and M3.7 costs its own render of the pairs inside the 7 s that 19.6
+  gives it. *Updated 2026-11-12 (M3.5):* this said M3.7 lifts the camera
+  and the pairs into `tests/common` too; rung 3 needed them first. A
+  first cut copied them into `synth::rung` beside `instrument.rs`'s own,
+  with a test (`tests/rung_copy.rs`) that held the copy to its own
+  literals rather than to `instrument.rs`'s; `instrument.rs` now takes
+  them from `synth::rung`, with its 132 measurements and its manifest
+  unchanged, and that test is gone.
 
 **For the fit** (M3.6): what it must not take on trust.
 

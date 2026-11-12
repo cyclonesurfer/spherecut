@@ -1,15 +1,10 @@
-//! Rung 1's camera, far tune, pairs and views (M3 plan 4.2, amendment
-//! 5), where the rungs that run outside render's tests reach them: rung
-//! 3 (M3.5) renders this pair through `render_rig_of` beside the file
-//! synth writes of it.
-//!
-//! These are copies of the helpers render's `tests/instrument.rs` keeps
-//! private (`x5`, `far`, `track`, `pair`, `equirect` and `whole_view`),
-//! not moves of them: a change to one is a change to each copy,
-//! `instrument.rs`'s and M3.7's `tests/common/rung1.rs` once it lands.
-//! render's `tests/rung_copy.rs` holds the camera, the tune and the
-//! frames to `instrument.rs`'s; the views stay untied until `rung1.rs`
-//! takes them.
+//! Rung 1's camera, far tune, frames and views (M3 plan 4.2, amendment
+//! 5), kept where every rung reaches them: render's `tests/instrument.rs`
+//! (rung 1) takes its camera, tune, frames and views from here and adds
+//! its own scenes, rigs and plants; rung 3 (M3.5) renders this pair
+//! through `render_rig_of` beside the file synth writes of it; and M3.7's
+//! rung 2 takes them too. There is one copy: a change here is a change to
+//! every rung.
 //!
 //! The rig the frames are stitched with isn't here: it is sphere's, of
 //! [`Camera::cal`] under [`Camera::planted`] through the boundary
@@ -48,6 +43,9 @@ pub const SS: u32 = 2;
 
 /// The track whose lens faces the front.
 pub const FRONT_TRACK: u8 = 0;
+
+/// The side of a rectilinear view of [`whole_view`]'s, in pixels.
+pub const VIEW_SIDE: u32 = 256;
 
 /// Rung 1's camera (4.2): synth's X5-like calibration under its planted
 /// conventions, composed at [`SIDE`] with track [`FRONT_TRACK`] in
@@ -183,18 +181,40 @@ fn color() -> ColorInfo {
 /// Track `track`'s frame 0 of `pattern` through the camera, from the
 /// process's [`RenderCache::shared`], coded as the X5 codes it.
 pub fn track(pattern: Pattern, track: usize) -> LensFrame {
-    let picture = RenderCache::shared().render(pattern, &camera().truth, track, 0, SS);
-    LensFrame::new(lens_planes(&picture, Coding::X5), SIDE)
+    track_through(pattern, &camera().truth, track)
 }
 
-/// Both tracks' frames, rendered side by side, by track.
+/// Both tracks' frames through the camera, rendered side by side, by
+/// track.
 ///
 /// # Panics
 ///
 /// If a track's render panics.
 pub fn pair(pattern: Pattern) -> [LensFrame; 2] {
+    pair_through(pattern, &camera().truth)
+}
+
+/// Track `track`'s frame 0 of `pattern` through `truth`, another camera
+/// of rung 1's (the camera at a nearer scene, a lens late or gained, or
+/// other lenses), at [`SS`] from the process's [`RenderCache::shared`],
+/// coded as the X5 codes it at the lens's own side.
+///
+/// # Panics
+///
+/// If `truth` has no lens `track`.
+pub fn track_through(pattern: Pattern, truth: &RigTruth, track: usize) -> LensFrame {
+    let picture = RenderCache::shared().render(pattern, truth, track, 0, SS);
+    LensFrame::new(lens_planes(&picture, Coding::X5), truth.lenses[track].side)
+}
+
+/// Both tracks' frames through `truth`, rendered side by side, by track.
+///
+/// # Panics
+///
+/// If a track's render panics.
+pub fn pair_through(pattern: Pattern, truth: &RigTruth) -> [LensFrame; 2] {
     std::thread::scope(|s| {
-        let tracks = [0, 1].map(|t| s.spawn(move || track(pattern, t)));
+        let tracks = [0, 1].map(|t| s.spawn(move || track_through(pattern, truth, t)));
         tracks.map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
     })
 }
@@ -218,8 +238,8 @@ pub fn equirect() -> Shot {
     }
 }
 
-/// 4.2's rectilinear view `k`, 90° at 256², on a side seam or a pole of
-/// the rig, where the seam's circle crosses +X (`k` = 0), −X (1), +Y (2)
+/// 4.2's rectilinear view `k`, 90° at [`VIEW_SIDE`]², on a side seam or
+/// a pole of the rig, where the seam's circle crosses +X (`k` = 0), −X (1), +Y (2)
 /// and −Y (3).
 pub fn whole_view(k: usize) -> Shot {
     let turn = match k {
@@ -231,6 +251,6 @@ pub fn whole_view(k: usize) -> Shot {
     Shot {
         turn,
         lens: Some(Lens::new(Projection::Rectilinear, FRAC_PI_2)),
-        size: (256, 256),
+        size: (VIEW_SIDE, VIEW_SIDE),
     }
 }

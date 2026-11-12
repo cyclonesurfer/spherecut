@@ -6,8 +6,9 @@
 //! `pair_stitching`'s guard against the UI thread.
 //!
 //! Rung 1's picture is made here from `synth::rung`'s pair, synth's
-//! planes with no file between, and the boundary crate's `sphere_rig`;
-//! render's `tests/rung_copy.rs` holds that copy to rung 1's own. Each
+//! planes with no file between, and the boundary crate's `sphere_rig`:
+//! the camera, tune, frames and views render's `tests/instrument.rs`
+//! (rung 1) takes from `synth::rung` too, so they are rung 1's own. Each
 //! file is written once a binary, into a folder of this binary's kept
 //! for the run, and synth renders each lens's picture once a binary
 //! through `RenderCache::shared()`, for `write_insv` and `synth::rung`
