@@ -592,9 +592,9 @@ FFmpeg's warnings and errors about each file whatever it is set to.
 - `SPHERECUT_GATE_PROBE`: another diagnostic of that stall, off by
   default. Set to a whole number of milliseconds from 2 to 50, a
   `--smoke` run submits a tiny job on the viewer's GPU queue that often
-  while it plays and lists in its document how long each took
-  (`result.probe` in `docs/cli-json.md`); anything else is ignored with
-  a warning.
+  while it plays, and gives in its document the percentiles of the
+  jobs' latencies and each job slower than 8 ms (`result.probe` in
+  `docs/cli-json.md`); anything else is ignored with a warning.
 - `SPHERECUT_EXPORT_DEVICE`: where the window's exports render. By
   default on a device of their own on the window's GPU (M2.10,
   DECISIONS D56); `window` puts them on the viewer's own device, as

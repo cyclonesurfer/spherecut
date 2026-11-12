@@ -1087,7 +1087,7 @@ and no `path` in its `error`. Its `result`:
 |---|---|
 | `version`, `clip`, `seconds`, `played_s`, `ended` | The build, the clip, the seconds asked for and played, and whether the clip ended first |
 | `asked` | What the run was asked to play with beside the clip (D40): `decoder` (`--smoke-decoder`'s value, or `null`), `decode_floor_ms` (`--smoke-decode-floor-ms`, or `null`) and `control_ui_waits` (whether `--smoke-control-ui-waits` was given) |
-| `vaapi_drain` | The VA-API drain the player ran with (`SPHERECUT_VAAPI_DRAIN` in the README): `off`, `download` or `picture`. Always there, `off` by default, and also when no decoder could drain (`drain`'s `unavailable`) |
+| `vaapi_drain` | The VA-API drain asked for (`SPHERECUT_VAAPI_DRAIN` in the README): `off`, `download` or `picture`. Always there, `off` by default. It names the mode even when no decoder could drain; `drain`'s `unavailable` then says so |
 | `adapter` | `name`, `vendor`, `device`, `device_type`, `driver`, `driver_info` as wgpu has them, and `cpu` for lavapipe |
 | `surface_format`, `scale`, `native_scale`, `window`, `viewer`, `refresh_hz` | The window surface's format, pixels a point and the window's own scale, the window's and the viewer's size in pixels, and the monitor's refresh rate (`null` when winit doesn't know it) |
 | `raw_view`, `streams[]` | Whether the viewer showed the raw view; each video stream's `format` (as the overlay has it), `fps`, `decoder` (`software`, `vaapi` or `vulkan`), `fell_back_from` and `decode` (the Info pane's words) |
