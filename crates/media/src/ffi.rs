@@ -3523,6 +3523,49 @@ pub(crate) fn vaapi_surface(frame: &ff::frame::Video) -> Option<VaSurface> {
     }
 }
 
+/// A reference to a frames context. While it is held the context stays
+/// alive, and with it its device, which it holds a reference to, and
+/// every surface its pool has made: FFmpeg destroys a VA-API surface only
+/// when the pool frees it with the context (`vaapi_buffer_free`, the
+/// pool's free callback in `hwcontext_vaapi.c`, read at n8.1.3).
+pub(crate) struct FramesRef(crate::hwprobe::BufferRef);
+
+// SAFETY: AVBufferRef reference counting is thread-safe, and nothing is
+// read or written through the reference but its data's address; the
+// last reference given back frees the context on whichever thread that
+// is, as a decoded frame's does.
+unsafe impl Send for FramesRef {}
+
+impl std::fmt::Debug for FramesRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("FramesRef").field(&self.addr()).finish()
+    }
+}
+
+impl FramesRef {
+    /// A new reference to `frame`'s frames context; `None` when it has
+    /// none, or FFmpeg has no memory for one.
+    pub(crate) fn of(frame: &ff::frame::Video) -> Option<Self> {
+        // SAFETY: `frame` wraps a live AVFrame; its hw_frames_ctx, when
+        // set, is a live reference, from which av_buffer_ref takes a new
+        // one that we own, or gives NULL.
+        let r = unsafe {
+            let frames = (*frame.as_ptr()).hw_frames_ctx;
+            if frames.is_null() {
+                return None;
+            }
+            sys::av_buffer_ref(frames)
+        };
+        (!r.is_null()).then(|| Self(crate::hwprobe::BufferRef(r)))
+    }
+
+    /// The address of the frames context, as [`VaSurface::ctx`] has it.
+    fn addr(&self) -> usize {
+        // SAFETY: a live reference we own; its data is only addressed.
+        unsafe { (*self.0.0).data.addr() }
+    }
+}
+
 /// The most surfaces a [`SurfaceSet`] keeps: more than a VA-API decoder's
 /// pool holds, its pictures, `extra_hw_frames` and zero copy's 24 spare
 /// ones together.
@@ -3533,11 +3576,14 @@ pub(crate) const MAX_SURFACES: usize = 64;
 /// into a pool that grows as needed, whose frames context lists no
 /// surfaces (`initial_pool_size` is 0, so `surface_ids` is NULL), so the
 /// decoder notes them as its frames come out; once the pool has grown,
-/// they are all of it.
+/// they are all of it. While it keeps any it holds their frames context,
+/// so each stays a live surface of its display until the set forgets it,
+/// even once FFmpeg has replaced the decoder's frames context (a stream
+/// whose parameters change) and dropped the frames of the old one.
 #[derive(Debug, Default)]
 pub(crate) struct SurfaceSet {
-    /// The frames context the ids are of, by address.
-    ctx: Option<usize>,
+    /// The frames context the ids are of, held.
+    frames: Option<FramesRef>,
     /// Its device's display, by address.
     display: usize,
     ids: Vec<u32>,
@@ -3547,13 +3593,20 @@ pub(crate) struct SurfaceSet {
 
 impl SurfaceSet {
     /// Note `s`: a surface of another frames context than the ones kept
-    /// replaces them all, one already kept is left where it is, and past
-    /// [`MAX_SURFACES`] the oldest is forgotten.
-    pub(crate) fn note(&mut self, s: &VaSurface) {
-        if self.ctx != Some(s.ctx) {
-            self.ctx = Some(s.ctx);
+    /// replaces them all, and is kept only with `hold`'s reference to its
+    /// context (as [`FramesRef::of`] takes its frame's); one already kept
+    /// is left where it is, and past [`MAX_SURFACES`] the oldest is
+    /// forgotten.
+    pub(crate) fn note(&mut self, s: &VaSurface, hold: impl FnOnce() -> Option<FramesRef>) {
+        // The context held can't be freed, so no other is at its address.
+        if self.frames.as_ref().map(FramesRef::addr) != Some(s.ctx) {
+            self.clear();
+            // Nothing else keeps a surface alive for a drain to sync.
+            let Some(frames) = hold().filter(|f| f.addr() == s.ctx) else {
+                return;
+            };
+            self.frames = Some(frames);
             self.display = s.display;
-            self.ids.clear();
         }
         if self.ids.contains(&s.id) {
             return;
@@ -3565,10 +3618,11 @@ impl SurfaceSet {
         self.ids.push(s.id);
     }
 
-    /// Forget every surface, as when the decoder is opened afresh.
+    /// Forget every surface, and give their frames context back, as when
+    /// the decoder is opened afresh.
     pub(crate) fn clear(&mut self) {
-        self.ctx = None;
         self.ids.clear();
+        self.frames = None;
     }
 
     /// The ids kept, in the order first seen.
@@ -3635,10 +3689,12 @@ pub(crate) fn drain_vaapi(set: &mut SurfaceSet, sync: VaSyncSurface) -> DrainOut
     let display = std::ptr::with_exposed_provenance_mut::<c_void>(set.display);
     drain(
         set,
-        // SAFETY: `display` is the VADisplay of the device whose frames
-        // context the surfaces are of, which the decoder still holds (its
-        // codec context's hw_device_ctx); libva checks the id, and answers
-        // VA_STATUS_ERROR_INVALID_SURFACE for one it doesn't know.
+        // SAFETY: the set keeps ids only while it holds their frames
+        // context, so each id synced is a live surface of that context's
+        // pool, which destroys its surfaces only with the context; and
+        // `display` is the VADisplay of the device the context holds a
+        // reference to, so still open. Mesa's driver locks the display
+        // for the call (`_vlVaSyncSurface`).
         |id| unsafe { sync(display, id) },
         Instant::now,
     )
@@ -5525,13 +5581,58 @@ mod tests {
         }
     }
 
-    /// A surface of frames context `ctx`, on one display.
-    fn surface(ctx: usize, id: u32) -> VaSurface {
-        VaSurface {
-            ctx,
-            display: 0xd15,
-            id,
+    /// A stand-in for a frames context: a buffer of FFmpeg's, whose
+    /// references a surface set takes and drops as it would a frames
+    /// context's.
+    struct Pool(crate::hwprobe::BufferRef);
+
+    impl Pool {
+        fn new() -> Self {
+            // SAFETY: a new buffer, whose one reference the Pool owns.
+            let buf = unsafe { sys::av_buffer_alloc(1) };
+            assert!(!buf.is_null());
+            Pool(crate::hwprobe::BufferRef(buf))
         }
+
+        /// Its address, as a [`VaSurface`] has its frames context's.
+        fn ctx(&self) -> usize {
+            // SAFETY: the Pool's live reference; its data is only addressed.
+            unsafe { (*self.0.0).data.addr() }
+        }
+
+        /// A new reference to it, as [`FramesRef::of`] takes a frame's.
+        fn hold(&self) -> Option<FramesRef> {
+            // SAFETY: the Pool's live reference; the new one, or NULL, is
+            // owned by the FramesRef.
+            let r = unsafe { sys::av_buffer_ref(self.0.0) };
+            (!r.is_null()).then(|| FramesRef(crate::hwprobe::BufferRef(r)))
+        }
+
+        /// References to it besides the Pool's own.
+        fn held(&self) -> c_int {
+            // SAFETY: the Pool's live reference.
+            unsafe { sys::av_buffer_get_ref_count(self.0.0) - 1 }
+        }
+
+        /// Its surface `id`, on one display.
+        fn surface(&self, id: u32) -> VaSurface {
+            VaSurface {
+                ctx: self.ctx(),
+                display: 0xd15,
+                id,
+            }
+        }
+
+        /// Note its surface `id` in `set`, as a decoder does a frame's.
+        fn note(&self, set: &mut SurfaceSet, id: u32) {
+            set.note(&self.surface(id), || self.hold());
+        }
+    }
+
+    /// Whether every surface `set` keeps is of `pool`, held once.
+    fn kept_alive(set: &SurfaceSet, pool: &Pool) -> bool {
+        set.ids().is_empty()
+            || pool.held() == 1 && set.frames.as_ref().map(FramesRef::addr) == Some(pool.ctx())
     }
 
     /// A surface set keeps each surface once, in the order first seen; one
@@ -5542,20 +5643,22 @@ mod tests {
     /// same check.
     #[test]
     fn a_surface_set_keeps_each_surface_once_in_order_up_to_64() {
+        let (a, b) = (Pool::new(), Pool::new());
         let mut set = SurfaceSet::default();
         let ids = [5, 3, 5, 9, 3];
         for id in ids {
-            set.note(&surface(1, id));
+            a.note(&mut set, id);
         }
         assert_eq!(set.ids(), [5, 3, 9]);
-        assert_eq!((set.ctx, set.display, set.overflow()), (Some(1), 0xd15, 0));
+        assert_eq!((set.display, set.overflow()), (0xd15, 0));
+        assert!(kept_alive(&set, &a));
         // Another frames context's surfaces are another pool's.
-        set.note(&surface(2, 7));
+        b.note(&mut set, 7);
         assert_eq!(set.ids(), [7]);
-        assert_eq!(set.ctx, Some(2));
+        assert!(kept_alive(&set, &b));
         let n = MAX_SURFACES as u32;
         for id in 100..100 + n + 2 {
-            set.note(&surface(2, id));
+            b.note(&mut set, id);
         }
         // 7, 100 and 101 forgotten, the oldest first.
         assert_eq!(set.ids().len(), MAX_SURFACES);
@@ -5564,17 +5667,63 @@ mod tests {
         assert!(set.ids().windows(2).all(|w| w[0] < w[1]));
         assert_eq!(set.overflow(), 3);
         // One kept is noted again where it is, and forgets nothing.
-        set.note(&surface(2, 150));
+        b.note(&mut set, 150);
         assert_eq!(set.ids().first(), Some(&102));
         assert_eq!(set.overflow(), 3);
         set.clear();
         assert!(set.ids().is_empty());
         assert_eq!(set.overflow(), 3, "what was forgotten stays counted");
-        set.note(&surface(2, 8));
+        b.note(&mut set, 8);
         assert_eq!(set.ids(), [8]);
         must_fail(
             "surfaces noted as they come, repeats and all",
             ids.to_vec() == [5, 3, 9],
+        );
+    }
+
+    /// A surface set holds one reference to the frames context of the
+    /// surfaces it keeps, which keeps them alive while it might sync them,
+    /// and gives it back once it keeps none of them: when another
+    /// context's surface replaces them, when cleared and when dropped. A
+    /// surface whose context it gets no reference to, or a reference to
+    /// another context, isn't kept.
+    ///
+    /// Control: a set that keeps surfaces by their context's address
+    /// alone, as the first version did, fails the same check.
+    #[test]
+    fn a_surface_set_holds_the_frames_context_of_what_it_keeps() {
+        let (a, b) = (Pool::new(), Pool::new());
+        let mut set = SurfaceSet::default();
+        for id in [5, 3, 5] {
+            a.note(&mut set, id);
+        }
+        assert_eq!(set.ids(), [5, 3]);
+        assert!(kept_alive(&set, &a));
+        assert_eq!(a.held(), 1, "one reference, whatever the surfaces");
+        b.note(&mut set, 7);
+        assert!(kept_alive(&set, &b));
+        assert_eq!(a.held(), 0, "the context replaced is given back");
+        set.clear();
+        assert_eq!((set.ids().len(), b.held()), (0, 0), "cleared");
+        b.note(&mut set, 8);
+        assert!(kept_alive(&set, &b));
+        drop(set);
+        assert_eq!(b.held(), 0, "dropped");
+        let mut set = SurfaceSet::default();
+        set.note(&a.surface(9), || None);
+        assert!(set.ids().is_empty(), "kept with no reference");
+        set.note(&a.surface(9), || b.hold());
+        assert!(set.ids().is_empty(), "kept with another context's");
+        assert_eq!((a.held(), b.held()), (0, 0));
+        let by_address = SurfaceSet {
+            frames: None,
+            display: 0xd15,
+            ids: vec![5],
+            overflow: 0,
+        };
+        must_fail(
+            "a set keeping surfaces by address alone",
+            kept_alive(&by_address, &a),
         );
     }
 
@@ -5613,9 +5762,10 @@ mod tests {
             );
             (out, calls.borrow().clone())
         };
+        let pool = Pool::new();
         let mut set = SurfaceSet::default();
         for id in 11..=15 {
-            set.note(&surface(1, id));
+            pool.note(&mut set, id);
         }
         let (out, synced) = run(&mut set, 499);
         assert_eq!(synced, [11, 12, 13, 14, 15]);
@@ -5632,7 +5782,7 @@ mod tests {
         assert_eq!(out, DrainOutcome::default());
         let mut set = SurfaceSet::default();
         for id in 11..=15 {
-            set.note(&surface(1, id));
+            pool.note(&mut set, id);
         }
         let (out, _) = run(&mut set, 500);
         must_fail("a sync of 0.5 ms not counted as a wait", out.waited == 3);
@@ -5762,6 +5912,18 @@ mod tests {
             id: 0x2a,
         });
         assert_eq!(vaapi_surface(&frame), want);
+        let frames = FramesRef::of(&frame).unwrap();
+        assert_eq!(
+            frames.addr(),
+            ctx,
+            "the reference is to the frame's context"
+        );
+        // SAFETY: the frame's live reference to its frames context.
+        let refs = || unsafe { sys::av_buffer_get_ref_count((*frame.as_ptr()).hw_frames_ctx) };
+        assert_eq!(refs(), 2);
+        drop(frames);
+        assert_eq!(refs(), 1);
+        assert!(FramesRef::of(&ff::frame::Video::empty()).is_none());
         // SAFETY: the type field of the live device context the frame
         // holds; FFmpeg frees it by the type it was allocated as.
         unsafe { (*device).type_ = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM };

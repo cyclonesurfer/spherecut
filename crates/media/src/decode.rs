@@ -588,7 +588,9 @@ impl VideoDecoder {
     /// [`VaapiDrain::Picture`], after each packet sent too. Otherwise, and
     /// when libva's `vaSyncSurface` isn't loaded (said in
     /// [`drained`](Self::drained)), nothing drains; with `Off` nothing is
-    /// even looked up.
+    /// even looked up. It waits for this decoder's pictures only: another
+    /// decoder on the same device, as a locked pair's other lens, may
+    /// still have pictures queued when this one downloads.
     pub(crate) fn set_vaapi_drain(&mut self, mode: VaapiDrain) {
         self.drain = None;
         if mode == VaapiDrain::Off || !self.hw.as_ref().is_some_and(|h| h.is_vaapi()) {
@@ -704,7 +706,7 @@ impl VideoDecoder {
                     if let Some(d) = &mut self.drain
                         && let Some(s) = ffi::vaapi_surface(&frame)
                     {
-                        d.surfaces.note(&s);
+                        d.surfaces.note(&s, || ffi::FramesRef::of(&frame));
                     }
                     return Ok(Received::Frame(frame));
                 }
