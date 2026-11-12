@@ -328,6 +328,12 @@ impl Tools for Spherecut {
             "compare" => ops::compare::run(ops::request(args)?, &cx)?,
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
+        // Every result has `warnings`, `[]` when nothing warned (F049), so
+        // that an agent reads one field the same way from every tool.
+        if let Value::Object(m) = &mut result {
+            m.entry("warnings")
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
         text::sanitize(&mut result);
         fits(&result)?;
         Ok(Output { result, images })

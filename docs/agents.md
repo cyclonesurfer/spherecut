@@ -267,13 +267,13 @@ Eleven tools, in this order; `edit`, `undo`, `render` and `job` are listed
 only with a write root (`--allow-write`), since without one each call
 would be refused. Each takes one JSON object; the schemas are
 `docs/agents/schemas/*.json`. Every result has `warnings: [{code,
-message}]`. Each is marked `readOnlyHint` true and `openWorldHint`
-false, except under `--allow-write`: `look` and `project` are marked as
-writing new files only (`readOnlyHint` false, `destructiveHint` false,
-`idempotentHint` true), since `look` writes one when a call gives
-`output` and `project` when it gives `create`, as are `render` and
-`job`, and `edit` and `undo` as replacing a project (`destructiveHint`
-true, `idempotentHint` false).
+message}]`, `[]` when nothing warned. Each is marked `readOnlyHint`
+true and `openWorldHint` false, except under `--allow-write`: `look` and
+`project` are marked as writing new files only (`readOnlyHint` false,
+`destructiveHint` false, `idempotentHint` true), since `look` writes one
+when a call gives `output` and `project` when it gives `create`, as are
+`render` and `job`, and `edit` and `undo` as replacing a project
+(`destructiveHint` true, `idempotentHint` false).
 
 - **`probe`**: what media files are, without decoding. `files` (up to
   64) or a `folder` (one level, its clips a page at a time: `page_size`

@@ -21,6 +21,35 @@ use spherecut_agent::{Roots, ToolError};
 use spherecut_core::project::folder::ProjectFolder;
 use spherecut_core::project::{Project, file};
 use spherecut_synth::media::{self, Spec};
+use spherecut_testkit::control::must_fail;
+
+/// When the first timed test began.
+static BEGAN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Prints a test's wall time when dropped, and the suite's so far.
+struct Timed {
+    name: &'static str,
+    began: Instant,
+}
+
+fn timed(name: &'static str) -> Timed {
+    BEGAN.get_or_init(Instant::now);
+    Timed {
+        name,
+        began: Instant::now(),
+    }
+}
+
+impl Drop for Timed {
+    fn drop(&mut self) {
+        let suite = BEGAN.get_or_init(Instant::now).elapsed().as_secs_f64();
+        eprintln!(
+            "{}: {:.3} s; the suite {suite:.3} s so far",
+            self.name,
+            self.began.elapsed().as_secs_f64()
+        );
+    }
+}
 
 /// The test's own directory, removed with what it holds when dropped.
 struct TempDir(PathBuf);
@@ -389,6 +418,7 @@ fn a_new_project_is_made_of_a_video_once() {
 /// `not_equirect` warning; a tagged one has none.
 #[test]
 fn a_project_is_made_of_an_untagged_clip_with_a_warning() {
+    let _t = timed("a_project_is_made_of_an_untagged_clip_with_a_warning");
     let dir = TempDir::new("create-untagged");
     let spec = Spec {
         name: "plain".into(),
@@ -423,7 +453,7 @@ fn a_project_is_made_of_an_untagged_clip_with_a_warning() {
         "project",
         json!({"file": "tagged.spherecut", "create": {"media": tagged}}),
     );
-    assert!(r.get("warnings").is_none(), "{r}");
+    assert_eq!(r["warnings"], json!([]), "{r}");
 }
 
 #[test]
@@ -736,12 +766,63 @@ fn project_create_x5() {
 }
 
 /// F049: every tool's simplest successful result has `warnings`, an
-/// array, `[]` when nothing warned. Control: the old assertion that the
+/// array, `[]` when nothing warned. `look`'s and `doctor`'s are held to
+/// the same in look.rs and protocol.rs, and left out here for the time
+/// their GPU and decode checks take. Control: the old assertion that the
 /// field is absent.
 #[test]
-#[ignore = "M3.9 unit (c)"]
 fn every_tool_result_carries_warnings() {
-    todo!()
+    let _t = timed("every_tool_result_carries_warnings");
+    let dir = TempDir::new("warnings");
+    let clip = dir.clip("clips", "a");
+    let tools = dir.tools();
+    let p = dir.path("a.spherecut");
+    let mut said = vec![(
+        "project create",
+        ok(
+            &tools,
+            "project",
+            json!({"file": p, "create": {"media": clip}}),
+        ),
+    )];
+    let trim = edit(&p, json!([{"op": "set_trim", "clip": 4, "end": "0.2"}]));
+    for (tool, args) in [
+        ("project", json!({"file": p})),
+        ("edit", trim),
+        ("undo", json!({"file": p})),
+        ("probe", json!({"files": [clip]})),
+        ("analyze", json!({"file": clip, "kind": "timing"})),
+        ("check", json!({"file": clip})),
+        (
+            "compare",
+            json!({"file": clip, "against_file": clip, "times": ["0"]}),
+        ),
+    ] {
+        said.push((tool, ok(&tools, tool, args)));
+    }
+    let r = ok(
+        &tools,
+        "render",
+        json!({"project": p, "output": dir.path("out.mp4"), "draft": true}),
+    );
+    let id = r["job"].clone();
+    said.push(("render", r));
+    said.push(("job", ok(&tools, "job", json!({"job": id}))));
+    said.push((
+        "job cancel",
+        ok(&tools, "job", json!({"job": id, "cancel": true})),
+    ));
+    let without: Vec<&str> = said
+        .iter()
+        .filter(|(_, r)| r["warnings"] != json!([]))
+        .map(|(tool, _)| *tool)
+        .collect();
+    assert_eq!(without, Vec::<&str>::new(), "without warnings: []");
+    let (_, created) = &said[0];
+    must_fail(
+        "the field absent, as it was",
+        created.get("warnings").is_none(),
+    );
 }
 
 /// F051: an error about a media names it by id ("media 1") and holds
