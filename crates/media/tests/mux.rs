@@ -19,9 +19,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use spherecut_core::{FrameRate, Rational};
+use spherecut_core::{FrameRate, Rational, StopToken};
+use spherecut_media::audio::FfmpegAudio;
+use spherecut_media::backend::{AudioDecode, AudioOutFormat, AudioRequest, NextAudio};
 use spherecut_media::encode::{
-    self, ColorTags, Mp4Writer, MuxedAs, PixelLayout, VideoSettings, YuvPlanes,
+    self, AudioSettings, ColorTags, Mp4Writer, MuxedAs, PixelLayout, VideoSettings, YuvPlanes,
 };
 use spherecut_media::mp4::{self, Mp4Error, TrackTiming};
 use spherecut_media::packets::{NextPacket, PacketInfo, PacketReader};
@@ -136,6 +138,14 @@ fn sources() -> [Source; 3] {
 /// `src` written into `dir` by FFmpeg's MP4 muxer, 64² and each frame a
 /// different grey.
 fn written(dir: &Path, src: &Source) -> PathBuf {
+    written_as(dir, src, false)
+}
+
+/// [`written`], with a silent AAC track at 48 kHz in stereo after the
+/// video when `silence`, as long as the video: the file
+/// `synth::insv::write_insv` writes its first lens and the camera's
+/// audio into.
+fn written_as(dir: &Path, src: &Source, silence: bool) -> PathBuf {
     let settings = VideoSettings {
         encoder: src.encoder.into(),
         width: 64,
@@ -153,8 +163,23 @@ fn written(dir: &Path, src: &Source) -> PathBuf {
         crop_left: 0,
         device: None,
     };
-    let path = dir.join(format!("{}.mp4", src.name));
-    let mut w = Mp4Writer::create(&path, &settings, None).unwrap();
+    let aac = AudioSettings {
+        encoder: "aac".into(),
+        sample_rate: 48_000,
+        channels: 2,
+        bit_rate: 192_000,
+        options: Vec::new(),
+    };
+    let (name, audio) = if silence {
+        (format!("{}-aac.mp4", src.name), Some(&aac))
+    } else {
+        (format!("{}.mp4", src.name), None)
+    };
+    let path = dir.join(name);
+    let mut w = Mp4Writer::create(&path, &settings, audio).unwrap();
+    // Frame i's samples are [i·48000/rate, (i + 1)·48000/rate).
+    let r = src.rate.as_rational();
+    let samples_at = |i: u32| i64::from(i) * 48_000 * r.den() / r.num();
     for i in 0..src.frames {
         let chroma = vec![128; 32 * 32];
         w.push_video(&YuvPlanes::U8([
@@ -163,6 +188,10 @@ fn written(dir: &Path, src: &Source) -> PathBuf {
             chroma,
         ]))
         .unwrap();
+        if silence {
+            let n = usize::try_from(samples_at(i + 1) - samples_at(i)).unwrap();
+            w.push_audio(&[vec![0.0; n], vec![0.0; n]]).unwrap();
+        }
     }
     w.finish().unwrap()
 }
@@ -207,7 +236,18 @@ fn same_packets_but(
     index: usize,
     durations_differ: bool,
 ) -> Result<(), String> {
-    let (ta, a) = demuxed(src, 0);
+    same_stream_packets(src, 0, out, index, durations_differ)
+}
+
+/// [`same_packets_but`] of stream `from` of `src`, rather than its first.
+fn same_stream_packets(
+    src: &Path,
+    from: usize,
+    out: &Path,
+    index: usize,
+    durations_differ: bool,
+) -> Result<(), String> {
+    let (ta, a) = demuxed(src, from);
     let (tb, b) = demuxed(out, index);
     if a.len() != b.len() {
         return Err(format!("{} packets, then {}", a.len(), b.len()));
@@ -485,12 +525,91 @@ fn the_destination_s_extension_picks_the_container() {
     must_fail("lenses.MKV kept 29.97's times", same_packets(&src, &mkv, 0));
 }
 
-/// The MP4 mux `synth::insv::write_insv` uses (M3.5) carries a silent
-/// AAC track beside the video tracks, each video track's packets and
-/// times kept as `mux_video_streams` keeps them, and the 2×64² pair files
-/// keep their bytes.
+/// Every sample of the first audio stream of `path`, as FFmpeg decodes
+/// it, its channels interleaved, with its rate and channel count.
+fn decoded_audio(path: &Path) -> (u32, u16, Vec<f32>) {
+    let req = AudioRequest {
+        stream: None,
+        out: AudioOutFormat {
+            rate: 48_000,
+            channels: 2,
+        },
+        origin: None,
+        interrupt: Arc::new(AtomicBool::new(false)),
+    };
+    let mut dec = FfmpegAudio::open_raw(path, &req).unwrap();
+    let (rate, channels) = (dec.info().rate, dec.info().channels);
+    let mut samples = Vec::new();
+    let stop = StopToken::never();
+    loop {
+        match dec.next_chunk(&stop).unwrap() {
+            NextAudio::Chunk(c) => samples.extend(c.data),
+            NextAudio::End => break,
+            NextAudio::Stopped => panic!("stopped"),
+        }
+    }
+    (rate, channels, samples)
+}
+
+/// The MP4 mux `synth::insv::write_insv` uses (M3.5) carries the silent
+/// AAC track of its audio source after the video tracks, packets as they
+/// are, and keeps each video track's tables and packets as
+/// `mux_video_streams` keeps them.
 #[test]
-#[ignore = "M3.5 unit (a)"]
 fn mux_carries_the_silent_audio_track() {
-    todo!()
+    let _t = timed("mux_carries_the_silent_audio_track");
+    let dir = temp_dir("mux-audio");
+    let all = sources();
+    let first = written_as(&dir.0, &all[0], true);
+    let second = written(&dir.0, &all[2]);
+    let out = encode::mux_video_streams_with_audio(
+        &[&first, &second],
+        &first,
+        &dir.0.join("lenses.insv"),
+    )
+    .unwrap();
+
+    let tree = mp4::read_file(&out).unwrap();
+    assert_eq!(tree.tracks().count(), 3);
+    for (k, src) in [&first, &second].into_iter().enumerate() {
+        let source = mp4::track_timing(src, 0).unwrap();
+        same_timing(&mp4::track_timing(&out, k).unwrap(), &source)
+            .map_err(|e| format!("track {k}: {e}"))
+            .unwrap();
+        same_packets(src, &out, k).unwrap();
+    }
+    assert_eq!(sample_entry(&out, 0), *b"hvc1");
+    assert_eq!(sample_entry(&out, 1), *b"hvc1");
+    assert_eq!(sample_entry(&out, 2), *b"mp4a");
+    same_stream_packets(&first, 1, &out, 2, false).unwrap();
+
+    // Silence, at 48 kHz in stereo, as long as the source's.
+    let (rate, channels, samples) = decoded_audio(&out);
+    assert_eq!((rate, channels), (48_000, 2));
+    assert_eq!(samples.len(), decoded_audio(&first).2.len());
+    assert!(!samples.is_empty());
+    assert!(samples.iter().all(|s| *s == 0.0));
+
+    // Its control: `mux_video_streams_as`'s file of the same sources has
+    // no audio track.
+    let plain =
+        encode::mux_video_streams_as(&[&first, &second], &dir.0.join("plain.insv"), MuxedAs::Mp4)
+            .unwrap();
+    must_fail(
+        "mux_video_streams_as's file has a third track",
+        mp4::read_file(&plain).unwrap().tracks().count() == 3,
+    );
+    let req = AudioRequest {
+        stream: None,
+        out: AudioOutFormat {
+            rate: 48_000,
+            channels: 2,
+        },
+        origin: None,
+        interrupt: Arc::new(AtomicBool::new(false)),
+    };
+    must_fail(
+        "mux_video_streams_as's file decoded as audio",
+        FfmpegAudio::open_raw(&plain, &req),
+    );
 }

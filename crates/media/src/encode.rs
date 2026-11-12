@@ -1367,13 +1367,48 @@ pub fn mux_video_streams_as(
     dst: &Path,
     muxed: MuxedAs,
 ) -> Result<PathBuf, EncodeError> {
+    mux_streams(srcs, None, dst, muxed)
+}
+
+/// [`mux_video_streams_as`] in MP4, whatever `dst`'s extension, with the
+/// first audio stream of `audio` after the video tracks, its packets as
+/// they are and in its source's time base: a camera's raw file with its
+/// sound (the X5's `.insv` holds an AAC track after its two lenses').
+/// `audio` may be one of `srcs`.
+pub fn mux_video_streams_with_audio(
+    srcs: &[&Path],
+    audio: &Path,
+    dst: &Path,
+) -> Result<PathBuf, EncodeError> {
+    mux_streams(srcs, Some(audio), dst, MuxedAs::Mp4)
+}
+
+/// The first video stream of each of `srcs`, then the first audio stream
+/// of `audio` when there is one, into `dst` in the container `muxed`.
+fn mux_streams(
+    srcs: &[&Path],
+    audio: Option<&Path>,
+    dst: &Path,
+    muxed: MuxedAs,
+) -> Result<PathBuf, EncodeError> {
     may_block("muxing files");
     init();
-    let mut inputs = Vec::with_capacity(srcs.len());
-    for src in srcs {
+    // Each source's input and the kind of stream taken from it; `audio`
+    // is opened again even when it is one of `srcs`, so that each input
+    // hands out one stream's packets in order.
+    let wanted = srcs
+        .iter()
+        .map(|s| (*s, ff::media::Type::Video))
+        .chain(audio.map(|a| (a, ff::media::Type::Audio)));
+    let mut inputs = Vec::with_capacity(srcs.len() + 1);
+    let mut kinds = Vec::with_capacity(srcs.len() + 1);
+    let mut paths = Vec::with_capacity(srcs.len() + 1);
+    for (src, kind) in wanted {
         let ictx = ffi::open_input(src, None)
             .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
         inputs.push(ictx);
+        kinds.push(kind);
+        paths.push(src);
     }
     let dest = follow_links(dst).map_err(|error| EncodeError::Io {
         path: dst.to_path_buf(),
@@ -1393,14 +1428,21 @@ pub fn mux_video_streams_as(
         || format!("creating {}", dest.display()),
     )?;
     let name = muxed.name();
-    // Per input: its video stream's index, the output stream's, and the
+    // Per input: its stream's index, the output stream's, and the
     // input's time base.
     let mut map = Vec::with_capacity(inputs.len());
-    for (ictx, src) in inputs.iter().zip(srcs) {
+    for ((ictx, src), kind) in inputs.iter().zip(&paths).zip(&kinds) {
         let ist = ictx
             .streams()
-            .find(|s| ffi::media_type(&s.parameters()) == ff::media::Type::Video)
-            .ok_or_else(|| EncodeError::Invalid(format!("{} has no video", src.display())))?;
+            .find(|s| ffi::media_type(&s.parameters()) == *kind)
+            .ok_or_else(|| {
+                let what = if *kind == ff::media::Type::Audio {
+                    "audio"
+                } else {
+                    "video"
+                };
+                EncodeError::Invalid(format!("{} has no {what}", src.display()))
+            })?;
         let mut ost = ctx(octx.add_stream(None::<ff::Codec>), || {
             "adding a stream".into()
         })?;
@@ -1431,7 +1473,7 @@ pub fn mux_video_streams_as(
                 continue;
             }
             let (from, to, in_tb) = map[i];
-            // The next packet of this input's video stream, if any.
+            // The next packet of this input's stream, if any.
             let next = it.by_ref().find(|(s, _)| s.index() == from);
             let Some((_, mut pkt)) = next else {
                 open[i] = false;
