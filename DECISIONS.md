@@ -1280,6 +1280,26 @@ file in the moment before its writer locks it. Why not a pid in the
 name: pids come round again, and a file from another machine on a
 shared folder has a pid that means nothing here.
 
+*Updated 2026-11-12 (M3.9's unit (a)):* after each publish
+(`persist_replace`, and `persist_new` by rename, link or copy) the
+output's folder is flushed too (`fsync` on the folder, opened
+`O_DIRECTORY`), so that a crash just after a save leaves the new name
+and not only the new bytes (the project review's F033). The file
+itself was already flushed before it was published. It is best effort:
+`EINVAL`, `EOPNOTSUPP` and `ENOSYS` pass (a filesystem without `fsync`
+on a folder, as some FUSE and network ones are), as do `EBADF` (one
+that won't sync a folder opened only for reading) and `EACCES` and
+`EPERM` (a folder that may be written but not opened, mode 0300 say),
+each at a debug line, since none says the name is lost, only that this
+folder can't be asked. Anything else (`EIO`, `ENOSPC`, `EDQUOT`) is the
+publish's error, though the file is in place by then; the writer says
+so and the temporary name is gone. The sync is a parameter of
+`persist_replace`'s and `persist_new`'s crate-private twins, which
+`fs::tests::publish_syncs_its_folder` counts. Also from M3.9: a
+`ProjectFolder::create` that published by the copy takes its identity
+from the copy (F032), so a save after it isn't refused as changed on
+disk.
+
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
 *2026-10-23, M0.*

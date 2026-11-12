@@ -3,14 +3,18 @@
 //! project that the rest of Spherecut would have to second-guess.
 
 use std::collections::HashSet;
+use std::f64::consts::PI;
 use std::fmt;
 
+use glam::DVec3;
 use spherecut_sphere::perspective::{LensShape, MIN_HFOV_DEG, Projection};
+use spherecut_sphere::rig::{Generation, Rig, RigError};
 use thiserror::Error;
 
 use super::anim::{Key, KeyTrack, Orient};
 use super::limits::*;
-use super::{Clip, Output, Project, Range, TrackKind};
+use super::source::{Cap, CapMode, DualFisheye, Gains, Source, ValidateTest};
+use super::{Clip, Media, Output, Project, Range, TrackKind};
 use crate::time::Time;
 
 /// Why an edit or a file was refused, as a stable code (A2's `edit` tool
@@ -131,9 +135,31 @@ impl Project {
     /// runs it after each edit and [`file::load`] after reading, so a
     /// project that exists has passed it.
     ///
+    /// Each media's source and caps keep M3 plan 11.2's, and each refusal
+    /// names the media and the field: [`Code::OutOfRange`] for a bound,
+    /// NaN and infinity past every one, and [`Code::Invalid`] otherwise.
+    /// A dual-fisheye source's are checked in this order, the first
+    /// refusal returned: its tracks differ; its front track is 0 or 1; the
+    /// geometry's generation has its set in the snapshot; the hash is the
+    /// raw strings'; each lens's yaw, pitch and roll within ±15°, centre
+    /// within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to 110°,
+    /// `xi_delta` within ±0.15 and ξ plus it above −1; the feather 0° to
+    /// 15° and q 0 to 3.34 m⁻¹; the gains; the caps; then, from one
+    /// [`Rig::build`] at the calibration's square, θ_max below the model's
+    /// limit, the feather at most max(0, min(θ_max, θ_frame) − 90°) for
+    /// each lens, and the coverage rule: no direction left that neither
+    /// lens's mask holds at the tune's q. No rule reads a file.
+    ///
     /// [`apply`]: Project::apply
     /// [`file::load`]: super::file::load
     pub fn validate(&self) -> Result<(), Problem> {
+        self.validate_leaving_out(ValidateTest::default())
+    }
+
+    /// [`Project::validate`] with the rules `test` turns off left out:
+    /// only a test's control asks for any.
+    #[doc(hidden)]
+    pub fn validate_leaving_out(&self, test: ValidateTest) -> Result<(), Problem> {
         self.check_ids()?;
         if self.sequences.len() != SEQUENCES {
             return fail(
@@ -171,6 +197,7 @@ impl Project {
                     format!("media {} has no picture or no duration", m.id),
                 );
             }
+            check_source(m, test)?;
         }
         if self.targets.len() > MAX_TARGETS {
             return fail(
@@ -429,6 +456,395 @@ impl Project {
         Ok(())
     }
 }
+
+/// The bounds of a dual-fisheye source's numbers (M3 plan 11.2), in the
+/// units its fields name. `sphere`'s `tune_default_lies_inside_validates_bounds`
+/// copies them.
+mod bounds {
+    /// Each lens's yaw, pitch and roll, ± degrees.
+    pub const YPR_DEG: f64 = 15.0;
+    /// Each lens's centre shift, ± canvas pixels.
+    pub const CENTRE_PX: f64 = 64.0;
+    /// Each lens's radius scale.
+    pub const RADIUS: (f64, f64) = (0.9, 1.1);
+    /// Each lens's θ_max, degrees.
+    pub const THETA_MAX_DEG: (f64, f64) = (85.0, 110.0);
+    /// Each lens's ξ delta, ±: as far as the radius scale's 0.9 to 1.1
+    /// moves θ_frame on X5-shaped sets, rounded outward (the range M3.9
+    /// proposed for 11.2's list).
+    pub const XI_DELTA: f64 = 0.15;
+    /// The feather's half width, degrees, before each lens's own bound.
+    pub const FEATHER_DEG: (f64, f64) = (0.0, 15.0);
+    /// The stitch distance as q = 1/D, m⁻¹ (D ≥ 0.3 m).
+    pub const Q_PER_M: (f64, f64) = (0.0, 3.34);
+    /// A fixed gain.
+    pub const GAIN: (f64, f64) = (0.25, 4.0);
+    /// A cap's radius, degrees.
+    pub const CAP_DEG: (f64, f64) = (5.0, 35.0);
+    /// A cap's soft edge, degrees.
+    pub const EDGE_DEG: (f64, f64) = (0.0, 5.0);
+}
+
+/// `v` within `lo` to `hi`, NaN and infinity outside: else an
+/// out-of-range refusal naming media `id`'s `field` (a closure, so that
+/// the name is only written for a refusal).
+fn within(
+    id: impl fmt::Display,
+    field: impl FnOnce() -> String,
+    v: f64,
+    (lo, hi): (f64, f64),
+    unit: &str,
+) -> Result<(), Problem> {
+    if !(lo..=hi).contains(&v) {
+        return fail(
+            Code::OutOfRange,
+            format!(
+                "media {id}'s {} of {v}{unit} is outside {lo}{unit} to {hi}{unit}",
+                field()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// A media's source and caps (M3 plan 11.2): an EAC pair's two tracks
+/// differ; a dual-fisheye source's structure, its tune's and gains'
+/// bounds, then its caps, then the rules that build its model.
+fn check_source(m: &Media, test: ValidateTest) -> Result<(), Problem> {
+    match &m.source {
+        Source::Equirect {} => check_caps(m),
+        Source::EacPair(eac) => {
+            check_tracks(m, eac.tracks)?;
+            check_caps(m)
+        }
+        Source::DualFisheye(df) => {
+            check_fisheye(m, df, test)?;
+            check_caps(m)?;
+            check_rig(m, df, test)
+        }
+    }
+}
+
+/// The two tracks are two streams: `Rig::build` pairs its blocks with
+/// tracks 0 and 1 whatever streams they name, so nothing after `validate`
+/// would see one stream named twice.
+fn check_tracks(m: &Media, tracks: [u32; 2]) -> Result<(), Problem> {
+    if tracks[0] == tracks[1] {
+        return fail(
+            Code::Invalid,
+            format!(
+                "media {}'s source.tracks name stream {} twice: each lens is a stream of its own",
+                m.id, tracks[0]
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// A dual-fisheye source's rules that build no model, in order: the
+/// tracks, the front track, the geometry's set, the hash, each lens's
+/// tune (yaw, pitch and roll, centre, radius scale, θ_max, ξ delta and
+/// the sum ξ + ξ delta), the feather's and q's ranges, and the gains.
+fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), Problem> {
+    use bounds::*;
+    let id = m.id;
+    check_tracks(m, df.tracks)?;
+    // `Rig::build`'s own rule (RigError::FrontTrack), held here so that
+    // no project reaches it.
+    if df.front_track > 1 {
+        return fail(
+            Code::OutOfRange,
+            format!(
+                "media {id}'s source.front_track {} is neither 0 nor 1",
+                df.front_track
+            ),
+        );
+    }
+    let cal = &df.calibration;
+    let (set, name) = match df.geometry.generation {
+        Generation::V3 => (cal.v3, "v3"),
+        Generation::V6 => (cal.v6, "v6"),
+    };
+    let Some(set) = set else {
+        return fail(
+            Code::Invalid,
+            format!(
+                "media {id}'s source.geometry.generation reads {:?}, and source.calibration.{name} is null",
+                df.geometry.generation
+            ),
+        );
+    };
+    let hash = cal.raw.hash();
+    if cal.hash != hash {
+        return fail(
+            Code::Invalid,
+            format!(
+                "media {id}'s source.calibration.hash {} isn't its raw strings' hash {hash}",
+                cal.hash
+            ),
+        );
+    }
+    let tune = &df.tune;
+    for (b, lens) in tune.lenses.iter().enumerate() {
+        let field = |f: &str| format!("source.tune.lenses[{b}].{f}");
+        for (i, &a) in lens.ypr_deg.iter().enumerate() {
+            within(
+                id,
+                || format!("{}[{i}]", field("ypr_deg")),
+                a,
+                (-YPR_DEG, YPR_DEG),
+                "°",
+            )?;
+        }
+        for (i, &c) in lens.centre_px.iter().enumerate() {
+            within(
+                id,
+                || format!("{}[{i}]", field("centre_px")),
+                c,
+                (-CENTRE_PX, CENTRE_PX),
+                " px",
+            )?;
+        }
+        within(id, || field("radius_scale"), lens.radius_scale, RADIUS, "")?;
+        within(
+            id,
+            || field("theta_max_deg"),
+            lens.theta_max_deg,
+            THETA_MAX_DEG,
+            "°",
+        )?;
+        within(
+            id,
+            || field("xi_delta"),
+            lens.xi_delta,
+            (-XI_DELTA, XI_DELTA),
+            "",
+        )?;
+        // F038: the unified model images nothing at ξ ≤ −1. A ξ that
+        // isn't finite is the rig's to refuse, as the snapshot's other
+        // numbers are.
+        let xi = set[b].xi;
+        let sum = xi + lens.xi_delta;
+        if !test.no_xi_sum && sum.is_finite() && sum <= -1.0 {
+            return fail(
+                Code::OutOfRange,
+                format!(
+                    "media {id}'s {} of {} takes block {b}'s ξ of {xi} to {sum}: \
+                     ξ + xi_delta must stay above −1, where the lens images nothing",
+                    field("xi_delta"),
+                    lens.xi_delta
+                ),
+            );
+        }
+    }
+    within(
+        id,
+        || "source.tune.feather_deg".into(),
+        tune.feather_deg,
+        FEATHER_DEG,
+        "°",
+    )?;
+    within(
+        id,
+        || "source.tune.q_per_m".into(),
+        tune.q_per_m,
+        Q_PER_M,
+        " m⁻¹",
+    )?;
+    check_gains(m, &df.gains)
+}
+
+/// Fixed gains within 0.25 to 4; an Auto track with a rate above 0, a
+/// sample at least ([`Gains::at`] gives ones without one) and finite
+/// ratios.
+fn check_gains(m: &Media, gains: &Gains) -> Result<(), Problem> {
+    let id = m.id;
+    match gains {
+        Gains::Off {} => {}
+        Gains::Fixed { rgb } => {
+            for (b, block) in rgb.iter().enumerate() {
+                for (c, &g) in block.iter().enumerate() {
+                    within(
+                        id,
+                        || format!("source.gains.rgb[{b}][{c}]"),
+                        g,
+                        bounds::GAIN,
+                        "",
+                    )?;
+                }
+            }
+        }
+        Gains::Auto {
+            rate_hz, log_ratio, ..
+        } => {
+            if !(rate_hz.is_finite() && *rate_hz > 0.0) {
+                return fail(
+                    Code::OutOfRange,
+                    format!(
+                        "media {id}'s source.gains.rate_hz of {rate_hz} isn't a rate above 0 \
+                         samples a second"
+                    ),
+                );
+            }
+            if log_ratio.is_empty() {
+                return fail(
+                    Code::Invalid,
+                    format!("media {id}'s source.gains.log_ratio has no samples"),
+                );
+            }
+            for (k, sample) in log_ratio.iter().enumerate() {
+                if let Some(c) = sample.iter().position(|r| !r.is_finite()) {
+                    return fail(
+                        Code::OutOfRange,
+                        format!(
+                            "media {id}'s source.gains.log_ratio[{k}][{c}] of {} is not finite",
+                            sample[c]
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Each cap 5° to 35° with an edge of 0° to 5°, and its other numbers
+/// finite.
+fn check_caps(m: &Media) -> Result<(), Problem> {
+    let id = m.id;
+    let caps: [(&str, Option<&Cap>); 2] = [
+        ("nadir", m.caps.nadir.as_deref()),
+        ("zenith", m.caps.zenith.as_deref()),
+    ];
+    for (pole, cap) in caps {
+        let Some(cap) = cap else { continue };
+        within(
+            id,
+            || format!("caps.{pole}.cap_deg"),
+            cap.cap_deg,
+            bounds::CAP_DEG,
+            "°",
+        )?;
+        within(
+            id,
+            || format!("caps.{pole}.edge_deg"),
+            cap.edge_deg,
+            bounds::EDGE_DEG,
+            "°",
+        )?;
+        let ring = match cap.mode {
+            CapMode::Fill { ring_deg } => Some(ring_deg),
+            CapMode::Patch { .. } => None,
+        };
+        let numbers = [
+            ("mode.ring_deg", ring),
+            ("rotation_deg", Some(cap.rotation_deg)),
+        ];
+        for (field, v) in numbers {
+            if let Some(v) = v.filter(|v| !v.is_finite()) {
+                return fail(
+                    Code::Invalid,
+                    format!("media {id}'s caps.{pole}.{field} of {v}° is not finite"),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The rules that build the source's model, once: [`Rig::build`] at the
+/// calibration's square (`src`, as `rig::theta_frame` takes it), which
+/// refuses θ_max past the model's `limit_theta` and anything it can't
+/// build from; then each lens's θ_frame against the feather; then the
+/// coverage rule.
+fn check_rig(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), Problem> {
+    let id = m.id;
+    let cal = df.calibration.calibration();
+    let rig = match Rig::build(&cal, &df.geometry, &df.tune, df.front_track, [cal.src; 2]) {
+        Ok(rig) => rig,
+        Err(RigError::PastLimit {
+            block,
+            theta_max_deg,
+            limit_deg,
+        }) => {
+            return fail(
+                Code::OutOfRange,
+                format!(
+                    "media {id}'s source.tune.lenses[{block}].theta_max_deg of {theta_max_deg}° \
+                     lies {LIMIT_WORDS} of {limit_deg:.3}°, where its r(θ) stops rising"
+                ),
+            );
+        }
+        Err(e) => {
+            return fail(
+                Code::Invalid,
+                format!("media {id}'s source makes no rig: {e}"),
+            );
+        }
+    };
+    let tune = &df.tune;
+    // The feather's band, 90° ± h, ends inside each lens's picture: h at
+    // most min(θ_max, θ_frame) − 90°, and 0 where that is below 0, where
+    // a feather of 0 switches at the lenses' equal θ and makes no hole of
+    // its own (plan amendment 5).
+    for (b, lens) in rig.lenses.iter().enumerate() {
+        let theta_max = tune.lenses[b].theta_max_deg;
+        let frame = lens.theta_frame.to_degrees();
+        let bound = (theta_max.min(frame) - 90.0).max(0.0);
+        if tune.feather_deg > bound {
+            return fail(
+                Code::OutOfRange,
+                format!(
+                    "media {id}'s source.tune.feather_deg of {}° would take the feather's band \
+                     past where lens {b}'s picture ends: lens {b}'s θ_max is {theta_max}° and its \
+                     θ_frame {frame:.3}°, so the feather is at most max(0, min(θ_max, θ_frame) − \
+                     90°) = {bound}°",
+                    tune.feather_deg
+                ),
+            );
+        }
+    }
+    // The coverage rule. Lens b's mask holds every direction within a_b
+    // of its axis: θ_b on the parallax-corrected ray normalize(d − q c_b)
+    // is at most min(θ_max, θ_frame) there, as that ray turns from d by
+    // asin(q |c_b|) at most. The two caps leave no direction out when
+    // their half-angles sum to 360° less the angle between the axes: the
+    // directions neither holds are two caps about the axes' opposites, of
+    // 180° − a_b each, which meet when those sum past the angle between
+    // the axes. The LOD's margin is left out, as the feather's is.
+    let cap = [0, 1].map(|b| {
+        let lens = &rig.lenses[b];
+        let parallax = (rig.q * lens.centre_m.length()).min(1.0).asin();
+        lens.theta_max.min(lens.theta_frame) - parallax
+    });
+    let axis = |b: usize| rig.lenses[b].lens_from_rig.inverse() * DVec3::Z;
+    let between = if test.axes_opposite {
+        PI
+    } else {
+        axis(0).angle_between(axis(1))
+    };
+    let need = 2.0 * PI - between;
+    if cap[0] + cap[1] < need {
+        let [a0, a1] = cap.map(f64::to_degrees);
+        return fail(
+            Code::OutOfRange,
+            format!(
+                "media {id}'s source.tune leaves directions {COVERAGE_WORDS} at q = {} m⁻¹: \
+                 the lenses' masks hold caps of {a0:.3}° and {a1:.3}° about axes {:.3}° apart, \
+                 and two caps cover the sphere only when they sum to 360° less that angle, \
+                 {:.3}°; raise θ_max, or lower the radius scale, q or the turn between the lenses",
+                tune.q_per_m,
+                between.to_degrees(),
+                need.to_degrees()
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// The words the limit's refusal and the coverage rule's are found by.
+const LIMIT_WORDS: &str = "past its lens's limit";
+const COVERAGE_WORDS: &str = "covered by neither lens";
 
 fn check_no_spin<V>(k: &Key<V>) -> Result<(), Problem> {
     if k.spin != 0 {

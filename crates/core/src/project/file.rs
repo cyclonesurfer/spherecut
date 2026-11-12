@@ -18,16 +18,18 @@
 //! `ypr_deg` are written for readers; a hand edit that changes one without
 //! the exact value beside it is refused, saying which to edit.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
 
+use rustix::fs::OFlags;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use super::Project;
-use super::validate::Problem;
+use super::validate::{Code, Problem};
 use crate::blocking::may_block;
 use crate::brand::{APP_SLUG, VERSION};
 use crate::fs::TempFile;
@@ -173,6 +175,9 @@ pub fn from_json(text: &str, folder: &Path) -> Result<Project, FileError> {
         }
     }
     if let Some(project) = top.get("project") {
+        if schema == Some(SCHEMA) {
+            check_sources(project)?;
+        }
         check_times(project, "/project")?;
     }
     // Parsed again from the text, so an error says its line and column.
@@ -194,10 +199,10 @@ pub fn save(project: &Project, path: &Path) -> Result<(), FileError> {
         path: path.to_path_buf(),
         source,
     };
-    let path = std::path::absolute(path).map_err(io)?;
     // Through a link the file is written where it points, so its paths
-    // are relative to that folder, which load reads them from too.
-    let dest = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    // are relative to that folder, which load reads them from too: the
+    // folder the kernel finds it in (F031).
+    let dest = crate::fs::real_file(path).map_err(io)?;
     let folder = dest.parent().unwrap_or(Path::new("/"));
     let text = to_json(project, folder)?;
     let mut tmp = TempFile::create(&dest).map_err(io)?;
@@ -213,18 +218,65 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
         source,
     };
     let path = std::path::absolute(path).map_err(io)?;
-    let file = File::open(&path).map_err(io)?;
-    let mut text = String::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_string(&mut text)
+    // Without waiting: a pipe at the path would hold the open until a
+    // writer came, and a folder or a device is no project (F034).
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::NONBLOCK.bits() as i32)
+        .open(&path)
         .map_err(io)?;
-    if text.len() as u64 > MAX_FILE_BYTES {
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err(FileError::NotProject(
+            "it is not a regular file (a folder, a pipe or a device, say)".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::TooLarge { path });
     }
-    // The folder of the file itself, a link's target, as save takes it.
-    let real = lexical(&crate::fs::follow_links(&path).map_err(io)?);
+    // Text that isn't UTF-8 is no project, as `ProjectFolder::load` says,
+    // not an I/O error (F034).
+    let text = String::from_utf8(bytes)
+        .map_err(|_| FileError::NotProject("it isn't UTF-8 text".into()))?;
+    // The real folder of the file itself, a link's target, as save
+    // takes it (F031).
+    let real = crate::fs::real_file(&path).map_err(io)?;
     let folder = real.parent().unwrap_or(Path::new("/"));
     from_json(&text, folder)
+}
+
+/// Each media of a schema 2 file has a `source`, and not null: a damaged
+/// file never reads as equirect by default, as a schema 1 media does
+/// (M3 plan 11.2). Read on the value, so that the typed read after it
+/// keeps its line and column; what isn't a list of objects is left to
+/// that read to refuse.
+fn check_sources(project: &Value) -> Result<(), FileError> {
+    let Some(Value::Array(media)) = project.get("media") else {
+        return Ok(());
+    };
+    for m in media {
+        let Value::Object(m) = m else { continue };
+        if !matches!(m.get("source"), None | Some(Value::Null)) {
+            continue;
+        }
+        let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+        let which = match m.get("id").and_then(Value::as_u64) {
+            Some(id) => format!("media {id} ({path:?})"),
+            None => format!("the media at {path:?}"),
+        };
+        return Err(FileError::Invalid(Problem::new(
+            Code::Invalid,
+            format!(
+                "{which} has no \"source\": a schema 2 file writes one for every media, so \
+                 this one was cut short or edited; give it its source ({{\"kind\": \
+                 \"equirect\"}} for a picture that is equirect already)"
+            ),
+        )));
+    }
+    Ok(())
 }
 
 /// Check every time in `v` (an object with `exact` and `seconds`): the

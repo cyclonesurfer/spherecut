@@ -2442,8 +2442,10 @@ fn feather_bound(cal: &Calibration, geo: &Geometry, tune: &Tune) -> f64 {
 }
 
 /// `Tune::default()` lies inside every bound of `validate` (11.2) on
-/// Pat's V6 numbers, the feather against min(θ_max, θ_frame) − 90° among
-/// them.
+/// Pat's V6 numbers, the feather against max(0, min(θ_max, θ_frame) −
+/// 90°) among them, `xi_delta` within ±0.15 with ξ plus it above −1, and
+/// the coverage rule: the lenses' caps of min(θ_max, θ_frame) less their
+/// parallax at q summing to 360° less the angle between their axes.
 #[test]
 fn tune_default_lies_inside_validates_bounds() {
     let _time = timed("tune_default_lies_inside_validates_bounds");
@@ -2454,7 +2456,7 @@ fn tune_default_lies_inside_validates_bounds() {
         assert!(lens.centre_px.iter().all(|c| c.abs() <= 64.0));
         assert!((0.9..=1.1).contains(&lens.radius_scale));
         assert!((85.0..=110.0).contains(&lens.theta_max_deg));
-        assert_eq!(lens.xi_delta, 0.0);
+        assert!((-0.15..=0.15).contains(&lens.xi_delta));
     }
     assert!((0.0..=15.0).contains(&tune.feather_deg));
     assert!((0.0..=3.34).contains(&tune.q_per_m));
@@ -2464,14 +2466,33 @@ fn tune_default_lies_inside_validates_bounds() {
             .chain(V6Reading::all().map(|v| (Generation::V6, v)));
         for (generation, v6) in readings {
             let geo = placeholder(canvas, generation, v6);
+            let blocks = match generation {
+                Generation::V3 => cal.v3,
+                Generation::V6 => cal.v6,
+            }
+            .unwrap();
+            for (block, lens) in blocks.iter().zip(&tune.lenses) {
+                assert!(block.xi + lens.xi_delta > -1.0);
+            }
             // Below the limit, as `build` checks.
-            assert!(Rig::build(&cal, &geo, &tune, 0, [768; 2]).is_ok());
+            let rig = Rig::build(&cal, &geo, &tune, 0, [768; 2]).unwrap();
             let bound = feather_bound(&cal, &geo, &tune);
             assert!(
-                tune.feather_deg <= bound,
+                tune.feather_deg <= bound.max(0.0),
                 "{canvas:?} {generation:?} {v6:?}: {bound}°"
             );
             least = least.min(bound);
+            // The coverage rule.
+            let cap = rig.lenses.map(|lens| {
+                lens.theta_max.min(lens.theta_frame) - (rig.q * lens.centre_m.length()).asin()
+            });
+            let axes = rig
+                .lenses
+                .map(|lens| lens.lens_from_rig.inverse() * DVec3::Z);
+            assert!(
+                cap[0] + cap[1] >= 2.0 * PI - axes[0].angle_between(axes[1]),
+                "{canvas:?} {generation:?} {v6:?}: caps {cap:?}"
+            );
         }
     }
     eprintln!("on Pat's numbers the feather may reach {least:.3}° at least");

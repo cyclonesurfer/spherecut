@@ -12,7 +12,12 @@ use common::*;
 use proptest::prelude::*;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
 use spherecut_core::project::*;
+use spherecut_sphere::fisheye::V6Reading;
 use spherecut_sphere::perspective::{LensShape, Morph, Projection};
+use spherecut_sphere::rig::{
+    Binding, CalibTerms, CanvasMap, EulerConv, Extrinsics, Generation, Geometry, LensCalib,
+    LensTune, QuarterTurn, Status, Tune, TurnAxis, TzSign,
+};
 use spherecut_testkit::control::must_fail;
 
 /// The checked-in file, and where its media is said to be.
@@ -106,11 +111,219 @@ fn rich() -> Project {
     p
 }
 
+/// The schema 2 fixture's project, 11.1's worked example: [`rich`] with
+/// a camera file added after its equirect one.
+fn schema2() -> Project {
+    let mut p = rich();
+    p.apply(&[Edit::AddMedia {
+        media: camera_media(),
+    }])
+    .unwrap();
+    p
+}
+
+/// A camera file of two fisheye lenses, as `media::project::project_media`
+/// would make it from an X5-shaped file, with a tune of its own.
+///
+/// The calibration is no camera's: its V3 and V6 sets are synth's
+/// `x5_like` and `x5_like_v6` (`synth/src/lens.rs`) with every number
+/// changed in its last printed digits, so that the file holds none of
+/// Pat's numbers (F137; `testkit::pats` holds those once). Its raw
+/// strings print those sets in `docs/formats/insta360.md` §4.1's token
+/// layout and were written by hand: core can call neither synth nor
+/// camera, so nothing here parses them. Unit (b)'s `camera_source` tests,
+/// in media, are what hold a snapshot's strings to its sets. The geometry
+/// is the X5 row's placeholder (`camera/src/insta360/known.rs`), the tune
+/// is off the default and validates, the gains are Fixed and the nadir
+/// is filled.
+fn camera_media() -> Media {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/clips/VID_2.insv");
+    // Block 1's centre counts from the canvas's left, its square 5376
+    // further on, as camera's `to_calibration` takes it off.
+    let src = 5376.0;
+    let v3 = [
+        LensCalib {
+            xi: 2.000003,
+            fx: 4284.617,
+            fy: 4284.283,
+            cx: 2704.806,
+            cy: 2673.296,
+            ypr_deg: [0.302, -0.197, 90.503],
+            t_m: [0.0; 3],
+            terms: CalibTerms::V3 {
+                k: [0.18632047, 2.04984362, -3.24446911],
+                p: [-0.00143571, -0.00339245],
+            },
+        },
+        LensCalib {
+            xi: 1.999996,
+            fx: 4291.034,
+            fy: 4291.027,
+            cx: 8045.104 - src,
+            cy: 2703.397,
+            ypr_deg: [-0.253, 0.348, 89.302],
+            t_m: [-0.004457, 0.000019, -0.032004],
+            terms: CalibTerms::V3 {
+                k: [0.18940831, 2.07073074, -3.24103338],
+                p: [0.00013836, -0.00299869],
+            },
+        },
+    ];
+    let v6 = [
+        LensCalib {
+            xi: 2.000002,
+            fx: 4277.523,
+            fy: 4277.266,
+            cx: 2704.812,
+            cy: 2673.291,
+            ypr_deg: [0.297, -0.204, 90.496],
+            t_m: [0.0; 3],
+            terms: CalibTerms::V6 {
+                d: [
+                    0.28032991,
+                    0.89045412,
+                    2.04927581,
+                    -8.05179779,
+                    0.0,
+                    0.00120207,
+                    -0.00259482,
+                    0.02324713,
+                    0.00533926,
+                    -0.01560201,
+                    0.00019351,
+                    -0.04580529,
+                    0.00197182,
+                ],
+            },
+        },
+        LensCalib {
+            xi: 1.999997,
+            fx: 4284.397,
+            fy: 4284.764,
+            cx: 8045.093 - src,
+            cy: 2703.405,
+            ypr_deg: [-0.246, 0.353, 89.297],
+            t_m: [-0.004463, 0.000014, -0.031996],
+            terms: CalibTerms::V6 {
+                d: [
+                    0.27665339,
+                    0.98522968,
+                    1.83605261,
+                    -7.99374491,
+                    0.0,
+                    0.00021051,
+                    -0.00147632,
+                    0.01940419,
+                    0.00331844,
+                    -0.01330669,
+                    0.00074517,
+                    -0.02859293,
+                    0.00888741,
+                ],
+            },
+        },
+    ];
+    let raw = RawStrings {
+        v1: None,
+        v2: None,
+        v3: Some(
+            "2_2.000003_4284.617_4284.283_2704.806_2673.296_0.302_-0.197_90.503_0.000000_\
+             0.000000_0.000000_0.18632047_2.04984362_-3.24446911_-0.00143571_-0.00339245_\
+             10752_5376_113_1.999996_4291.034_4291.027_8045.104_2703.397_-0.253_0.348_\
+             89.302_-0.004457_0.000019_-0.032004_0.18940831_2.07073074_-3.24103338_\
+             0.00013836_-0.00299869_10752_5376_113_197632"
+                .into(),
+        ),
+        v6: Some(
+            "2_2.000002_4277.523_4277.266_2704.812_2673.291_0.297_-0.204_90.496_0.000000_\
+             0.000000_0.000000_0.28032991_0.89045412_2.04927581_-8.05179779_0.00000000_\
+             0.00120207_-0.00259482_0.02324713_0.00533926_-0.01560201_0.00019351_\
+             -0.04580529_0.00197182_10752_5376_113_1.999997_4284.397_4284.764_8045.093_\
+             2703.405_-0.246_0.353_89.297_-0.004463_0.000014_-0.031996_0.27665339_\
+             0.98522968_1.83605261_-7.99374491_0.00000000_0.00021051_-0.00147632_\
+             0.01940419_0.00331844_-0.01330669_0.00074517_-0.02859293_0.00888741_10752_\
+             5376_113_394240"
+                .into(),
+        ),
+    };
+    let hash = raw.hash();
+    let lens = |ypr_deg, centre_px, radius_scale, theta_max_deg| LensTune {
+        ypr_deg,
+        centre_px,
+        radius_scale,
+        xi_delta: 0.0,
+        theta_max_deg,
+    };
+    Media {
+        id: MediaId::NEW,
+        path,
+        fingerprint: Fingerprint {
+            bytes: 2_000_000,
+            head: "fedcba9876543210".into(),
+        },
+        video: MediaVideo {
+            stream: 0,
+            width: 3840,
+            height: 3840,
+            rate: spherecut_core::FrameRate::FPS_30,
+            duration: spherecut_core::Time::from_secs(10),
+        },
+        source: Source::DualFisheye(Box::new(DualFisheye {
+            camera: Camera {
+                make: Some("Insta360".into()),
+                model: Some("Insta360 X5".into()),
+                firmware: Some("v1.0.31_build2".into()),
+                serial: None,
+            },
+            tracks: [0, 1],
+            front_track: 0,
+            calibration: CalibSnapshot {
+                canvas: [10752, 5376],
+                window: [5312, 5312],
+                window_offset: [0, 0],
+                raw,
+                hash,
+                v3: Some(v3),
+                v6: Some(v6),
+            },
+            geometry: Geometry {
+                binding: Binding::Reversed,
+                canvas: CanvasMap::C,
+                extrinsics: Extrinsics::Stored(EulerConv::PLACEHOLDER),
+                turn: TurnAxis::Y,
+                tz: TzSign::AsStored,
+                upright: QuarterTurn::Zero,
+                generation: Generation::V6,
+                v6: V6Reading::RADIAL_ONLY,
+                status: Status::Provisional,
+                evidence: "placeholder until the fit".into(),
+            },
+            tune: Tune {
+                lenses: [
+                    lens([0.4, -0.3, 0.2], [1.5, -2.0], 1.002, 100.0),
+                    lens([-0.3, 0.25, -0.1], [-1.0, 0.5], 0.998, 98.0),
+                ],
+                feather_deg: 4.0,
+                q_per_m: 0.5,
+            },
+            gains: Gains::Fixed {
+                rgb: [[1.0, 1.0, 1.0], [0.96, 1.0, 1.03]],
+            },
+            profile: Some(ProfileRef::of("indoor", b"{\"feather_deg\": 4.0}\n")),
+        })),
+        caps: Caps {
+            nadir: Some(Box::new(Cap {
+                mode: CapMode::Fill { ring_deg: 3.0 },
+                cap_deg: 20.0,
+                edge_deg: 2.0,
+                rotation_deg: 0.0,
+            })),
+            zenith: None,
+        },
+    }
+}
+
 /// `text` without its `saved_by` line, which names the build.
-#[expect(
-    dead_code,
-    reason = "M3.9 unit (a)'s schema 2 fixture compares saves without it"
-)]
 fn without_saved_by(text: &str) -> String {
     text.lines()
         .filter(|l| !l.trim_start().starts_with("\"saved_by\""))
@@ -150,19 +363,111 @@ fn the_checked_in_schema_1_file_loads_unchanged() {
 /// The schema 2 fixture, `schema2.spherecut` (M3 plan 11.2), holds a
 /// dual-fisheye source and loads and saves the same; it alone may be
 /// blessed, through F055's `testkit::bless` once M3.7 has merged (F063).
+/// Marked schema 3 it is refused as newer.
+///
+/// Control: the schema 1 file's text isn't what a save writes.
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn the_checked_in_schema_2_file_loads_and_saves_the_same() {
-    todo!()
+    let path = data_dir().join("schema2.spherecut");
+    let text = file::to_json(&schema2(), &data_dir()).unwrap();
+    // The variable's presence blesses, as M2's schema 1 test read it;
+    // M3.7's F055 brings `testkit::bless`, whose one rule reads unset,
+    // empty and "0" as off, and takes this switch over when it merges.
+    if std::env::var_os("SPHERECUT_BLESS_PROJECT").is_some() {
+        std::fs::write(&path, &text).unwrap();
+    }
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        without_saved_by(&text),
+        without_saved_by(&on_disk),
+        "schema2.spherecut isn't what a save writes: a change within schema 2 rewrites it \
+         (SPHERECUT_BLESS_PROJECT=1), a new schema gets its own fixture"
+    );
+    let loaded = file::load(&path).unwrap();
+    assert_eq!(loaded, schema2());
+    // A save of what it loads writes it again.
+    let again = file::to_json(&loaded, &data_dir()).unwrap();
+    assert_eq!(without_saved_by(&again), without_saved_by(&on_disk));
+    for key in [
+        "\"schema\": 2,",
+        "\"kind\": \"dual_fisheye\"",
+        "\"q_per_m\": 0.5",
+        "\"window_offset\"",
+        "\"path\": \"../clips/VID_2.insv\"",
+    ] {
+        assert!(on_disk.contains(key), "{key}");
+    }
+    let value: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    assert_eq!(
+        value["project"]["media"][1]["source"]["geometry"]["extrinsics"],
+        serde_json::json!({"stored": {
+            "axes": ["y", "x", "z"],
+            "order": ["yaw", "pitch", "roll"],
+            "signs": [1, 1, 1],
+            "roll_offset": -90
+        }}),
+        "11.1's extrinsics"
+    );
+    let three = on_disk.replacen("\"schema\": 2,", "\"schema\": 3,", 1);
+    assert!(matches!(
+        file::from_json(&three, &data_dir()),
+        Err(FileError::NewerSchema { found: 3 })
+    ));
+
+    let schema1 = std::fs::read_to_string(data_dir().join("schema1.spherecut")).unwrap();
+    let saved = file::to_json(&rich(), &data_dir()).unwrap();
+    must_fail(
+        "the schema 1 file taken for what a save writes",
+        without_saved_by(&schema1) == without_saved_by(&saved),
+    );
 }
 
 /// A schema 2 media without a `source` is refused, naming its path, so a
 /// damaged file never defaults to equirect silently (11.2); a schema 1
 /// media without one reads as equirect.
+///
+/// Controls: the same text marked schema 1 loads, its media equirect, and
+/// the whole fixture loads.
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_media_without_source_is_refused_by_path() {
-    todo!()
+    let on_disk = std::fs::read_to_string(data_dir().join("schema2.spherecut")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    // The fixture with media `i`'s source taken out, or set to `null`,
+    // marked `schema`.
+    let without = |i: usize, null: bool, schema: u64| {
+        let mut v = fixture.clone();
+        v["schema"] = schema.into();
+        let m = v["project"]["media"][i].as_object_mut().unwrap();
+        if null {
+            m.insert("source".into(), serde_json::Value::Null);
+        } else {
+            m.remove("source").unwrap();
+        }
+        serde_json::to_string_pretty(&v).unwrap()
+    };
+    for (i, path) in [(0, "../clips/VID_1.mp4"), (1, "../clips/VID_2.insv")] {
+        for null in [false, true] {
+            let text = without(i, null, 2);
+            let e = file::from_json(&text, &data_dir()).unwrap_err();
+            let FileError::Invalid(problem) = &e else {
+                panic!("media {i}, null {null}: {e}");
+            };
+            assert_eq!(problem.code, Code::Invalid, "{e}");
+            assert!(
+                problem.message.contains(path) && problem.message.contains("\"source\""),
+                "media {i}, null {null}: {e}"
+            );
+            assert_eq!(e.code(), "invalid");
+
+            // The same text as schema 1, which never wrote a source,
+            // reads as equirect.
+            if !null {
+                let loaded = file::from_json(&without(i, null, 1), &data_dir()).unwrap();
+                assert_eq!(loaded.media()[i].source, Source::Equirect {}, "media {i}");
+            }
+        }
+    }
+    file::from_json(&on_disk, &data_dir()).unwrap();
 }
 
 /// `deny_unknown_fields` still refuses a misspelt key in a source's
@@ -172,28 +477,162 @@ fn a_media_without_source_is_refused_by_path() {
 /// brace, not on the key's own line: the test checks that a position is
 /// given, not which.
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_misspelt_key_in_tune_is_refused() {
-    todo!()
+    let on_disk = std::fs::read_to_string(data_dir().join("schema2.spherecut")).unwrap();
+    for (right, wrong) in [
+        ("\"feather_deg\":", "\"feather_degs\":"),
+        ("\"rgb\":", "\"rgbs\":"),
+        ("\"cap_deg\":", "\"cap_degs\":"),
+    ] {
+        assert_eq!(on_disk.matches(right).count(), 1, "{right}");
+        let text = on_disk.replacen(right, wrong, 1);
+        let e = file::from_json(&text, &data_dir()).unwrap_err();
+        let FileError::Malformed(json) = &e else {
+            panic!("{wrong}: {e}");
+        };
+        let key = wrong.trim_end_matches(':');
+        assert!(
+            e.to_string()
+                .contains(&format!("unknown field `{}`", key.trim_matches('"'))),
+            "{e}"
+        );
+        assert!(json.line() > 0 && json.column() > 0, "{e}");
+        assert!(e.to_string().contains(" at line "), "{e}");
+        assert_eq!(e.code(), "malformed");
+    }
+    // The right keys load.
+    file::from_json(&on_disk, &data_dir()).unwrap();
 }
 
 /// A project file in a folder reached through a link with a `../` target
 /// finds its media from the file's real folder, while media paths stay
 /// lexical as D47 intends (F031; the CLI's half is cli's
 /// `a_project_in_a_linked_folder_renders_its_media`).
+///
+/// Two layouts, each read through `file::load` and
+/// `ProjectFolder::of_file`: `link` names `real/sub`, whose project
+/// keeps its media in `real` as `../clip.mp4`; and `home/proj` names
+/// `nas/proj`, whose `current.spherecut` is a link to
+/// `../archive/v3.spherecut`, kept with its media in `nas/archive`.
+///
+/// Control: the base's rule, the link's own folder taken lexically, puts
+/// the media beside the link's parent, where it isn't.
+#[cfg(unix)]
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
-    todo!()
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("linked-folder");
+    // Where the system's temp folder is reached through a link, its
+    // real path.
+    let root = std::fs::canonicalize(&dir.0).unwrap();
+    let root = root.as_path();
+    std::fs::create_dir_all(root.join("real/sub")).unwrap();
+    std::fs::create_dir_all(root.join("nas/proj")).unwrap();
+    std::fs::create_dir_all(root.join("nas/archive")).unwrap();
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    symlink("real/sub", root.join("link")).unwrap();
+    symlink("../nas/proj", root.join("home/proj")).unwrap();
+    symlink(
+        "../archive/v3.spherecut",
+        root.join("nas/proj/current.spherecut"),
+    )
+    .unwrap();
+    let cases = [
+        // (the path a user gives, where the project is, its media)
+        (
+            root.join("link/p.spherecut"),
+            root.join("real/sub/p.spherecut"),
+            root.join("real/clip.mp4"),
+        ),
+        (
+            root.join("home/proj/current.spherecut"),
+            root.join("nas/archive/v3.spherecut"),
+            root.join("nas/archive/clip.mp4"),
+        ),
+    ];
+    for (given, real, media) in &cases {
+        std::fs::write(media, b"a clip").unwrap();
+        let p = project_at(media.to_str().unwrap());
+        file::save(&p, real).unwrap();
+        let text = std::fs::read_to_string(real).unwrap();
+        assert!(!text.contains(root.to_str().unwrap()), "relative: {text}");
+
+        let loaded = file::load(given).unwrap();
+        assert_eq!(&loaded.media()[0].path, media, "{}", given.display());
+        assert!(loaded.media()[0].path.exists());
+        let (folder, name) = ProjectFolder::of_file(given).unwrap();
+        assert_eq!(folder.path(), real.parent().unwrap(), "{}", given.display());
+        assert_eq!(name, real.file_name().unwrap());
+        let loaded = folder.load(&name).unwrap().project;
+        assert_eq!(&loaded.media()[0].path, media, "{}", given.display());
+
+        // The base's rule: the file's folder lexically from the link.
+        let lexical = file::lexical(&spherecut_core::fs::follow_links(given).unwrap());
+        let rel = Path::new(
+            text.split("\"path\": \"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap(),
+        );
+        let there = file::lexical(&lexical.parent().unwrap().join(rel));
+        must_fail(
+            &format!("{}'s media found lexically", given.display()),
+            there.exists(),
+        );
+    }
 }
 
 /// `file::load` behaves as `ProjectFolder::load` does (F034): it opens
 /// without blocking, refuses what isn't a regular file (a FIFO at the
-/// path), and calls a file that isn't UTF-8 `not_project`.
+/// path), and calls a file that isn't UTF-8 `not_project`. The FIFO is
+/// loaded on a thread held to a deadline, so a load that waits for a
+/// writer fails the test rather than hanging it.
+///
+/// Control: a regular UTF-8 project at the same path loads.
+#[cfg(unix)]
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_fifo_or_bad_utf8_at_the_path_is_not_a_project() {
-    todo!()
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use rustix::fs::{CWD, FileType, Mode, mknodat};
+    let dir = TempDir::new("fifo");
+    let path = dir.0.join("p.spherecut");
+    mknodat(CWD, &path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let fifo = path.clone();
+    std::thread::spawn(move || {
+        tx.send(file::load(&fifo).map(drop)).ok();
+    });
+    let e = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(r) => r.unwrap_err(),
+        Err(_) => {
+            // Let the stuck open go before failing.
+            std::fs::OpenOptions::new().write(true).open(&path).ok();
+            panic!("loading a FIFO waited for a writer for 5 s");
+        }
+    };
+    assert_eq!(e.code(), "not_project", "{e}");
+    assert!(e.to_string().contains("not a regular file"), "{e}");
+    std::fs::remove_file(&path).unwrap();
+
+    std::fs::write(
+        &path,
+        b"{\"format\": \"spherecut.project\", \"name\": \"\xff\"}",
+    )
+    .unwrap();
+    let e = file::load(&path).unwrap_err();
+    assert_eq!(e.code(), "not_project", "{e}");
+    assert!(e.to_string().contains("UTF-8"), "{e}");
+
+    std::fs::write(&path, sample()).unwrap();
+    assert!(file::load(&path).is_ok());
+    must_fail(
+        "a regular UTF-8 project refused as not a project",
+        file::load(&path).is_err_and(|e| e.code() == "not_project"),
+    );
 }
 
 #[test]
@@ -555,15 +994,18 @@ fn pointers(v: &serde_json::Value, at: String, out: &mut Vec<String>) {
 
 proptest! {
     /// Files written by agents and by hand: whatever is changed, deleted
-    /// or cut short, loading gives a project that passes `validate` or a
-    /// typed error, never a panic.
+    /// or cut short in either fixture, the schema 1 file or the schema 2
+    /// one with its dual-fisheye source, loading gives a project that
+    /// passes `validate` or a typed error, never a panic.
     #[test]
     fn mangled_files_load_or_are_refused(
         changes in prop::collection::vec((any::<prop::sample::Index>(), junk(), 0u8..4), 1..4),
         cut in any::<prop::sample::Index>(),
         cut_it in prop::bool::weighted(0.1),
+        schema_2 in any::<bool>(),
     ) {
-        let text = std::fs::read_to_string(data_dir().join("schema1.spherecut")).unwrap();
+        let fixture = if schema_2 { "schema2.spherecut" } else { "schema1.spherecut" };
+        let text = std::fs::read_to_string(data_dir().join(fixture)).unwrap();
         let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
         for (at, value, how) in changes {
             let mut all = Vec::new();

@@ -32,7 +32,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -256,14 +256,16 @@ impl ProjectFolder {
     /// The folder the project at `path` is in, and the project's name: a
     /// link at `path` is followed, so the project is written where it
     /// points and its paths are from that folder (D47), and its lock is
-    /// the one an agent takes there.
+    /// the one an agent takes there. The folder is the one the kernel
+    /// finds the file in, its path resolved physically
+    /// ([`crate::fs::real_file`], F031), so a `..` across a linked folder
+    /// names the folder the file is really in.
     pub fn of_file(path: &Path) -> Result<(ProjectFolder, OsString), FolderError> {
         let io = |source| FolderError::Io {
             path: path.to_path_buf(),
             source,
         };
-        let path = std::path::absolute(path).map_err(io)?;
-        let path = file::lexical(&crate::fs::follow_links(&path).map_err(io)?);
+        let path = crate::fs::real_file(path).map_err(io)?;
         let name = path
             .file_name()
             .ok_or_else(|| io(io::Error::new(io::ErrorKind::InvalidInput, "no file name")))?
@@ -461,6 +463,18 @@ impl ProjectFolder {
         project: &Project,
         history: &History,
     ) -> Result<Saved, FolderError> {
+        self.create_with(name, project, history, TempFile::publish_new)
+    }
+
+    /// [`ProjectFolder::create`], publishing with `publish`, which tests
+    /// make take `persist_new`'s other ways.
+    fn create_with(
+        &self,
+        name: &OsStr,
+        project: &Project,
+        history: &History,
+        publish: impl FnOnce(TempFile) -> io::Result<std::fs::Metadata>,
+    ) -> Result<Saved, FolderError> {
         may_block("saving a project");
         self.check_name(name)?;
         let path = self.path_of(name);
@@ -470,7 +484,7 @@ impl ProjectFolder {
         }
         let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
         let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
-        tmp.persist_new().map_err(|source| {
+        let published = publish(tmp).map_err(|source| {
             if source.kind() == io::ErrorKind::AlreadyExists {
                 FolderError::Exists { path: path.clone() }
             } else {
@@ -480,8 +494,9 @@ impl ProjectFolder {
                 }
             }
         })?;
-        // persist_new renames or links the same inode in, so the identity
-        // holds.
+        // The published file's, which the copy fallback makes another file
+        // than the temporary one (F032), with the same bytes.
+        let identity = Identity::of(&published, text.as_bytes());
         Ok(publish_history(side, identity, dropped, &path))
     }
 
@@ -605,6 +620,18 @@ impl ProjectFolder {
         identity: &Identity,
         project_tmp: &TempFile,
     ) -> Result<(TempFile, usize), FolderError> {
+        let side = side(name, "history");
+        // A link where the history goes is refused, as one at the
+        // project's name or the lock's is: the rename would replace the
+        // link and leave its target as it was (F036). Anything else there
+        // that isn't a file the temporary file's own checks refuse.
+        if let Ok(st) = rustix::fs::statat(&self.fd, &side, AtFlags::SYMLINK_NOFOLLOW)
+            && FileType::from_raw_mode(st.st_mode) == FileType::Symlink
+        {
+            return Err(FolderError::Link {
+                path: self.path_of(&side),
+            });
+        }
         let mut history = history.clone();
         // Room for the envelope around the history.
         let dropped = history.keep_bytes(MAX_HISTORY_BYTES - 256);
@@ -615,7 +642,6 @@ impl ProjectFolder {
             project_hash: format!("{:016x}", identity.hash),
             history: &history,
         };
-        let side = side(name, "history");
         let io = |source| FolderError::Io {
             path: self.path_of(&side),
             source,
@@ -1051,9 +1077,43 @@ mod tests {
     /// takes its identity from the published file, not the temporary one.
     /// Control: the temporary file's identity fails the same check.
     #[test]
-    #[ignore = "M3.9 unit (a)"]
     fn create_names_the_published_file_after_a_copy() {
-        todo!()
+        use spherecut_testkit::control::must_fail;
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        // What renameat2 says without RENAME_NOREPLACE, and link(2) on FAT.
+        let no_flag = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(22));
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(1));
+        let mut temp = None;
+        let saved = folder
+            .create_with(name, &p, &h, |tmp| {
+                temp = Some(tmp.file().metadata()?);
+                tmp.persist_new_with(no_flag, no_links, crate::fs::sync_folder)
+            })
+            .unwrap();
+        let published = folder.identity(name).unwrap().unwrap();
+        let temp = temp.unwrap();
+        assert_ne!(
+            temp.ino(),
+            std::fs::metadata(dir.join(name)).unwrap().ino(),
+            "the copy path"
+        );
+        assert_eq!(saved.identity, published);
+        // So the next save, which expects what create saved, goes ahead,
+        // and the history beside it is the one written with it.
+        let loaded = folder.load(name).unwrap();
+        assert_eq!(loaded.identity, saved.identity);
+        assert_eq!(loaded.history, Kept::Kept(History::new()));
+        rename(&mut p, &mut h, "b");
+        folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
+
+        must_fail(
+            "the temporary file's identity taken for the published file's",
+            Identity::of(&temp, &std::fs::read(dir.join(name)).unwrap()) == published,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// F036: a symbolic link at the history file's name is
@@ -1061,8 +1121,55 @@ mod tests {
     /// target is left as it was. Control: a regular history file there is read
     /// and replaced.
     #[test]
-    #[ignore = "M3.9 unit (a)"]
     fn a_link_at_the_history_name_is_refused() {
-        todo!()
+        use spherecut_testkit::control::must_fail;
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        let saved = folder.create(name, &p, &h).unwrap();
+        let history = dir.join(".a.spherecut.history");
+        let target = dir.join("kept.txt");
+        std::fs::write(&target, b"someone's file").unwrap();
+        std::fs::remove_file(&history).unwrap();
+        std::os::unix::fs::symlink("kept.txt", &history).unwrap();
+        let is_link = |e: &FolderError| matches!(e, FolderError::Link { path } if path.ends_with(".a.spherecut.history"));
+
+        // Read: no history, saying why.
+        let loaded = folder.load(name).unwrap();
+        let Kept::Unreadable(why) = &loaded.history else {
+            panic!("{:?}", loaded.history)
+        };
+        assert!(why.contains("symbolic link"), "{why}");
+        // Saved: refused before anything is written.
+        rename(&mut p, &mut h, "b");
+        let e = folder
+            .save(name, &p, &h, Some(&saved.identity))
+            .unwrap_err();
+        assert!(is_link(&e), "{e}");
+        assert_eq!(folder.identity(name).unwrap(), Some(saved.identity));
+        // A new project beside such a link is refused too, and isn't made.
+        std::fs::rename(dir.join(name), dir.join("moved.spherecut")).unwrap();
+        let e = folder.create(name, &p, &h).unwrap_err();
+        assert!(is_link(&e), "{e}");
+        assert!(!dir.join(name).exists());
+        // The link and its target are as they were.
+        assert!(std::fs::symlink_metadata(&history).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&target).unwrap(), b"someone's file");
+
+        // A regular history file there is read, and replaced by a save.
+        std::fs::rename(dir.join("moved.spherecut"), dir.join(name)).unwrap();
+        std::fs::remove_file(&history).unwrap();
+        let (p0, h0) = (project(), History::new());
+        let again = folder.save(name, &p0, &h0, None).unwrap();
+        assert_eq!(folder.load(name).unwrap().history, Kept::Kept(h0));
+        let saved = folder.save(name, &p, &h, Some(&again.identity));
+        must_fail(
+            "a regular history file refused as a link",
+            saved.as_ref().is_err_and(is_link),
+        );
+        saved.unwrap();
+        assert_eq!(folder.load(name).unwrap().history, Kept::Kept(h));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -152,6 +152,22 @@ impl CalibSnapshot {
     }
 }
 
+/// Rules of [`Project::validate`] a control turns off, to show that the
+/// test it controls fails without them (M3 plan 4.1 rule 1). Each is off
+/// (`false`) by default, which is `validate` as built.
+///
+/// [`Project::validate`]: super::Project::validate
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ValidateTest {
+    /// No sum rule: ξ plus a lens's `xi_delta` may reach −1, and
+    /// [`Rig::build`] is left to refuse it.
+    pub no_xi_sum: bool,
+    /// The coverage rule takes the lenses' axes as opposite, whatever
+    /// angle the geometry and the tune put between them.
+    pub axes_opposite: bool,
+}
+
 /// Each generation's working calibration string as the trailer stores it
 /// (record 1's fields 5, 53, 54 and 111), or none.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -235,10 +251,42 @@ impl Gains {
     /// Each block's red, green and blue gains at clip time `t`, by block:
     /// Off gives ones, Fixed its `rgb`, and Auto its track at `t`, linear
     /// between samples, the ratio L split as exp(+L/2) for block 0 and
-    /// exp(−L/2) for block 1 so both meet at √(L0·L1) (plan 16).
-    #[expect(unused_variables, reason = "M3.9 unit (a) writes the body")]
+    /// exp(−L/2) for block 1 so both meet at √(L0·L1) (plan 16). Auto's
+    /// track is held at its ends, a time before 0 too, and a track with
+    /// no samples, which [`Project::validate`] refuses, gives ones.
+    ///
+    /// [`Project::validate`]: super::Project::validate
     pub fn at(&self, t: Time) -> [[f64; 3]; 2] {
-        todo!("M3.9 unit (a)")
+        match self {
+            Gains::Off {} => [[1.0; 3]; 2],
+            Gains::Fixed { rgb } => *rgb,
+            Gains::Auto {
+                rate_hz, log_ratio, ..
+            } => {
+                let Some(last) = log_ratio.len().checked_sub(1) else {
+                    return [[1.0; 3]; 2];
+                };
+                // Where `t` falls among the samples; a rate validate
+                // refuses (NaN) reads the first.
+                let x = t.to_secs_f64() * rate_hz;
+                let x = if x.is_nan() {
+                    0.0
+                } else {
+                    x.clamp(0.0, last as f64)
+                };
+                let i = (x.floor() as usize).min(last);
+                let f = x - i as f64;
+                let (a, b) = (log_ratio[i], log_ratio[(i + 1).min(last)]);
+                let mut g = [[1.0; 3]; 2];
+                for c in 0..3 {
+                    let (a, b) = (f64::from(a[c]), f64::from(b[c]));
+                    let l = a + (b - a) * f;
+                    g[0][c] = (l / 2.0).exp();
+                    g[1][c] = (-l / 2.0).exp();
+                }
+                g
+            }
+        }
     }
 }
 

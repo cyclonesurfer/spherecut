@@ -594,9 +594,11 @@ For development and the tests:
   (Development).
 - `SPHERECUT_UPDATE_GOLDENS=1` blesses the golden images (DECISIONS
   D32). `SPHERECUT_BLESS_PROJECT=1` rewrites the checked-in project
-  file `crates/core/tests/data/schema1.spherecut`, whose test fails
-  when the format changes: a new schema needs a migration, not a new
-  copy of that file (DECISIONS D47).
+  file `crates/core/tests/data/schema2.spherecut`, the current
+  schema's fixture, whose test fails when a save no longer writes it.
+  It never rewrites `schema1.spherecut`, which loads unchanged forever:
+  a new schema gets a migration and a fixture of its own (DECISIONS
+  D47).
 - `SPHERECUT_TIER2`, `SPHERECUT_SAMPLES`, `SPHERECUT_PERF_MEDIA` and
   `SPHERECUT_GUI_OUT`: what `cargo xtask hw-test` hands the Tier 2
   tests (run them, the samples folder, the perf clips' folder, where
