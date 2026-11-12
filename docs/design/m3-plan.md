@@ -739,9 +739,15 @@ are at its own date.*
    are not rewritten. The project review of 2026-11-11 (F001 to F143), the slice's dated notes in
    DECISIONS (on D1, D15, D25, D31, D34, D37, D47, D52 and D63 among others) and the new D78 hold
    the detail; where one of them says otherwise, this item holds. Results of odin's run at 0b3ab9b
-   are [odin at 0b3ab9b: pending]; compat at 0b3ab9b passed (Tier 1 on 8.1.3; on 9.0.2, run by
-   hand, every test of the FFmpeg read-back below passed, and its 21 failures are PROGRESS's
-   Known issues on FFmpeg 9.0.2).
+   are in: the full hw-test (`hw-reports/odin-0b3ab9b4d0.md`) and two GUI reruns
+   (`hw-reports/odin-0b3ab9b-behind-2.md`, `hw-reports/odin-0b3ab9b-125.md`). Tier 1 passed, and so
+   did Tier 2 but for one skip (no clip 12) and `gui_decode_behind`'s run 1. That run, VA-API copied
+   on the noisy 5.7K 10-bit clip, presented 74 to 78 % of the UI frames at a UI p99 of
+   92.7 to 122.3 ms in all three samples. Run 0 passed and the control failed as it must. A short
+   slice traces the stall on odin and fixes it before huginn's run, beside M3.5 (PROGRESS's Known
+   issues; the working default until Pat answers). Compat at 0b3ab9b passed (Tier 1 on 8.1.3; on
+   9.0.2, run by hand, every test of the FFmpeg read-back below passed, and its 21 failures are
+   PROGRESS's Known issues on FFmpeg 9.0.2).
    - **Path A's mismatch (4.3's K2; amendment 6's path A bullet).** `zero_copy_matches_copy_path`
      has run 22 times on odin up to 04d15be, not about a dozen, and mismatched twice, not once: at
      0d491ae (`hw-reports/odin-0d491ae.md:141-142`) and 0663e05
@@ -749,12 +755,14 @@ are at its own date.*
      `VID_20261022_165613_00_007.insv` frame 26, view 0, at the first render after the import, in 2
      of its 3 full hw-test runs; its 19 runs alone or in short `--only` lists all passed. Both came
      before D77, whose slot fault stays the probable cause. Since a run alone has never failed,
-     amendment 6's 30 runs alone (odin's soak at 0b3ab9b: [odin at 0b3ab9b: pending]) can't clear
-     path A by themselves: the full-suite runs count beside them, and any mismatch goes into perf.md
-     and a dated D77 note with the stage the test now names (the take, the slot, against D77's
-     signature, or the render). K2's path A rule stays as 4.3 writes it, on huginn; whether path A's
-     default there needs more (huginn's full hw-test clean, several runs, no path A mismatch on odin
-     since D77) is Pat's call.
+     amendment 6's 30 runs alone (odin's soak at 0b3ab9b: 30 of 30 passed,
+     `hw-reports/odin-0b3ab9b-zc/`, and that run's full hw-test, the first full-suite run since D77,
+     passed it too, `hw-reports/odin-0b3ab9b4d0.md:133`) can't clear path A by themselves: the
+     full-suite runs count beside them, and any mismatch goes into perf.md and a dated D77 note with
+     the stage the test now names (the take, the slot, against D77's signature, or the render). K2's
+     path A rule stays as 4.3 writes it, on huginn; whether path A's default there needs more
+     (huginn's full hw-test clean, several runs, no path A mismatch on odin since D77) is Pat's
+     call.
    - **Path A's acquire on every device (amendment 6's path A bullet; m1-5b.md).** Every Vulkan
      device Spherecut opens but path B's shared one (`Gpu::headless`, `for_window` and the export's
      among them) is now made through `vkshare::open_plain` (wgpu's own checks, then wgpu-hal with
@@ -776,8 +784,10 @@ are at its own date.*
      first-order ambiX and the identity channel map (D52's note). M3.11's pair exports go through
      the same checks. They pass on FFmpeg 6.1 in the cloud's check; Tier 1 on 8.1.3 (compat) and on
      9.0.2 (by hand) passed them at 0b3ab9b, and odin's VA-API exports (`export_360_8k_vaapi`, which
-     now also records its frames a second and bitrate) [odin at 0b3ab9b: pending]. Whether
-     `ffmpeg_log` should only warn is Pat's question.
+     now also records its frames a second and bitrate) passed them on FFmpeg 8.1.3 at 0b3ab9b, the
+     8K export at 10.16 fps and 35.30 Mb/s through av1_vaapi
+     (`hw-reports/odin-0b3ab9b4d0.md:104-105` and `:252-253`). Whether `ffmpeg_log` should only warn
+     is Pat's question.
    - **The binding's tilt (3.2's U2, 3.4's binding row, 8.2; F024).** 3.2 and 3.4 bound the reversed
      binding's tilt at 2.3° and 8.2 at 2.4°, "inside the ±3° search"; amendment 5 measured a1/b1 of
      3.25° on Pat's V6 and about 3.7° in Tier 1's rig, with 28 of 72 bins past the search. M3.6

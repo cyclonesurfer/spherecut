@@ -10,7 +10,7 @@ reference, at the end.
 
 | Target | Measured by |
 |---|---|
-| The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (odin pending); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
+| The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (on odin at 0b3ab9b, in three samples, run 0 passed and the control failed as it must, and run 1 failed each time, presenting 74 to 78% of the UI frames at a UI p99 of 92.7 to 122.3 ms: [`odin-0b3ab9b4d0.md`](../hw-reports/odin-0b3ab9b4d0.md):1752-1754, [`odin-0b3ab9b-behind-2.md`](../hw-reports/odin-0b3ab9b-behind-2.md):232-234 and [`odin-0b3ab9b-125.md`](../hw-reports/odin-0b3ab9b-125.md):232-234, and PROGRESS's Known issues); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
 | 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `bench_playback_realtime_5k7_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
 | 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw`'s `Vulkan (Auto, zero copy)` rows (the app's path on odin); its copy rows and `bench_playback_realtime_8k_8bit` (copy path only) are recorded; and the decode rows on 8K samples and their LRV proxies (`bench_samples_realtime_decode`) |
 | A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
@@ -1204,11 +1204,13 @@ twin:
 | [0663e05 at 125 %](../hw-reports/odin-0663e05-125.md):229 | egui zoom 1 | 1.25 | 100.0 % | 0 | 16.7 / 17.0 | 0.9 / 2.1 | 0.4 |
 
 D52's 4K30 figures (DECISIONS.md) are 6993987's above, rounded, and its
-AV1 parity 6ed8172's. Its "8K 360 export through av1_vaapi ran at 10.0
-fps, 35.3 Mb/s" is in no report: `export_360_8k_vaapi` printed it to
-stderr, which the test harness drops when a test passes. The test now
-records both as `360 8k export <encoder>` rows, so odin's next report
-carries them.
+AV1 parity 6ed8172's. Its "8K 360 export through av1_vaapi ran at
+10.0 fps, 35.3 Mb/s" is in no report: `export_360_8k_vaapi` printed it
+to stderr, which the test harness drops when a test passes. The test
+now records both as `360 8k export <encoder>` rows, and odin's report at
+0b3ab9b (PR #35) carries them: 10.16 fps and 35.30 Mb/s through
+av1_vaapi
+([`odin-0b3ab9b4d0.md`](../hw-reports/odin-0b3ab9b4d0.md):252-253).
 
 Ninth run, M3.1's pair decode: at 0444568 (branch `m3/decode`, over
 Remote Control), 2026-11-01 (PR #27). Its log,

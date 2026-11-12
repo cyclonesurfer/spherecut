@@ -7227,6 +7227,17 @@ tests run, so a build of the binary alone would lack the flags and the
 test would fail for that rather than for the UI; a hidden flag in
 every build is plainer, and costs nothing unused.
 
+*Noted 2026-11-12 (odin at 0b3ab9b, PR #35):* `gui_decode_behind`'s
+run 1 failed its UI gates in all three samples, with decode behind
+(19 to 21 % of the frames shown). It presented 74 to 78 % of the UI
+frames, at a UI p99 of 92.7 to 122.3 ms, while the UI's own work was
+1.4 to 2.1 ms at p95 (`hw-reports/odin-0b3ab9b4d0.md:1753` and
+`:1770`, `hw-reports/odin-0b3ab9b-behind-2.md:233` and `:250`,
+`hw-reports/odin-0b3ab9b-125.md:233` and `:250`). Run 0 passed, and the
+control failed as it must. A short slice traces the stall on odin and
+fixes it before huginn's run, beside M3.5. That is the working default
+until Pat answers the card of 2026-11-12 (PROGRESS's Known issues).
+
 ## D41. The submit gate
 
 *2026-10-30, M1 slice 9, from odin's GUI runs with zero copy the
@@ -8693,8 +8704,10 @@ What, as `crates/export` does it:
   one, still 7 dB over PLAN's 40 dB, so it stands (below). The 8K 360
   export through av1_vaapi ran at 10.0 fps, 35.3 Mb/s (decode 5.7 s of
   8.0): seen on stderr at 6993987, not in a report, since libtest drops
-  a passing test's output. From odin's next run the test records both
-  (`bench::record`, "360 8k export <encoder>"), so the report has them.
+  a passing test's output. Since the review-fix slice the test records
+  both (`bench::record`, "360 8k export <encoder>"), and odin's report
+  at 0b3ab9b has them: 10.16 fps and 35.30 Mb/s
+  (`hw-reports/odin-0b3ab9b4d0.md:252-253`).
 
 Not yet, and where it goes:
 

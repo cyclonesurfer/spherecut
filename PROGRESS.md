@@ -10,7 +10,7 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because huginn's Mesa is Fedora's build, without RPM Fusion's `mesa-vulkan-drivers-freeworld`, which leaves H.264 and HEVC out of Vulkan Video. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S (`hw-run-8.md`, sent 2026-11-01), Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12 at 5.7K30, a Studio export of take 16 (`docs/SAMPLES.md`), for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). D25 decided 2026-10-30: path B on odin by default; VA-API's import stays opt-in until huginn's numbers. How it got here: below, "M1: how it got here" |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn (`hw-run-8.md`, sent 2026-11-01). Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). Next, M3.5. Waiting on Pat: huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). Next, M3.5, and beside it a short slice that traces and fixes that stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12). Waiting on Pat: that card, huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
 | M4–M9 | Not started |
 | Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,245 of its 12,288 bytes (the review-fix slice). How it got here: below, "Agent integration (track A): how it got here" |
 
@@ -2862,7 +2862,16 @@ hand.
   `the_smoke_flags_need_their_output_and_a_display` (contract.rs),
   `the_behind_gates_fail_what_they_say` (planted documents through the
   real gates) and `the_behind_section_shows_each_run_and_the_control`.
-  Its odin rows: [odin at 0b3ab9b: pending].
+  Its odin rows at 0b3ab9b come from three samples: the full hw-test, a
+  rerun of `gui_decode_behind` and `gui_smoke`, and one at GNOME's
+  125 % (odin-0b3ab9b4d0.md:1752-1770, odin-0b3ab9b-behind-2.md:232-250,
+  odin-0b3ab9b-125.md:232-250). Run 0 passed each time: 100 %
+  presented, UI p99 17.0 to 17.3 ms, 180 of 270 frames shown. Run 1
+  failed each time. It was behind, with 106, 112 and 117 frames shown of
+  about 570 (19 to 21 %), but it presented only 78, 75 and 74 % of the
+  UI frames, at a UI p99 of 92.7, 122.3 and 111.6 ms. Its own work was
+  1.4 to 2.1 ms at p95. The control failed as it must (33 %, UI p99
+  50.6 to 50.9 ms). Known issues has the per-pass pattern.
 - **Major 7, exports checked only by their writer (F123).** FFmpeg's
   demuxer reads every export. Tests: mp4.rs's 360 and flat exports, with
   doctored copies of a real export (a box renamed `free` or a field
@@ -2875,7 +2884,11 @@ hand.
   `a_spherical_complaint_is_listed_past_the_log_limit`,
   `open_header_keeps_the_confinement`. `export_360_8k_vaapi` asserts
   `ffmpeg_sphere` and `ffmpeg_log` among its checks
-  (tier2_export.rs:399); its odin row: [odin at 0b3ab9b: pending].
+  (tier2_export.rs:399); its odin row: it passed at 0b3ab9b
+  (odin-0b3ab9b4d0.md:104), so FFmpeg 8.1.3's demuxer read the 8K
+  export as written. The export ran at 10.16 fps and 35.30 Mb/s through
+  av1_vaapi (:252-253), and `export_vaapi_matches_software` passed too
+  (:105).
 - **Major 8, doctor on a discrete GPU (F125).** Tests in doctor.rs:
   `vulkan_video_failures_are_warnings_on_a_discrete_gpu_and_notes_on_an_integrated_one`,
   `a_driver_that_decodes_wrongly_is_told_apart_from_one_that_refuses`,
@@ -2885,8 +2898,10 @@ hand.
   holds only where Vulkan Video is asked for by name; that half is
   handed on (F125's wrong-output case, M3.21).
 - **Major 9, no record of M2's hardware numbers (F091).** perf.md's M2
-  block and targets table, the 8K export's numbers recorded from odin's
-  next run. Tests: `every_benchmark_has_its_paragraph_in_perf_md`,
+  block and targets table, the 8K export's numbers recorded since odin's
+  run at 0b3ab9b (10.16 fps and 35.30 Mb/s,
+  odin-0b3ab9b4d0.md:252-253). Tests:
+  `every_benchmark_has_its_paragraph_in_perf_md`,
   `perf_targets_name_tests_that_exist` (it failed on three rows at
   073715b: UI at refresh, export, cache) and
   `every_hw_report_link_resolves`.
@@ -2909,7 +2924,10 @@ hand.
   before D77. The review's "about 17" predates the last five. PLAN,
   perf.md and PROGRESS say so, with D77's DCC fault as the probable
   cause. Whether one passing run should make path A huginn's default is
-  Pat's (F112's gate). odin's 30-run soak: [odin at 0b3ab9b: pending].
+  Pat's (F112's gate). odin's 30-run soak at 0b3ab9b: 30 of 30 passed,
+  32 to 33 s each (odin-0b3ab9b-zc/zc-01.md to zc-30.md), and the full
+  hw-test there, the first full-suite run since D77, passed it too
+  (odin-0b3ab9b4d0.md:133).
 - **The equality test's order and stage (F113, F114).**
   `compare_zero_copy` (tier2_playback.rs) now renders before downloading
   and names the stage that parts; Tier 1's
@@ -3024,11 +3042,17 @@ byte for byte against 073715b) and were applied with the merge.
   player's wgpu adapter (player.rs:715); on a machine with two GPUs they
   can differ.
 - `gui_decode_behind`'s constants (`MAX_SHOWN_BEHIND` 0.85,
-  `DECODE_FLOOR_MS` 50) stand until odin's first run; run 1 may be
-  inconclusive on huginn if VA-API keeps up there, and a floor on top of
-  VA-API there is unsettled. F086's slump is recorded, not gated, until
-  M3.11's vmstat deltas.
-- F113 and F114's Tier 2 halves have not run; they need odin.
+  `DECODE_FLOOR_MS` 50) stood for odin's first run at 0b3ab9b, which
+  judged every run: run 0 showed 67 % of its frames and run 1 showed
+  19 to 21 %, both under 0.85. Run 1 failed there (Known issues). It
+  may be inconclusive on huginn if VA-API keeps up there, and a floor on
+  top of VA-API there is unsettled. F086's slump is recorded, not gated,
+  until M3.11's vmstat deltas.
+- F113 and F114's Tier 2 halves ran on odin at 0b3ab9b:
+  `zero_copy_matches_copy_path` and `shared_vulkan_matches_copy_path`
+  passed in the full hw-test (odin-0b3ab9b4d0.md:132-133), and the
+  first passed 30 more times alone (odin-0b3ab9b-zc/), so no mismatch
+  has named its stage yet.
 - The rustdoc gate puts `-D warnings` last, so `-A warnings` can't turn
   it off, but `-A rustdoc::broken_intra_doc_links -D warnings` and
   `--cap-lints allow` still pass (rustdoc 1.97.0); ARCHITECTURE and the
@@ -3085,12 +3109,17 @@ Pat's questions (new unless marked):
   or is the caveat enough?
 - Keyframe interpolation (D50, asked 2026-10-31): Level or Free as the
   default?
-- Only if odin's run 1 misses refresh: fix it now (D41's gate or the
-  belt), or keep it as a known issue? [odin at 0b3ab9b: pending]
-- Keep `MAX_SHOWN_BEHIND` 0.85 and `DECODE_FLOOR_MS` 50 until odin's
-  first run of `gui_decode_behind`?
+- odin's run 1 missed refresh at 0b3ab9b (Known issues, asked
+  2026-11-12): merge, then trace and fix it in a slice of its own
+  (recommended, and the working default until Pat answers), hold the
+  merge until it is fixed, or keep it as a known issue only?
+- Keep `MAX_SHOWN_BEHIND` 0.85 and `DECODE_FLOOR_MS` 50 now that odin's
+  first run of `gui_decode_behind` is in? (At 0b3ab9b run 0, under the
+  50 ms floor, showed 67 % of its frames, and run 1 showed 19 to 21 %.)
 - Should huginn's run 1 on VA-API also get the decode floor, so that it
-  is judged with decode behind rather than inconclusive?
+  is judged with decode behind rather than inconclusive? (On odin, run 1
+  was behind without one: 19 to 21 % shown, each download
+  152.0 to 154.9 ms at p50.)
 - Should F086's copy-path drops get a gate now, or stay recorded until
   M3.11's vmstat deltas?
 - Should doctor say more about a forced Vulkan decoder on a driver that
@@ -3266,10 +3295,24 @@ reordered map, it reads the layout as "4 channels" and logs "Unsupported
 SA3D box version 1" or "Ambisonic channel reordering is not supported";
 with `svhd` at version 1 it logs "Unknown spherical version 1". Every
 new Tier 1 media test passed on FFmpeg 6.1.1 in the cloud check (the
-Tier 2 export assertion waits on odin); on 8.1.3 in compat's Tier 1 and
-on 9.0.2 in a Tier 1 run by hand (below). odin (full hw-test with Tier
-1, a second `gui_decode_behind` sample, a 30-run zero-copy soak):
-[odin at 0b3ab9b: pending].
+Tier 2 export assertion passed on odin, odin-0b3ab9b4d0.md:104); on
+8.1.3 in compat's Tier 1 and on 9.0.2 in a Tier 1 run by hand (below).
+odin (full hw-test with Tier 1, a second `gui_decode_behind` sample, a
+30-run zero-copy soak) ran at 0b3ab9b on Mesa 26.2.5 and FFmpeg 8.1.3
+(PR #35). The screen never locked. The box was 92 to 99 % idle at each
+step's start and end, with no audio stream open
+(odin-0b3ab9b-run/times.txt). Firefox was reopened about 5 minutes
+into the full hw-test and played nothing. The full hw-test took
+9151 s. Tier 1 passed 1617 tests and failed none in 120 binaries
+(549 s). Tier 2 passed 56, failed 1 (`gui_decode_behind`'s run 1) and
+skipped 1 (the stitched-samples bench, no clip 12). doctor found no
+problems (odin-0b3ab9b4d0.md:27-29, :1878). The second sample took
+394 s, and a third at GNOME's 125 % took 412 s. Each failed run 1
+again, with `gui_smoke` 5 of 5; at 125 % `gui_proto` passed at 99.9 %
+(odin-0b3ab9b-behind-2.md, odin-0b3ab9b-125.md). The soak passed
+30 of 30 (odin-0b3ab9b-zc/). Two partial runs, one during video
+playback and one under Firefox's load, aren't counted
+(odin-0b3ab9b-youtube/ and odin-0b3ab9b-ffbusy/, each with a README).
 
 Checks of `m3/review-fix` at 0b3ab9b: `cargo xtask check` passed
 (rustfmt, clippy and its controls, rustdoc and its 4 controls, the MSRV
@@ -3653,7 +3696,7 @@ D53's runs).
 | Every edit an `Edit`, through `Project::apply`, ids never reused, a revision, labelled steps with an origin; the property tests | D48; `crates/core/tests/project_props.rs` at 100,000 cases (undo gives back the original, save then load is equal, a refused edit changes nothing) over every edit kind |
 | Flat export: the aspects and sizes, the rate, H.264, HEVC and AV1 on VA-API with the software fallback, audio copied or encoded | D52; `crates/export/tests/parity.rs`, `audio.rs`, `export.rs`; `tier2_export.rs` on odin (`hw-reports/odin-6993987-m25.md`: every format doctor found against its software twin) |
 | Export in the background with progress and Cancel, the UI responsive | D55's export window and job, D56's pace: while the viewer plays the export stands aside, while a drag runs it keeps to a frame a UI pass; `reframe2.rs` (the export reaches the end with the UI drawing on, Cancel, Replace); gui_smoke on odin at 5b907e3 (PR #25: 100 % presented, none dropped, while 5.7K played and 1080p, 8K and 4K-with-blur exports waited) |
-| 360 export to 7680 × 3840 with st3d, sv3d and SA3D, our box writer, re-parsed | D52's last pass and its checks before the file appears; `crates/export/tests/mp4.rs`; A1's `check` passes odin's 8K export for `youtube_360`; since the review-fix slice, FFmpeg's own mov demuxer also reads every export before it appears (`ffmpeg_sphere`, `ffmpeg_ambix`, `ffmpeg_log`; F123), on FFmpeg 6.1.1 in the cloud check, on 8.1.3 in compat's Tier 1 and on 9.0.2 in a Tier 1 run by hand at 0b3ab9b; odin's 8K export under it [odin at 0b3ab9b: pending] |
+| 360 export to 7680 × 3840 with st3d, sv3d and SA3D, our box writer, re-parsed | D52's last pass and its checks before the file appears; `crates/export/tests/mp4.rs`; A1's `check` passes odin's 8K export for `youtube_360`; since the review-fix slice, FFmpeg's own mov demuxer also reads every export before it appears (`ffmpeg_sphere`, `ffmpeg_ambix`, `ffmpeg_log`; F123), on FFmpeg 6.1.1 in the cloud check, on 8.1.3 in compat's Tier 1 and on 9.0.2 in a Tier 1 run by hand at 0b3ab9b; odin's 8K export passed under it at 0b3ab9b on FFmpeg 8.1.3 (`hw-reports/odin-0b3ab9b4d0.md:104`; 10.16 fps, 35.30 Mb/s, :252-253) |
 | Parity tests against `spherecut frame`, flat and 360 | D52's floors (flat, 360, AV1 8 and 10-bit, the draft); `crates/cli/tests/render.rs`'s sample against `spherecut frame` |
 | `spherecut render`, its JSON lines, `--overwrite`, Ctrl+C | D51; `crates/cli/tests/render.rs` (start, progress and result lines; a file in the way; Ctrl+C and a full disk leave nothing) |
 | Motion blur, off by default, with a golden | D49; the `blur_pan` golden with its unblurred control (20.3 dB) |
@@ -4978,6 +5021,34 @@ Last reviewed 2026-11-12, in the review-fix slice. Each entry's date is the
 day its text last changed, or the review's for the entries it rewrote;
 each slice's merge sweeps the list.
 
+- `gui_decode_behind`'s run 1 fails on odin. That run is VA-API with its
+  frames copied (`SPHERECUT_ZERO_COPY=0`) on a discrete GPU (the
+  RX 7600), on the noisy 5.7K 10-bit clip, with decode behind as the run
+  means it to be. In all three samples at 0b3ab9b it showed 19 to 21 %
+  of the frames, so it was judged. It presented 78, 75 and 74 % of the
+  UI frames (the gate is 90 %), at a UI p99 of 92.7, 122.3 and 111.6 ms
+  (the gate is 25.0 ms at 60 Hz). Each VA-API download took
+  152.0 to 154.9 ms at p50 (odin-0b3ab9b4d0.md:1753 and :1770-1772,
+  odin-0b3ab9b-behind-2.md:233 and :250-252, odin-0b3ab9b-125.md:233 and
+  :250-252). The late passes of the second and third samples
+  (`result.late` in odin-0b3ab9b-run/behind2-gui/gui-behind-1.json and
+  in 125-gui/; it keeps the first 64, to 11.6 s and 11.3 s of the 20 s)
+  show a gap of about 45 to 65 ms between UI passes about every 131 ms.
+  In some seconds (6 of the 10 from 2 to 11 s in the second sample, 5 in
+  the third), just after the second mark, the gap is 112 to 125 ms, with
+  one of 81 to 91 ms after it. In both, the UI's own work stays under
+  4 ms in every late pass (1.4 to 2.1 ms at p95 in all three samples).
+  No call marked as blocking ran on the UI thread:
+  `blocked_on_ui_thread` is 0 on run 1, against the control's 200.
+  Run 0, the default path (Vulkan Video, zero copy) with decode held to
+  20 fps, passed every time, at 100 % and a UI p99 of 17.0 to 17.3 ms.
+  VA-API copied is huginn's default path, which has never run in a
+  window there (Next, item 1), so huginn's run may show the same stall.
+  A short slice traces it on odin and fixes it before huginn's run,
+  beside M3.5. That is the working default until Pat answers the card of
+  2026-11-12 (merge, then fix in its own slice; hold the merge; or keep
+  it as a known issue only).
+  (as of 2026-11-12)
 - Vulkan Video's copy path (where the device can't be shared, or with
   `SPHERECUT_ZERO_COPY=0`) drops frames on odin in some runs and not in
   others. Its download buffers are huge-page mappings, and with THP
@@ -4996,14 +5067,16 @@ each slice's merge sweeps the list.
   thread, would hide the drops if compaction makes them; the attribution
   waits on vmstat deltas (M3.11). (as of 2026-11-12)
 - VA-API zero copy (path A, opt-in) rendered an X5 frame's import other
-  than its download in `zero_copy_matches_copy_path` on odin twice in 22
-  runs, at 0d491ae and 0663e05: both times on frame 26, view 0 of
-  `VID_20261022_165613_00_007.insv`, at the first render after the
-  import, in a run of the whole Tier 2 suite (2 of the 3 such runs; none
-  of the 19 runs alone or in short `--only` lists failed). D77's fault in
-  a slot's 8-bit planes is the probable cause; full-suite runs after D77
-  would show whether its workaround ends it. The test's message says
-  which side differs. (as of 2026-11-12)
+  than its download in `zero_copy_matches_copy_path` on odin twice in
+  22 runs up to 04d15be, at 0d491ae and 0663e05: both times on frame 26,
+  view 0 of `VID_20261022_165613_00_007.insv`, at the first render after
+  the import, in a run of the whole Tier 2 suite (2 of the 3 such runs;
+  none of the 19 runs alone or in short `--only` lists failed). D77's
+  fault in a slot's 8-bit planes is the probable cause; full-suite runs
+  after D77 would show whether its workaround ends it. The first, at
+  0b3ab9b, passed (odin-0b3ab9b4d0.md:133), and so did 30 of 30 runs
+  alone there (odin-0b3ab9b-zc/). The test's message says which side
+  differs. (as of 2026-11-12)
 
 - At 125 % on a 1920×1080 GNOME monitor the window opens at 75 % of its
   1280×800-point default, 960×600 points (odin, 2026-10-30). Probably
@@ -5470,18 +5543,22 @@ each slice's merge sweeps the list.
    whether VA-API's import becomes the default there (D25). On huginn
    the default path is VA-API copied, which has never run in a window,
    and `gui_decode_behind`'s run 1 may be inconclusive there if VA-API
-   keeps up.
+   keeps up. On odin that run fails (Known issues); under the working
+   default (item 2), huginn's run follows the slice that fixes it.
 2. **M3**: M3.0 to M3.4, M3.8 and the review-fix slice are in. Next M3.5
    (the file), M3.9 (schema 2), M3.7 (GPU stitch) and M3.6 (the fit),
    per `docs/design/m3-plan.md` 22.2, with what amendment 7 hands each
-   of them. Plan amendments 5 to 7 record what M3.4, M3.8 and the
-   review-fix slice settled for the slices after them. The agent briefs
-   for M3.5, M3.9, M3.7 and M3.6 are drafted and reviewed. Pat's takes
-   14 to 17 and the plan's questions 3 and 4 are open, and nothing waits
-   on them. Filing D77's drafted Mesa report is Pat's call. Pat answered
-   whether to cap the lock's all-trailing catch-up on 2026-11-11: no cap
-   for now (amendments 6 and 7; odin showed no slide), so M3.10 no
-   longer waits on it.
+   of them. Beside M3.5, a short slice traces `gui_decode_behind`'s
+   run 1 stall on odin and fixes it before huginn's run (Known issues;
+   the working default until Pat answers the card of 2026-11-12). Plan
+   amendments 5 to 7 record what M3.4, M3.8 and the review-fix slice
+   settled for the slices after them. The agent briefs for M3.5, M3.9,
+   M3.7 and M3.6 are drafted and reviewed. Pat's takes 14 to 17 and the
+   plan's questions 3 and 4 are open, and nothing waits on them. Filing
+   D77's drafted Mesa report is Pat's call. Pat answered whether to cap
+   the lock's all-trailing catch-up on 2026-11-11: no cap for now
+   (amendments 6 and 7; odin showed no slide), so M3.10 no longer waits
+   on it.
 3. **A1's open box** (`PLAN.md:516`): Pat's runs of the recipes with two
    agents, one using each kind of session where possible (Claude Code,
    and Codex or Gemini CLI), A2's fourth recipe among them, recorded here

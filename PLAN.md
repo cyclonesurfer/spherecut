@@ -161,15 +161,18 @@ new features to agents, which adds a little work to each.
       use (D25). Decided for Vulkan Video on 2026-10-30 (Pat, from odin's
       window): it decodes on the renderer's own device by default where that
       can be shared; VA-API's import stays opt-in until huginn's numbers.
-      Pending hardware: on odin the test has run 22 times and mismatched
-      twice, at 0d491ae (`hw-reports/odin-0d491ae.md:141-142`) and 0663e05
-      (`hw-reports/odin-0663e057fe.md:160-161`: 19 of 2,764,800 values, by
-      0.0863 at most), both on `VID_20261022_165613_00_007.insv` frame 26,
-      view 0, at the first render after the import, and both in full-suite
-      runs; the second time, the same import rendered again as the copy. The
-      fault in a slot's 8-bit planes that D77 records is the probable cause,
-      and the run at 04d15be, after D77's workaround, passed. huginn's run
-      is still to come.
+      Pending hardware: on odin the test ran 22 times up to 04d15be and
+      mismatched twice, at 0d491ae (`hw-reports/odin-0d491ae.md:141-142`)
+      and 0663e05 (`hw-reports/odin-0663e057fe.md:160-161`:
+      19 of 2,764,800 values, by 0.0863 at most), both on
+      `VID_20261022_165613_00_007.insv` frame 26, view 0, at the first
+      render after the import, and both in full-suite runs; the second
+      time, the same import rendered again as the copy. The fault in a
+      slot's 8-bit planes that D77 records is the probable cause, and the
+      run at 04d15be, after D77's workaround, passed. At 0b3ab9b it passed
+      in the first full-suite run since D77
+      (`hw-reports/odin-0b3ab9b4d0.md:133`) and 30 of 30 times alone
+      (`hw-reports/odin-0b3ab9b-zc/`). huginn's run is still to come.
 
 ## M2 Clip reframer
 
