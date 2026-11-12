@@ -3281,6 +3281,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "spherecut-boundary",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-media",
  "spherecut-sphere",
