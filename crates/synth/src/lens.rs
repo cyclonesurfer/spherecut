@@ -2015,13 +2015,14 @@ pub fn pats_v6_scaled(xi: f64) -> TruthModel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashSet;
     use std::fmt::Debug;
     use std::hash::Hash;
 
     use spherecut_testkit::bench;
     use spherecut_testkit::control::{at_least, at_most, must_fail};
+    use spherecut_testkit::pats::{self, tokens};
 
     use super::*;
     use crate::AXIS_MARKERS;
@@ -2179,91 +2180,70 @@ mod tests {
         }
     }
 
+    /// Block `b`'s numbers in Pat's V3 or V6 string `s`
+    /// (`testkit::pats`), which follow the lens count: ξ, fx, fy, cx, cy,
+    /// yaw, pitch, roll, tx, ty, tz, the terms (5 in V3, 13 in V6), then
+    /// w, h and the lens type (insta360.md §4.1).
+    pub(crate) fn pats_block(s: &str, b: usize) -> Vec<f64> {
+        let t = tokens(s);
+        let per = (t.len() - 2) / 2;
+        t[1 + b * per..1 + (b + 1) * per].to_vec()
+    }
+
+    /// Pat's V3 or V6 string `s` (`testkit::pats`) as a truth: each
+    /// number its token as stored, and the window and body code the X5's,
+    /// which the string doesn't hold.
+    pub(crate) fn pats_truth(s: &str) -> CalibTruth {
+        let [b0, b1] = [pats_block(s, 0), pats_block(s, 1)];
+        let block = |t: &[f64]| BlockTruth {
+            xi: t[0],
+            fx: t[1],
+            fy: t[2],
+            cx: t[3],
+            cy: t[4],
+            ypr_deg: [t[5], t[6], t[7]],
+            t_m: [t[8], t[9], t[10]],
+        };
+        let n = b0.len();
+        let dist = match n - 14 {
+            5 => StoredDist::V3 {
+                k: [[b0[11], b0[12], b0[13]], [b1[11], b1[12], b1[13]]],
+                p: [[b0[14], b0[15]], [b1[14], b1[15]]],
+            },
+            13 => StoredDist::V6 {
+                d: [
+                    std::array::from_fn(|i| b0[11 + i]),
+                    std::array::from_fn(|i| b1[11 + i]),
+                ],
+            },
+            terms => panic!("{terms} terms a block in {s}"),
+        };
+        CalibTruth {
+            blocks: [block(&b0), block(&b1)],
+            dist,
+            canvas: [b0[n - 3] as u32, b0[n - 2] as u32],
+            dst: 5312,
+            lens_type: b0[n - 1] as u32,
+            body: 4,
+        }
+    }
+
     #[test]
     fn stored_terms_name_their_generation_and_block() {
-        // Pat's V3 and V6 strings, the same in all 7 masters and 7 LRVs
-        // (insta360.md, "Pat's X5 samples", its calibration strings).
-        // Each number is its token as stored, less its trailing zeros:
-        // none is rounded.
-        let (k, p) = (
-            [
-                [0.18632051, 2.04984355, -3.24446917],
-                [0.18940836, 2.07073069, -3.24103332],
-            ],
-            [[-0.00143576, -0.00339240], [0.00013831, -0.00299873]],
-        );
-        let v3_terms: [&[f64]; 2] = [
-            &[
-                0.18632051,
-                2.04984355,
-                -3.24446917,
-                -0.00143576,
-                -0.00339240,
-            ],
-            &[0.18940836, 2.07073069, -3.24103332, 0.00013831, -0.00299873],
-        ];
-        let blocks = [
-            BlockTruth {
-                xi: 2.0,
-                fx: 4284.62,
-                fy: 4284.28,
-                cx: 2701.13,
-                cy: 2692.13,
-                ypr_deg: [-0.198, 0.211, 90.28],
-                t_m: [0.0; 3],
-            },
-            BlockTruth {
-                xi: 2.0,
-                fx: 4291.03,
-                fy: 4291.03,
-                cx: 8069.0,
-                cy: 2684.95,
-                ypr_deg: [0.239, 0.113, 89.107],
-                t_m: [-0.00446, 0.000017, -0.03192],
-            },
-        ];
-        let cal = CalibTruth {
-            blocks,
-            dist: StoredDist::V3 { k, p },
-            canvas: [10752, 5376],
-            dst: 5312,
-            lens_type: 113,
-            body: 4,
-        };
+        // Pat's V3 and V6 strings (testkit::pats), the same in all 7
+        // masters and 7 LRVs (insta360.md, "Pat's X5 samples"). Each
+        // block's terms are its tokens 11 to 15 in V3 and 11 to 23 in V6.
+        let cal = pats_truth(pats::V3);
+        let v3_terms =
+            [pats_block(pats::V3, 0), pats_block(pats::V3, 1)].map(|t| t[11..16].to_vec());
+        let v3_terms = [v3_terms[0].as_slice(), v3_terms[1].as_slice()];
         assert_eq!(cal.generation(), Generation::V3);
         assert_eq!(terms_differ(&cal.dist, v3_terms), Ok(()));
-        let d = [
-            [
-                0.28032997,
-                0.89045405,
-                2.04927588,
-                -8.05179787,
-                0.0,
-                0.00120200,
-                -0.00259487,
-                0.02324706,
-                0.00533920,
-                -0.01560208,
-                0.00019357,
-                -0.04580523,
-                0.00197187,
-            ],
-            [
-                0.27665332,
-                0.98522973,
-                1.83605266,
-                -7.99374485,
-                0.0,
-                0.00021056,
-                -0.00147626,
-                0.01940425,
-                0.00331838,
-                -0.01330665,
-                0.00074511,
-                -0.02859299,
-                0.00888746,
-            ],
-        ];
+        let StoredDist::V6 { d } = pats_truth(pats::V6).dist else {
+            panic!("Pat's V6 string read as V3");
+        };
+        let v6_terms =
+            [pats_block(pats::V6, 0), pats_block(pats::V6, 1)].map(|t| t[11..24].to_vec());
         // Only the terms are Pat's V6 string's: the blocks (xi, focal,
         // centre, angles and t) stay V3's, which is all this test needs.
         let v6 = CalibTruth {
@@ -2271,9 +2251,12 @@ mod tests {
             ..cal
         };
         assert_eq!(v6.generation(), Generation::V6);
-        assert_eq!(terms_differ(&v6.dist, [&d[0], &d[1]]), Ok(()));
+        assert_eq!(terms_differ(&v6.dist, [&v6_terms[0], &v6_terms[1]]), Ok(()));
         // Control: the blocks' terms swapped, so that each block would
         // read the other's.
+        let StoredDist::V3 { k, p } = cal.dist else {
+            panic!("Pat's V3 string read as V6");
+        };
         let swapped = StoredDist::V3 {
             k: [k[1], k[0]],
             p: [p[1], p[0]],
@@ -2291,14 +2274,18 @@ mod tests {
     /// times 768/5376 (insta360.md, "Pat's X5 samples").
     fn pats_v3_at_768() -> TruthModel {
         let s = 768.0 / 5376.0;
+        let cal = pats_truth(pats::V3);
+        let (b, StoredDist::V3 { k, p }) = (cal.blocks[0], cal.dist) else {
+            unreachable!("Pat's V3 string is V3");
+        };
         TruthModel::Mei {
-            xi: 2.0,
-            fx: 4284.62 * s,
-            fy: 4284.28 * s,
-            cx: 2701.13 * s,
-            cy: 2692.13 * s,
-            k: [0.18632051, 2.04984355, -3.24446917],
-            p: [-0.00143576, -0.00339240],
+            xi: b.xi,
+            fx: b.fx * s,
+            fy: b.fy * s,
+            cx: b.cx * s,
+            cy: b.cy * s,
+            k: k[0],
+            p: p[0],
         }
     }
 
@@ -2697,35 +2684,10 @@ mod tests {
         must_fail("one focal", close(at, [111.598, 60.0 + 81.834]));
     }
 
-    /// Pat's V6 calibration (insta360.md, "Pat's X5 samples").
+    /// Pat's V6 calibration (`testkit::pats::V6`; insta360.md, "Pat's X5
+    /// samples").
     fn pats_v6() -> CalibTruth {
-        CalibTruth {
-            blocks: [
-                BlockTruth {
-                    xi: 2.0,
-                    fx: 4277.52,
-                    fy: 4277.27,
-                    cx: 2713.05,
-                    cy: 2689.21,
-                    ypr_deg: [-0.310, -0.271, 90.255],
-                    t_m: [0.0; 3],
-                },
-                BlockTruth {
-                    xi: 2.0,
-                    fx: 4284.40,
-                    fy: 4284.76,
-                    cx: 8075.73,
-                    cy: 2680.35,
-                    ypr_deg: [0.120, -0.173, 89.112],
-                    t_m: [0.000637, 0.000001, -0.031525],
-                },
-            ],
-            dist: StoredDist::V6 { d: PATS_V6_D },
-            canvas: [10752, 5376],
-            dst: 5312,
-            lens_type: 113,
-            body: 4,
-        }
+        pats_truth(pats::V6)
     }
 
     /// Pat's V6 calibration with both blocks' stored angles (0, 0, 90),
@@ -3182,11 +3144,11 @@ mod tests {
             },
             direct
         );
-        // Block 0's model, by its focal: 4277.52 · 832/5376 = 661.98.
+        // Block 0's model, by its focal: fx · 832/5376 (661.98).
         let TruthModel::MeiV6 { fx, .. } = swapped.lenses[1].model else {
             panic!("not V6");
         };
-        assert!((fx - 4277.52 * 832.0 / 5376.0).abs() < 1e-9);
+        assert!((fx - cal.blocks[0].fx * 832.0 / 5376.0).abs() < 1e-9);
         // Control: the tracks left as the blocks are.
         must_fail(
             "Reversed with the tracks unswapped",
@@ -4566,13 +4528,179 @@ mod tests {
         });
     }
 
-    /// Each copy of Pat's numbers in this crate (`PATS_V6_D`, `x5_like`'s
-    /// focal lengths and terms, and `insv.rs`'s tests' strings) is
+    /// A copy of one of Pat's numbers in this crate's code: its name, its
+    /// value, and the token of V3 or V6 it copies, scaled to
+    /// [`X5_LIKE_SIDE`]'s slot when `slot`.
+    struct PatsCopy {
+        name: String,
+        value: f64,
+        v6: bool,
+        token: usize,
+        slot: bool,
+    }
+
+    /// Every copy of Pat's numbers in this crate's code: `x5_like`'s ξ,
+    /// focal lengths and terms by block, and block 1's tx and ty (its
+    /// centres, angles and tz are the round trip's own, not Pat's);
+    /// `x5_like_v6`'s four focal lengths; all 26 of `PATS_V6_D`; and
+    /// `pats_v6_scaled(2.0)`'s focal lengths, centre and terms, where its
+    /// scale is 1.
+    fn pats_copies() -> Vec<PatsCopy> {
+        let copy = |name: String, value: f64, v6: bool, token: usize, slot: bool| PatsCopy {
+            name,
+            value,
+            v6,
+            token,
+            slot,
+        };
+        let mut copies = Vec::new();
+        let v3 = x5_like();
+        let StoredDist::V3 { k, p } = v3.dist else {
+            panic!("x5_like isn't V3");
+        };
+        for (b, block) in v3.blocks.iter().enumerate() {
+            let at = 1 + 19 * b;
+            let name = |field: &str| format!("x5_like block {b} {field}");
+            copies.push(copy(name("xi"), block.xi, false, at, false));
+            copies.push(copy(name("fx"), block.fx, false, at + 1, false));
+            copies.push(copy(name("fy"), block.fy, false, at + 2, false));
+            for (i, k) in k[b].iter().enumerate() {
+                copies.push(copy(
+                    name(&format!("k{}", i + 1)),
+                    *k,
+                    false,
+                    at + 11 + i,
+                    false,
+                ));
+            }
+            for (i, p) in p[b].iter().enumerate() {
+                copies.push(copy(
+                    name(&format!("p{}", i + 1)),
+                    *p,
+                    false,
+                    at + 14 + i,
+                    false,
+                ));
+            }
+        }
+        let t = v3.blocks[1].t_m;
+        copies.push(copy(
+            "x5_like block 1 tx".into(),
+            t[0],
+            false,
+            20 + 8,
+            false,
+        ));
+        copies.push(copy(
+            "x5_like block 1 ty".into(),
+            t[1],
+            false,
+            20 + 9,
+            false,
+        ));
+        for (b, block) in x5_like_v6().blocks.iter().enumerate() {
+            let at = 1 + 27 * b;
+            copies.push(copy(
+                format!("x5_like_v6 block {b} fx"),
+                block.fx,
+                true,
+                at + 1,
+                false,
+            ));
+            copies.push(copy(
+                format!("x5_like_v6 block {b} fy"),
+                block.fy,
+                true,
+                at + 2,
+                false,
+            ));
+        }
+        for (b, d) in PATS_V6_D.iter().enumerate() {
+            for (i, d) in d.iter().enumerate() {
+                copies.push(copy(
+                    format!("PATS_V6_D[{b}][{i}]"),
+                    *d,
+                    true,
+                    1 + 27 * b + 11 + i,
+                    false,
+                ));
+            }
+        }
+        let TruthModel::MeiV6 {
+            fx, fy, cx, cy, d, ..
+        } = pats_v6_scaled(2.0)
+        else {
+            panic!("pats_v6_scaled isn't MeiV6");
+        };
+        let scaled = |field: &str| format!("pats_v6_scaled(2.0) {field}");
+        copies.push(copy(scaled("fx"), fx, true, 2, true));
+        copies.push(copy(scaled("fy"), fy, true, 3, true));
+        copies.push(copy(scaled("cx"), cx, true, 4, true));
+        copies.push(copy(scaled("cy"), cy, true, 5, true));
+        for (i, d) in d.iter().enumerate() {
+            copies.push(copy(scaled(&format!("d{i}")), *d, true, 12 + i, false));
+        }
+        copies
+    }
+
+    /// The copies that aren't the tokens of `v3` and `v6` they copy, by
+    /// name: a copy scaled to the slot is held to its token by the
+    /// expression `pats_v6_scaled` computes it by, at a scale of 1.
+    fn pats_copies_differ(copies: &[PatsCopy], v3: &str, v6: &str) -> Result<(), Vec<String>> {
+        let (v3, v6) = (tokens(v3), tokens(v6));
+        let slot = f64::from(X5_LIKE_SIDE) / 5376.0;
+        let differ: Vec<String> = copies
+            .iter()
+            .filter(|c| {
+                let token = if c.v6 { v6[c.token] } else { v3[c.token] };
+                let want = if c.slot { token * slot * 1.0 } else { token };
+                c.value != want
+            })
+            .map(|c| c.name.clone())
+            .collect();
+        if differ.is_empty() {
+            Ok(())
+        } else {
+            Err(differ)
+        }
+    }
+
+    /// `s` with token `at`'s last digit one more, 9 going to 0.
+    fn one_digit_off(s: &str, at: usize) -> String {
+        let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
+        let token = &mut tokens[at];
+        let last = token.pop().and_then(|c| c.to_digit(10));
+        let Some(digit) = last else {
+            panic!("token {at} of {s} doesn't end in a digit");
+        };
+        token.push(char::from_digit((digit + 1) % 10, 10).unwrap_or('0'));
+        tokens.join("_")
+    }
+
+    /// Each copy of Pat's numbers in this crate's code is
     /// `testkit::pats`'s (the project review's F137): a drift test of the
-    /// copies.
+    /// copies, which the tests' own copies no longer need, since they read
+    /// `testkit::pats` (and `insv.rs`'s tests its strings). The control
+    /// changes each token a copy reads in its last digit, and the copy is
+    /// named among those that no longer match.
     #[test]
-    #[ignore = "M3.5 unit (a)"]
     fn pats_copies_match_testkit_pats() {
-        todo!()
+        let copies = pats_copies();
+        // 8 numbers a block of x5_like, its t_1's 2, 4 focals, 26 terms,
+        // and pats_v6_scaled's 4 and 13.
+        assert_eq!(copies.len(), 16 + 2 + 4 + 26 + 4 + 13);
+        assert_eq!(pats_copies_differ(&copies, pats::V3, pats::V6), Ok(()));
+        for c in &copies {
+            let (v3, v6) = if c.v6 {
+                (pats::V3.to_owned(), one_digit_off(pats::V6, c.token))
+            } else {
+                (one_digit_off(pats::V3, c.token), pats::V6.to_owned())
+            };
+            let names = must_fail(
+                &format!("{} against its token a digit off", c.name),
+                pats_copies_differ(&copies, &v3, &v6),
+            );
+            assert!(names.contains(&c.name), "{}: {names:?}", c.name);
+        }
     }
 }

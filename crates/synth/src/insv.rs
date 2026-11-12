@@ -966,117 +966,25 @@ impl InsvSpec {
 #[cfg(test)]
 mod tests {
     use spherecut_testkit::control::must_fail;
+    use spherecut_testkit::pats;
 
     use super::*;
+    use crate::lens::tests::pats_truth;
     use crate::lens::{
-        Angle, Axis, BlockTruth, QuarterTurn, Sign, StoredDist, TruthBinding, TruthCanvas,
-        TruthEuler, TruthTurn, TruthTz, TruthV6,
+        Angle, Axis, QuarterTurn, Sign, TruthBinding, TruthCanvas, TruthEuler, TruthTurn, TruthTz,
+        TruthV6,
     };
 
-    // Pat's V3 and V6 strings, byte-identical in all 14 of Pat's files
-    // (insta360.md, "Pat's X5 samples").
-    const PATS_V3: &str = "2_2.000000_4284.620_4284.280_2701.130_2692.130_-0.198_0.211_90.280_0.000000_0.000000_0.000000_0.18632051_2.04984355_-3.24446917_-0.00143576_-0.00339240_10752_5376_113_2.000000_4291.030_4291.030_8069.000_2684.950_0.239_0.113_89.107_-0.004460_0.000017_-0.031920_0.18940836_2.07073069_-3.24103332_0.00013831_-0.00299873_10752_5376_113_197632";
-    const PATS_V6: &str = "2_2.000000_4277.520_4277.270_2713.050_2689.210_-0.310_-0.271_90.255_0.000000_0.000000_0.000000_0.28032997_0.89045405_2.04927588_-8.05179787_0.00000000_0.00120200_-0.00259487_0.02324706_0.00533920_-0.01560208_0.00019357_-0.04580523_0.00197187_10752_5376_113_2.000000_4284.400_4284.760_8075.730_2680.350_0.120_-0.173_89.112_0.000637_0.000001_-0.031525_0.27665332_0.98522973_1.83605266_-7.99374485_0.00000000_0.00021056_-0.00147626_0.01940425_0.00331838_-0.01330665_0.00074511_-0.02859299_0.00888746_10752_5376_113_394240";
-
-    /// Pat's V3 calibration, number for number as the format notes lay it
-    /// out.
+    /// Pat's V3 calibration (`testkit::pats::V3`), number for number as
+    /// the format notes lay it out.
     fn pats_v3() -> CalibTruth {
-        let blocks = [
-            BlockTruth {
-                xi: 2.0,
-                fx: 4284.62,
-                fy: 4284.28,
-                cx: 2701.13,
-                cy: 2692.13,
-                ypr_deg: [-0.198, 0.211, 90.28],
-                t_m: [0.0; 3],
-            },
-            BlockTruth {
-                xi: 2.0,
-                fx: 4291.03,
-                fy: 4291.03,
-                cx: 8069.0,
-                cy: 2684.95,
-                ypr_deg: [0.239, 0.113, 89.107],
-                t_m: [-0.00446, 0.000017, -0.03192],
-            },
-        ];
-        let dist = StoredDist::V3 {
-            k: [
-                [0.18632051, 2.04984355, -3.24446917],
-                [0.18940836, 2.07073069, -3.24103332],
-            ],
-            p: [[-0.00143576, -0.0033924], [0.00013831, -0.00299873]],
-        };
-        CalibTruth {
-            blocks,
-            dist,
-            canvas: [10752, 5376],
-            dst: 5312,
-            lens_type: 113,
-            body: 4,
-        }
+        pats_truth(pats::V3)
     }
 
-    /// Pat's V6 calibration, a separate one from V3's.
+    /// Pat's V6 calibration (`testkit::pats::V6`), a separate one from
+    /// V3's.
     fn pats_v6() -> CalibTruth {
-        let blocks = [
-            BlockTruth {
-                xi: 2.0,
-                fx: 4277.52,
-                fy: 4277.27,
-                cx: 2713.05,
-                cy: 2689.21,
-                ypr_deg: [-0.31, -0.271, 90.255],
-                t_m: [0.0; 3],
-            },
-            BlockTruth {
-                xi: 2.0,
-                fx: 4284.4,
-                fy: 4284.76,
-                cx: 8075.73,
-                cy: 2680.35,
-                ypr_deg: [0.12, -0.173, 89.112],
-                t_m: [0.000637, 0.000001, -0.031525],
-            },
-        ];
-        let d = [
-            [
-                0.28032997,
-                0.89045405,
-                2.04927588,
-                -8.05179787,
-                0.0,
-                0.001202,
-                -0.00259487,
-                0.02324706,
-                0.0053392,
-                -0.01560208,
-                0.00019357,
-                -0.04580523,
-                0.00197187,
-            ],
-            [
-                0.27665332,
-                0.98522973,
-                1.83605266,
-                -7.99374485,
-                0.0,
-                0.00021056,
-                -0.00147626,
-                0.01940425,
-                0.00331838,
-                -0.01330665,
-                0.00074511,
-                -0.02859299,
-                0.00888746,
-            ],
-        ];
-        CalibTruth {
-            dist: StoredDist::V6 { d },
-            blocks,
-            ..pats_v3()
-        }
+        pats_truth(pats::V6)
     }
 
     /// One value of each convention; `print` reads none of them yet.
@@ -1107,15 +1015,16 @@ mod tests {
         }
     }
 
-    /// Printing Pat's V3 and V6 numbers ("Pat's X5 samples") gives
-    /// Pat's strings, token for token.
+    /// Printing Pat's V3 and V6 numbers ("Pat's X5 samples"), parsed
+    /// from `testkit::pats`, gives `testkit::pats`'s strings back, token
+    /// for token and byte for byte.
     #[test]
     fn print_gives_pats_strings_back() {
         let p = planted();
-        assert_eq!(same_tokens(&print(&pats_v3(), &p), PATS_V3), Ok(()));
-        assert_eq!(same_tokens(&print(&pats_v6(), &p), PATS_V6), Ok(()));
-        assert_eq!(print(&pats_v3(), &p), PATS_V3);
-        assert_eq!(print(&pats_v6(), &p), PATS_V6);
+        assert_eq!(same_tokens(&print(&pats_v3(), &p), pats::V3), Ok(()));
+        assert_eq!(same_tokens(&print(&pats_v6(), &p), pats::V6), Ok(()));
+        assert_eq!(print(&pats_v3(), &p), pats::V3);
+        assert_eq!(print(&pats_v6(), &p), pats::V6);
         // No token depends on what is planted yet: under every value of
         // the other conventions, the same strings.
         let others = TruthBinding::all().flat_map(|binding| {
@@ -1133,7 +1042,7 @@ mod tests {
         });
         for q in others {
             assert_eq!(
-                same_tokens(&print(&pats_v6(), &q), PATS_V6),
+                same_tokens(&print(&pats_v6(), &q), pats::V6),
                 Ok(()),
                 "{q:?}"
             );
@@ -1146,14 +1055,14 @@ mod tests {
         swapped.blocks.swap(0, 1);
         let at = must_fail(
             "Pat's V3 blocks swapped",
-            same_tokens(&print(&swapped, &p), PATS_V3),
+            same_tokens(&print(&swapped, &p), pats::V3),
         );
         assert_eq!(at, 2);
         let mut off = pats_v6();
         off.blocks[1].t_m[2] -= 0.000001;
         let at = must_fail(
             "block 1's tz a unit off",
-            same_tokens(&print(&off, &p), PATS_V6),
+            same_tokens(&print(&off, &p), pats::V6),
         );
         assert_eq!(at, 38);
     }
@@ -1398,7 +1307,7 @@ mod tests {
                 InsvFault::WrongTokenCount | InsvFault::NoCalibration => {
                     let less = match fault {
                         InsvFault::WrongTokenCount => 4 * 7,
-                        _ => 2 * (2 + 2 + PATS_V3.len()) + 2 * (2 + 2 + PATS_V6.len()),
+                        _ => 2 * (2 + 2 + pats::V3.len()) + 2 * (2 + 2 + pats::V6.len()),
                     };
                     assert_eq!(
                         l.slots[0].size as usize,
@@ -1737,7 +1646,7 @@ mod tests {
         );
         assert_eq!(
             text(&planted_one, 111),
-            Some(Value::Bytes(PATS_V6.as_bytes().to_vec()))
+            Some(Value::Bytes(pats::V6.as_bytes().to_vec()))
         );
         must_fail(
             "the working string, the planted original",
