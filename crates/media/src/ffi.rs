@@ -171,6 +171,14 @@ pub(crate) fn set_codec_tag(st: &mut ff::format::stream::StreamMut<'_>, tag: u32
     unsafe { (*(*st.as_mut_ptr()).codecpar).codec_tag = tag };
 }
 
+/// Set an output audio stream's priming, the samples its decoder makes
+/// before the stream's first (`initial_padding`), which FFmpeg's Matroska
+/// muxer writes as the track's CodecDelay.
+pub(crate) fn set_initial_padding(st: &mut ff::format::stream::StreamMut<'_>, samples: i32) {
+    // SAFETY: as in `clear_codec_tag`; `initial_padding` is a plain integer.
+    unsafe { (*(*st.as_mut_ptr()).codecpar).initial_padding = samples };
+}
+
 /// FFmpeg's h264_metadata or hevc_metadata bitstream filter, set to crop
 /// the pictures of an encoder's stream on the left: it rewrites H.264's
 /// frame cropping or HEVC's conformance window in every SPS, in the

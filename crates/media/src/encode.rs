@@ -1660,22 +1660,59 @@ pub fn mux_video_streams(srcs: &[&Path], dst: &Path) -> Result<PathBuf, EncodeEr
 /// writes through our own handle, as [`Mp4Writer`] does, and keeps its
 /// default time base of 1/1000 s, so every timestamp is rounded to the
 /// millisecond. MP4 edit lists are not carried over: `src` should have
-/// none. The file appears at `dst` only once it is complete.
+/// none but the one that hides an audio track's priming (AAC's 1024
+/// samples), whose packet the MP4 demuxer times before 0, so that its
+/// block comes before the video's first frame. Its CodecDelay is
+/// [`Priming::AsSource`]: none from FFmpeg before 9.0, whose MP4 demuxer
+/// keeps the priming to itself, and 1024 samples from 9.0, whose demuxer
+/// reports it. The file appears at `dst` only once it is complete.
 pub fn remux_to_matroska(src: &Path, dst: &Path) -> Result<PathBuf, EncodeError> {
-    remux_to_matroska_at(src, dst, None)
+    remux_to_matroska_at(src, dst, None, Priming::AsSource)
+}
+
+/// What [`remux_to_matroska_at`] writes as each audio track's priming:
+/// the samples its decoder makes before the stream's first, which FFmpeg
+/// calls the stream's initial padding and its Matroska muxer writes as
+/// the track's CodecDelay. The packets are the same either way, the
+/// priming's first. Without a CodecDelay the priming is samples like any
+/// other, before the video's first frame. With one, FFmpeg's Matroska
+/// demuxer (8.1's and 9.0's; 6.1's reads it and drops nothing) has the
+/// decoder drop that many samples at the start, so that the stream starts
+/// with the video, but only at open, never after a seek
+/// ([`crate::audio`]'s Timing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Priming {
+    /// As `src`'s demuxer reports it, so that the file depends on the
+    /// FFmpeg: for an MP4's AAC, none before 9.0 and the 1024 samples its
+    /// edit list skips from 9.0 on.
+    #[default]
+    AsSource,
+    /// This many samples, whatever `src`'s demuxer reports: 0 writes no
+    /// CodecDelay.
+    Samples(u32),
 }
 
 /// [`remux_to_matroska`], with the video track's default duration that of
 /// `rate` rather than of the source's average rate, whatever the frames'
-/// timestamps: a file whose default duration says a rate its blocks don't
-/// keep, as recorders that set a nominal rate write.
+/// timestamps (a file whose default duration says a rate its blocks don't
+/// keep, as recorders that set a nominal rate write), and each audio
+/// track's priming as `priming` says.
 pub fn remux_to_matroska_at(
     src: &Path,
     dst: &Path,
     rate: Option<FrameRate>,
+    priming: Priming,
 ) -> Result<PathBuf, EncodeError> {
     may_block("remuxing a file");
     init();
+    let padding = match priming {
+        Priming::AsSource => None,
+        Priming::Samples(n) => Some(i32::try_from(n).map_err(|_| {
+            EncodeError::Invalid(format!(
+                "a priming of {n} samples is more than FFmpeg holds"
+            ))
+        })?),
+    };
     let mut ictx = ffi::open_input(src, None)
         .map_err(|e| crate::MediaError::opening(src, e, |e| e.to_string()))?;
     let dest = follow_links(dst).map_err(|error| EncodeError::Io {
@@ -1718,6 +1755,9 @@ pub fn remux_to_matroska_at(
         // MP4's sample entry type (`avc1`, `hvc1`) means nothing in
         // Matroska, which names codecs its own way.
         ffi::clear_codec_tag(&mut ost);
+        if let Some(samples) = padding.filter(|_| !video) {
+            ffi::set_initial_padding(&mut ost, samples);
+        }
         map[ist.index()] = Some((ost.index(), ist.time_base()));
     }
     ctx(octx.write_header(), || "writing Matroska header".into())?;

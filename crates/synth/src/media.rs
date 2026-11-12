@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use spherecut_core::{FrameRate, Rational, Time};
 use spherecut_media::encode::{
-    self, AudioSettings, ColorTags, EncodeError, Mp4Writer, MuxedAs, PixelLayout, VideoSettings,
-    YuvPlanes,
+    self, AudioSettings, ColorTags, EncodeError, Mp4Writer, MuxedAs, PixelLayout, Priming,
+    VideoSettings, YuvPlanes,
 };
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::mp4::{self, Mp4Tree};
@@ -2127,7 +2127,8 @@ fn set_jpeg_frame_sizes(data: &mut [u8], width: u16, height: u16) -> usize {
 
 /// Remux `src` into `dir` as Matroska, with the same name and `.mkv`
 /// (see [`spherecut_media::encode::remux_to_matroska`]: timestamps in
-/// milliseconds, and no edit list).
+/// milliseconds, no edit list, and the audio's priming as the FFmpeg's
+/// MP4 demuxer reports it).
 pub fn remux_to_mkv(src: &Path, dir: &Path) -> Result<PathBuf, SynthError> {
     let name = src.file_stem().ok_or_else(|| SynthError::Io {
         path: src.to_path_buf(),
@@ -2146,6 +2147,22 @@ pub fn remux_to_mkv_at(src: &Path, dst: &Path, rate: FrameRate) -> Result<PathBu
         src,
         dst,
         Some(rate),
+        Priming::AsSource,
+    )?)
+}
+
+/// Remux `src` into the Matroska file `dst` with each audio track's
+/// CodecDelay `priming` samples, whatever the FFmpeg's MP4 demuxer
+/// reports (see [`Priming`]): from an MP4 with AAC, 0 gives the file
+/// [`remux_to_mkv`] gives on FFmpeg before 9.0, its priming samples
+/// before the video's first frame, and 1024 the one it gives on 9.0, its
+/// priming a CodecDelay.
+pub fn remux_to_mkv_primed(src: &Path, dst: &Path, priming: u32) -> Result<PathBuf, SynthError> {
+    Ok(spherecut_media::encode::remux_to_matroska_at(
+        src,
+        dst,
+        None,
+        Priming::Samples(priming),
     )?)
 }
 
