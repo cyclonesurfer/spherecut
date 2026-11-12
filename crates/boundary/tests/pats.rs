@@ -1,6 +1,6 @@
 //! The boundary crate's own checks (the project review's F137): Pat's
 //! truths, parsed from `testkit::pats`, print as the strings they were
-//! parsed from, byte for byte.
+//! parsed from, byte for byte, and a truth a digit off doesn't.
 //!
 //! Before the literal calibrations in synth's `tests/lens_against_sphere.rs`
 //! and render's `tests/common/rig.rs` were removed, a test held [`pats`]
@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use spherecut_boundary::pats;
 use spherecut_synth::insv::print;
-use spherecut_synth::lens::{self as truth, x5_like_planted};
+use spherecut_synth::lens::{self as truth, CalibTruth, StoredDist, x5_like_planted};
 use spherecut_testkit::control::must_fail;
 use spherecut_testkit::pats as testkit_pats;
 
@@ -55,31 +55,41 @@ fn string(generation: truth::Generation) -> &'static str {
     }
 }
 
-/// `s` with token `at`'s last digit changed, 1 to 2, 9 to 0.
-fn one_digit_off(s: &str, at: usize) -> String {
-    let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
-    let token = &mut tokens[at];
-    let last = token.pop().unwrap();
-    let digit = last.to_digit(10).unwrap();
-    token.push(char::from_digit((digit + 1) % 10, 10).unwrap());
-    tokens.join("_")
+/// Whether `cal` printed through synth's `print` is generation g's
+/// string, or the tokens at which it isn't.
+fn prints_as(cal: &CalibTruth, g: truth::Generation) -> Result<(), Vec<usize>> {
+    let printed = print(cal, &x5_like_planted());
+    if printed == string(g) {
+        return Ok(());
+    }
+    let (a, b): (Vec<&str>, Vec<&str>) =
+        (printed.split('_').collect(), string(g).split('_').collect());
+    Err((0..a.len().max(b.len()))
+        .filter(|&k| a.get(k) != b.get(k))
+        .collect())
 }
 
 /// `pats(g)` printed through synth's `print` is `testkit::pats`'s string
 /// of g, byte for byte: the parse lost and moved nothing, and synth's
-/// printer writes Pat's strings unchanged. The control changes one token,
-/// block 0's first term, in its last digit, and the printed string no
-/// longer equals it.
+/// printer writes Pat's strings unchanged. The control prints `pats(g)`
+/// with block 0's first term (V3's k1, V6's d0) one unit off in its last
+/// printed digit, its 8th decimal: the same check fails, at that token
+/// alone, as the printer reads the term.
 #[test]
 fn pats_print_as_the_strings_they_parse() {
     let _t = timed("pats_print_as_the_strings_they_parse");
-    let planted = x5_like_planted();
     for g in truth::Generation::all() {
-        let printed = print(&pats(g), &planted);
-        assert_eq!(printed, string(g), "{g:?}");
+        assert_eq!(prints_as(&pats(g), g), Ok(()), "{g:?}");
+        let mut off = pats(g);
+        match &mut off.dist {
+            StoredDist::V3 { k, .. } => k[0][0] += 1e-8,
+            StoredDist::V6 { d } => d[0][0] += 1e-8,
+        }
+        let moved = must_fail(
+            &format!("{g:?} with block 0's first term a digit off"),
+            prints_as(&off, g),
+        );
         // Token 12 is block 0's k1 in V3 and d0 in V6.
-        let off = one_digit_off(string(g), 12);
-        assert_ne!(off, string(g));
-        must_fail(&format!("{g:?} with one digit off"), printed == off);
+        assert_eq!(moved, [12], "{g:?}");
     }
 }
