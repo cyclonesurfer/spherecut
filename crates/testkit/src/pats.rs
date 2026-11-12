@@ -19,12 +19,18 @@
 //! all 14 files share and insta360.md documents for the camera, not the
 //! unit: the canvas (10752 × 5376), the lens type (113) and each
 //! generation's packed word (`0x471`, `0x20400`, `0x30400` and
-//! `0x60400`), in `strings.rs`, `synth_insv.rs` and `tier2_samples.rs`.
-//! Each sits in an exact assertion on a string from here, or on a file,
-//! which fails loudly if they change. Two lens numbers are left as
-//! samples whose value nothing depends on: `-0.198`, a token's text in
-//! camera's `Token::new` doc and `strings.rs`'s grammar test, and
-//! 8075.73, a worked example in sphere's `rig.rs` doc.
+//! `0x60400`), which these strings hold as tokens, and field 27's
+//! window (each lens's 5376² square cut to 5312²), which is no string's.
+//! Between them `strings.rs`, `synth_insv.rs`, `tier2_samples.rs` and
+//! `geometry.rs` hold all four; cli's `contract.rs` holds the canvas and
+//! the window, and its `doctor.rs` the window. Each sits in an exact
+//! assertion (on a string from here, on a file, or on a record the test
+//! wrote), which fails loudly if they change, or starts a fault a test
+//! plants (a canvas a pixel narrow, a window 5000 high); Tier 2c holds
+//! the window to the files. Two lens numbers are left as samples whose
+//! value nothing depends on: `-0.198`, a token's text in camera's
+//! `Token::new` doc and `strings.rs`'s grammar test, and 8075.73, a
+//! worked example in sphere's `rig.rs` doc.
 //!
 //! This module holds text, not meaning: which token is which number is
 //! the format notes' §4.1, which each reader applies with its own code.

@@ -30,9 +30,11 @@
 //! camera's tests parse `testkit::pats`, take [`pats`], or read the
 //! text of the token they name from `testkit::pats`, and cli's keep
 //! none: `tests/insv/mod.rs` takes Pat's calibrations from [`pats`]
-//! (M3.5's unit (d)). What camera's tests still write out is the X5's
-//! canvas, lens type and packed words, the camera's format rather than
-//! Pat's unit, in exact assertions (`testkit::pats` lists them).
+//! (M3.5's unit (d)). What camera's and cli's tests still write out is
+//! the camera's format rather than Pat's unit (the X5's canvas, lens
+//! type, packed words and field 27's window), and camera's two samples
+//! whose value nothing depends on; `testkit::pats` lists each, with the
+//! files that hold it.
 
 #![forbid(unsafe_code)]
 
