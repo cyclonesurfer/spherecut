@@ -1133,9 +1133,7 @@ mod tests {
         std::fs::write(&target, b"someone's file").unwrap();
         std::fs::remove_file(&history).unwrap();
         std::os::unix::fs::symlink("kept.txt", &history).unwrap();
-        let is_link = |e: &FolderError| {
-            matches!(e, FolderError::Link { path } if path.ends_with(".a.spherecut.history"))
-        };
+        let is_link = |e: &FolderError| matches!(e, FolderError::Link { path } if path.ends_with(".a.spherecut.history"));
 
         // Read: no history, saying why.
         let loaded = folder.load(name).unwrap();
@@ -1149,7 +1147,7 @@ mod tests {
             .save(name, &p, &h, Some(&saved.identity))
             .unwrap_err();
         assert!(is_link(&e), "{e}");
-        assert_eq!(folder.identity(name).unwrap(), Some(saved.identity.clone()));
+        assert_eq!(folder.identity(name).unwrap(), Some(saved.identity));
         // A new project beside such a link is refused too, and isn't made.
         std::fs::rename(dir.join(name), dir.join("moved.spherecut")).unwrap();
         let e = folder.create(name, &p, &h).unwrap_err();

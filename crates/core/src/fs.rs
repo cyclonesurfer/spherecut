@@ -719,15 +719,23 @@ mod tests {
 
         let out = dir.join("linked.png");
         let tmp = written(&out, b"linked");
-        tmp.persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to), sync_folder)
-            .unwrap();
+        tmp.persist_new_with(
+            no_flag,
+            |from, to| std::fs::hard_link(from, to),
+            sync_folder,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
         // One name left: the temp name was removed after the link.
         assert_eq!(std::fs::metadata(&out).unwrap().nlink(), 1);
         assert_eq!(listing(&dir), ["linked.png", "out.png"]);
         let tmp = written(&out, b"again");
         let e = tmp
-            .persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to), sync_folder)
+            .persist_new_with(
+                no_flag,
+                |from, to| std::fs::hard_link(from, to),
+                sync_folder,
+            )
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
@@ -804,7 +812,9 @@ mod tests {
 
         // The exclusive create still refuses an output that turned up.
         let tmp = written(&out, b"ours");
-        let e = tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap_err();
+        let e = tmp
+            .persist_new_with(no_flag, refuse, sync_folder)
+            .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(listing(&dir), ["out.png"]);
@@ -812,7 +822,9 @@ mod tests {
         // And a refusal the create meets too is reported, leaving nothing.
         let nowhere = dir.join("no-such-dir").join("out.png");
         let tmp = written(&out, b"ours").aimed_at(&nowhere);
-        let e = tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap_err();
+        let e = tmp
+            .persist_new_with(no_flag, refuse, sync_folder)
+            .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert_eq!(listing(&dir), ["out.png"]);
     }
