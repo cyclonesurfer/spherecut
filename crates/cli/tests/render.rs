@@ -1201,3 +1201,31 @@ fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
     assert!(!png.exists());
     assert_eq!(temp_files(&dir), Vec::<String>::new());
 }
+
+/// `spherecut render` and `frame --project` of a dual-fisheye project
+/// fail `not_yet` until M3.11, writing nothing. Control: an equirect
+/// project renders.
+#[test]
+#[ignore = "M3.9 unit (d)"]
+fn a_dual_fisheye_project_is_refused_not_yet() {
+    todo!()
+}
+
+/// A project whose stored geometry the table has since superseded gets a
+/// `warnings` entry from `render` (M3 plan 11.4). Control: the project as
+/// made has none.
+#[test]
+#[ignore = "M3.9 unit (d)"]
+fn render_warns_of_a_superseded_geometry() {
+    todo!()
+}
+
+/// F031's CLI half: a project saved in a real folder with its media
+/// recorded as `../clip.mp4`, opened through a link to that folder, finds
+/// and exports its media. Control: a project whose media sits where the
+/// lexical rule would look is `media_offline`.
+#[test]
+#[ignore = "M3.9 unit (d)"]
+fn a_project_in_a_linked_folder_renders_its_media() {
+    todo!()
+}

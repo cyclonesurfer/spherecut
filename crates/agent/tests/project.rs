@@ -674,3 +674,92 @@ fn a_session_lists_the_project_tools_and_edits() {
     assert_eq!(r["result"]["isError"], true, "{r}");
     s.close();
 }
+
+/// `set_source`'s camera form, `{"kind": "camera", "binding": …}`, is
+/// expanded by the server from the file beneath the roots (M3 plan 11.3):
+/// the file's hash, tracks and the table's geometry with the asked binding
+/// and status user, after the entry was tagged equirect; one undo step
+/// each. Control: with the camera file swapped for a plain MP4 it is
+/// refused.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn set_source_reads_the_camera_form() {
+    todo!()
+}
+
+/// A source sent whole whose calibration differs from the file's, in a
+/// raw string with its hash made to fit or in a parsed number, is
+/// `calibration_mismatch`, with nothing saved. Control: sent unchanged, it
+/// applies.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn an_altered_calibration_is_refused() {
+    todo!()
+}
+
+/// `project create` of a camera file records its camera, calibration and
+/// geometry: the summary's kind, camera, hash, geometry status (with
+/// `superseded` null, or the table's status and evidence once the stored
+/// evidence is older) and tune, and no warning.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn a_project_of_an_insv_records_its_camera() {
+    todo!()
+}
+
+/// `project create` of a two-lens file with no calibration a stitch reads
+/// makes an equirect media with its doubt and a `no_calibration` warning,
+/// as does one whose calibration camera refuses.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn no_calibration_is_made_with_a_warning() {
+    todo!()
+}
+
+/// A stored camera model with control, bidi and ANSI characters reaches
+/// the summary only as a text field gives it, and neither a raw string nor
+/// an Auto sample appears in the summary. Control: the camera passed
+/// through as it is fails the check.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn the_summary_keeps_camera_text_as_fields() {
+    todo!()
+}
+
+/// Tier 2c: `project create` of Pat's clip 8 gives a dual-fisheye source
+/// whose hash is the trailer's, and the saved project loads and validates.
+/// Control: the hash of a changed string isn't it.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn project_create_x5() {
+    todo!()
+}
+
+/// F049: every tool's simplest successful result has `warnings`, an
+/// array, `[]` when nothing warned. Control: the old assertion that the
+/// field is absent.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn every_tool_result_carries_warnings() {
+    todo!()
+}
+
+/// F051: an error about a media names it by id ("media 1") and holds
+/// none of its path's text, which may carry control, bidi and ANSI
+/// characters or words like an instruction. Control: the message as it was
+/// worded holds the path.
+#[test]
+#[ignore = "M3.9 unit (c)"]
+fn errors_name_media_by_id_and_keep_file_text_out() {
+    todo!()
+}
+
+/// `look`, `compare`, `check` and `render` of a dual-fisheye project are
+/// `not_yet` until M3.11 (M3 plan 14), with no file written and no job
+/// started. Control: none of the four is `not_yet` on an equirect
+/// project.
+#[test]
+#[ignore = "M3.9 unit (d)"]
+fn a_dual_fisheye_project_is_refused_not_yet() {
+    todo!()
+}

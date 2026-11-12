@@ -466,3 +466,29 @@ fn history_keeps_its_limit_and_drops_redo_on_a_new_step() {
         .to_string();
     assert!(e.contains("cursor 9 is past its 3 steps"), "{e}");
 }
+
+proptest! {
+    /// Random tunes, gains, sources and caps inside 11.2's bounds, applied
+    /// through the three stitch ops in random order (M3 plan 11.5): undoing
+    /// all gives the first project, redoing gives the last, and every step
+    /// saves and loads the same. Control: an inverse of `set_stitch` that
+    /// drops the gains is caught.
+    #[test]
+    #[ignore = "M3.9 unit (b)"]
+    #[expect(unreachable_code, reason = "M3.9 unit (b) writes the body")]
+    fn stitch_edits_undo_and_save(_seed in any::<u64>()) {
+        todo!()
+    }
+}
+
+/// The corners of the property's tune draws clear `validate`'s frame and
+/// coverage rules: `Rig::build` takes each, each lens's min(θ_max,
+/// θ_frame) − 90° is at least the largest feather drawn, and the two
+/// lenses cover every direction at the largest q drawn. Controls: a
+/// radius scale of 1.1 fails the frame half; θ_max 95° on both lenses
+/// with one yawed 15° at q 3.34 fails the coverage half.
+#[test]
+#[ignore = "M3.9 unit (b)"]
+fn the_drawn_tunes_clear_the_frame() {
+    todo!()
+}

@@ -781,4 +781,13 @@ mod tests {
         let e = follow_links(&dir.join("loop-a")).unwrap_err();
         assert!(e.to_string().contains("symbolic links"), "{e}");
     }
+
+    /// F033: each atomic publish syncs its folder once, as best it can: a
+    /// folder that can't be synced (EINVAL) still publishes. Control: with the
+    /// sync left out the count is 0.
+    #[test]
+    #[ignore = "M3.9 unit (a)"]
+    fn publish_syncs_its_folder() {
+        todo!()
+    }
 }

@@ -1046,4 +1046,23 @@ mod tests {
         assert!(undone.steps().is_empty());
         assert_eq!(undone.cursor(), 0);
     }
+
+    /// F032: when `persist_new` publishes by its copy fallback, `create`
+    /// takes its identity from the published file, not the temporary one.
+    /// Control: the temporary file's identity fails the same check.
+    #[test]
+    #[ignore = "M3.9 unit (a)"]
+    fn create_names_the_published_file_after_a_copy() {
+        todo!()
+    }
+
+    /// F036: a symbolic link at the history file's name is
+    /// `FolderError::Link`, as one at the lock's or the project's is, and its
+    /// target is left as it was. Control: a regular history file there is read
+    /// and replaced.
+    #[test]
+    #[ignore = "M3.9 unit (a)"]
+    fn a_link_at_the_history_name_is_refused() {
+        todo!()
+    }
 }

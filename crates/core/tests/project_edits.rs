@@ -1192,3 +1192,22 @@ fn keys_too_close_for_seconds_are_refused() {
         Code::Exists,
     );
 }
+
+/// `set_source`, `set_stitch` and `set_caps` on a dual-fisheye media
+/// (M3 plan 11.3): each change, undone to an equal project and redone to
+/// the edited one, an agent's step keeping its name. Control: an inverse
+/// made of the new value fails the undo.
+#[test]
+#[ignore = "M3.9 unit (b)"]
+fn the_stitch_ops_apply_and_undo_exactly() {
+    todo!()
+}
+
+/// `set_stitch` with neither a tune nor gains, on an equirect media, or
+/// on a media that isn't there is refused by its code. Control: gains
+/// alone apply.
+#[test]
+#[ignore = "M3.9 unit (b)"]
+fn set_stitch_needs_a_tune_or_gains() {
+    todo!()
+}

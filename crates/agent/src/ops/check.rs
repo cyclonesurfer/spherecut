@@ -1774,4 +1774,14 @@ mod tests {
             }
         }
     }
+
+    /// A project whose source's geometry is provisional gets
+    /// `provisional_geometry` advice (info), with the table's evidence when
+    /// the table has superseded it (M3 plan 11.4). Control: a geometry of
+    /// status user gets none.
+    #[test]
+    #[ignore = "M3.9 unit (d)"]
+    fn provisional_geometry_is_advice() {
+        todo!()
+    }
 }
