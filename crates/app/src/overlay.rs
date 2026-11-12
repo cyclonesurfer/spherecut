@@ -16,8 +16,8 @@ use spherecut_audio::OutputStats;
 use spherecut_core::video::{Matrix, Range};
 use spherecut_media::backend::VideoStreamInfo;
 use spherecut_playback::{
-    CacheStats, Counter, LockStatus, MemoryStats, PerfSnapshot, PerfStats, SlotStats, Stage,
-    StageSummary,
+    CacheStats, Counter, DrainWaits, LockStatus, MemoryStats, PerfSnapshot, PerfStats, SlotStats,
+    Stage, StageSummary, VaapiDrain,
 };
 use spherecut_render::Filter;
 
@@ -106,6 +106,9 @@ pub struct Readings {
     pub download: StageSummary,
     pub decoded_fps: Option<f64>,
     pub catching_up: bool,
+    /// The VA-API drain's numbers, with it on (`SPHERECUT_VAAPI_DRAIN`):
+    /// a line of their own under the decoder's.
+    pub drain: Option<DrainReading>,
     pub upload_cpu: StageSummary,
     pub upload_gpu: StageSummary,
     /// Frames into slots: imported as DMA-BUFs, copied out of Vulkan
@@ -156,6 +159,45 @@ pub struct Readings {
     pub look: Option<&'static str>,
 }
 
+/// What the VA-API drain has waited for since the player started
+/// ([`VaapiDrain`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DrainReading {
+    pub mode: VaapiDrain,
+    /// Each frame's drains, over the stage's ring ([`Stage::Drain`]).
+    pub stage: StageSummary,
+    /// The surfaces each frame's drains found not yet ready.
+    pub waits: DrainWaits,
+    /// Syncs that failed, surfaces forgotten past the 64 a decoder keeps,
+    /// and decoders that found no `vaSyncSurface` to call.
+    pub errors: u64,
+    pub overflow: u64,
+    pub unavailable: u64,
+}
+
+impl DrainReading {
+    /// "drain     download   2.1 ms p95 5.0   surfaces waited p50 2 max
+    /// 12   errors 0   overflow 0", and the decoders that couldn't drain,
+    /// if any.
+    fn line(&self) -> String {
+        let count = |v: Option<u64>| v.map_or_else(|| "-".into(), |n| n.to_string());
+        let mut line = format!(
+            "drain     {}   {} p95 {}   surfaces waited p50 {} max {}   errors {}   overflow {}",
+            self.mode.name(),
+            ms(self.stage.p50),
+            num(self.stage.p95),
+            count(self.waits.percentile(50.0)),
+            count(self.waits.max()),
+            self.errors,
+            self.overflow
+        );
+        if self.unavailable > 0 {
+            line.push_str(&format!("   unavailable {}", self.unavailable));
+        }
+        line
+    }
+}
+
 impl Readings {
     /// The numbers now, for a viewer of `size` physical pixels at `ppp`.
     pub fn read(s: &AppState, size: (u32, u32), ppp: f32) -> Readings {
@@ -181,6 +223,17 @@ impl Readings {
             download: *p.stage(Stage::Download),
             decoded_fps: s.overlay.decoded_fps(),
             catching_up: snap.streams.iter().any(|st| st.catching_up),
+            drain: s.player.as_ref().and_then(|pl| {
+                let mode = pl.config().vaapi_drain;
+                (mode != VaapiDrain::Off).then(|| DrainReading {
+                    mode,
+                    stage: *p.stage(Stage::Drain),
+                    waits: pl.perf().drain_waits(),
+                    errors: p.counter(Counter::DrainErrors),
+                    overflow: p.counter(Counter::DrainOverflow),
+                    unavailable: p.counter(Counter::DrainUnavailable),
+                })
+            }),
             upload_cpu: *p.stage(Stage::UploadCpu),
             upload_gpu: *p.stage(Stage::UploadGpu),
             imported: p.counter(Counter::FramesImported),
@@ -302,7 +355,7 @@ impl Readings {
                 )
             },
         );
-        vec![
+        let mut lines = vec![
             head.join(" · "),
             format!(
                 "decode    {} p95 {}   download {}   decoded {decoded}   catch-up {}",
@@ -311,6 +364,9 @@ impl Readings {
                 num(self.download.p50),
                 if self.catching_up { "on" } else { "off" }
             ),
+        ];
+        lines.extend(self.drain.as_ref().map(DrainReading::line));
+        lines.extend([
             upload,
             format!(
                 "render    CPU {}   GPU {}   {}×{} @{}   {}   projection skipped {skipped}",
@@ -342,7 +398,8 @@ impl Readings {
             format!("audio     {}", self.audio_text()),
             format!("memory    {}", self.memory_text()),
             format!("view      {}", self.look.unwrap_or("free (no project)")),
-        ]
+        ]);
+        lines
     }
 
     /// A GPU time: "n/a" without timestamps, and marked as the CPU's on
@@ -599,6 +656,7 @@ mod tests {
             download: at(2.3),
             decoded_fps: Some(61.2),
             catching_up: false,
+            drain: None,
             upload_cpu: at(1.4),
             upload_gpu: at(0.6),
             imported: 0,
@@ -668,6 +726,63 @@ mod tests {
         assert_eq!(
             lines[8],
             "memory    RSS 2.50 GiB   GPU alloc 0.50 GiB   minflt 12/s"
+        );
+    }
+
+    /// With the VA-API drain on, a line under the decoder's says how long
+    /// its drains took and what they waited for; with it off there is
+    /// none, and the lines are as they were.
+    ///
+    /// Control: the lines with the drain on fail the check of the lines
+    /// with it off.
+    #[test]
+    fn the_drain_line_shows_with_the_drain_on() {
+        use spherecut_testkit::control::must_fail;
+
+        let without =
+            |lines: &[String]| lines.len() == 10 && !lines.iter().any(|l| l.starts_with("drain "));
+        let off = readings().lines();
+        assert!(without(&off), "{}", off.join("\n"));
+        let perf = spherecut_playback::PerfStats::new();
+        for w in [0, 2, 2, 12] {
+            perf.record_drain_waits(w);
+        }
+        let mut r = readings();
+        r.drain = Some(DrainReading {
+            mode: VaapiDrain::Download,
+            stage: StageSummary {
+                recorded: 4,
+                p50: Some(2.1),
+                p95: Some(5.0),
+                ..StageSummary::default()
+            },
+            waits: perf.drain_waits(),
+            errors: 0,
+            overflow: 1,
+            unavailable: 0,
+        });
+        let on = r.lines();
+        assert_eq!(
+            on[2],
+            "drain     download   2.1 ms p95 5.0   surfaces waited p50 2 max 12   errors 0   \
+             overflow 1"
+        );
+        assert_eq!(on[..2], off[..2]);
+        assert_eq!(on[3..], off[2..]);
+        must_fail("the lines with the drain on", without(&on));
+        // No frame drained yet, and no libva to call.
+        r.drain = Some(DrainReading {
+            mode: VaapiDrain::Picture,
+            stage: StageSummary::default(),
+            waits: DrainWaits::default(),
+            errors: 0,
+            overflow: 0,
+            unavailable: 2,
+        });
+        assert_eq!(
+            r.lines()[2],
+            "drain     picture   - p95 -   surfaces waited p50 - max -   errors 0   overflow 0   \
+             unavailable 2"
         );
     }
 
