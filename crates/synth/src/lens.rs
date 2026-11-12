@@ -1282,6 +1282,32 @@ pub fn render_lens_coded(
     Ok(picture)
 }
 
+/// [`render_lens_coded`]'s picture, rendered through `cache`, so that a
+/// test that asks for the same frame again for its hashes renders it
+/// once.
+pub(crate) fn render_lens_coded_in(
+    cache: &RenderCache,
+    pattern: Pattern,
+    rig: &RigTruth,
+    lens: usize,
+    frame: u32,
+    ss: u32,
+) -> Result<RgbImage, crate::code::CodeError> {
+    let truth = &rig.lenses[lens];
+    check_clear_at(truth, truth.side)?;
+    let mut picture = RgbImage::clone(&cache.render(pattern, rig, lens, frame, ss));
+    crate::code::corner_code(&mut picture, lens, frame)?;
+    Ok(picture)
+}
+
+/// [`crate::code::check_clear`] of `truth`'s picture scaled to `side`
+/// square, as an LRV's half is, its image circle scaled with it.
+pub(crate) fn check_clear_at(truth: &LensTruth, side: u32) -> Result<(), crate::code::CodeError> {
+    let (offset, radius) = circle(truth);
+    let k = f64::from(side) / f64::from(truth.side.max(1));
+    crate::code::check_clear(side, offset * k, radius * k)
+}
+
 /// Where a lens's image circle lies in its square, for 7.1's bound: its
 /// centre's distance from the square's, and the farthest it reaches from
 /// that centre at `theta_max`, over 360 azimuths. An azimuth with no
