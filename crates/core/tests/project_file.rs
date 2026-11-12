@@ -425,10 +425,49 @@ fn the_checked_in_schema_2_file_loads_and_saves_the_same() {
 /// A schema 2 media without a `source` is refused, naming its path, so a
 /// damaged file never defaults to equirect silently (11.2); a schema 1
 /// media without one reads as equirect.
+///
+/// Controls: the same text marked schema 1 loads, its media equirect, and
+/// the whole fixture loads.
 #[test]
-#[ignore = "M3.9 unit (a)"]
 fn a_media_without_source_is_refused_by_path() {
-    todo!()
+    let on_disk = std::fs::read_to_string(data_dir().join("schema2.spherecut")).unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    // The fixture with media `i`'s source taken out, or set to `null`,
+    // marked `schema`.
+    let without = |i: usize, null: bool, schema: u64| {
+        let mut v = fixture.clone();
+        v["schema"] = schema.into();
+        let m = v["project"]["media"][i].as_object_mut().unwrap();
+        if null {
+            m.insert("source".into(), serde_json::Value::Null);
+        } else {
+            m.remove("source").unwrap();
+        }
+        serde_json::to_string_pretty(&v).unwrap()
+    };
+    for (i, path) in [(0, "../clips/VID_1.mp4"), (1, "../clips/VID_2.insv")] {
+        for null in [false, true] {
+            let text = without(i, null, 2);
+            let e = file::from_json(&text, &data_dir()).unwrap_err();
+            let FileError::Invalid(problem) = &e else {
+                panic!("media {i}, null {null}: {e}");
+            };
+            assert_eq!(problem.code, Code::Invalid, "{e}");
+            assert!(
+                problem.message.contains(path) && problem.message.contains("\"source\""),
+                "media {i}, null {null}: {e}"
+            );
+            assert_eq!(e.code(), "invalid");
+
+            // The same text as schema 1, which never wrote a source,
+            // reads as equirect.
+            if !null {
+                let loaded = file::from_json(&without(i, null, 1), &data_dir()).unwrap();
+                assert_eq!(loaded.media()[i].source, Source::Equirect {}, "media {i}");
+            }
+        }
+    }
+    file::from_json(&on_disk, &data_dir()).unwrap();
 }
 
 /// `deny_unknown_fields` still refuses a misspelt key in a source's

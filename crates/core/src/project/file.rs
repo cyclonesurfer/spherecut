@@ -29,7 +29,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use super::Project;
-use super::validate::Problem;
+use super::validate::{Code, Problem};
 use crate::blocking::may_block;
 use crate::brand::{APP_SLUG, VERSION};
 use crate::fs::TempFile;
@@ -175,6 +175,9 @@ pub fn from_json(text: &str, folder: &Path) -> Result<Project, FileError> {
         }
     }
     if let Some(project) = top.get("project") {
+        if schema == Some(SCHEMA) {
+            check_sources(project)?;
+        }
         check_times(project, "/project")?;
     }
     // Parsed again from the text, so an error says its line and column.
@@ -243,6 +246,37 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
     let real = crate::fs::real_file(&path).map_err(io)?;
     let folder = real.parent().unwrap_or(Path::new("/"));
     from_json(&text, folder)
+}
+
+/// Each media of a schema 2 file has a `source`, and not null: a damaged
+/// file never reads as equirect by default, as a schema 1 media does
+/// (M3 plan 11.2). Read on the value, so that the typed read after it
+/// keeps its line and column; what isn't a list of objects is left to
+/// that read to refuse.
+fn check_sources(project: &Value) -> Result<(), FileError> {
+    let Some(Value::Array(media)) = project.get("media") else {
+        return Ok(());
+    };
+    for m in media {
+        let Value::Object(m) = m else { continue };
+        if !matches!(m.get("source"), None | Some(Value::Null)) {
+            continue;
+        }
+        let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+        let which = match m.get("id").and_then(Value::as_u64) {
+            Some(id) => format!("media {id} ({path:?})"),
+            None => format!("the media at {path:?}"),
+        };
+        return Err(FileError::Invalid(Problem::new(
+            Code::Invalid,
+            format!(
+                "{which} has no \"source\": a schema 2 file writes one for every media, so \
+                 this one was cut short or edited; give it its source ({{\"kind\": \
+                 \"equirect\"}} for a picture that is equirect already)"
+            ),
+        )));
+    }
+    Ok(())
 }
 
 /// Check every time in `v` (an object with `exact` and `seconds`): the
