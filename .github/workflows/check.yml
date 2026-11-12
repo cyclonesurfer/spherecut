@@ -1,0 +1,120 @@
+# An independent check on GitHub's runner (DECISIONS D78).
+#
+# check runs `cargo xtask check`, as the building agent does before a
+# push: rustfmt, clippy, rustdoc, the MSRV build (required here, since
+# GitHub sets CI), the Tier 1 tests on lavapipe against Ubuntu's FFmpeg
+# 6.1, the doc tests, cargo-deny and cargo-audit, each gate with its
+# controls. compat builds FFmpeg 8.1.3 and 9.0.2 with
+# scripts/build-ffmpeg.sh and runs `cargo xtask compat` against both,
+# the two releases of the push rule (M3 plan 4.1 rule 6).
+#
+# What it can't run: Tier 2 (VA-API, Vulkan Video, the GUI, real time,
+# Pat's samples), the benchmarks, gui_smoke, Tier 1 on odin's RADV, the
+# property tests at 100,000 cases, fit-matrix, and Tier 1 against 8.1.3
+# (compat runs clippy and a link there, not the tests). Those stay with
+# the push rule, run by the building agent, and odin's hw-test (D37).
+#
+# It runs only when started by hand (Actions, check, Run workflow) until
+# Pat turns the push trigger below on. The actions are GitHub's own,
+# named by major version.
+name: check
+
+on:
+  workflow_dispatch:
+  # push:
+  #   branches: [main]
+  #   paths-ignore: ['hw-reports/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+  RUST_STABLE: '1.97.0'
+  RUST_MSRV: '1.95'
+  CARGO_DENY: '0.20.2'
+  CARGO_AUDIT: '0.22.2'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Packages, README's Ubuntu 24.04 list
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang ffmpeg libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libswresample-dev libasound2-dev mesa-vulkan-drivers \
+            vulkan-tools vainfo strace
+      - name: Rust, stable and the MSRV
+        run: |
+          rustup toolchain install "$RUST_STABLE" --profile minimal -c rustfmt,clippy
+          rustup default "$RUST_STABLE"
+          rustup toolchain install "$RUST_MSRV" --profile minimal
+      - name: cargo-deny and cargo-audit, cached
+        id: tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/bin/cargo-audit
+          key: tools-${{ runner.os }}-deny-${{ env.CARGO_DENY }}-audit-${{ env.CARGO_AUDIT }}-rust-${{ env.RUST_STABLE }}
+      - name: cargo-deny and cargo-audit
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: |
+          cargo install --locked cargo-deny --version "$CARGO_DENY"
+          cargo install --locked cargo-audit --version "$CARGO_AUDIT"
+      - name: Cargo's registry and target, cached
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            target
+          key: cargo-${{ runner.os }}-${{ env.RUST_STABLE }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ env.RUST_STABLE }}-
+      - name: cargo xtask check
+        run: cargo xtask check
+
+  compat:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Packages, README's Ubuntu 24.04 list and build-ffmpeg.sh's
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config clang ffmpeg libavcodec-dev libavformat-dev \
+            libavutil-dev libswscale-dev libswresample-dev libasound2-dev mesa-vulkan-drivers \
+            vulkan-tools vainfo strace \
+            build-essential git nasm cmake libvulkan1 \
+            libva-dev libdrm-dev libx264-dev libx265-dev libdav1d-dev \
+            libsvtav1enc-dev libopus-dev libvorbis-dev libshaderc-dev
+      - name: Rust, stable
+        run: |
+          rustup toolchain install "$RUST_STABLE" --profile minimal -c clippy
+          rustup default "$RUST_STABLE"
+      - name: FFmpeg 8.1.3 and 9.0.2, cached
+        id: ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}-n8.1.3-n9.0.2
+      - name: FFmpeg 8.1.3 and 9.0.2
+        if: steps.ffmpeg.outputs.cache-hit != 'true'
+        run: |
+          scripts/build-ffmpeg.sh n8.1.3 ~/ffmpeg
+          scripts/build-ffmpeg.sh n9.0.2 ~/ffmpeg
+      - name: cargo xtask compat
+        run: cargo xtask compat ~/ffmpeg/n8.1.3-full ~/ffmpeg/n9.0.2-full --clean

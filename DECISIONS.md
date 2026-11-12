@@ -8,7 +8,8 @@ section 0), so each of those lands in its place with its slice, and D38
 came before some of them. M3's plan reserves D60 to D76 for M3's slices
 (`docs/design/m3-plan.md`, section 23), so a number there with no
 heading belongs to a slice not yet built (D64 is M3.5's, D66 M3.7's);
-D77 came from M3.8. Superseded entries stay and say so.
+D77 came from M3.8 and D78 from the review-fix slice. Superseded
+entries stay and say so.
 
 Index:
 
@@ -78,6 +79,7 @@ Index:
 - D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 - D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
 - D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
+- D78. An independent check on GitHub's runner
 
 ## D1. Rust stable, edition 2024, MSRV 1.95
 
@@ -6808,6 +6810,12 @@ that `--no-tier1` becomes the habit; or H2's `gui_smoke` fails a
 session that was on screen (winit reporting the wrong refresh rate, or
 a compositor that paces a visible window below it).
 
+*Updated 2026-11-12 (review-fix slice):* CI (D78) runs Tier 1 on
+GitHub's runner, on lavapipe, and that doesn't replace Tier 1 on odin's
+RADV: the Vulkan driver, the render node and the decoders the tests
+find there differ (D38). So odin's hw-test at a slice's end keeps Tier
+1 on (no `--no-tier1`), and a Tier 1 failure there still fails the run.
+
 ## D38. Vulkan Video is tested on VA-API's GPU, and skips in FFmpeg's words
 
 *2026-10-24, M1. Pat approved Vulkan Video HEVC in odin's hardware run
@@ -11180,6 +11188,86 @@ run. The project rows, sampling planes made without
 `RENDER_ATTACHMENT`, read 0.22 and 0.77 ms at 1920×1080 and 3840×2160
 rectilinear, within the 0.19 to 0.22 and 0.73 to 0.81 odin measured
 from 43abcda to 0663e05 (10.6's 0.20 and 0.74 among them).
+
+## D78. An independent check on GitHub's runner
+
+*2026-11-12, the review-fix slice, from the review's F098 and F061. Adds
+a note to D37.*
+
+What:
+
+- **The workflow**, `.github/workflows/check.yml`: two jobs on GitHub's
+  `ubuntu-24.04` runner, each limited to 120 minutes, with read-only
+  access to the repository, the checkout's credentials not kept, and a
+  run cancelled when a newer one for the same branch starts.
+  - **check** installs README's Ubuntu 24.04 packages, Rust 1.97.0 with
+    rustfmt and clippy, the MSRV toolchain (1.95, D1), and cargo-deny
+    0.20.2 and cargo-audit 0.22.2 (cached by their versions), and runs
+    `cargo xtask check` as it is: rustfmt; clippy and its network
+    controls; rustdoc and its controls; the MSRV build, required here
+    since GitHub sets `CI`; the Tier 1 tests on lavapipe against
+    Ubuntu's FFmpeg 6.1; the doc tests; cargo-deny and its controls;
+    and cargo-audit (D8). Cargo's registry and target directory are
+    cached by the Rust version and `Cargo.lock`.
+  - **compat** installs those packages and the ones
+    `scripts/build-ffmpeg.sh` lists, builds FFmpeg 8.1.3 and 9.0.2 with
+    that script (cached by the script's hash), and runs `cargo xtask
+    compat` against both with `--clean`: clippy and a link of the tests
+    against each, the two releases of the M3 plan's push rule (4.1 rule
+    6, D2).
+- **What it can't run.** Tier 2 of either kind (VA-API, Vulkan Video,
+  real time, the GUI and `gui_smoke`, Pat's samples); the benchmarks;
+  Tier 1 on a real GPU, which odin's hw-test keeps (D37's note); the
+  property tests at 100,000 cases; `cargo xtask fit-matrix` (from
+  M3.6); and Tier 1 against 8.1.3 or 9.0.2, which compat builds and
+  links but doesn't run.
+- **Manual until Pat turns it on.** `on:` holds only
+  `workflow_dispatch`; a push trigger on `main`, leaving out
+  `hw-reports/` (no check reads it), is written out beside it,
+  commented. Pushing a file under `.github/workflows/` needs a token
+  with the `workflow` scope, so the workflow came in a commit of its
+  own, last on its branch, which can be split off if the push is
+  refused.
+- **The push rule stays the building agent's.** A run here is a second
+  run of the same commands on a machine the building agent doesn't
+  control. It doesn't replace the full check, compat and property-test
+  runs before a push (M3 plan 4.1 rule 6), and nothing waits on it.
+- **Only GitHub's own actions**, `actions/checkout` (v5) and
+  `actions/cache` (v4), named by major version. Pinning each to a
+  commit is a follow-up: no commit hash was at hand offline, and none
+  was written from memory.
+- **Its test**, `xtask/tests/workflow.rs`, reads the workflow as text
+  and holds it to the files it stands for: the check job installs every
+  package README's Ubuntu 24.04 section names, compat those and
+  build-ffmpeg.sh's, the check job runs `cargo xtask check` alone,
+  `RUST_MSRV` is the workspace's `rust-version`, and compat builds
+  against 8.1.3 and 9.0.2. Each rule has a control, a doctored copy
+  that must fail (D32): README asking for `libfoo-dev`, build-ffmpeg.sh
+  asking for `libbar-dev`, the check run with `--no-supply-chain`,
+  `RUST_MSRV` 1.94, and compat without 9.0.2.
+
+Why: every gate (the check, compat, cargo-deny and cargo-audit, the
+property tests) was run and reported only by the agent that built the
+change (F098), and `scripts/check.sh` said it was kept for a CI that
+didn't exist (F061).
+
+Considered: a self-hosted runner on odin, which could run Tier 2 but
+would hand Pat's machine to a workflow, and is Pat's to decide; the
+property tests at 100,000 cases on the runner, left to the push rule
+until a run shows what they cost there; third-party actions for the
+toolchain or the cache, left out because GitHub's two suffice and each
+other action is someone else's code run with the repository's token.
+
+What it costs is Pat's question. GitHub doesn't bill its standard
+runners' minutes on a public repository and counts them against the
+account's monthly allowance on a private one. A cold run, which builds
+FFmpeg twice and fills both caches, is the longest; no run has been
+timed yet.
+
+Revisit if: a warm run takes over 60 minutes; Tier 1 flakes on the
+runner (lavapipe on GitHub's CPUs, or a timing-bound test); or Pat
+wants branch protection, which would make a passing run required
+before a merge.
 
 ## Open
 

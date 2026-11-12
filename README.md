@@ -627,6 +627,15 @@ finds no `alsa`, with the command that installs it (`sudo dnf install
 strace alsa-lib-devel`, `sudo pacman -S strace alsa-lib` or `sudo apt
 install strace libasound2-dev`).
 
+CI (`.github/workflows/check.yml`, DECISIONS D78) runs `cargo xtask
+check` on GitHub's Ubuntu 24.04 runner, with the Ubuntu packages above
+and the MSRV build required, and `cargo xtask compat` against FFmpeg
+8.1.3 and 9.0.2 built by `scripts/build-ffmpeg.sh`. It runs only when
+started by hand (Actions, check, Run workflow) until Pat turns its push
+trigger on, and it can't run Tier 2, the benchmarks or Tier 1 on a real
+GPU, so the full check, compat and property-test runs before a push
+stay the rule.
+
 Tests come in three kinds. Tier 1 runs anywhere, including machines without
 a GPU. It needs the FFmpeg codecs listed above and Mesa's lavapipe Vulkan
 driver (`mesa-vulkan-drivers` on Fedora and Ubuntu, `vulkan-swrast` on

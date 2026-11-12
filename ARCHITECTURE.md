@@ -1288,7 +1288,11 @@ without waiting.
   every library the build bound came from the prefix, and
   with `--test` runs Tier 1 against one; `check` runs the clippy and the
   link for the prefixes `SPHERECUT_FFMPEG_COMPAT` lists, and says when it
-  lists none (D2).
+  lists none (D2). CI (`.github/workflows/check.yml`, D78) runs the same
+  `cargo xtask check` on GitHub's Ubuntu 24.04 runner, where `CI` makes
+  the MSRV build required, and `cargo xtask compat` against FFmpeg 8.1.3
+  and 9.0.2; it is started by hand until Pat turns its push trigger on,
+  and it runs no Tier 2 test.
 * **Tier 2** needs hardware or Pat's camera samples, and comes in two
   kinds (M3 plan 4.4, D60). Tier 2 tests are `#[ignore]`d with a reason
   and call `spherecut_testkit::tier2::require_*` first, which fails the
