@@ -141,7 +141,7 @@ use spherecut_playback::{
     PlayerConfig, PlayerParts, PlayerSnapshot, Presented, SURFACE_CAP, ShownFrame, SlotFrame,
     SlotState, SlotStats, Stage, StreamFormat, ZeroCopy,
 };
-use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::dmabuf::{self, Imported, Importer};
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
     AdapterChoice, DebugMode, Encoder, Filter, Gpu, GpuFrame, GpuTimers, Image, LinearTarget,
@@ -2777,14 +2777,16 @@ enum NotCompared {
     Import(String),
 }
 
-/// A frame taken on the GPU, as the upload thread takes it.
-enum Taken {
-    Imported(Vec<wgpu::Texture>),
+/// A frame taken on the GPU, as the upload thread takes it, or its planes
+/// made textures as an import's are (on lavapipe, which imports nothing).
+enum Taken<'f> {
+    Imported(Imported<'f>),
+    AsImported(Vec<wgpu::Texture>),
     Copied(Copied),
 }
 
 /// `frame` taken on `gpu` as `how` takes it.
-fn take(gpu: &Gpu, how: &OnDevice, frame: &VideoFrame) -> Result<Taken, NotCompared> {
+fn take<'f>(gpu: &Gpu, how: &OnDevice, frame: &'f VideoFrame) -> Result<Taken<'f>, NotCompared> {
     Ok(match how {
         OnDevice::DmaBuf => Taken::Imported(import_planes(gpu, frame)?),
         OnDevice::Shared(_) => Taken::Copied(copy_planes(gpu, frame)?),
@@ -2796,7 +2798,7 @@ fn render_taken(
     gpu: &Gpu,
     renderer: &mut StillRenderer,
     frame: &VideoFrame,
-    taken: &Taken,
+    taken: &Taken<'_>,
     view: &ViewParams,
     size: (u32, u32),
     opts: &StillOptions,
@@ -2804,6 +2806,9 @@ fn render_taken(
     let views = std::slice::from_ref(view);
     match taken {
         Taken::Imported(planes) => renderer.render_imported(gpu, frame, planes, views, size, opts),
+        Taken::AsImported(planes) => {
+            renderer.render_imported(gpu, frame, planes, views, size, opts)
+        }
         Taken::Copied(c) => {
             renderer.render_copied(gpu, frame, &c.buffer, &c.planes, views, size, opts)
         }
@@ -2826,7 +2831,7 @@ fn mismatch(
     renderer: &mut StillRenderer,
     how: &OnDevice,
     frame: &VideoFrame,
-    taken: &Taken,
+    taken: &Taken<'_>,
     got: &Image,
     want: &Image,
     view: &ViewParams,
@@ -2934,12 +2939,16 @@ fn stage(
 
 /// The planes `taken` holds, read back from `gpu`: an import's textures,
 /// whole, or the planes in the copy's buffer. Waits for the GPU.
-fn taken_planes(gpu: &Gpu, taken: &Taken) -> Result<Vec<readback::Texels>, String> {
-    match taken {
-        Taken::Imported(planes) => planes
+fn taken_planes(gpu: &Gpu, taken: &Taken<'_>) -> Result<Vec<readback::Texels>, String> {
+    let textures = |planes: &[wgpu::Texture]| {
+        planes
             .iter()
             .map(|t| readback::read_texture(gpu, t, 0).map_err(|e| e.to_string()))
-            .collect(),
+            .collect()
+    };
+    match taken {
+        Taken::Imported(planes) => textures(planes),
+        Taken::AsImported(planes) => textures(planes),
         Taken::Copied(c) => {
             let end = c
                 .planes
@@ -3059,14 +3068,14 @@ fn same(got: &[Image], want: &[Image]) -> Result<(), usize> {
 
 /// `frame`'s planes imported into `gpu`, as `frame --zero-copy` and the
 /// upload thread import them.
-fn import_planes(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, NotCompared> {
+fn import_planes<'f>(gpu: &Gpu, frame: &'f VideoFrame) -> Result<Imported<'f>, NotCompared> {
     let layers = frame
         .dmabuf()
         .ok_or_else(|| NotCompared::Export(format!("the frame came as {:?}", frame.transfer)))?;
     let whole = SlotShape::of(frame.layout(), frame.size())
         .map_err(|e| NotCompared::Import(e.to_string()))?;
     let planes = dmabuf::plan(&whole, layers).map_err(NotCompared::Import)?;
-    Importer::new().import(gpu, &planes).map_err(refused)
+    Importer::new().import(gpu, frame, &planes).map_err(refused)
 }
 
 /// `frame`'s planes copied out of its Vulkan image on `gpu`, waited for
@@ -6281,14 +6290,14 @@ fn a_zero_copy_mismatch_names_the_stage_that_parts_from_the_download() {
     let mut renderer = StillRenderer::new(gpu);
     let (view, size) = &zero_copy_views()[0];
     let opts = StillOptions::default();
-    let mut slot_after = |f: &VideoFrame, taken: &Taken| {
+    let mut slot_after = |f: &VideoFrame, taken: &Taken<'_>| {
         render_taken(gpu, &mut renderer, f, taken, view, *size, &opts).unwrap();
         renderer.slot().map(|s| read_planes(gpu, s))
     };
-    let taken = Taken::Imported(as_imported(gpu, &frame));
-    let other = Taken::Imported(as_imported(gpu, &swapped));
+    let taken = Taken::AsImported(as_imported(gpu, &frame));
+    let other = Taken::AsImported(as_imported(gpu, &swapped));
     let named =
-        |taken: &Taken, slot| stage(&OnDevice::DmaBuf, taken_planes(gpu, taken), slot, &frame);
+        |taken: &Taken<'_>, slot| stage(&OnDevice::DmaBuf, taken_planes(gpu, taken), slot, &frame);
 
     let slot = slot_after(&frame, &taken);
     assert_eq!(

@@ -46,7 +46,7 @@ use spherecut_media::probe::{self, ProbeReport, StreamInfo, StreamKind};
 use spherecut_media::seek::{FrameAddress, frame_address};
 use spherecut_media::spherical::{Projection as SvProjection, StereoMode};
 use spherecut_media::{HwDevice, MediaError, Source};
-use spherecut_render::dmabuf::{self, Importer};
+use spherecut_render::dmabuf::{self, Imported, Importer};
 use spherecut_render::reference::RigOptions;
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
@@ -1102,7 +1102,7 @@ fn decode_mode(decoder: Decoder, node: &RenderNode) -> (DecodeMode, Option<Fallb
 
 /// `frame`'s planes imported into `gpu` (`--zero-copy`): `import_failed`
 /// when the decoder didn't export it, or the GPU can't import it.
-fn import(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, Failure> {
+fn import<'f>(gpu: &Gpu, frame: &'f VideoFrame) -> Result<Imported<'f>, Failure> {
     let refused = |why: String| render_error(RenderError::Import(why));
     let layers = match (&frame.transfer, frame.dmabuf()) {
         (Transfer::DrmPrime, Some(layers)) => layers,
@@ -1125,7 +1125,9 @@ fn import(gpu: &Gpu, frame: &VideoFrame) -> Result<Vec<wgpu::Texture>, Failure> 
     };
     let whole = SlotShape::of(frame.layout(), frame.size()).map_err(render_error)?;
     let planes = dmabuf::plan(&whole, layers).map_err(refused)?;
-    Importer::new().import(gpu, &planes).map_err(render_error)
+    Importer::new()
+        .import(gpu, frame, &planes)
+        .map_err(render_error)
 }
 
 /// FFmpeg's Vulkan context on `gpu`'s device, shared with it
