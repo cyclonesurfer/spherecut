@@ -1,0 +1,35 @@
+{
+  "env": [
+    "WAYLAND_DISPLAY=wayland-0"
+  ],
+  "locked": false,
+  "not_run": [],
+  "runs": [
+    {
+      "document": "/home/pat/spherecut/target/hw-gui/gui-proto-0.json",
+      "failed": [],
+      "label": "egui zoom 1",
+      "n": 0,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-proto-0.png",
+      "zoom": 1.0
+    },
+    {
+      "document": "/home/pat/spherecut/target/hw-gui/gui-proto-1.json",
+      "failed": [],
+      "label": "egui zoom 1.25",
+      "n": 1,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-proto-1.png",
+      "zoom": 1.25
+    },
+    {
+      "document": "/home/pat/spherecut/target/hw-gui/gui-proto-2.json",
+      "failed": [],
+      "label": "egui zoom 1.5",
+      "n": 2,
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-proto-2.png",
+      "zoom": 1.5
+    }
+  ],
+  "seconds": 20.0,
+  "session": "WAYLAND_DISPLAY set"
+}
