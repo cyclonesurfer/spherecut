@@ -37,9 +37,9 @@ use spherecut_core::FrameRate;
 use spherecut_core::StopToken;
 use spherecut_core::project::file::{self, head_hash};
 use spherecut_core::project::{
-    AnyKeys, Aspect, AudioChoice, Caps, Codec, Ease, Edit, EncoderChoice, ExportSettings,
-    Fingerprint, InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output,
-    Project, Quality, Source,
+    AnyKeys, Aspect, AudioChoice, Camera, Caps, Codec, EacLayout, EacPair, Ease, Edit,
+    EncoderChoice, ExportSettings, Fingerprint, InitialView, Key, KeyId, Media, MediaId,
+    MediaVideo, Orient, Orientation, Output, Project, Quality, Source,
 };
 use spherecut_core::time::{Rational, Time};
 use spherecut_core::video::VideoPlanes;
@@ -1258,21 +1258,39 @@ fn frame_of(project: &Path, out: &Path) -> (Option<i32>, Value) {
 /// A short render: half size, the first frame.
 const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
 
-/// `spherecut render` and `frame --project` of a dual-fisheye project
-/// fail `not_yet` until M3.11, writing nothing: the refusal comes before
-/// a render starts, so nothing is ever rendered from lens 0 alone.
-/// Control: an equirect project renders.
+/// `spherecut render` and `frame --project` of a dual-fisheye project,
+/// or of an EAC pair's, fail `not_yet` until M3.11, writing nothing: the
+/// refusal comes before a render starts, so nothing is ever rendered from
+/// lens 0 alone. Control: an equirect project renders.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
     let began = Instant::now();
     let dir = TempDir::new("not-yet");
     let master = insv::master(&dir, insv::MASTER, None).path;
     let cam = camera_project(&dir, &master, "cam.spherecut");
+    let src = clip(&dir, "grid", Pattern::Grid, 2);
+    // An EAC pair's project of a clip that is there, which render would
+    // otherwise export as an equirect. The layout is the MAX's
+    // (docs/formats/gopro.md).
+    let eac = dir.join("eac.spherecut");
+    let mut m = media(&src);
+    m.source = Source::EacPair(Box::new(EacPair {
+        camera: Camera::default(),
+        tracks: [0, 1],
+        layout: EacLayout {
+            overlap: 32,
+            pre: 1408,
+            post: 1376,
+            size: [4096, 1344],
+        },
+    }));
+    saved(m, &eac);
     let out = dir.join("out.mp4");
     let png = dir.join("still.png");
-    // Both commands' refusals, or what they did instead: each runs, and
-    // then each is held to the refusal.
-    let refused = |p: &Path| -> Result<(), String> {
+    // Both commands' refusals of the project at `p` whose media is the
+    // file `media`, and their messages, or what they did instead: each
+    // runs, and then each is held to the refusal.
+    let refused = |p: &Path, media: &Path| -> Result<[String; 2], String> {
         let ran = run(p, &out, SHORT);
         let (status, still) = frame_of(p, &png);
         let said = |m: &Value| m.as_str().unwrap_or("").to_string();
@@ -1283,28 +1301,33 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
             && ran.lines.len() == 1
             && doc["schema"] == contract::RENDER
             && said(&e["message"]).contains("M3.11")
-            && e["path"] == master.to_str().unwrap())
+            && e["path"] == media.to_str().unwrap())
         {
             return Err(format!("render: {:?} {:?}", ran.status, ran.lines));
         }
-        let e = &still["error"];
+        let f = &still["error"];
         if !(status == Some(1)
-            && e["code"] == "not_yet"
+            && f["code"] == "not_yet"
             && still["schema"] == contract::FRAME
-            && said(&e["message"]).contains("M3.11"))
+            && said(&f["message"]).contains("M3.11"))
         {
             return Err(format!("frame: {status:?} {still}"));
         }
-        Ok(())
+        Ok([said(&e["message"]), said(&f["message"])])
     };
-    refused(&cam).unwrap();
+    for (p, media, pair) in [
+        (&cam, &master, "two fisheye lenses"),
+        (&eac, &src, "two EAC tracks"),
+    ] {
+        let said = refused(p, media).unwrap();
+        assert!(said.iter().all(|m| m.contains(pair)), "{said:?}");
+    }
     assert!(!out.exists() && !png.exists());
     assert_eq!(temp_files(&dir), Vec::<String>::new());
     eprintln!("refused in {:.3} s", began.elapsed().as_secs_f64());
 
-    let src = clip(&dir, "grid", Pattern::Grid, 2);
     let flat = project(&dir, &src);
-    must_fail("the equirect project", refused(&flat));
+    must_fail("the equirect project", refused(&flat, &src));
     assert!(out.exists() && png.exists());
     eprintln!("with the control, {:.3} s", began.elapsed().as_secs_f64());
 }

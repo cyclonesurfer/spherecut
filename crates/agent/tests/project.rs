@@ -21,7 +21,9 @@ use spherecut_agent::{Roots, ToolError, reference, text};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{parse_metadata, read_record, read_trailer};
 use spherecut_core::project::folder::ProjectFolder;
-use spherecut_core::project::{DualFisheye, Media, Project, Source, file, gains_basis};
+use spherecut_core::project::{
+    Camera, DualFisheye, EacLayout, EacPair, Media, Project, Source, file, gains_basis,
+};
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_media::probe::probe;
 use spherecut_media::project::{camera_source, project_media};
@@ -1391,10 +1393,10 @@ fn errors_name_media_by_id_and_keep_file_text_out() {
     must_fail("the message as it was worded", free_of_the_path(&was));
 }
 
-/// `look`, `compare`, `check` and `render` of a dual-fisheye project are
-/// `not_yet` until M3.11 (M3 plan 14), with no file written and no job
-/// started. Control: none of the four is `not_yet` on an equirect
-/// project.
+/// `look`, `compare`, `check` and `render` of a dual-fisheye project, or
+/// of an EAC pair's, are `not_yet` until M3.11 (M3 plan 14), with no file
+/// written and no job started. Control: none of the four is `not_yet` on
+/// an equirect project.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
     let _t = timed("a_dual_fisheye_project_is_refused_not_yet");
@@ -1409,6 +1411,21 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         json!({"file": p, "create": {"media": cam}}),
     );
     assert!(matches!(load(&p).media()[0].source, Source::DualFisheye(_)));
+    // An EAC pair's project of a clip that is there, which the tools
+    // would otherwise read as an equirect. The layout is the MAX's
+    // (docs/formats/gopro.md).
+    let mut m = reference::media(&clip);
+    m.source = Source::EacPair(Box::new(EacPair {
+        camera: Camera::default(),
+        tracks: [0, 1],
+        layout: EacLayout {
+            overlap: 32,
+            pre: 1408,
+            post: 1376,
+            size: [4096, 1344],
+        },
+    }));
+    let eac = dir.made("eac.spherecut", m, None);
     let equirect = dir.fixture("equirect.spherecut");
 
     // Each tool with the project, as its argument names it, writing to
@@ -1459,8 +1476,12 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         n
     };
     let before = names();
-    for said in calls(&p) {
-        not_yet(&said).unwrap();
+    for (project, pair) in [(&p, "two fisheye lenses"), (&eac, "two EAC tracks")] {
+        for said in calls(project) {
+            not_yet(&said).unwrap();
+            let e = said.2.as_ref().unwrap_err();
+            assert!(e.message.contains(pair), "{}: {e:?}", said.0);
+        }
     }
     // Nothing written beside the project: no picture, no render and no
     // render's temporary file. A refused render answers with an error,
