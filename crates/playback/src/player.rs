@@ -231,15 +231,17 @@ pub struct PlayerConfig {
     /// imported (path A) too, when the device can import them.
     /// [`ZERO_COPY_ENV`] sets it.
     pub zero_copy: ZeroCopy,
-    /// Whether VA-API decoders wait for every picture queued on their
-    /// device before each download, or after each packet too: the fix
-    /// for the copy path's stall on AMD. Its default is what
+    /// Whether a VA-API decoder waits for the pictures it has queued on
+    /// its device before each download, or after each packet too: the
+    /// fix for the copy path's stall on AMD (D79). It waits for its own
+    /// pictures only, so another decoder on the device (a locked pair's
+    /// other lens) may still have pictures queued. Its default is what
     /// [`VAAPI_DRAIN_ENV`] says, read when the config is made, so that the
     /// window and the headless benchmarks both honour it; unset, it is
     /// [`VaapiDrain::Download`], the working choice until Pat picks one.
-    /// Software and Vulkan decoders never drain, nor do VA-API decoders
-    /// whose frames are exported (path A) unless it is
-    /// [`VaapiDrain::Picture`].
+    /// Software and Vulkan decoders never drain. On path A a frame that
+    /// is exported is not drained unless it is [`VaapiDrain::Picture`],
+    /// but a frame path A fails to export, and so downloads, is.
     pub vaapi_drain: VaapiDrain,
 }
 

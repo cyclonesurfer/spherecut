@@ -3686,8 +3686,10 @@ pub(crate) fn drain_vaapi(set: &mut SurfaceSet, sync: VaSyncSurface) -> DrainOut
         // context, so each id synced is a live surface of that context's
         // pool, which destroys its surfaces only with the context; and
         // `display` is the VADisplay of the device the context holds a
-        // reference to, so still open. Mesa's driver locks the display
-        // for the call (`_vlVaSyncSurface`).
+        // reference to, so still open. Mesa 26.2.5 takes its driver's
+        // mutex to look the surface up and the context's for the wait
+        // (`va/surface.c`); how other VA-API drivers lock is not read
+        // (D79).
         |id| unsafe { sync(display, id) },
         Instant::now,
     )
