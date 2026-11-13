@@ -9550,10 +9550,10 @@ open (then the lock's holder changes, and `not_top` may become
 apply; a client's limit makes the 12 KiB list too large; or a user
 wants an agent to undo the user's steps.
 
-*Updated 2026-11-13 (M3.9, D68):* projects of a camera's file.
-`Edit` has 24 ops, and the edit reference has an example of each new
-one against the fixture project, which gains a camera's media, 12
-(the plan's 11, an id the target's key already holds), when D57's test
+*Updated 2026-11-13 (M3.9, D68):* projects of a camera's file. `Edit`
+has 24 ops, and the edit reference has an example of each new one
+against the fixture project, which gains a camera's media, 12 (the
+plan's 11, an id the target's key already holds), when D57's test
 passes one: the test writes a synthetic `.insv` into its folder and
 makes the entry as `create` does, so that `set_source`'s camera form,
 `set_stitch` (a tune and gains) and `set_caps` (a nadir fill) apply to
@@ -9562,66 +9562,70 @@ file, and `add_media`, make its dual-fisheye source on the server with
 media's `camera_source`, or warn `no_calibration` and keep it an
 equirect. `set_source` takes `{"kind": "equirect"}`; the camera form
 `{"kind": "camera", "binding": …}`, which the server makes whole by
-reading the media's file beneath the roots, as it probes
-`add_media`'s path (the binding the one given, its status `user`); or
-a whole `dual_fisheye` source, copied unchanged from the project file
-by a client that can read it, whose calibration must be the one the
-file holds (`calibration_mismatch` names the parts that differ). An
-agent never makes a calibration: the server reads it from the file, or
-checks the one sent against it, so this entry's rule holds. `wired()`, which reads no file, skips the camera form as it
-skips `add_media`. The summary gives each media's source (the camera
-without its serial, the calibration's hash, the geometry with
-`superseded`, the tune, the gains' mode, the profile), never the raw
-strings. From the review: every tool result has `warnings`, `[]` when
-nothing warned, set once in `tools.rs` (F049); and one rule for text
-from files in errors (F051): an error names a project's media by id
-("the project's media 1"), never by the path the project recorded or
-by text read from a file, and every error's message, `valid` and
-`next` pass the fields' filter as a backstop, which PLAN's A1
-criterion now says too. `look`, `compare`, `check` and `render` refuse
-a project of a camera's pair `not_yet` until M3.11 (D68). `tools/list`
-is 12,235 of its 12,288 bytes, `project` 986 of its 1,000
-(`create.media` reads "A video."), and no other tool's description or
-schema changed. From the M3.9 review (R1), an agent's project folder
-is the one the kernel finds, as the GUI's and the CLI's are since
-F031: `Roots::project_folder` reads the path of the descriptor
-`openat2` gave from `/proc/self/fd`, refuses one no longer beneath
-the root (`outside_roots`) or removed (`not_found`), and names the
-folder as its root was given joined with the real path below the
-root's. So a project reached through a folder link beneath a root
-reads its `../clip.mp4` beside the folder it is really in, as the
-window and `spherecut render` do, and one an agent makes there loads
-in them with its media. The root keeps the name it was given, so a
-root reached through a link still names its paths as the agent does.
-A folder removed meanwhile is known by its link count, not by the
-" (deleted)" the kernel adds to its name. From the fix round's review,
-a media an agent adds is named as the window's save names one (R8),
-beneath the root: `Roots::named_near` keeps, of the names its folders
-give it as the kernel finds them, the one that shares the most of the
-project's folder, so a project made in `link` (a link to `real/sub`)
-of `link/clip.mp4` stores `clip.mp4`, not `../../link/clip.mp4`, and
-moves with its clip. From R7, `create` and `add_media` make a camera's file a source only
-if `validate` takes it at the default tune: media's `camera_source`
-ends with the source's `check`, and a refusal (a frame under 95°, too
-narrow for the default feather; a lens's ξ at −1 or below) keeps the
-media an equirect with `not_equirect` and `no_calibration`, whose
-parentheses carry `validate`'s words, which name only fields and
-numbers. Before, `add_media` refused such a file `bad_argument` and
-`create` refused to make the project at all. `trailer_source` is the
-same source unchecked, which a whole `dual_fisheye` source in a
-`set_source` is compared with, so one with a tune that fits can still
-make such a file a source. From R6, a whole source's lens `tracks` and
-its camera's model and firmware must be the file's too, refused
-`calibration_mismatch` at `edits[i].source.tracks` or `.camera`
-before core's rule on the first track is reached: a swapped pair or
-another stream would stitch the wrong pictures once M3.11 renders, and
-the table's geometry is looked up by the camera the file names. The
-front track, geometry, tune, gains and profile stay the client's to
-change. From R5, each refusal's `next` names a way that works: the
-camera form, or the part exactly as the project file holds it; and for
-a file that holds no calibration a stitch reads, keeping it equirect
-or probing the file. No tool gives a calibration whole, so only a
-client that can read the project file sends one.
+reading the media's file beneath the roots, as it probes `add_media`'s
+path (the binding the one given, its status `user`); or a whole
+`dual_fisheye` source, copied unchanged from the project file by a
+client that can read it, whose calibration must be the one the file
+holds (`calibration_mismatch` names the parts that differ). An agent
+never makes a calibration: the server reads it from the file, or
+checks the one sent against it, so this entry's rule holds. `wired()`,
+which reads no file, skips the camera form as it skips `add_media`.
+The summary gives each media's source (the camera without its serial,
+the calibration's hash, the geometry with `superseded`, the tune, the
+gains' mode, the profile), never the raw strings. From the review:
+every tool result has `warnings`, `[]` when nothing warned, set once
+in `tools.rs` (F049); and one rule for text from files in errors
+(F051): an error names a project's media by id ("the project's media
+1"), never by the path the project recorded or by text read from a
+file, and every error's message, `valid` and `next` pass the fields'
+filter as a backstop, which PLAN's A1 criterion now says too. `look`,
+`compare`, `check` and `render` refuse a project of a camera's pair
+`not_yet` until M3.11 (D68). `tools/list` is 12,235 of its 12,288
+bytes, `project` 986 of its 1,000 (`create.media` reads "A video."),
+and no other tool's description or schema changed. From the M3.9
+review (R1), an agent's project folder is the one the kernel finds, as
+the GUI's and the CLI's are since F031: `Roots::project_folder` reads
+the path of the descriptor `openat2` gave from `/proc/self/fd`,
+refuses one no longer beneath the root (`outside_roots`) or removed
+(`not_found`), and names the folder as its root was given joined with
+the real path below the root's. So a project reached through a folder
+link beneath a root reads its `../clip.mp4` beside the folder it is
+really in, as the window and `spherecut render` do, and one an agent
+makes there loads in them with its media. The root keeps the name it
+was given, so a root reached through a link still names its paths as
+the agent does. A folder removed meanwhile is known by its link count,
+not by the " (deleted)" the kernel adds to its name. From the fix
+round's review, a media an agent adds is named as the window's save
+names one (R8), beneath the root: `Roots::named_near` keeps, of the
+names its folders give it as the kernel finds them, the one that
+shares the most of the project's folder, so a project made in `link`
+(a link to `real/sub`) of `link/clip.mp4` stores `clip.mp4`, not
+`../../link/clip.mp4`, and moves with its clip. From R7, `create` and
+`add_media` make a camera's file a source only if `validate` takes it
+at the default tune: media's `camera_source` ends with the source's
+`check`, and a refusal (a frame under 95°, too narrow for the default
+feather; a lens's ξ at −1 or below) keeps the media an equirect with
+`not_equirect` and `no_calibration`, whose parentheses carry
+`validate`'s words, which name only fields and numbers. Before,
+`add_media` refused such a file `bad_argument` and `create` refused to
+make the project at all. `trailer_source` is the same source
+unchecked, which a whole `dual_fisheye` source in a `set_source` is
+compared with, so one with a tune that fits can still make such a file
+a source; but no tool gives a calibration whole, so only a client that
+reads the camera file's trailer itself can send one, and the camera
+form on such a file is refused `bad_edit` with `validate`'s words and
+a `next` to keep the media equirect. From R6, a whole source's lens
+`tracks` and its camera's model and firmware must be the file's too,
+refused `calibration_mismatch` at `edits[i].source.tracks` or
+`.camera` before core's rule on the first track is reached: a swapped
+pair or another stream would stitch the wrong pictures once M3.11
+renders, and the table's geometry is looked up by the camera the file
+names. The front track, geometry, tune, gains and profile stay the
+client's to change. From R5, each refusal's `next` names a way that
+works: the camera form, or the part exactly as the project file holds
+it; and for a file that holds no calibration a stitch reads, keeping
+it equirect or probing the file. No tool gives a calibration whole, so
+only a client that can read the project file sends one.
 
 ## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
 

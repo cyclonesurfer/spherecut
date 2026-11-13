@@ -343,7 +343,10 @@ struct CameraSource {
 /// for: the two-lens source of the media's file, read beneath the roots
 /// and checked against what the project recorded of it, as `project
 /// create` makes one, its geometry's binding the asked one and the user's
-/// when one is asked.
+/// when one is asked. A source that `validate`'s rules for one refuse at
+/// the default tune (the M3.9 review's R7) is refused here with their
+/// words and a `next` to keep the media equirect, as `create` and
+/// `add_media` keep such a file: the form has nothing to fix.
 fn camera_form(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, ToolError> {
     let arg = format!("edits[{i}]");
     let form: CameraForm = serde_json::from_value(v).map_err(|e| {
@@ -377,6 +380,14 @@ fn camera_form(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, 
     if let Some(b) = form.source.binding {
         d.geometry.binding = b;
         d.geometry.status = Status::User;
+    }
+    if let Some(m) = project.media().iter().find(|m| m.id == id)
+        && let Err(p) = d.check(m)
+    {
+        return Err(bad_edit(set_source_error(i, p.code, p.message)).next(
+            "nothing was saved; the file's calibration makes no source a project takes at the \
+             default tune: keep it {\"kind\": \"equirect\"}",
+        ));
     }
     Ok(Edit::SetSource {
         media: id,

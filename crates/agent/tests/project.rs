@@ -1574,10 +1574,13 @@ fn frame_deg(path: &Path) -> [f64; 2] {
 /// be read does. The files: cam.insv's calibration with both blocks'
 /// focals times 1.07, so that each lens's θ_frame is under the 95° the
 /// default 5° feather needs, and with block 0's ξ at −1.5, where the lens
-/// images nothing. The first is made a source after by a whole
-/// `set_source` whose feather fits its frame, while the camera form, at
-/// the default tune, is refused with `validate`'s words. Control: cam.insv
-/// itself is made a dual-fisheye source without the warnings.
+/// images nothing. The camera form, at the default tune, is refused on
+/// either with `validate`'s words and a `next` that says to keep the
+/// media equirect, since the form has nothing to fix (the review of R7's
+/// fix); the first is made a source after by a whole `set_source` whose
+/// feather fits its frame. Controls: cam.insv itself is made a
+/// dual-fisheye source without the warnings, and a camera form refused
+/// for another reason gets another `next`.
 #[test]
 fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
     let _t = timed("a_calibration_no_project_takes_at_the_default_tune_stays_equirect");
@@ -1642,12 +1645,29 @@ fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
     check("long.spherecut", &long, "source.tune.feather_deg").unwrap();
     check("xi.spherecut", &xi, "ξ + xi_delta must stay above −1").unwrap();
     // The camera form's default tune is refused as `validate` refuses
-    // it; the file's source with a feather that fits its frame applies.
+    // it, with a `next` that says to keep the media equirect.
+    let keep = "nothing was saved; the file's calibration makes no source a project takes at \
+                the default tune: keep it {\"kind\": \"equirect\"}";
+    let camera_form = |file: &str, id: u64| {
+        let form = set_source(id, json!({"kind": "camera"}));
+        refused(&tools, "edit", edit(&dir.path(file), json!([form])))
+    };
+    for (file, words) in [
+        ("long.spherecut", "source.tune.feather_deg"),
+        ("xi.spherecut", "ξ + xi_delta must stay above −1"),
+    ] {
+        let e = camera_form(file, 1);
+        assert_eq!(e.code, codes::BAD_EDIT, "{e:?}");
+        assert!(e.message.contains(words), "{e:?}");
+        assert_eq!(e.next.as_deref(), Some(keep), "{e:?}");
+    }
+    let e = camera_form("long.spherecut", 99);
+    must_fail(
+        "a camera form refused for another reason",
+        e.next.as_deref() == Some(keep),
+    );
+    // The file's source with a feather that fits its frame applies.
     let q = dir.path("long.spherecut");
-    let camera = json!({"kind": "camera"});
-    let e = refused(&tools, "edit", edit(&q, json!([set_source(1, camera)])));
-    assert_eq!(e.code, codes::BAD_EDIT, "{e:?}");
-    assert!(e.message.contains("source.tune.feather_deg"), "{e:?}");
     let report = probe(&long).unwrap();
     let mut fits = trailer_source(spherecut_media::Source::path(&long), &report)
         .unwrap()

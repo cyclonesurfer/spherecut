@@ -518,29 +518,31 @@ text). A camera's two EAC tracks (a GoPro MAX file) are
 one sent in `set_source` or a project file written by hand, and the
 tools that render refuse it (`not_yet`). `create`, and `edit`'s
 `add_media`, make a camera's file a `dual_fisheye` source of the
-calibration its trailer holds; a file with none a stitch reads, or
-one whose source at the default tune
-`validate` refuses (its frame too narrow for the default feather, a
-lens's ξ at −1 or below), stays an equirect, shown as its lenses, with
-`not_equirect` and `no_calibration` warnings. Three ops change a
-source: `set_source`, `set_stitch` (the tune, the gains or both) and
-`set_caps` (the nadir and zenith caps). `set_source` takes
-`{"kind": "equirect"}`; the camera form
-`{"kind": "camera", "binding": "direct"}`, which the server makes
-whole from the media's file beneath the roots, as `create` would, with
-the geometry's binding the one given and its status `user` (`binding`
-may be left out); or a whole `dual_fisheye` source, copied unchanged
-from the project file by a client that can read it, whose
-`calibration`, `tracks` and `camera` `model` and `firmware` must be
-what its media's file holds (`calibration_mismatch`, at the part that
-differs, names what does) and whose `front_track`, `geometry`, `tune`,
-`gains` and `profile` are the client's to change. An agent never makes
-a calibration: the server reads it from the file, or checks the one
-sent against it. Until M3.11 renders a project stitched, `look`,
-`compare`, `check` and `render` refuse a project whose clip's media is
-a camera's pair (`not_yet`), rather than show its first lens as an
-equirect: `look` at the file itself with `mode` `raw`, or, for two
-fisheye lenses, `frame --reference` it in a terminal.
+calibration its trailer holds; a file with none a stitch reads, or one
+whose source at the default tune `validate` refuses (its frame too
+narrow for the default feather, a lens's ξ at −1 or below), stays an
+equirect, shown as its lenses, with `not_equirect` and
+`no_calibration` warnings. Three ops change a source: `set_source`,
+`set_stitch` (the tune, the gains or both) and `set_caps` (the nadir
+and zenith caps). `set_source` takes `{"kind": "equirect"}`; the
+camera form `{"kind": "camera", "binding": "direct"}`, which the
+server makes whole from the media's file beneath the roots, as
+`create` would, with the geometry's binding the one given and its
+status `user` (`binding` may be left out), and which is `bad_edit`,
+with `validate`'s words and a `next` to keep the media equirect, on a
+file whose source at the default tune `validate` refuses; or a whole
+`dual_fisheye` source, copied unchanged from the project file by a
+client that can read it, whose `calibration`, `tracks` and `camera`
+`model` and `firmware` must be what its media's file holds
+(`calibration_mismatch`, at the part that differs, names what does)
+and whose `front_track`, `geometry`, `tune`, `gains` and `profile` are
+the client's to change. An agent never makes a calibration: the server
+reads it from the file, or checks the one sent against it. Until M3.11
+renders a project stitched, `look`, `compare`, `check` and `render`
+refuse a project whose clip's media is a camera's pair (`not_yet`),
+rather than show its first lens as an equirect: `look` at the file
+itself with `mode` `raw`, or, for two fisheye lenses,
+`frame --reference` it in a terminal.
 
 **The window's actions that aren't edits**, and what an agent does
 instead:
