@@ -47,7 +47,11 @@
 //! removes the PNGs its own manifest doesn't list; and [`rung2`], the
 //! shader's stitch held to rung 1's, which stores floors alone, in
 //! `goldens/rung2.json`. They share rung 1's pairs (`tests/common/rung1.rs`)
-//! with the rest of the binary, rendered once a run.
+//! with the rest of the binary, rendered once a run. Their tests carry
+//! the module's path, `dfish_seam::dfish_seam_rows`,
+//! `dfish_views::dfish_view_rows` and `rung2::rung2_x5_like_matches_rung1`
+//! among them, which a filter given `--exact` spells out whole: the bare
+//! name with `--exact` matches no test, runs nothing and passes.
 //!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
 //! CPU and ideal references only, at the floors blessed here, and on the
