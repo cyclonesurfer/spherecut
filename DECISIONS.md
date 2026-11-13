@@ -11354,9 +11354,14 @@ and `invalid` otherwise, and the first refusal is the one given. An
 equirect media gets the caps' rules alone, and an EAC pair its tracks'
 too. A dual-fisheye source, in this order: its tracks differ; its
 `front_track` is 0 or 1; the generation the geometry reads has its set
-in the snapshot; the snapshot's hash is its raw strings'; for each lens
-the tune's yaw, pitch and roll within ±15°, its centre within ±64
-canvas px, the radius scale 0.9 to 1.1, θ_max 85° to 110°, `xi_delta`
+in the snapshot; the snapshot's hash is its raw strings'; each of that
+set's principal points within the span of its square the canvas map
+shows (0 to src, or the window under map B), as a lens whose axis is
+out of frame covers nothing of its slot (the M3.9 review's R2, which
+also gives such a lens θ_frame 0, so the tune's centre can't take an
+axis out unrefused); for each lens the tune's yaw, pitch and roll
+within ±15°, its centre within ±64 canvas px, the radius scale 0.9 to
+1.1, θ_max 85° to 110°, `xi_delta`
 within ±0.15 and ξ + `xi_delta` above −1; the feather 0° to 15° and q
 0 to 3.34 m⁻¹ (D ≥ 0.3 m); fixed gains 0.25 to 4, or an Auto track
 with a rate above 0, a sample at least and finite ratios; the caps (5°

@@ -144,8 +144,8 @@ struct Row {
 }
 
 /// The bounds' table: each number `validate` reads (11.2, and the rules
-/// this slice adds: `front_track`, `xi_delta`'s range and the coverage
-/// rule) at each end and a step past it.
+/// this slice adds: `front_track`, `xi_delta`'s range, the principal
+/// points and the coverage rule) at each end and a step past it.
 fn rows() -> Vec<Row> {
     let mut rows = Vec::new();
     let mut row = |name: String, media: Media, expect: Expect| {
@@ -214,6 +214,77 @@ fn rows() -> Vec<Row> {
             "source.calibration.hash",
             "raw strings' hash",
         ),
+    );
+    // Each block's principal point (R2): within its square, [0, src],
+    // under the fixture's map C. At an end the lens's axis meets its
+    // slot's edge, where θ_frame is about 0 and the feather's rule
+    // refuses the fixture's 4°.
+    let src = f64::from(fisheye(&camera()).calibration.canvas[1]);
+    let centred = |generation: Generation, b: usize, axis: usize, v: f64| {
+        changed(|df| {
+            df.geometry.generation = generation;
+            let set = match generation {
+                Generation::V3 => df.calibration.v3.as_mut(),
+                Generation::V6 => df.calibration.v6.as_mut(),
+            };
+            let block = &mut set.unwrap()[b];
+            *[&mut block.cx, &mut block.cy][axis] = v;
+        })
+    };
+    for b in 0..2 {
+        for (axis, name) in ["cx", "cy"].into_iter().enumerate() {
+            for (end, past) in [(0.0, (-0.0f64).next_down()), (src, src.next_up())] {
+                row(
+                    format!("block {b}'s {name} at {end} px"),
+                    centred(Generation::V6, b, axis, end),
+                    refused(Code::OutOfRange, "source.tune.feather_deg", FEATHER),
+                );
+                row(
+                    format!("block {b}'s {name} a step past {end} px"),
+                    centred(Generation::V6, b, axis, past),
+                    range(format!("source.calibration.v6[{b}].{name}")),
+                );
+            }
+        }
+    }
+    let cx = fisheye(&camera()).calibration.v6.unwrap()[1].cx;
+    row(
+        "block 1's cx canvas-absolute, as the raw string holds it".into(),
+        centred(Generation::V6, 1, 0, cx + src),
+        range("source.calibration.v6[1].cx".into()),
+    );
+    row(
+        "V3's cx out of its square, with the geometry reading V6".into(),
+        changed(|df| df.calibration.v3.as_mut().unwrap()[1].cx += src),
+        Expect::Valid,
+    );
+    row(
+        "V3's cx out of its square, with the geometry reading V3".into(),
+        centred(Generation::V3, 1, 0, -1.0),
+        range("source.calibration.v3[1].cx".into()),
+    );
+    // Under map B the slot shows the window, [(src − dst)/2,
+    // (src + dst)/2] of the square: 32 to 5344 px on the X5.
+    let windowed = |v: f64| {
+        changed(|df| {
+            df.geometry.canvas = CanvasMap::B;
+            df.calibration.v6.as_mut().unwrap()[0].cx = v;
+        })
+    };
+    row(
+        "the fixture under map B".into(),
+        changed(|df| df.geometry.canvas = CanvasMap::B),
+        Expect::Valid,
+    );
+    row(
+        "under map B, block 0's cx a step left of the window".into(),
+        windowed(32f64.next_down()),
+        range("source.calibration.v6[0].cx".into()),
+    );
+    row(
+        "under map B, block 0's cx a step right of the window".into(),
+        windowed(5344f64.next_up()),
+        range("source.calibration.v6[0].cx".into()),
     );
     row(
         "a focal of NaN in the set the geometry reads".into(),
@@ -702,7 +773,8 @@ fn both_at_85() -> Media {
 /// Every number `validate` bounds (11.2), at each end (valid) and a step
 /// past it (refused, naming the media and the field), and the structural
 /// rules (distinct tracks, front track 0 or 1, the geometry's generation
-/// in the snapshot, the hash of the raw strings); the row count pinned so
+/// in the snapshot, the hash of the raw strings, each principal point in
+/// the span of its square its slot shows); the row count pinned so
 /// no rule drops unseen. Where another rule refuses an end (a feather of
 /// 15° on the fixture's tune, a radius scale of 1.1, θ_max at 85° or
 /// `xi_delta` at −0.15 beside a feather of 4°), the row names that rule,
@@ -751,7 +823,7 @@ fn validate_at_each_bound_and_just_past() {
         spent_valid / f64::from(valid) * 1e3
     );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    assert_eq!(rows.len(), 159, "a row was added or dropped");
+    assert_eq!(rows.len(), 181, "a row was added or dropped");
 
     // What both lenses at 85° would have rendered: directions 90° off
     // lens 0's axis, which neither covers, weighed (0, 0).

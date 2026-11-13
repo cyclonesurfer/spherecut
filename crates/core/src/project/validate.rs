@@ -141,7 +141,9 @@ impl Project {
     /// A dual-fisheye source's are checked in this order, the first
     /// refusal returned: its tracks differ; its front track is 0 or 1; the
     /// geometry's generation has its set in the snapshot; the hash is the
-    /// raw strings'; each lens's yaw, pitch and roll within ±15°, centre
+    /// raw strings'; each of that set's principal points within the span
+    /// of its square the canvas map shows (0 to src, or the window under
+    /// map B); each lens's yaw, pitch and roll within ±15°, centre
     /// within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to 110°,
     /// `xi_delta` within ±0.15 and ξ plus it above −1; the feather 0° to
     /// 15° and q 0 to 3.34 m⁻¹; the gains; the caps; then, from one
@@ -542,9 +544,10 @@ fn check_tracks(m: &Media, tracks: [u32; 2]) -> Result<(), Problem> {
 }
 
 /// A dual-fisheye source's rules that build no model, in order: the
-/// tracks, the front track, the geometry's set, the hash, each lens's
-/// tune (yaw, pitch and roll, centre, radius scale, θ_max, ξ delta and
-/// the sum ξ + ξ delta), the feather's and q's ranges, and the gains.
+/// tracks, the front track, the geometry's set, the hash, that set's
+/// principal points, each lens's tune (yaw, pitch and roll, centre,
+/// radius scale, θ_max, ξ delta and the sum ξ + ξ delta), the feather's
+/// and q's ranges, and the gains.
 fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), Problem> {
     use bounds::*;
     let id = m.id;
@@ -583,6 +586,25 @@ fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), 
                 cal.hash
             ),
         );
+    }
+    // Each block's principal point within the span of its square that
+    // the canvas map shows (the M3.9 review's R2): outside, the lens's
+    // axis is out of frame and it covers nothing of its slot. Block 1's cx
+    // left canvas-absolute, as the raw string holds it, is the likeliest
+    // slip. The tune's centre may still take it out by 64 px, where
+    // θ_frame is 0 and the feather's and coverage rules refuse it.
+    let rig_cal = cal.calibration();
+    let span = df.geometry.canvas.slot_span(rig_cal.src, rig_cal.dst);
+    for (b, block) in set.iter().enumerate() {
+        for (axis, v) in [("cx", block.cx), ("cy", block.cy)] {
+            within(
+                id,
+                || format!("source.calibration.{name}[{b}].{axis}"),
+                v,
+                span,
+                " px",
+            )?;
+        }
     }
     let tune = &df.tune;
     for (b, lens) in tune.lenses.iter().enumerate() {

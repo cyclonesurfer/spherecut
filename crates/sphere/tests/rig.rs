@@ -1520,7 +1520,8 @@ fn rig_values_of_every_field_differ_in_texel() {
     );
 }
 
-/// Canvas maps A, B and C invert.
+/// Canvas maps A, B and C invert, and the span of its square each slot
+/// shows ends at the slot's edges.
 #[test]
 fn rig_canvas_maps_invert() {
     let _time = timed("rig_canvas_maps_invert");
@@ -1559,6 +1560,13 @@ fn rig_canvas_maps_invert() {
                 [side; 2],
             )
             .unwrap();
+            // The span of its square a slot shows ends at the slot's edges.
+            let (lo, hi) = map.slot_span(SRC, DST);
+            let ends = [lo, hi].map(|v| map.to_slot(DVec2::splat(v), SRC, DST, side));
+            assert!(
+                ends[0].length() <= 1e-9 * s && (ends[1] - DVec2::splat(s)).length() <= 1e-9 * s,
+                "{map:?} at {side}: {ends:?}"
+            );
             for b in 0..2 {
                 let block = cal.v6.unwrap()[b];
                 let c = DVec2::new(block.cx, block.cy) + DVec2::from(lens.centre_px);
@@ -1597,6 +1605,17 @@ fn rig_canvas_maps_invert() {
     must_fail(
         "B's inverse of A's output",
         at_most((back - p).length(), 1e-9 * f64::from(SRC)),
+    );
+    // Control: A's span through B's map, whose slot shows the window.
+    let (lo, _) = CanvasMap::A.slot_span(SRC, DST);
+    must_fail(
+        "A's span through B's map",
+        at_most(
+            CanvasMap::B
+                .to_slot(DVec2::splat(lo), SRC, DST, 768)
+                .length(),
+            1e-9 * 768.0,
+        ),
     );
 }
 

@@ -155,6 +155,20 @@ impl CanvasMap {
         }
     }
 
+    /// The span of a block's own square, in canvas pixels along either
+    /// axis, that its slot shows: the whole square, 0 to src, or under B
+    /// the window, (src − dst)/2 to (src + dst)/2. [`CanvasMap::to_slot`]
+    /// takes its ends to the slot's edges; a principal point outside it
+    /// leaves the lens's axis out of frame, which `validate` refuses (the
+    /// M3.9 review's R2).
+    pub fn slot_span(self, src: u32, dst: u32) -> (f64, f64) {
+        let (src, dst) = (f64::from(src), f64::from(dst));
+        match self {
+            CanvasMap::B => ((src - dst) / 2.0, (src + dst) / 2.0),
+            CanvasMap::A | CanvasMap::C | CanvasMap::Fitted { .. } => (0.0, src),
+        }
+    }
+
     /// The inverse of [`CanvasMap::to_slot`]: a point of a track of side
     /// `side` in its block's square, in canvas pixels. The Stitch pane
     /// turns a drag in the slot into the tune's canvas pixels by it.
