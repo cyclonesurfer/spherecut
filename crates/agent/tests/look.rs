@@ -16,6 +16,7 @@ use spherecut_agent::limits::{JPEG_QSCALE, JPEG_QSCALE_MAX, MAX_IMAGE_BUDGET};
 use spherecut_agent::rpc::{CallCx, Image, Tools};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError};
+use spherecut_render::compare::sample_diff;
 use spherecut_synth::media::{self, Codec, Spec};
 use spherecut_synth::{AXIS_MARKERS, RgbImage, decode_frame_code};
 
@@ -93,7 +94,7 @@ fn px(img: &image::RgbImage, x: u32, y: u32) -> [f64; 3] {
 }
 
 fn far(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f64::max)
+    (0..3).map(|c| sample_diff(a[c], b[c])).fold(0.0, f64::max)
 }
 
 /// Tile `t`'s picture: `[x, y, w, h]`.

@@ -50,7 +50,7 @@ use spherecut_core::{FrameRate, StopToken};
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, NextFrame, VideoRequest};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::ff;
-use spherecut_render::compare::{View, psnr, ssim};
+use spherecut_render::compare::{View, psnr, sample_diff, ssim};
 use spherecut_render::reference;
 use spherecut_render::{Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -198,7 +198,7 @@ fn rgb(img: &Image, x: u32, y: u32) -> [f64; 3] {
 }
 
 fn far(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f64::max)
+    (0..3).map(|c| sample_diff(a[c], b[c])).fold(0.0, f64::max)
 }
 
 /// A spherical clip of synth's grid, `frames` long at 30 fps.
@@ -227,7 +227,7 @@ fn within_cpu_rule(got: &Image, want: &Image) -> Result<(), String> {
     let far = a
         .iter()
         .zip(&b)
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, *y))
         .fold(0.0, f64::max);
     if db >= 36.0 && far <= 0.1 {
         Ok(())
@@ -1775,7 +1775,7 @@ fn max_diff(a: &Image, b: &Image) -> f64 {
     unit(a)
         .iter()
         .zip(unit(b))
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, y))
         .fold(0.0, f64::max)
 }
 
@@ -2829,7 +2829,7 @@ fn swscale_cross_check(run: &mut Run) {
                         .flat_map(|&(o, t)| {
                             (0..3).map(move |c| {
                                 let s = (f64::from(rgb48[3 * t + c]) / 257.0).round();
-                                (f64::from(px[3 * o + c]) - s).abs()
+                                sample_diff(f64::from(px[3 * o + c]), s)
                             })
                         })
                         .fold(0.0, f64::max)
@@ -2843,7 +2843,7 @@ fn swscale_cross_check(run: &mut Run) {
                     .iter()
                     .flat_map(|&(o, t)| {
                         let x = exact_rgb(&planes, t, matrix, range);
-                        (0..3).map(move |c| (f64::from(px[3 * o + c]) - 255.0 * x[c]).abs())
+                        (0..3).map(move |c| sample_diff(f64::from(px[3 * o + c]), 255.0 * x[c]))
                     })
                     .fold(0.0, f64::max);
                 exact_worst = exact_worst.max(e);

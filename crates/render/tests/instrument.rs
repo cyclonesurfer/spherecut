@@ -2352,11 +2352,7 @@ fn rung1_exposure_step_once_matched() {
     // The signature's log gains against the truth's.
     let planted = gained().lenses[1].gain.map(f64::ln);
     let measured = seam.own.log_gain;
-    let off = |got: [f64; 3]| {
-        (0..3)
-            .map(|c| (got[c] - planted[c]).abs())
-            .fold(0.0, f64::max)
-    };
+    let off = |got: [f64; 3]| (0..3).map(|c| (got[c] - planted[c]).abs()).fold(0.0, worse);
     eprintln!(
         "log gains: measured {measured:.4?}, planted {planted:.4?}, {:.4} off at most",
         off(measured)
@@ -2397,7 +2393,7 @@ fn rung1_exposure_step_once_matched() {
         }
         let by_channel = sum.map(|s| s / count as f64 * 255.0);
         eprintln!("    the step by channel, in LSB: {by_channel:+.3?}");
-        by_channel.iter().map(|s| s.abs()).fold(0.0, f64::max)
+        by_channel.iter().map(|s| s.abs()).fold(0.0, worse)
     };
     let gains_of = |log_gain: [f64; 3]| [[1.0; 3], log_gain.map(|l| (-l).exp())];
     let matched = step(&alone(1, gains_of(measured)));

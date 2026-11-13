@@ -58,6 +58,7 @@ use spherecut_media::backend::{
 };
 use spherecut_media::decode::open_vulkan_device;
 use spherecut_media::{HwError, MediaError, Source, capture_hw_decode_log};
+use spherecut_render::compare::sample_diff;
 use spherecut_render::reference::{RigDebug, RigOptions};
 use spherecut_render::{Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -176,7 +177,7 @@ fn max_lsb(a: &Path, b: &Path) -> f64 {
     unit(&a)
         .iter()
         .zip(unit(&b))
-        .map(|(x, y)| (x - y).abs() * 255.0)
+        .map(|(x, y)| sample_diff(*x, y) * 255.0)
         .fold(0.0, f64::max)
 }
 

@@ -71,7 +71,7 @@ use spherecut_core::video::{
     ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
 };
 use spherecut_render::blur;
-use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, ssim};
+use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, sample_diff, ssim};
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
@@ -83,6 +83,7 @@ use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
+use spherecut_testkit::control::{above, at_most, below, must_fail};
 use spherecut_testkit::{Fnv64, bench, tier2};
 
 /// Where the stored images and the manifest live.
@@ -545,10 +546,14 @@ fn rms(a: &[f64], b: &[f64]) -> f64 {
     (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len().max(1) as f64).sqrt()
 }
 
+/// The largest difference between two images' samples, infinite where
+/// either holds a NaN ([`sample_diff`]): a bare `f64::max` fold passes over
+/// a NaN and would call a render with one equal to its reference (the
+/// project review's F039).
 fn max_diff(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b)
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, *y))
         .fold(0.0, f64::max)
 }
 
@@ -2702,7 +2707,7 @@ fn lod_heatmap(run: &mut Run<'_>) {
             let want = [l.clamp(0.0, 4.0), c.clamp(0.0, 3.0), l];
             let have = got.unit_at(i, j).unwrap();
             for k in 0..3 {
-                let d = (have[k] - want[k]).abs();
+                let d = sample_diff(have[k], want[k]);
                 worst = worst.max(d);
                 if d > 0.5 {
                     over += 1.0;
@@ -3536,6 +3541,30 @@ fn a_bound_over_is_strict() {
     assert!(run.over("control", 101.0, 100.0));
     assert_eq!(run.failures.len(), 1, "{:?}", run.failures);
     assert_eq!(run.thresholds["control_over"], json!(100.0));
+}
+
+#[test]
+fn a_nan_is_infinitely_far_from_the_reference() {
+    // The CPU rule and the emulation's 1e-12 both read max_diff, which a
+    // render holding a NaN must fail (F039).
+    let want = [0.25, 0.5, 0.75, 0.1, 0.2, 0.3];
+    let mut got = want;
+    assert_eq!(at_most(max_diff(&got, &want), 0.0).passes(), Some(true));
+    got[4] = f64::NAN;
+    let off = max_diff(&got, &want);
+    assert_eq!(off, f64::INFINITY);
+    must_fail("a NaN under the CPU rule", at_most(off, CPU_MAX_CHANNEL));
+    must_fail("a NaN under the emulation's bound", below(off, 1e-12));
+    // Control: the bare fold this replaced reads the NaN picture as exact.
+    let bare = got
+        .iter()
+        .zip(&want)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f64::max);
+    assert_eq!(
+        must_fail("the bare fold seeing the NaN", above(bare, 0.0)),
+        0.0
+    );
 }
 
 #[test]

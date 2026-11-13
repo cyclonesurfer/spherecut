@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use common::{Frame, Kind, color, frame, gpu};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, Transfer};
-use spherecut_render::compare::{View, diff_stats, psnr};
+use spherecut_render::compare::{View, diff_stats, psnr, sample_diff};
 use spherecut_render::readback::{Texels, f16_to_f32, read_texture, round_f16};
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::still::srgb_oetf;
@@ -927,12 +927,12 @@ fn a_stereo_eye_shows_nothing_of_the_other() {
             let off = a
                 .iter()
                 .zip(&b)
-                .filter(|(a, b)| (*a - *b).abs() > 1.5 / 255.0)
+                .filter(|(a, b)| sample_diff(**a, **b) > 1.5 / 255.0)
                 .count();
             let worst = a
                 .iter()
                 .zip(&b)
-                .map(|(a, b)| (a - b).abs())
+                .map(|(a, b)| sample_diff(*a, *b))
                 .fold(0.0, f64::max);
             assert_eq!(
                 off,
