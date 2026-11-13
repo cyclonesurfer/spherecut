@@ -88,7 +88,7 @@ pub struct VideoRequest {
     /// [`VaapiDrain::Off`] here, not the drain's default: the CLI's render
     /// and frame and the agents' tools share their GPU's memory with no
     /// window, so a drain would only cost them speed. The player asks for
-    /// its `PlayerConfig`'s.
+    /// its `PlayerConfig`'s, and the window's exports for the player's.
     pub vaapi_drain: VaapiDrain,
     /// Set at shutdown only: FFmpeg stops reading inside a read, and the
     /// stream ends for good (D13). Seeks stop through [`StopToken`]s.
@@ -185,7 +185,8 @@ pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> ZeroCopy {
 }
 
 /// `SPHERECUT_VAAPI_DRAIN` sets the [`VaapiDrain`] the player's VA-API
-/// decoders run with: playback's `PlayerConfig::vaapi_drain`.
+/// decoders run with, and the window's exports: playback's
+/// `PlayerConfig::vaapi_drain`.
 pub const VAAPI_DRAIN_ENV: &str = "SPHERECUT_VAAPI_DRAIN";
 
 /// Whether a VA-API decoder waits for every picture queued on its device

@@ -934,6 +934,9 @@ whether the viewer has two frames ready beyond the one it shows, and
 while a drag runs and it hasn't, the export's decode, render and encode
 stages each wait before a frame's work (`Pace::yield_to_viewer`, 100 ms
 at most), so the viewer's decodes go first on the GPU's video engine.
+Its decode on VA-API drains as the player's does
+(`ExportJob::vaapi_drain`, "The VA-API drain" below), since its
+downloads free their staging buffers in the window's process too.
 No thread but the UI's
 waits for the GPU through wgpu's `Device::poll` wait, which holds the
 lock a present takes: they use `Gpu::wait_for_submitted`, which polls
@@ -1229,10 +1232,12 @@ without waiting.
     times it. Exported frames (path A) aren't downloaded and don't
     drain; `picture`, a mode to compare against, drains after every
     packet sent too, theirs included; `off` or `0` runs none of it, not
-    even libva's lookup. Software and Vulkan decoders never drain.
-    `frame`, `render`, the window's exports and the agents' tools ask
-    for none (`VideoRequest::default`). Download is the working choice
-    until Pat answers the question asked on 2026-11-13.
+    even libva's lookup. Software and Vulkan decoders never drain. The
+    window's exports drain as its player does
+    (`ExportJob::vaapi_drain`); `frame`, `render` and the agents' tools,
+    with no window in their process, ask for none
+    (`VideoRequest::default`). Download is the working choice until Pat
+    answers the question asked on 2026-11-13.
   * **The submit gate** (D41, `core::gate::SubmitGate`, one a device,
     `Gpu::submit_gate`): while the UI thread holds a swapchain image,
     no other thread submits to its device, since RADV makes every

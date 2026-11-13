@@ -132,12 +132,7 @@ pub(crate) fn run(
     if let Some(f) = &decode_skipped {
         shared.decode_fell_back(f.clone());
     }
-    let req = VideoRequest {
-        stream: Some(media.video.stream as usize),
-        decode,
-        interrupt: stop.shutdown_flag(),
-        ..VideoRequest::default()
-    };
+    let req = video_request(job, media.video.stream, decode, stop);
     let open = || {
         backend.open_video(&media.path, &req).map_err(|e| {
             if stop.is_shut_down() {
@@ -420,6 +415,24 @@ fn decode_mode(decoder: Decoder, node: &RenderNode) -> (DecodeMode, Option<Fallb
             },
             None,
         ),
+    }
+}
+
+/// What the decode stage asks for of the source's video `stream`:
+/// decoded on `decode` with the job's VA-API drain, stopping for good at
+/// `stop`'s shutdown.
+fn video_request(
+    job: &ExportJob,
+    stream: u32,
+    decode: DecodeMode,
+    stop: &StopSource,
+) -> VideoRequest {
+    VideoRequest {
+        stream: Some(stream as usize),
+        decode,
+        vaapi_drain: job.vaapi_drain,
+        interrupt: stop.shutdown_flag(),
+        ..VideoRequest::default()
     }
 }
 
@@ -1866,5 +1879,41 @@ mod tests {
         std::os::unix::fs::symlink(other.join("out.mp4"), &link).unwrap();
         assert_eq!(folder(&link, false).unwrap(), other);
         assert_eq!(folder(&link, true).unwrap(), tmp.0);
+    }
+
+    /// The decode stage asks for the job's VA-API drain: none from
+    /// `ExportJob::new`, as the CLI's and the agents' exports run, and
+    /// whatever the window's export sets, its player's.
+    ///
+    /// Control: the request as built before the drain, which takes
+    /// `VideoRequest`'s, carries no drain a job asks for.
+    #[test]
+    fn the_decode_asks_for_the_jobs_drain() {
+        use spherecut_media::backend::VaapiDrain;
+        use spherecut_testkit::control::must_fail;
+
+        let dir = TempDir::new("drain");
+        let mut job = job(&dir.0, 3);
+        assert_eq!(job.vaapi_drain, VaapiDrain::Off);
+        let stop = StopSource::new();
+        let mut carries = |rule: fn(&ExportJob, u32, DecodeMode, &StopSource) -> VideoRequest| {
+            [VaapiDrain::Download, VaapiDrain::Picture, VaapiDrain::Off]
+                .into_iter()
+                .all(|mode| {
+                    job.vaapi_drain = mode;
+                    let req = rule(&job, 1, DecodeMode::Software, &stop);
+                    req.vaapi_drain == mode && req.stream == Some(1)
+                })
+        };
+        assert!(carries(video_request));
+        must_fail(
+            "the request without the job's drain",
+            carries(|_, stream, decode, stop| VideoRequest {
+                stream: Some(stream as usize),
+                decode,
+                interrupt: stop.shutdown_flag(),
+                ..VideoRequest::default()
+            }),
+        );
     }
 }

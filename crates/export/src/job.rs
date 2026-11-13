@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use spherecut_core::cancel::StopSource;
 use spherecut_core::project::{Codec, EncoderChoice, ExportSettings, Project};
 use spherecut_core::time::{FrameRate, Time};
+use spherecut_media::backend::VaapiDrain;
 use spherecut_media::encode::has_encoder;
 use spherecut_media::hw::{self, GpuIds, RenderNode};
 use spherecut_render::Gpu;
@@ -52,6 +53,14 @@ pub struct ExportJob {
     pub draft: bool,
     /// Where the source is decoded (amendment 2 item 25).
     pub decoder: Decoder,
+    /// Whether a VA-API decode waits for the pictures queued on its
+    /// device before each download ([`VaapiDrain`]). [`ExportJob::new`]
+    /// makes it [`VaapiDrain::Off`]: the CLI's `render` and the agents'
+    /// tools share their GPU's memory with no window, and the drain would
+    /// only cost them speed. The window's exports take its player's,
+    /// download by default, since freeing a download's staging buffer
+    /// holds back the window's frames there as the player's downloads do.
+    pub vaapi_drain: VaapiDrain,
     /// Mesa's quality level for a VA-API encoder
     /// ([`quality_level`](crate::encoder::quality_level)) in place of the
     /// quality's: for the benchmark that measured them.
@@ -112,6 +121,7 @@ impl ExportJob {
             eight_bit: false,
             draft: false,
             decoder: Decoder::Auto,
+            vaapi_drain: VaapiDrain::Off,
             vaapi_level: None,
             gpu,
             pace: None,

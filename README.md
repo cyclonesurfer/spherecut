@@ -601,10 +601,10 @@ FFmpeg's warnings and errors about each file whatever it is set to.
   GPUs, on by default. A VA-API decoder that copies its frames to
   memory first waits for every picture queued on the GPU, so that
   freeing the copy's staging buffer holds back nothing else, the
-  viewer's frames included. Unset, empty or `download`, the viewer and
-  the playback benchmarks drain that way on the copy path; `frame`,
-  `render`, the window's exports and the agents' tools never drain.
-  Download is the working choice
+  viewer's frames included. Unset, empty or `download`, the viewer, the
+  window's exports and the playback benchmarks drain that way on the
+  copy path; `frame`, `render` and the agents' tools, which have no
+  window to hold back, never drain. Download is the working choice
   until Pat answers the question asked on 2026-11-13. `off` or `0`
   waits for nothing, as before the drain. `picture` waits after every
   packet too, zero copy's decoders included: a mode to compare against.
