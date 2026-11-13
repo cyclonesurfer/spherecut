@@ -596,7 +596,7 @@ the agent as fields do, as a backstop. The codes:
 | `not_project` | Not a Spherecut project; it was left as it was |
 | `bad_project` | A project that doesn't read: malformed, or breaking a rule |
 | `newer_schema` | A project saved by a newer Spherecut |
-| `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved |
+| `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved (a save that put the file in place but couldn't flush its folder succeeds, with `not_flushed`) |
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
 | `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; look at or frame the `.insv` itself |
@@ -655,6 +655,7 @@ and says what it left out or doubts. The tools' own codes:
 | `not_equirect` | `project`, `edit` | `create` or `add_media` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
 | `no_calibration` | `project`, `edit` | `create` or `add_media` with a camera's two-lens file that holds no calibration a stitch reads (or one camera can't read, its words after, in parentheses): the media stays an equirect, shown as its lenses |
 | `history_not_saved` | `edit`, `undo` | The project was saved but its history wasn't: `undo` can't take the step back |
+| `not_flushed` | `project`, `edit`, `undo` | The project was saved, but its folder couldn't be flushed to disk after: the change stands, so don't make it again, though a crash before the disk catches up could lose it |
 | `outside_trim` | `edit` | Keys or markers the edits left outside the clip's trim, which no render shows |
 | `sheet_left_out` | `compare` | `sheet` was asked for, but the video's shape leaves its tiles too small to label |
 

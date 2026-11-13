@@ -173,6 +173,40 @@ pub fn replaceable(dest: &Path) -> io::Result<Option<std::fs::Metadata>> {
     }
 }
 
+/// Why a publish ([`TempFile::publish_replace_with`],
+/// [`TempFile::publish_new_with`]) failed: before the file was in place,
+/// or after, when only the folder's flush failed. The public `persist_*`
+/// give either as their `io::Error`.
+#[derive(Debug)]
+pub(crate) enum PublishError {
+    /// Nothing was published: the output is as it was.
+    Failed(io::Error),
+    /// The file is in place under its name, with `meta`, but the folder
+    /// couldn't be flushed after (`EIO`, `ENOSPC`, `EDQUOT`), so a crash
+    /// before the disk catches up may lose the name (the M3.9 review's
+    /// R3). A caller that keeps what it wrote takes it as published.
+    /// (Boxed, as the metadata is large beside an `io::Error`.)
+    NotFlushed {
+        meta: Box<std::fs::Metadata>,
+        source: io::Error,
+    },
+}
+
+impl PublishError {
+    /// The error alone, as the public `persist_*` give it.
+    fn into_io(self) -> io::Error {
+        match self {
+            PublishError::Failed(e) | PublishError::NotFlushed { source: e, .. } => e,
+        }
+    }
+}
+
+impl From<io::Error> for PublishError {
+    fn from(e: io::Error) -> PublishError {
+        PublishError::Failed(e)
+    }
+}
+
 /// A new file next to `dest`, published onto it by
 /// [`TempFile::persist_replace`] or [`TempFile::persist_new`], and removed
 /// if dropped before that (on an error or a panic). `dest` itself is
@@ -262,7 +296,8 @@ impl TempFile {
     }
 
     /// Flush to disk and rename onto `dest`, replacing the regular file
-    /// there, if any, then flush the folder (D16).
+    /// there, if any, then flush the folder (D16). A failed flush of the
+    /// folder is an error too, though the file is in place by then.
     pub fn persist_replace(self) -> io::Result<()> {
         self.persist_replace_with(sync_folder)
     }
@@ -270,16 +305,29 @@ impl TempFile {
     /// [`TempFile::persist_replace`], syncing the folder with `sync`,
     /// which tests count.
     pub(crate) fn persist_replace_with(
-        mut self,
+        self,
         sync: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.publish_replace_with(sync)
+            .map(drop)
+            .map_err(PublishError::into_io)
+    }
+
+    /// [`TempFile::persist_replace`], giving the published file's metadata,
+    /// and telling a failed flush of the folder after the rename apart
+    /// ([`PublishError::NotFlushed`]).
+    pub(crate) fn publish_replace_with(
+        mut self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
         // Something may have turned up at `dest` while the file was written.
         replaceable(&self.dest)?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;
-        self.synced(sync)
+        let meta = self.file.metadata()?;
+        self.synced(sync, meta)
     }
 
     /// Flush to disk and publish as `dest` only if nothing is there, not
@@ -288,30 +336,44 @@ impl TempFile {
     /// leaves what is there alone, whenever it turned up. The temp file is
     /// gone either way. Once published, the folder is flushed too (D16).
     pub fn persist_new(self) -> io::Result<()> {
-        self.publish_new().map(drop)
+        self.publish_new().map(drop).map_err(PublishError::into_io)
     }
 
     /// [`TempFile::persist_new`], giving the published file's metadata:
     /// the temporary file's own where it was renamed or linked in, the
     /// copy's where it was copied, which is another file (the project
-    /// review's F032).
-    pub(crate) fn publish_new(self) -> io::Result<std::fs::Metadata> {
-        self.persist_new_with(
+    /// review's F032); a failed flush of the folder after the publish is
+    /// [`PublishError::NotFlushed`], with it.
+    pub(crate) fn publish_new(self) -> Result<std::fs::Metadata, PublishError> {
+        self.publish_new_with(
             rename_new,
             |from, to| std::fs::hard_link(from, to),
             sync_folder,
         )
     }
 
-    /// [`TempFile::publish_new`], publishing with `rename` or else `link`,
-    /// which tests make refuse as filesystems without them do, and
-    /// syncing the folder with `sync`, which tests count.
+    /// [`TempFile::publish_new`] as the public [`TempFile::persist_new`]
+    /// gives it, for tests.
+    #[cfg(test)]
     pub(crate) fn persist_new_with(
-        mut self,
+        self,
         rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
         sync: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<std::fs::Metadata> {
+        self.publish_new_with(rename, link, sync)
+            .map_err(PublishError::into_io)
+    }
+
+    /// [`TempFile::publish_new`], publishing with `rename` or else `link`,
+    /// which tests make refuse as filesystems without them do, and
+    /// syncing the folder with `sync`, which tests count.
+    pub(crate) fn publish_new_with(
+        mut self,
+        rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
         // One step that leaves nothing at the temporary name and is never
@@ -319,10 +381,10 @@ impl TempFile {
         match rename(&self.path, &self.dest) {
             Ok(()) => {
                 self.persisted = true;
-                self.synced(sync)?;
-                return self.file.metadata();
+                let meta = self.file.metadata()?;
+                return self.synced(sync, meta);
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e.into()),
             // The filesystem doesn't take the flag (EINVAL), or the kernel
             // is older than it (ENOSYS); any other refusal the link meets
             // too.
@@ -333,7 +395,7 @@ impl TempFile {
         }
         let copy = match link(&self.path, &self.dest) {
             Ok(()) => None,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e.into()),
             // No hard links here (EPERM on FAT, EOPNOTSUPP or ENOSYS on
             // some network filesystems), or another refusal, which the
             // exclusive create then meets too and reports.
@@ -351,32 +413,40 @@ impl TempFile {
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!("could not remove {}: {e}", self.path.display());
         }
-        self.synced(sync)?;
-        match copy {
-            Some(meta) => Ok(meta),
-            None => self.file.metadata(),
-        }
+        let meta = match copy {
+            Some(meta) => meta,
+            None => self.file.metadata()?,
+        };
+        self.synced(sync, meta)
     }
 
-    /// After a publish, flush the folder `dest` is in with `sync`, so that
-    /// the name survives a crash as the bytes do (the project review's
-    /// F033). Best effort: what says the folder can't be synced here
-    /// ([`cannot_sync`]) passes, logged; a failed sync is the publish's
-    /// error, though the file is in place.
-    fn synced(&self, sync: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    /// After a publish of the file with `meta`, flush the folder `dest` is
+    /// in with `sync`, so that the name survives a crash as the bytes do
+    /// (the project review's F033). Best effort: what says the folder
+    /// can't be synced here ([`cannot_sync`]) passes, logged; a failed
+    /// sync is [`PublishError::NotFlushed`], the file in place.
+    fn synced(
+        &self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+        meta: std::fs::Metadata,
+    ) -> Result<std::fs::Metadata, PublishError> {
         if sync_left_out() {
-            return Ok(());
+            return Ok(meta);
         }
         let folder = match self.dest.parent() {
             Some(p) if !p.as_os_str().is_empty() => p,
             _ => Path::new("."),
         };
         match sync(folder) {
+            Ok(()) => Ok(meta),
             Err(e) if cannot_sync(&e) => {
                 tracing::debug!("{} can't be synced here: {e}", folder.display());
-                Ok(())
+                Ok(meta)
             }
-            done => done,
+            Err(source) => Err(PublishError::NotFlushed {
+                meta: Box::new(meta),
+                source,
+            }),
         }
     }
 
@@ -463,7 +533,7 @@ fn cannot_sync(e: &io::Error) -> bool {
 
 /// Rename `from` to `to` unless something is at `to`, even a dangling
 /// link: `renameat2` with `RENAME_NOREPLACE`.
-fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
 }
@@ -1061,5 +1131,22 @@ mod tests {
             "a publish with its folder's sync left out",
             seen.borrow().len() == 1,
         );
+
+        // Told apart for a caller that keeps what it wrote (R3): the
+        // published file's metadata comes with the failed sync.
+        match written(&out("a.png"), b"a6").publish_replace_with(sync(Some(5))) {
+            Err(PublishError::NotFlushed { meta, source }) => {
+                assert_eq!(source.raw_os_error(), Some(5));
+                assert_eq!(meta.ino(), std::fs::metadata(out("a.png")).unwrap().ino());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a6");
+        match written(&out("f.png"), b"f").publish_new_with(no_flag, no_links, sync(Some(5))) {
+            Err(PublishError::NotFlushed { meta, .. }) => {
+                assert_eq!(meta.ino(), std::fs::metadata(out("f.png")).unwrap().ino());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

@@ -45,7 +45,7 @@ use super::Project;
 use super::file::{self, FileError, MAX_FILE_BYTES, fnv1a64};
 use super::history::History;
 use crate::blocking::may_block;
-use crate::fs::TempFile;
+use crate::fs::{PublishError, TempFile};
 
 /// The `format` a history file names.
 pub const HISTORY_FORMAT: &str = concat!(crate::brand::slug!(), ".history");
@@ -187,6 +187,11 @@ pub struct Saved {
     /// the last rename failing): the project is saved, and its history
     /// reads as stale next time.
     pub history_error: Option<String>,
+    /// Why the folder couldn't be flushed to disk once the project (or
+    /// its history) was in place, if it couldn't (`EIO`, `ENOSPC`): the
+    /// save stands, and `identity` is the new file's, but a crash before
+    /// the disk catches up may lose it (the M3.9 review's R3).
+    pub flush_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -442,13 +447,28 @@ impl ProjectFolder {
     /// project goes first, so a history never claims a project it wasn't
     /// written with; both are written to temporary files before either is
     /// renamed into place, so a history that can't be written (a full
-    /// disk) leaves the project as it was.
+    /// disk) leaves the project as it was. Once the project is in place
+    /// the save stands: a folder that can't be flushed after is
+    /// [`Saved::flush_error`], not an error.
     pub fn save(
         &self,
         name: &OsStr,
         project: &Project,
         history: &History,
         expect: Option<&Identity>,
+    ) -> Result<Saved, FolderError> {
+        self.save_with(name, project, history, expect, crate::fs::sync_folder)
+    }
+
+    /// [`ProjectFolder::save`], flushing the folder with `sync`, which
+    /// tests make fail.
+    fn save_with(
+        &self,
+        name: &OsStr,
+        project: &Project,
+        history: &History,
+        expect: Option<&Identity>,
+        sync: impl Fn(&Path) -> io::Result<()>,
     ) -> Result<Saved, FolderError> {
         may_block("saving a project");
         self.check_name(name)?;
@@ -466,38 +486,58 @@ impl ProjectFolder {
         let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
         let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
         check()?;
-        tmp.persist_replace().map_err(|source| FolderError::Io {
-            path: self.path_of(name),
-            source,
-        })?;
+        // A rename keeps the file, so the identity is the temporary
+        // file's, taken above.
+        let not_flushed = match tmp.publish_replace_with(&sync) {
+            Ok(_) => None,
+            Err(PublishError::NotFlushed { source, .. }) => Some(source),
+            Err(PublishError::Failed(source)) => {
+                return Err(FolderError::Io {
+                    path: self.path_of(name),
+                    source,
+                });
+            }
+        };
         Ok(publish_history(
             side,
             identity,
             dropped,
             &self.path_of(name),
+            not_flushed,
+            &sync,
         ))
     }
 
     /// Save a new project as `name`, refused if anything is there
     /// ([`FolderError::Exists`]), and `history` beside it; nothing is
-    /// there if the history can't be written.
+    /// there if the history can't be written. As with
+    /// [`ProjectFolder::save`], a folder that can't be flushed once the
+    /// project is in place is [`Saved::flush_error`].
     pub fn create(
         &self,
         name: &OsStr,
         project: &Project,
         history: &History,
     ) -> Result<Saved, FolderError> {
-        self.create_with(name, project, history, TempFile::publish_new)
+        self.create_with(
+            name,
+            project,
+            history,
+            TempFile::publish_new,
+            crate::fs::sync_folder,
+        )
     }
 
     /// [`ProjectFolder::create`], publishing with `publish`, which tests
-    /// make take `persist_new`'s other ways.
+    /// make take `persist_new`'s other ways, and flushing the folder after
+    /// the history with `sync`, which tests make fail.
     fn create_with(
         &self,
         name: &OsStr,
         project: &Project,
         history: &History,
-        publish: impl FnOnce(TempFile) -> io::Result<std::fs::Metadata>,
+        publish: impl FnOnce(TempFile) -> Result<std::fs::Metadata, PublishError>,
+        sync: impl Fn(&Path) -> io::Result<()>,
     ) -> Result<Saved, FolderError> {
         may_block("saving a project");
         self.check_name(name)?;
@@ -508,20 +548,25 @@ impl ProjectFolder {
         }
         let (tmp, identity) = self.write_temp(name, text.as_bytes(), None)?;
         let (side, dropped) = self.history_temp(name, project, history, &identity, &tmp)?;
-        let published = publish(tmp).map_err(|source| {
-            if source.kind() == io::ErrorKind::AlreadyExists {
-                FolderError::Exists { path: path.clone() }
-            } else {
-                FolderError::Io {
-                    path: path.clone(),
-                    source,
-                }
+        let (published, not_flushed) = match publish(tmp) {
+            Ok(meta) => (meta, None),
+            Err(PublishError::NotFlushed { meta, source }) => (*meta, Some(source)),
+            Err(PublishError::Failed(source)) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(FolderError::Exists { path });
             }
-        })?;
+            Err(PublishError::Failed(source)) => return Err(FolderError::Io { path, source }),
+        };
         // The published file's, which the copy fallback makes another file
         // than the temporary one (F032), with the same bytes.
         let identity = Identity::of(&published, text.as_bytes());
-        Ok(publish_history(side, identity, dropped, &path))
+        Ok(publish_history(
+            side,
+            identity,
+            dropped,
+            &path,
+            not_flushed,
+            &sync,
+        ))
     }
 
     /// What is at `name` now: `None` if nothing is.
@@ -720,16 +765,40 @@ impl ProjectFolder {
 /// Publish the history written beside a project just published as
 /// `identity`: after the project, so a history never claims a project it
 /// wasn't written with, and only a crash between the two renames leaves
-/// it stale.
-fn publish_history(tmp: TempFile, identity: Identity, dropped: usize, project: &Path) -> Saved {
-    let written = tmp.persist_replace().map_err(|e| e.to_string());
-    if let Err(e) = &written {
-        tracing::warn!("{}'s history wasn't saved: {e}", project.display());
+/// it stale. `not_flushed` is why the folder couldn't be flushed after
+/// the project, if it couldn't; a history put in place whose flush fails
+/// is saved too, and says so the same way.
+fn publish_history(
+    tmp: TempFile,
+    identity: Identity,
+    dropped: usize,
+    project: &Path,
+    not_flushed: Option<io::Error>,
+    sync: impl Fn(&Path) -> io::Result<()>,
+) -> Saved {
+    let mut flush_error = not_flushed.map(|e| e.to_string());
+    let history_error = match tmp.publish_replace_with(sync) {
+        Ok(_) => None,
+        Err(PublishError::NotFlushed { source, .. }) => {
+            flush_error.get_or_insert_with(|| source.to_string());
+            None
+        }
+        Err(PublishError::Failed(e)) => {
+            tracing::warn!("{}'s history wasn't saved: {e}", project.display());
+            Some(e.to_string())
+        }
+    };
+    if let Some(e) = &flush_error {
+        tracing::warn!(
+            "{} is saved, but its folder couldn't be flushed to disk: {e}",
+            project.display()
+        );
     }
     Saved {
         identity,
         dropped,
-        history_error: written.err(),
+        history_error,
+        flush_error,
     }
 }
 
@@ -1112,10 +1181,16 @@ mod tests {
         let no_links = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(1));
         let mut temp = None;
         let saved = folder
-            .create_with(name, &p, &h, |tmp| {
-                temp = Some(tmp.file().metadata()?);
-                tmp.persist_new_with(no_flag, no_links, crate::fs::sync_folder)
-            })
+            .create_with(
+                name,
+                &p,
+                &h,
+                |tmp| {
+                    temp = Some(tmp.file().metadata()?);
+                    tmp.publish_new_with(no_flag, no_links, crate::fs::sync_folder)
+                },
+                crate::fs::sync_folder,
+            )
             .unwrap();
         let published = folder.identity(name).unwrap().unwrap();
         let temp = temp.unwrap();
@@ -1136,6 +1211,67 @@ mod tests {
         must_fail(
             "the temporary file's identity taken for the published file's",
             Identity::of(&temp, &std::fs::read(dir.join(name)).unwrap()) == published,
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// R3: a folder flush that fails (EIO) once the project is in place is
+    /// no failed save: `save` and `create` take the published file's
+    /// identity and say why the flush failed beside it, so the next save
+    /// with that identity goes ahead rather than being refused as
+    /// changed on disk. Control: the identity from before the save, which
+    /// a caller told the save failed would still hold, is refused.
+    #[test]
+    fn a_failed_folder_flush_still_names_the_saved_file() {
+        use spherecut_testkit::control::must_fail;
+        let dir = temp_dir();
+        let folder = ProjectFolder::open(&dir).unwrap();
+        let name = OsStr::new("a.spherecut");
+        let (mut p, mut h) = (project(), History::new());
+        let eio = |_: &Path| -> io::Result<()> { Err(io::Error::from_raw_os_error(5)) };
+        let link = |from: &Path, to: &Path| std::fs::hard_link(from, to);
+
+        let created = folder
+            .create_with(
+                name,
+                &p,
+                &h,
+                |tmp| tmp.publish_new_with(crate::fs::rename_new, link, eio),
+                eio,
+            )
+            .unwrap();
+        assert_eq!(folder.identity(name).unwrap(), Some(created.identity));
+        assert!(
+            created
+                .flush_error
+                .as_ref()
+                .is_some_and(|e| e.contains("os error 5"))
+        );
+        assert_eq!(created.history_error, None);
+        assert_eq!(folder.load(name).unwrap().history, Kept::Kept(h.clone()));
+
+        rename(&mut p, &mut h, "b");
+        let saved = folder
+            .save_with(name, &p, &h, Some(&created.identity), eio)
+            .unwrap();
+        assert_eq!(folder.identity(name).unwrap(), Some(saved.identity));
+        assert!(saved.flush_error.is_some());
+        let loaded = folder.load(name).unwrap();
+        assert_eq!(loaded.project, p);
+        assert_eq!(loaded.history, Kept::Kept(h.clone()));
+
+        rename(&mut p, &mut h, "c");
+        let again = folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
+        assert_eq!(again.flush_error, None);
+        rename(&mut p, &mut h, "d");
+        let stale = folder.save(name, &p, &h, Some(&created.identity));
+        must_fail(
+            "a save with the identity from before a save whose flush failed",
+            stale.as_ref().map(drop),
+        );
+        assert!(
+            matches!(stale, Err(FolderError::Changed { .. })),
+            "{stale:?}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

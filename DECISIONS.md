@@ -1294,8 +1294,16 @@ that won't sync a folder opened only for reading) and `EACCES` and
 each at a debug line, since none says the name is lost, only that this
 folder can't be asked. Anything else (`EIO`, `ENOSPC`, `EDQUOT`) is the
 publish's error, though the file is in place by then; the writer says
-so and the temporary name is gone. The sync is a parameter of
-`persist_replace`'s and `persist_new`'s crate-private twins, which
+so and the temporary name is gone. A project's save and create are the
+exception (the M3.9 review's R3): the crate-private `publish_*` twins
+tell such a failed sync (`PublishError::NotFlushed`, with the file's
+metadata) from a publish that put nothing in place, and
+`ProjectFolder::save` and `create` take the file's identity and write
+its history all the same, returning the sync's error as
+`Saved::flush_error`, which the window shows as a warning and the
+agent's `project`, `edit` and `undo` as `not_flushed`; so the next save
+isn't refused as changed on disk, and an agent doesn't make its edit
+twice. The sync is a parameter of the twins, which
 `fs::tests::publish_syncs_its_folder` counts. Also from M3.9: a
 `ProjectFolder::create` that published by the copy takes its identity
 from the copy (F032), so a save after it isn't refused as changed on

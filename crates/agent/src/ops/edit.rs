@@ -109,6 +109,9 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
         if saved.dropped > 0 {
             out["history_dropped"] = json!(saved.dropped);
         }
+        if let Some(why) = &saved.flush_error {
+            warnings.push(proj::not_flushed(why));
+        }
         drop(lock);
         out["undo"] = match saved.history_error {
             Some(e) => {
@@ -188,13 +191,20 @@ pub fn undo(req: UndoRequest, cx: &Ctx) -> Result<Value, ToolError> {
         "undo": next_step(&kept, false, revision),
         "redo": next_step(&kept, true, revision),
     });
+    let mut warnings = Vec::new();
     if let Some(e) = saved.history_error {
         out["undo"] = unsaved_history();
         out["redo"] = unsaved_history();
-        out["warnings"] = json!([Warning::new(
+        warnings.push(Warning::new(
             "history_not_saved",
             format!("the project was saved, its history wasn't: {e}"),
-        )]);
+        ));
+    }
+    if let Some(why) = &saved.flush_error {
+        warnings.push(proj::not_flushed(why));
+    }
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
     }
     Ok(out)
 }

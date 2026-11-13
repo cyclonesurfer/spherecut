@@ -142,12 +142,15 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
     // As the GUI's Save As does: the target's lock before anything is
     // written.
     let _lock = lock(&folder, &name)?;
-    folder
+    let saved = folder
         .create(&name, &project, &History::new())
         .map_err(|e| match e {
             FolderError::Exists { .. } => taken(),
             e => folder_error("file", e),
         })?;
+    if let Some(why) = &saved.flush_error {
+        doubts.push(not_flushed(why));
+    }
     let loaded = folder.load(&name).map_err(|e| folder_error("file", e))?;
     let mut s = summary(&folder, &name, &loaded, cx);
     s["created"] = json!(true);
@@ -259,6 +262,21 @@ fn no_calibration(why: Option<&str>) -> Warning {
         Some(why) => format!("no calibration: shown as its lenses ({})", text::field(why)),
     };
     Warning::new("no_calibration", message)
+}
+
+/// The warning of a save that put the project in place but couldn't
+/// flush its folder to disk after (the M3.9 review's R3): the call did
+/// what it said, so it isn't to be made again, though a crash before the
+/// disk catches up could still lose it. `why` is the system's words for
+/// the failed flush, which quote no file.
+pub(crate) fn not_flushed(why: &str) -> Warning {
+    Warning::new(
+        "not_flushed",
+        format!(
+            "the project was saved, but its folder couldn't be flushed to disk ({why}): the \
+             change stands, so don't make it again"
+        ),
+    )
 }
 
 /// The lock on `name` for one call: another call's is waited for

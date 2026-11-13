@@ -97,6 +97,9 @@ enum Saved {
         lock: Arc<ProjectLock>,
         /// The project is saved, but its history isn't, for this reason.
         history_error: Option<String>,
+        /// The project is saved, but its folder couldn't be flushed to
+        /// disk after, for this reason (the M3.9 review's R3).
+        flush_error: Option<String>,
     },
     /// The file is there, and the save wasn't to replace it.
     Exists,
@@ -326,11 +329,46 @@ fn save_file(
             identity: saved.identity,
             lock,
             history_error: saved.history_error,
+            flush_error: saved.flush_error,
         },
         Err(e @ FolderError::Changed { .. }) => Saved::Changed(e.to_string()),
         Err(FolderError::Exists { .. }) => Saved::Exists,
         Err(e) => Saved::Failed(e.to_string()),
     }
+}
+
+/// The warnings a save that went through still gives: its history not
+/// saved, or its folder not flushed to disk once the file was in place,
+/// which is a save all the same (the file is the new one, and the next
+/// save expects it), with a crash before the disk catches up able to lose
+/// it (the M3.9 review's R3).
+fn saved_notices(history_error: Option<String>, flush_error: Option<String>) -> Vec<Notice> {
+    let mut notices = Vec::new();
+    if let Some(why) = flush_error {
+        notices.push(
+            Notice::new(
+                NoticeKind::Project,
+                Severity::Warning,
+                "Saved, but the folder couldn't be flushed to disk",
+            )
+            .impact(format!(
+                "{why}; the file is saved, but a crash before the disk catches up could lose it"
+            )),
+        );
+    }
+    if let Some(why) = history_error {
+        notices.push(
+            Notice::new(
+                NoticeKind::History,
+                Severity::Warning,
+                "The project is saved, but its undo history isn't",
+            )
+            .impact(format!(
+                "{why}; undo goes on until the project closes, and it opens with none"
+            )),
+        );
+    }
+    notices
 }
 
 /// The lock for the project at `path` refused, as the window says it.
@@ -751,6 +789,7 @@ impl AppState {
                 identity,
                 lock,
                 history_error,
+                flush_error,
             }) => {
                 let ours = s.generation == self.reframe.generation;
                 if ours && let Some(doc) = &mut self.reframe.doc {
@@ -758,17 +797,8 @@ impl AppState {
                 }
                 self.notices
                     .retain(|k| !matches!(k, NoticeKind::Project | NoticeKind::History));
-                if let Some(why) = history_error {
-                    self.notices.push(
-                        Notice::new(
-                            NoticeKind::History,
-                            Severity::Warning,
-                            "The project is saved, but its undo history isn't",
-                        )
-                        .impact(format!(
-                            "{why}; undo goes on until the project closes, and it opens with none"
-                        )),
-                    );
+                for notice in saved_notices(history_error, flush_error) {
+                    self.notices.push(notice);
                 }
                 if let Some(step) = self.reframe.after_save.take() {
                     // A step asked for while this save ran waits on the
@@ -1309,6 +1339,34 @@ mod tests {
         assert_eq!((y, h), (45.0, 810.0));
         assert_eq!(w, (810.0f64 * 9.0 / 16.0).round());
         assert_eq!(x, ((1600.0 - w) / 2.0).round());
+    }
+
+    /// R3: a save whose folder couldn't be flushed once the file was in
+    /// place is a save with a warning, not a failure. Control: a save that
+    /// flushed gives no such warning.
+    #[test]
+    fn a_save_whose_folder_wasnt_flushed_warns() {
+        use spherecut_testkit::control::must_fail;
+        let why = "Input/output error (os error 5)";
+        let notices = saved_notices(None, Some(why.into()));
+        let flush = |n: &Notice| {
+            n.kind == NoticeKind::Project
+                && n.severity == Severity::Warning
+                && n.what == "Saved, but the folder couldn't be flushed to disk"
+                && n.impact.starts_with(why)
+        };
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(flush(&notices[0]), "{notices:?}");
+        // With the history's warning beside it, each of its own kind.
+        let both = saved_notices(Some("no space".into()), Some(why.into()));
+        assert!(
+            flush(&both[0]) && both[1].kind == NoticeKind::History,
+            "{both:?}"
+        );
+        must_fail(
+            "a save that flushed warned of its folder",
+            saved_notices(None, None).iter().any(flush),
+        );
     }
 
     #[test]
