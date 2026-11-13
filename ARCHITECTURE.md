@@ -1101,14 +1101,15 @@ without waiting.
   frame (at most `CONTROL_WAIT`, 250 ms), breaking D34's rule on
   purpose and only under `--smoke`. The document's `asked` says which
   of them the run had; hw-test's Tier 2 `gui_decode_behind` runs them
-  (below, "Testing tiers"). Two diagnostics of the VA-API copy path's
-  stall, both off by default, show in the document too: `vaapi_drain`
-  names the drain the player ran with (`SPHERECUT_VAAPI_DRAIN`), and
-  with it on `drain` says what it waited for; and with
-  `SPHERECUT_GATE_PROBE=<ms>` the run starts the gate probe
-  (`render::GateProbe`) as it starts playing, which every period waits
-  at the submit gate (D41) as the uploader does, submits a clear of a
-  256-byte buffer of its own on the viewer's queue and times it to
+  (below, "Testing tiers"). The VA-API copy path's stall shows in the
+  document too: `vaapi_drain` names the drain the player ran with
+  (`SPHERECUT_VAAPI_DRAIN`, `download` by default, "The VA-API drain"
+  below), and unless it is off `drain` says what it waited for, nothing
+  on paths that never drain; and with the diagnostic
+  `SPHERECUT_GATE_PROBE=<ms>`, off by default, the run starts the gate
+  probe (`render::GateProbe`) as it starts playing, which every period
+  waits at the submit gate (D41) as the uploader does, submits a clear
+  of a 256-byte buffer of its own on the viewer's queue and times it to
   wgpu's work-done callback, and `probe` lists its jobs slower than 8
   ms while the run played, to set beside the late UI passes.
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
@@ -1217,6 +1218,21 @@ without waiting.
     buffer until the GPU has read it. A refused import or copy is
     copied through the CPU, said once in the snapshot
     (`import_refused`), and the next opens ask for downloads.
+  * **The VA-API drain** (`PlayerConfig.vaapi_drain`, set by
+    `SPHERECUT_VAAPI_DRAIN`, `download` by default): on AMD, radeonsi
+    frees a download's staging buffer inside `vaGetImage`, and the
+    kernel's clearing of the freed range makes every later submission
+    in the process's GPU VM, the window's frame among them, wait for the
+    decodes then queued. So before each download a VA-API decoder on
+    the copy path calls `vaSyncSurface` on every surface it has handed
+    out a frame of, and the free finds nothing queued; the stage `drain`
+    times it. Exported frames (path A) aren't downloaded and don't
+    drain; `picture`, a mode to compare against, drains after every
+    packet sent too, theirs included; `off` or `0` runs none of it, not
+    even libva's lookup. Software and Vulkan decoders never drain.
+    `frame`, `render`, the window's exports and the agents' tools ask
+    for none (`VideoRequest::default`). Download is the working choice
+    until Pat answers the question asked on 2026-11-13.
   * **The submit gate** (D41, `core::gate::SubmitGate`, one a device,
     `Gpu::submit_gate`): while the UI thread holds a swapchain image,
     no other thread submits to its device, since RADV makes every

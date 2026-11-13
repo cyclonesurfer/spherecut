@@ -2,9 +2,9 @@
 //! compositor: it waits for the clip's first frame, plays it, takes the
 //! screenshot, writes the JSON hw-test reads and asks the window to
 //! close; and a clip that can't open ends the run with its error's code.
-//! The copy path's two diagnostics, the VA-API drain and the gate probe,
-//! are off but where a test turns them on, whatever the environment
-//! says.
+//! The VA-API drain runs as it does by default (download, which
+//! software decode never runs) and the gate probe, a diagnostic, is off,
+//! but where a test asks otherwise, whatever the environment says.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -21,7 +21,7 @@ use spherecut_core::project::Aspect;
 use spherecut_export::Preset;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_media::encode::{MuxedAs, mux_video_streams_as};
-use spherecut_playback::VaapiDrain;
+use spherecut_playback::{VaapiDrain, vaapi_drain_from_env};
 use spherecut_synth::media::{self, Codec, Spec};
 use spherecut_testkit::control::must_fail;
 
@@ -50,7 +50,8 @@ fn smoke_app(
     rs: &egui_wgpu::RenderState,
     args: SmokeArgs,
 ) -> SpherecutApp {
-    smoke_app_with(gpu, rs, args, VaapiDrain::Off, None)
+    // The drain as with `SPHERECUT_VAAPI_DRAIN` unset.
+    smoke_app_with(gpu, rs, args, vaapi_drain_from_env(|_| None), None)
 }
 
 /// [`smoke_app`] with the VA-API drain `drain` and the gate probe every
@@ -76,13 +77,18 @@ fn smoke_app_with(
     app
 }
 
-/// A document with the copy path's diagnostics off: the drain named
-/// `off` and nothing it did, and no probe.
-fn diagnostics_off(r: &serde_json::Value) -> bool {
-    r["vaapi_drain"] == "off"
-        && r.get("drain").is_none()
-        && r.get("probe").is_none()
+/// A document of a run as it is by default, on software decode: the
+/// drain named `download`, its block there with nothing drained, and no
+/// probe.
+fn the_default(r: &serde_json::Value) -> bool {
+    r["vaapi_drain"] == "download"
+        && r["drain"]
+            == serde_json::json!({
+                "waited_per_download": {"p50": null, "max": null},
+                "errors": 0, "overflow": 0, "unavailable": 0,
+            })
         && r["stages"]["drain"]["samples"] == 0
+        && r.get("probe").is_none()
 }
 
 /// `docs/cli-json.md`'s section on the smoke run.
@@ -206,8 +212,25 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
             .starts_with("h264 1024×512")
     );
     assert_eq!(r["raw_view"], false);
-    // Neither diagnostic of the copy path ran.
-    assert!(diagnostics_off(r), "{r}");
+    // The drain as by default, which software decode never runs, and no
+    // gate probe; the drain's keys are named in `docs/cli-json.md`, which
+    // without the drain's row doesn't name them.
+    assert!(the_default(r), "{r}");
+    let docs = smoke_docs();
+    let drain = serde_json::json!({"vaapi_drain": r["vaapi_drain"], "drain": r["drain"]});
+    let missing = undocumented(&docs, &drain);
+    assert!(
+        missing.is_empty(),
+        "docs/cli-json.md doesn't name {missing:?}"
+    );
+    let without: Vec<&str> = docs
+        .lines()
+        .filter(|l| !l.starts_with("| `drain` |"))
+        .collect();
+    must_fail(
+        "the docs without the drain's row",
+        undocumented(&without.join("\n"), &drain).is_empty(),
+    );
     // Every stage's numbers over the run, none of them missed.
     let stages = r["stages"].as_object().unwrap();
     for name in [
@@ -358,14 +381,14 @@ fn the_smoke_run_exports_while_it_plays_then_stops_and_waits_for_the_export() {
     assert!(h.state().state.reframe.confirm.is_none());
 }
 
-/// With the VA-API drain asked for and the gate probe every 4 ms: the
-/// document names the drain, which software decode never runs, and the
-/// probe's jobs submitted while the run played, timed from its start.
+/// With the VA-API drain off and the gate probe every 4 ms: the document
+/// names the drain, with nothing it did, and lists the probe's jobs
+/// submitted while the run played, timed from its start.
 ///
-/// Its new keys are named in `docs/cli-json.md`.
+/// The probe's keys are named in `docs/cli-json.md`.
 ///
-/// Controls: this document fails the check of a run with both off; and
-/// the docs without the probe's row fail the keys' check.
+/// Controls: this document fails the check of a run as it is by default;
+/// and the docs without the probe's row fail the keys' check.
 #[test]
 fn the_smoke_run_names_the_drain_and_reports_the_gate_probe() {
     let gpu = common::gpu();
@@ -386,7 +409,7 @@ fn the_smoke_run_names_the_drain_and_reports_the_gate_probe() {
         &gpu,
         &rs,
         args.clone(),
-        VaapiDrain::Download,
+        VaapiDrain::Off,
         Some(Duration::from_millis(4)),
     );
     let mut h = common::harness(app, &rs, [800.0, 600.0], 1.0);
@@ -399,15 +422,9 @@ fn the_smoke_run_names_the_drain_and_reports_the_gate_probe() {
         r["probe"],
         serde_json::to_string_pretty(&r["drain"]).unwrap()
     );
-    assert_eq!(r["vaapi_drain"], "download");
-    // Software decode never drains.
-    assert_eq!(
-        r["drain"],
-        serde_json::json!({
-            "waited_per_download": {"p50": null, "max": null},
-            "errors": 0, "overflow": 0, "unavailable": 0,
-        })
-    );
+    // Off: named, and no block of what it did.
+    assert_eq!(r["vaapi_drain"], "off");
+    assert!(r.get("drain").is_none(), "{}", r["drain"]);
     assert_eq!(r["stages"]["drain"]["samples"], 0);
     let p = &r["probe"];
     assert_eq!(p["period_ms"], 4.0);
@@ -435,12 +452,10 @@ fn the_smoke_run_names_the_drain_and_reports_the_gate_probe() {
     );
     assert_eq!(p["over_8ms_dropped"], 0);
     assert_eq!(p["unfinished"], 0);
-    must_fail("a run with the drain and the probe on", diagnostics_off(r));
+    must_fail("a run with the drain off and the probe on", the_default(r));
 
     let docs = smoke_docs();
-    let new = serde_json::json!({
-        "vaapi_drain": r["vaapi_drain"], "drain": r["drain"], "probe": r["probe"],
-    });
+    let new = serde_json::json!({"vaapi_drain": r["vaapi_drain"], "probe": r["probe"]});
     let missing = undocumented(&docs, &new);
     assert!(
         missing.is_empty(),

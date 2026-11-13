@@ -40,15 +40,18 @@
 //! [`SCREENSHOT_WIDTH`] pixels wide, and the files are written on a
 //! worker: the UI thread never waits on the disk.
 //!
-//! Two diagnostics of the VA-API copy path's stall on AMD, both off by
-//! default, show in the document. The VA-API drain the player ran with
-//! (`SPHERECUT_VAAPI_DRAIN`) is always named, and with it on, what it
-//! waited for. With `SPHERECUT_GATE_PROBE=<ms>` ([`gate_probe_from_env`])
-//! the run starts a [`GateProbe`] on the window's device as it starts
-//! playing, which times a tiny job on the UI's queue every `<ms>`; the
-//! writer stops it, and the document lists its jobs submitted while the
-//! run played, on the run's own time base (`late`'s), so that a slow job
-//! can be lined up with a late UI pass.
+//! The document shows the fix for the VA-API copy path's stall on AMD,
+//! and a diagnostic of it. The VA-API drain the player ran with
+//! (`SPHERECUT_VAAPI_DRAIN`, download by default) is always named, and
+//! unless it is off, what it waited for: nothing where no decoder
+//! drains (software and Vulkan, and VA-API's exported frames unless it
+//! is `picture`). The gate probe is the diagnostic, off by default: with
+//! `SPHERECUT_GATE_PROBE=<ms>` ([`gate_probe_from_env`]) the run starts
+//! a [`GateProbe`] on the window's device as it starts playing, which
+//! times a tiny job on the UI's queue every `<ms>`; the writer stops it,
+//! and the document lists its jobs submitted while the run played, on
+//! the run's own time base (`late`'s), so that a slow job can be lined
+//! up with a late UI pass.
 //!
 //! The run's own limits are checked in its UI passes, which stop where
 //! the compositor draws nothing of the window: eframe then runs only its
@@ -519,8 +522,8 @@ struct Run {
     /// stopped for an export still running (D56): what the run reports
     /// is up to here.
     stopped: Option<Mark>,
-    /// The VA-API drain the player runs with, and with it on, the drains'
-    /// waits when the run started.
+    /// The VA-API drain the player runs with, and unless it is off, the
+    /// drains' waits when the run started.
     vaapi_drain: VaapiDrain,
     drain_from: Option<DrainWaits>,
     /// The gate probe, with [`GATE_PROBE_ENV`].
@@ -1293,7 +1296,8 @@ pub struct Report {
     pub late: Vec<Late>,
     /// Each stage's milliseconds by its name ([`Stage::name`]).
     pub stages: BTreeMap<&'static str, Percentiles>,
-    /// What the VA-API drain waited for, with it on; absent with it off.
+    /// What the VA-API drain waited for, unless it is off: no waits and
+    /// zero counts where no decoder drained.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub drain: Option<DrainReport>,
     pub av: Option<Av>,

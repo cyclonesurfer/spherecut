@@ -84,7 +84,11 @@ pub struct VideoRequest {
     pub output: HwOutput,
     /// Whether a VA-API decoder waits for the pictures queued on its
     /// device before a download, or after every packet sent too
-    /// ([`VaapiDrain`]). Other decoders don't look at it.
+    /// ([`VaapiDrain`]). Other decoders don't look at it. It is
+    /// [`VaapiDrain::Off`] here, not the drain's default: the CLI's render
+    /// and frame and the agents' tools share their GPU's memory with no
+    /// window, so a drain would only cost them speed. The player asks for
+    /// its `PlayerConfig`'s.
     pub vaapi_drain: VaapiDrain,
     /// Set at shutdown only: FFmpeg stops reading inside a read, and the
     /// stream ends for good (D13). Seeks stop through [`StopToken`]s.
@@ -186,17 +190,19 @@ pub const VAAPI_DRAIN_ENV: &str = "SPHERECUT_VAAPI_DRAIN";
 
 /// Whether a VA-API decoder waits for every picture queued on its device
 /// (`vaSyncSurface` on every surface it has handed out a frame of) before
-/// it copies a frame to memory: a diagnostic of the copy path's stall on
-/// AMD, where freeing the copy's staging buffer makes every later GPU
-/// submission in the process wait for the decodes then queued. Software
-/// and Vulkan decoders never drain.
+/// it copies a frame to memory. On AMD, freeing the copy's staging
+/// buffer makes every later GPU submission in the process wait for the
+/// decodes then queued, the window's frame among them; with the queue
+/// drained first there is nothing to wait for. Software and Vulkan
+/// decoders never drain, nor do VA-API decoders that export their frames
+/// unless asked for [`VaapiDrain::Picture`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaapiDrain {
-    /// Nothing waits: `SPHERECUT_VAAPI_DRAIN=0` or `off`. The default.
-    #[default]
+    /// Nothing waits: `SPHERECUT_VAAPI_DRAIN=0` or `off`.
     Off,
-    /// Before each download: `download`.
+    /// Before each download: `download`. The default.
+    #[default]
     Download,
     /// Before each download and after each packet sent, which keeps about
     /// one picture queued at a time, exported frames' decoders too:
@@ -218,8 +224,11 @@ impl VaapiDrain {
 
 /// What `get` (the environment, or a test's) asks for: `0` or `off`,
 /// `download` or `picture`, in any case and with spaces around it. Unset
-/// or empty is the default; anything else is too, and is warned of, the
-/// first time only.
+/// or empty is the default, [`VaapiDrain::Download`]; anything else is
+/// too, and is warned of, the first time only. A `VideoRequest` doesn't
+/// read it: its own default is [`VaapiDrain::Off`], since the CLI's
+/// render and frame and the agents' tools have no window sharing their
+/// GPU's memory.
 pub fn vaapi_drain_from_env(get: impl Fn(&str) -> Option<String>) -> VaapiDrain {
     static WARNED: AtomicBool = AtomicBool::new(false);
     let value = get(VAAPI_DRAIN_ENV);
@@ -241,8 +250,8 @@ pub fn vaapi_drain_from_env(get: impl Fn(&str) -> Option<String>) -> VaapiDrain 
 fn drain_mode(value: Option<&str>, warned: &AtomicBool) -> (VaapiDrain, bool) {
     let value = value.map(str::trim).unwrap_or_default();
     let mode = match value.to_ascii_lowercase().as_str() {
-        "" | "0" | "off" => Some(VaapiDrain::Off),
-        "download" => Some(VaapiDrain::Download),
+        "0" | "off" => Some(VaapiDrain::Off),
+        "" | "download" => Some(VaapiDrain::Download),
         "picture" => Some(VaapiDrain::Picture),
         _ => None,
     };
@@ -1415,11 +1424,13 @@ mod tests {
     use super::*;
 
     /// `SPHERECUT_VAAPI_DRAIN` names a mode in any case, with spaces
-    /// around it; unset or empty is off, and so is any other value, which
-    /// is warned of the first time only.
+    /// around it; unset or empty is download, the default, and so is any
+    /// other value, which is warned of the first time only. A request
+    /// built from `VideoRequest::default()` drains nothing.
     ///
-    /// Control: a misspelt mode isn't taken for the mode it was meant to
-    /// be.
+    /// Controls: a misspelt mode isn't taken for the mode it was meant to
+    /// be; and a value it doesn't know, once one has been warned of,
+    /// isn't warned of again.
     #[test]
     fn the_drain_mode_comes_from_its_variable() {
         let env = |value: Option<&'static str>| {
@@ -1443,34 +1454,46 @@ mod tests {
                 "{value:?}"
             );
         }
-        for value in [None, Some(""), Some("  ")] {
+        for value in [None, Some(""), Some("  "), Some(" \n")] {
             assert_eq!(
                 vaapi_drain_from_env(env(value)),
-                VaapiDrain::Off,
+                VaapiDrain::Download,
+                "{value:?}"
+            );
+            assert_eq!(
+                drain_mode(value, &AtomicBool::new(false)),
+                (VaapiDrain::Download, false),
                 "{value:?}"
             );
         }
-        assert_eq!(vaapi_drain_from_env(env(Some("1"))), VaapiDrain::Off);
-        assert_eq!(VaapiDrain::default(), VaapiDrain::Off);
-        assert_eq!(VideoRequest::default().vaapi_drain, VaapiDrain::Off);
+        assert_eq!(vaapi_drain_from_env(env(Some("1"))), VaapiDrain::Download);
+        assert_eq!(VaapiDrain::default(), VaapiDrain::Download);
+        assert_eq!(
+            VideoRequest::default().vaapi_drain,
+            VaapiDrain::Off,
+            "a request drains nothing unless asked: the CLI's render and frame and the \
+             agents' tools share their GPU's VM with no UI, so a drain would only cost them \
+             throughput"
+        );
         // Warned of once: the second value it doesn't know isn't.
         let warned = AtomicBool::new(false);
-        assert_eq!(drain_mode(Some("1"), &warned), (VaapiDrain::Off, true));
+        assert_eq!(drain_mode(Some("1"), &warned), (VaapiDrain::Download, true));
         assert_eq!(
             drain_mode(Some("always"), &warned),
-            (VaapiDrain::Off, false)
-        );
-        assert_eq!(
-            drain_mode(Some("download"), &warned),
             (VaapiDrain::Download, false)
         );
+        assert_eq!(drain_mode(Some("off"), &warned), (VaapiDrain::Off, false));
         // Each mode's name is the value that names it.
         for mode in [VaapiDrain::Off, VaapiDrain::Download, VaapiDrain::Picture] {
             assert_eq!(drain_mode(Some(mode.name()), &warned), (mode, false));
         }
         must_fail(
-            "a misspelt mode taken for download",
-            drain_mode(Some("downlaod"), &AtomicBool::new(false)).0 == VaapiDrain::Download,
+            "a misspelt mode taken for picture",
+            drain_mode(Some("pictrue"), &AtomicBool::new(false)).0 == VaapiDrain::Picture,
+        );
+        must_fail(
+            "a value it doesn't know warned of after the first",
+            drain_mode(Some("2"), &warned).1,
         );
     }
 

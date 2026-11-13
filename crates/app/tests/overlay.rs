@@ -2,7 +2,8 @@
 //! it over the viewer, and after a clip has played every line has its
 //! numbers (decode, upload and render times on the CPU and, through
 //! lavapipe's timestamps, the GPU; the UI's frames; frames shown; the
-//! cache and the memory); F3 again takes it away.
+//! cache and the memory); F3 again takes it away. The VA-API drain, on
+//! by default, adds no line where nothing drains, as in software.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -16,6 +17,7 @@ use egui_kittest::kittest::Queryable;
 use spherecut_app::SpherecutApp;
 use spherecut_app::overlay::Readings;
 use spherecut_media::backend::FfmpegBackend;
+use spherecut_playback::{VaapiDrain, vaapi_drain_from_env};
 use spherecut_synth::media::{self, Codec, Spec};
 
 /// The grid at 30 fps for 3 s: long enough for the rates over a second
@@ -49,6 +51,9 @@ fn the_overlay_has_every_number_after_playing() {
     let rs = common::render_state(&gpu);
     let mut parts = common::parts(&gpu, Arc::new(FfmpegBackend::new()));
     parts.open = vec![long_clip().to_path_buf()];
+    // The drain as it is by default, whatever the environment says.
+    parts.config.vaapi_drain = vaapi_drain_from_env(|_| None);
+    assert_eq!(parts.config.vaapi_drain, VaapiDrain::Download);
     let mut h = common::harness(SpherecutApp::new(parts), &rs, [1000.0, 640.0], 1.25);
     common::until_shown(&mut h, &rs);
     assert!(last(&h).is_none(), "the overlay is off at first");
@@ -114,6 +119,9 @@ fn the_overlay_has_every_number_after_playing() {
     assert!(m.rss.is_some_and(|b| b > 0), "{m:?}");
     assert!(m.minor_faults_per_s.is_some(), "{m:?}");
     assert_eq!(lines[7], "audio     none");
+    // Software decode drains nothing: no drain line.
+    assert_eq!(r.drain, None);
+    assert!(!lines.iter().any(|l| l.starts_with("drain ")));
 
     // F3 again: gone.
     h.key_press(egui::Key::F3);

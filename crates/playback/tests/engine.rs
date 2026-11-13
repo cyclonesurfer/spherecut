@@ -51,7 +51,7 @@ use spherecut_playback::{
     AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, DrainWaits,
     HwDecodeCheck, HwPromise, HwSupport, LockSpec, LockStatus, PREROLL_FRAMES, PerfStats, PlaySpan,
     PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts, PlayerThreads,
-    Presented, SlotState, Stage, StreamStatus, VAAPI_DRAIN_ENV,
+    Presented, SlotState, Stage, StreamStatus, VAAPI_DRAIN_ENV, vaapi_drain_from_env,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
@@ -1108,13 +1108,31 @@ fn drained(perf: &PerfStats, decoders: u64) -> bool {
         && perf.count(Counter::DrainOverflow) == decoders
 }
 
+/// Whether `perf` holds nothing of a drain: no drain stage sample, no
+/// waits and no drain counter.
+fn no_drain(perf: &PerfStats) -> bool {
+    perf.summary(Stage::Drain).recorded == 0
+        && perf.drain_waits() == DrainWaits::default()
+        && [
+            Counter::DrainWaited,
+            Counter::DrainErrors,
+            Counter::DrainOverflow,
+            Counter::DrainUnavailable,
+        ]
+        .iter()
+        .all(|&c| perf.count(c) == 0)
+}
+
 /// A decoder whose numbers say it drained VA-API's queue puts each
 /// frame's drain in the drain stage, its waits in the histogram and its
 /// failures in the counters; the mode the config asks for reaches each
-/// stream's request. A decoder that drains nothing records none of it.
+/// stream's request. The default config asks for `download` with the
+/// variable unset, and `off` with `0`; under it a software decode, which
+/// never drains, records none of it.
 ///
-/// Control: the synthetic clip's own decoders, which drain nothing, fail
-/// the same check.
+/// Controls: the synthetic clip's own decoders, which drain nothing, fail
+/// the check of a decoder that drained; and the draining decoders' numbers
+/// fail the check of one that didn't.
 #[test]
 fn a_decoder_s_drains_reach_the_drain_stage_and_counters() {
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -1141,29 +1159,43 @@ fn a_decoder_s_drains_reach_the_drain_stage_and_counters() {
         perf.drain_waits(),
         perf.snapshot().counters
     );
-    // Off by default (unless the variable says otherwise), and nothing
-    // of a drain without one.
+    // Download by default: the config reads the variable, which unset
+    // (as the tests run, unless someone set it) asks for download, and
+    // `0` for none. The environment is only read here, never set.
+    assert_eq!(
+        PlayerConfig::default().vaapi_drain,
+        vaapi_drain_from_env(|k| std::env::var(k).ok())
+    );
     if std::env::var_os(VAAPI_DRAIN_ENV).is_none() {
-        assert_eq!(PlayerConfig::default().vaapi_drain, VaapiDrain::Off);
+        assert_eq!(PlayerConfig::default().vaapi_drain, VaapiDrain::Download);
     }
-    let plain = opened(clip(30), clock, config(64));
+    let unset = vaapi_drain_from_env(|_| None);
+    assert_eq!(unset, VaapiDrain::Download);
+    assert_eq!(vaapi_drain_from_env(|_| Some("0".into())), VaapiDrain::Off);
+    // Under the default, a software decode drains nothing.
+    let default = PlayerConfig {
+        vaapi_drain: unset,
+        ..config(64)
+    };
+    let plain = opened(clip(30), clock, default);
     plain.seek(at(12), SeekMode::Exact);
     show(&plain, 12);
     let none = plain.perf().clone();
     assert!(none.summary(Stage::Decode).recorded > 0);
-    assert_eq!(none.summary(Stage::Drain).recorded, 0);
-    assert_eq!(none.drain_waits(), DrainWaits::default());
-    for c in [
-        Counter::DrainWaited,
-        Counter::DrainErrors,
-        Counter::DrainOverflow,
-        Counter::DrainUnavailable,
-    ] {
-        assert_eq!(none.count(c), 0, "{c:?}");
-    }
+    assert!(
+        no_drain(&none),
+        "{:?}, {:?}, {:?}",
+        none.summary(Stage::Drain),
+        none.drain_waits(),
+        none.snapshot().counters
+    );
     must_fail(
         "a decoder that drains nothing read as draining",
         drained(&none, 2),
+    );
+    must_fail(
+        "the draining decoders read as draining nothing",
+        no_drain(&perf),
     );
 }
 
