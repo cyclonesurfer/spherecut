@@ -753,7 +753,7 @@ fn the_encode_pass_writes_every_code() {
         let t = got.texel(k, 0).unwrap();
         let v = f64::from(f32::from_le_bytes(t[..4].try_into().unwrap()));
         let want = f64::from(srgb_oetf(lin(k) as f32));
-        off_oetf = off_oetf.max((v - want).abs());
+        off_oetf = off_oetf.max(sample_diff(v, want));
         codes_off = codes_off.max((want - f64::from(k) / 255.0).abs());
     }
     // Rounded to 8-bit codes it would be up to 0.037 codes, 1.5e-4, off.
