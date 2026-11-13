@@ -367,10 +367,15 @@ impl Roots {
     /// beneath its root, and the project's file name (a2-plan 3.1): to
     /// write, beneath the write root, where a relative path is from, as
     /// for [`create`](Self::create); to read, beneath any root, as for
-    /// [`open_file`](Self::open_file). The folder is named as its root was
-    /// given joined with the rest, lexically, so media paths are read the
-    /// way the agent names them (D47). The project, its history and its
-    /// lock are then opened by name in the folder, never through a link.
+    /// [`open_file`](Self::open_file). The folder is the one the kernel
+    /// finds, a link beneath the root followed, named as its root was
+    /// given joined with the folder's real path below the root's (F031,
+    /// the M3.9 review's R1): so a project's media paths are made
+    /// relative to, and read against, the folder the GUI and the CLI find
+    /// it in, and a `..` in one climbs from where the project really is,
+    /// while the root keeps the name the agent knows it by (D47). The
+    /// project, its history and its lock are then opened by name in the
+    /// folder, never through a link.
     pub fn project_folder(
         &self,
         arg: &str,
@@ -410,11 +415,18 @@ impl Roots {
         let folder = rest.parent().unwrap_or(Path::new(""));
         let fd = beneath(root.fd.as_fd(), folder, OFlags::PATH | OFlags::DIRECTORY)
             .map_err(|e| self.refused(arg, e, want, path))?;
-        let named = if folder.as_os_str().is_empty() {
-            root.given.clone()
-        } else {
-            root.given.join(folder)
+        // Where the kernel found it, beneath the root's own path: a folder
+        // removed since is refused as missing, and one moved out of the
+        // root as the lookup would have refused it.
+        let real = std::fs::read_link(proc_path(fd.as_fd()))
+            .map_err(|e| ToolError::new(codes::NOT_FOUND, format!("can't be read: {e}")).at(arg))?;
+        if real.as_os_str().as_bytes().ends_with(b" (deleted)") {
+            return Err(self.refused(arg, Errno::NOENT, want, path));
+        }
+        let Ok(below) = real.strip_prefix(&root.canonical) else {
+            return Err(self.refused(arg, Errno::XDEV, want, path));
         };
+        let named = root.given.join(below);
         Ok((ProjectFolder::from_fd(fd, &named), name.to_owned()))
     }
 

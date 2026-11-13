@@ -22,7 +22,7 @@ use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{parse_metadata, read_record, read_trailer};
 use spherecut_core::project::folder::ProjectFolder;
 use spherecut_core::project::{
-    Camera, DualFisheye, EacLayout, EacPair, Media, Project, Source, file, gains_basis,
+    Camera, DualFisheye, EacLayout, EacPair, History, Media, Project, Source, file, gains_basis,
 };
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_media::probe::probe;
@@ -866,6 +866,101 @@ fn media_outside_the_roots_is_named_without_being_read() {
     let p = dir.project("a.spherecut", Path::new("/nonexistent-spherecut/a.mp4"));
     let s = ok(&tools, "project", json!({"file": p}));
     assert_eq!(s["media"][0]["status"], "outside_roots", "{s}");
+}
+
+/// The roots' layout of the M3.9 review's R1: `real/clip.mp4`, a folder
+/// `real/sub`, and `link`, a relative link to it beneath the root, which
+/// the kernel follows there; the clip's path.
+fn linked_folder(dir: &TempDir) -> PathBuf {
+    let clip = dir.clip("real", "clip");
+    std::fs::create_dir_all(dir.path("real/sub")).unwrap();
+    std::os::unix::fs::symlink("real/sub", dir.path("link")).unwrap();
+    clip
+}
+
+/// Whether `path` opens, beneath `dir` as an agent's tools open a
+/// project's media, as the clip at `clip`.
+fn opens(dir: &TempDir, path: &Path, clip: &Path) -> Result<(), String> {
+    let roots = Roots::new(std::slice::from_ref(&dir.0), None).unwrap();
+    let opened = roots
+        .open_file("media", path)
+        .map_err(|e| format!("{}: {e:?}", path.display()))?;
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap();
+    if real(opened.source().open) == real(clip) {
+        Ok(())
+    } else {
+        Err(format!("{} isn't the clip", path.display()))
+    }
+}
+
+/// R1: a project reached through a folder link beneath a root, whose
+/// media path climbs out with "..", is read by an agent from the folder
+/// the kernel finds it in, as the GUI and the CLI read it (F031): the
+/// summary names `real/clip.mp4`, present, and `check` reads it. Control:
+/// the folder named as given, lexically (the rule before), reads
+/// `clip.mp4` beside the link, which isn't there.
+#[test]
+fn a_project_in_a_linked_folder_reads_its_media_from_its_real_folder() {
+    let _t = timed("a_project_in_a_linked_folder_reads_its_media_from_its_real_folder");
+    let dir = TempDir::new("linked-read");
+    let clip = linked_folder(&dir);
+    let tools = dir.tools();
+    // Made where it is, so its media is "../clip.mp4" whatever the rule.
+    ok(
+        &tools,
+        "project",
+        json!({"file": dir.path("real/sub/p.spherecut"), "create": {"media": clip}}),
+    );
+    let text = std::fs::read_to_string(dir.path("real/sub/p.spherecut")).unwrap();
+    assert!(text.contains("\"../clip.mp4\""), "{text}");
+    let through = dir.path("link/p.spherecut");
+    let s = ok(&tools, "project", json!({"file": through}));
+    assert_eq!(s["media"][0]["status"], "present", "{s}");
+    let named = PathBuf::from(s["media"][0]["path"].as_str().unwrap());
+    assert_eq!(named, clip, "{s}");
+    opens(&dir, &named, &clip).unwrap();
+    ok(&tools, "check", json!({"project": through}));
+    // Control: the folder as named, lexically.
+    let lexical = ProjectFolder::open(&dir.path("link")).unwrap();
+    let read = lexical.load(OsStr::new("p.spherecut")).unwrap().project;
+    must_fail(
+        "the folder named lexically",
+        opens(&dir, &read.media()[0].path, &clip),
+    );
+}
+
+/// R1: a project an agent makes through a folder link beneath a root
+/// stores its media from the folder the kernel finds, so core's
+/// `file::load`, as the GUI and the CLI read it, finds the media there.
+/// Control: the same project saved through the folder named lexically
+/// (the rule before) stores "../real/clip.mp4", which `file::load` reads
+/// as `real/real/clip.mp4`.
+#[test]
+fn a_project_made_through_a_linked_folder_loads_in_core() {
+    let _t = timed("a_project_made_through_a_linked_folder_loads_in_core");
+    let dir = TempDir::new("linked-create");
+    let clip = linked_folder(&dir);
+    let tools = dir.tools();
+    let through = dir.path("link/p.spherecut");
+    let r = ok(
+        &tools,
+        "project",
+        json!({"file": through, "create": {"media": clip}}),
+    );
+    assert_eq!(r["media"][0]["status"], "present", "{r}");
+    let text = std::fs::read_to_string(&through).unwrap();
+    assert!(text.contains("\"../clip.mp4\""), "{text}");
+    let in_core = |p: &Path| opens(&dir, &load(p).media()[0].path, &clip);
+    in_core(&through).unwrap();
+    // Control: the project saved through the folder named lexically.
+    let lexical = ProjectFolder::open(&dir.path("link")).unwrap();
+    lexical
+        .create(OsStr::new("q.spherecut"), &load(&through), &History::new())
+        .unwrap();
+    must_fail(
+        "saved through the folder named lexically",
+        in_core(&dir.path("link/q.spherecut")),
+    );
 }
 
 /// Through our own client over pipes: the list a session gets, and an

@@ -9428,15 +9428,17 @@ and 6, has the detail; this is what was built and why.*
 
 **One folder handle for every project read and write.** A
 `ProjectFolder` is an `O_PATH | O_DIRECTORY` descriptor for the
-project's folder and that folder's path as named. An agent gets it from
-its roots (`Roots::project_folder`: beneath a read root or the write
-root to read, beneath the write root to write, by `openat2` as D45's
+project's folder and that folder's path. An agent gets it from its
+roots (`Roots::project_folder`: beneath a read root or the write root
+to read, beneath the write root to write, by `openat2` as D45's
 outputs are); the GUI opens the folder by its path. Files in it are
 opened with `openat(O_NOFOLLOW)`, so the project, its history and its
 lock are what is in that folder, and a link at the project's name is
-refused rather than replaced. Media paths are made relative to, and
-read against, the path as named (D47), so the GUI and an agent read a
-project's `../clips/a.mp4` as the same file.
+refused rather than replaced. The folder is the one the kernel finds,
+for the GUI, the CLI and agents alike (since M3.9: F031 and the M3.9
+review's R1), and media paths are made relative to, and read against,
+it (D47), so all three read a project's `../clips/a.mp4` as the same
+file.
 
 **The lock**, `.<name>.lock` beside the project: `flock` on a file
 that is never removed or replaced, with one line saying who holds it
@@ -9577,7 +9579,17 @@ criterion now says too. `look`, `compare`, `check` and `render` refuse
 a project of a camera's pair `not_yet` until M3.11 (D68). `tools/list`
 is 12,235 of its 12,288 bytes, `project` 986 of its 1,000
 (`create.media` reads "A video."), and no other tool's description or
-schema changed.
+schema changed. From the M3.9 review (R1), an agent's project folder
+is the one the kernel finds, as the GUI's and the CLI's are since
+F031: `Roots::project_folder` reads the path of the descriptor
+`openat2` gave from `/proc/self/fd`, refuses one no longer beneath
+the root (`outside_roots`) or removed (`not_found`), and names the
+folder as its root was given joined with the real path below the
+root's. So a project reached through a folder link beneath a root
+reads its `../clip.mp4` beside the folder it is really in, as the
+window and `spherecut render` do, and one an agent makes there loads
+in them with its media. The root keeps the name it was given, so a
+root reached through a link still names its paths as the agent does.
 
 ## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
 

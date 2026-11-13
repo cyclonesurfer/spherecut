@@ -9,12 +9,16 @@
 //! through `/proc/self/fd/N`, so a write lands in the folder that was
 //! opened whatever has happened to its path since. The descriptor is for
 //! I/O only: media paths are made relative to, and read against, the
-//! folder's path (D47). The GUI's folder, from [`ProjectFolder::of_file`],
-//! is named as the kernel finds it (F031), and its saves name each media
-//! path as near it as its folders' real paths let it be before making it
-//! relative (R8), as `file::save` does; a folder opened by
-//! [`ProjectFolder::open`] or [`ProjectFolder::from_fd`] is named as
-//! given, lexically, and its media paths with it.
+//! folder's path (D47), which is the folder the kernel finds, for the
+//! GUI, the CLI and agents alike. The GUI's folder, from
+//! [`ProjectFolder::of_file`], is named by its real path (F031), and its
+//! saves name each media path as near it as its folders' real paths let
+//! it be before making it relative (R8), as `file::save` does. An
+//! agent's, from [`ProjectFolder::from_fd`], is named by its roots: the
+//! root as it was given joined with the folder's real path below the
+//! root's (the M3.9 review's R1), its media paths made relative as the
+//! agent names them. A folder opened by [`ProjectFolder::open`] is named
+//! as given, lexically.
 //!
 //! ```text
 //! trip.spherecut            the project (D47)
