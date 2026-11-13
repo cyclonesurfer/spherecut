@@ -255,11 +255,14 @@ fn camera_source(
 }
 
 /// The warning for a camera's file with no calibration a stitch reads,
-/// and camera's words for why when it has one that can't be read.
+/// and the words for why when it has one that can't be read or that
+/// makes no source a project takes. The whole message is a field, so the
+/// words and what wraps them stay within its bound together (the M3.9
+/// review's N8).
 fn no_calibration(why: Option<&str>) -> Warning {
     let message = match why {
         None => "no calibration: shown as its lenses".to_owned(),
-        Some(why) => format!("no calibration: shown as its lenses ({})", text::field(why)),
+        Some(why) => text::field(&format!("no calibration: shown as its lenses ({why})")),
     };
     Warning::new("no_calibration", message)
 }
@@ -977,4 +980,51 @@ fn step(s: &Step, done: bool) -> Value {
         "after": s.after,
         "done": done,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use spherecut_testkit::control::must_fail;
+
+    use super::*;
+    use crate::limits::FIELD_BYTES;
+
+    /// Whether `message` is within a field's bound and holds no character
+    /// a field refuses.
+    fn a_field(message: &str) -> Result<(), String> {
+        if message.len() > FIELD_BYTES {
+            return Err(format!("{} bytes, past {FIELD_BYTES}", message.len()));
+        }
+        if message.chars().any(text::refused) {
+            return Err(format!("{message:?} holds a refused character"));
+        }
+        Ok(())
+    }
+
+    /// The `no_calibration` warning with camera's words is a field as a
+    /// whole (the M3.9 review's N8): one exactly `FIELD_BYTES` long is
+    /// kept whole, one a byte longer is cut to the bound, and words a
+    /// whole field long, a newline in them, are cut with the wrapper.
+    /// Control: the words fielded and then wrapped, as before, pass the
+    /// bound.
+    #[test]
+    fn no_calibration_stays_within_a_field() {
+        let plain = no_calibration(None).message;
+        let room = FIELD_BYTES - plain.len() - " ()".len();
+        let whole = no_calibration(Some(&"w".repeat(room))).message;
+        assert_eq!(whole, format!("{plain} ({})", "w".repeat(room)));
+        assert_eq!(whole.len(), FIELD_BYTES);
+        let cut = no_calibration(Some(&"w".repeat(room + 1))).message;
+        assert_eq!(a_field(&cut), Ok(()));
+        assert!(
+            cut.starts_with(&format!("{plain} (w")) && cut.ends_with('…'),
+            "{cut}"
+        );
+        let long = format!("line\n{}", "w".repeat(FIELD_BYTES));
+        assert_eq!(a_field(&no_calibration(Some(&long)).message), Ok(()));
+        must_fail(
+            "the words fielded, then wrapped",
+            a_field(&format!("{plain} ({})", text::field(&long))),
+        );
+    }
 }
