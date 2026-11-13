@@ -11377,12 +11377,21 @@ What, as `crates/core/src/project/` has it:
   clears it); `set_caps {media, caps}` both caps.
 - **Who builds a source**: never core, which reads no file.
   `media::project::camera_source` reads a camera file's trailer again,
-  through camera's `stitching`: the geometry is the table's row with
-  the generation the file's field 136 names (never `known::lookup`'s
-  row as it stands, which reads V6), the tune `Tune::default()`, the
-  gains off and the front track 0. Agents' `project create` and
-  `set_source`'s camera form call it now (D57's note); the app's open
-  flow takes it in M3.10.
+  through camera's `stitching`: the geometry is the table's row with the
+  generation the file's field 136 names (never `known::lookup`'s row as
+  it stands, which reads V6), the tune `Tune::default()`, the gains off
+  and the front track 0. It ends with `DualFisheye::check` on the source
+  as the media it becomes (the M3.9 review's R7): a camera file whose
+  source `validate` refuses at the default tune (a θ_frame under the 95°
+  the default feather needs; a lens's ξ at −1 or below) stays an
+  equirect with `not_equirect` and `no_calibration`, carrying
+  `validate`'s words, as a file without a calibration a stitch reads
+  does. `trailer_source` is the same source unchecked, which a whole
+  source in an agent's `set_source` is compared with. Agents' `project
+  create` and `add_media` call `camera_source` now, and `set_source`'s
+  camera form reads `trailer_source` and checks it with
+  `DualFisheye::check`, refusing it `bad_edit` where the check fails
+  (D57's note); the app's open flow takes it in M3.10.
 - **Only an edit changes a stored geometry** (plan 11.4). When the
   table's entry for the camera is settled, or provisional on other
   evidence, and the stored geometry is provisional
@@ -11499,7 +11508,7 @@ turns each stored tune into the new frame.
 
 Why: every render reads only the project, so the CLI and agents match
 the window with no trailer reader, a project still diffs (D47), and an
-agent never reads a calibration (D57). The raw strings and their hash
+agent never makes a calibration (D57). The raw strings and their hash
 let a later build parse them again and refuse a source whose
 calibration isn't its file's. One schema for M3 is one migration
 instead of three. The bounds come first so that a mistake is named by
@@ -11850,6 +11859,11 @@ before a merge.
   JSON lock and history records, the undo budget, two of `cli-json.md`'s
   codes and M3.9's schema 2 (D47's update); RON could keep the
   sidecars, and SQLite would rework the folder's write-then-rename.
+
+  *Updated 2026-11-13 (M3.9):* still Pat's. M3.9 checked this card
+  before it launched (the M3 plan's risk 15) and built schema 2 (D68) on
+  JSON, the working choice; another answer reworks schema 2's file, its
+  migration from schema 1 and both checked-in fixtures with the rest.
 - **The interpolation default** (D50): Level, which interpolates yaw,
   pitch and roll each as an angle, or Free, which interpolates on
   SO(3) as `docs/PROMPT.md` asks. Pat was asked on 2026-10-31, with
