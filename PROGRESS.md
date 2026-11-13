@@ -3990,12 +3990,12 @@ measured it in three runs, PRs #36 to #38, and b3a1720 merged main at
 7a06482 (M3.9) and the three PRs. Nine commits, 6aef1ce to a9a2f2b (18
 files, 695 lines added and 220 removed), then made `download` the
 default and answered a fresh review's five findings (F1 to F5), and this
-note's unit wrote D79 and the docs (90a95bc, 22cd128 and this note's
-commit). Against main at 7a06482 the code and docs outside `hw-reports/`
-came to 27 files, 3,480 lines added and 85 removed, at a9a2f2b. What Pat
-sees: with VA-API's frames copied, the window keeps refresh while decode
-is behind, and shows fewer frames than before; odin's default path
-(Vulkan Video on path B) is unchanged.
+note's unit wrote D79 and the docs (90a95bc, 22cd128, this note's
+commit and bf532b3's corrections). Against main at 7a06482 the code and
+docs outside `hw-reports/` came to 27 files, 3,480 lines added and 85
+removed, at a9a2f2b. What Pat sees: with VA-API's frames copied, the
+window keeps refresh while decode is behind, and shows fewer frames
+than before; odin's default path (Vulkan Video on path B) is unchanged.
 
 - **The cause (D79).** On each download radeonsi frees a staging buffer
   of the whole frame (47.46 MiB for the 5.7K P010 clip) inside
@@ -4109,13 +4109,20 @@ is behind, and shows fewer frames than before; odin's default path
 
 **Gates**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
 lavapipe):
-- The docs tests after the docs commits: xtask `tests/docs.rs` 6
-  passed (0.15 s), agent `tests/docs.rs` 6 passed, cli
-  `tests/contract.rs` 28 passed (14.46 s).
+- The docs tests after the docs commits, at 5392792: xtask
+  `tests/docs.rs` 6 passed (0.73 s), agent `tests/docs.rs` 6 passed
+  (0.01 s), cli `tests/contract.rs` 28 passed (15.34 s).
 - Property tests: none. The branch adds or changes none (`git diff
   7a06482 HEAD -- crates` names no `proptest`), so none ran at
   100,000 cases.
-- CHECK_PLACEHOLDER
+- `cargo xtask check` passed at 5392792, after which only this file
+  changed (`check-stallfix.log`), in 854 s on a warm target dir: 1746
+  tests passed, 0 failed and 61 ignored on 144 result lines, against
+  1721, 0 and 61 on 143 at M3.9's 8088143, with clippy's, rustdoc's 4,
+  the MSRV build's and cargo-deny's controls failing as they must. An
+  earlier run at 400038c, cut off by a machine restart in playback's
+  tests with no failure, doesn't count. `cargo xtask compat` (FFmpeg
+  8.1.3 and 9.0.2) is run after this note.
 
 **Open, and known limits:**
 - Path A's gaps, which neither mode fixes (D25's note): RADV maps each
