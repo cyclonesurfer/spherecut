@@ -1,0 +1,3 @@
+memory some avg10=0.00 avg60=0.01 avg300=0.03 total=85817779 full avg10=0.00 avg60=0.01 avg300=0.03 total=84071706 
+cpu some avg10=0.02 avg60=0.31 avg300=0.32 total=8508026216 full avg10=0.00 avg60=0.00 avg300=0.00 total=0 
+io some avg10=0.00 avg60=0.00 avg300=0.09 total=23109922632 full avg10=0.00 avg60=0.00 avg300=0.09 total=22371479741 
