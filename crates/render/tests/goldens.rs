@@ -94,14 +94,17 @@ use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, sample_diff, 
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
 use spherecut_render::{
-    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, OutKind, Pixels, Placement,
-    PlaneFormat, SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, LensFrame, OutKind, Pixels, Placement,
+    PlaneFormat, PlaneSource, SlotShape, SourceFrames, Stereo, StillOptions, StillRenderer,
+    ViewParams,
 };
 use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
-use spherecut_sphere::rig::Rig;
+use spherecut_sphere::rig::{Rig, Tune};
+use spherecut_synth::lens::{CalibTruth, Planted, x5_like, x5_like_planted};
+use spherecut_synth::rung::{FRONT_TRACK, far};
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
 use spherecut_testkit::control::{above, at_most, below, must_fail};
 use spherecut_testkit::{Fnv64, bench, bless, tier2};
@@ -312,7 +315,6 @@ fn planes_fnv64(frame: &dyn VideoPlanes) -> u64 {
 }
 
 /// A lens pair and what it is, for a dfish manifest (M3 plan 10.5).
-#[expect(dead_code, reason = "M3.7 units (a) to (c) make and record pairs")]
 struct PairSource<'a> {
     /// The scene, as rung 1 names it.
     name: String,
@@ -326,12 +328,76 @@ struct PairSource<'a> {
     gains: [[f64; 3]; 2],
 }
 
-#[expect(dead_code, reason = "M3.7 unit (a) records pairs by it")]
-impl PairSource<'_> {
+impl<'a> PairSource<'a> {
+    /// The pair `frames` (by track) of the scene `name`, seen through
+    /// `cal` under `geometry` ([`pair_geometry`]), with `gains`.
+    fn new(
+        name: &str,
+        frames: [&'a dyn VideoPlanes; 2],
+        cal: &CalibTruth,
+        geometry: Value,
+        gains: [[f64; 3]; 2],
+    ) -> PairSource<'a> {
+        PairSource {
+            name: name.into(),
+            frames,
+            calibration_fnv64: calibration_fnv64(cal),
+            geometry,
+            gains,
+        }
+    }
+
     /// Each track's [`planes_fnv64`].
     fn hash(&self) -> [u64; 2] {
         self.frames.map(planes_fnv64)
     }
+
+    /// The manifest's `source` for the pair: the scene, each track's
+    /// picture as [`Source`] records a frame, the calibration's hash, the
+    /// geometry with R, and the gains. Its `source_fnv64` is [`Self::hash`],
+    /// as [`Self::hashes`] writes it.
+    fn about(&self) -> Value {
+        let lens = |f: &dyn VideoPlanes| {
+            let c = f.color();
+            let (w, h) = f.size();
+            json!({
+                "size": [w, h],
+                "layout": f.layout().name,
+                "range": format!("{:?}", c.range).to_lowercase(),
+                "matrix": format!("{:?}", c.matrix).to_lowercase(),
+                "siting": format!("{:?}", c.siting).to_lowercase(),
+            })
+        };
+        json!({
+            "scene": self.name,
+            "tracks": [lens(self.frames[0]), lens(self.frames[1])],
+            "calibration_fnv64": format!("{:016x}", self.calibration_fnv64),
+            "geometry": self.geometry,
+            "gains": self.gains,
+        })
+    }
+
+    /// Both tracks' FNV-64, as the manifest writes them.
+    fn hashes(&self) -> Value {
+        json!(self.hash().map(|h| format!("{h:016x}")))
+    }
+}
+
+/// FNV-64 of a calibration synth makes: of its every number, as `Debug`
+/// writes them (each to the shortest digits that read back as it).
+fn calibration_fnv64(cal: &CalibTruth) -> u64 {
+    spherecut_testkit::fnv64(format!("{cal:?}").as_bytes())
+}
+
+/// The geometry a pair's rig is built under, for [`PairSource`]: synth's
+/// planted conventions (as `Debug` writes them), the tune, and the
+/// scene's distance R in metres, `"inf"` where it is infinitely far.
+fn pair_geometry(planted: &Planted, tune: &Tune, r_m: f64) -> Value {
+    json!({
+        "planted": format!("{planted:?}"),
+        "tune": serde_json::to_value(tune).unwrap(),
+        "r_m": num(r_m),
+    })
 }
 
 fn limited709() -> ColorInfo {
@@ -611,6 +677,22 @@ fn max_diff(a: &[f64], b: &[f64]) -> f64 {
 }
 
 /// A JSON number, to 4 decimals; ±∞ as a string.
+/// One value as itself, more as a list, in their order: a manifest
+/// entry's sources and views.
+fn one_or_list(mut v: Vec<Value>) -> Value {
+    if v.len() == 1 {
+        v.remove(0)
+    } else {
+        Value::Array(v)
+    }
+}
+
+/// A string as it reads, anything else as JSON writes it: a hash in a
+/// message.
+fn bare(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_string)
+}
+
 fn num(v: f64) -> Value {
     if v.is_finite() {
         json!((v * 1e4).round() / 1e4)
@@ -1032,7 +1114,6 @@ impl<'g> Run<'g> {
     /// [`StillRenderer::render_blurred`] renders a pair of its frames'
     /// bytes, or records why it couldn't.
     #[allow(clippy::too_many_arguments)]
-    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
     fn render_pair(
         &mut self,
         pair: &PairSource<'_>,
@@ -1042,7 +1123,22 @@ impl<'g> Run<'g> {
         size: (u32, u32),
         opts: StillOptions,
     ) -> Option<Image> {
-        todo!("M3.7 unit (a)")
+        let lenses = pair.frames.map(|frame| LensFrame {
+            frame,
+            from: PlaneSource::Bytes,
+        });
+        let source = SourceFrames::Pair { lenses, rig, gains };
+        let views = std::slice::from_ref(view);
+        match self
+            .renderer
+            .render_blurred(self.gpu, source, views, size, &opts)
+        {
+            Ok(img) => Some(img),
+            Err(e) => {
+                self.fail(format!("render_blurred of a pair: {e} ({})", e.code()));
+                None
+            }
+        }
     }
 
     fn render_with(
@@ -1147,13 +1243,6 @@ impl<'g> Run<'g> {
     /// every view it renders them through: one of each is recorded as
     /// itself, more as a list, in the row's order.
     fn end_check(&mut self, what: &str, sources: &[&Source], views: Vec<Value>) {
-        let one_or_list = |mut v: Vec<Value>| {
-            if v.len() == 1 {
-                v.remove(0)
-            } else {
-                Value::Array(v)
-            }
-        };
         let mut m = self.stamp();
         m.insert("what".into(), json!(what));
         if !sources.is_empty() {
@@ -1174,9 +1263,19 @@ impl<'g> Run<'g> {
     /// [`Self::end_check`] for rows that render lens pairs: each pair's
     /// entry as 10.5 asks, its calibration's hash, the geometry, the
     /// gains, R and both lenses' FNV-64, beside every view.
-    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
     fn end_pair_check(&mut self, what: &str, pairs: &[&PairSource<'_>], views: Vec<Value>) {
-        todo!("M3.7 unit (a)")
+        let mut m = self.stamp();
+        m.insert("what".into(), json!(what));
+        if !pairs.is_empty() {
+            let about = pairs.iter().map(|p| p.about()).collect();
+            let hashes = pairs.iter().map(|p| p.hashes()).collect();
+            m.insert("source".into(), one_or_list(about));
+            m.insert("source_fnv64".into(), one_or_list(hashes));
+        }
+        if !views.is_empty() {
+            m.insert("view".into(), one_or_list(views));
+        }
+        self.end(m, false);
     }
 
     /// Ends the row with its manifest entry, which must say what it
@@ -1216,8 +1315,32 @@ impl<'g> Run<'g> {
     /// The row's image against its stored golden, by the rules of section
     /// 6, or kept for blessing; then the row ends.
     fn stored(&mut self, what: &str, got: &Image, source: &Source, view: Value) {
+        let hash = json!(format!("{:016x}", source.hash()));
+        self.store(what, got, (&source.about, None), hash, view);
+    }
+
+    /// [`Self::stored`] for a row that renders a lens pair: the image
+    /// against its stored golden, its entry recording the pair as
+    /// [`Self::end_pair_check`] does.
+    fn stored_pair(&mut self, what: &str, got: &Image, pair: &PairSource<'_>, view: Value) {
+        let about = pair.about();
+        self.store(what, got, (&about, Some(&about)), pair.hashes(), view);
+    }
+
+    /// [`Self::stored`]'s body: `about` is the entry's `source`, and
+    /// `matched`, when given, must be the blessed one's as `hash` must be
+    /// its `source_fnv64`, for the render to be compared (a pair's whole
+    /// source: a changed calibration, geometry or gains is a changed
+    /// source, 10.5).
+    fn store(
+        &mut self,
+        what: &str,
+        got: &Image,
+        (about, matched): (&Value, Option<&Value>),
+        hash: Value,
+        view: Value,
+    ) {
         let png = format!("{}.png", self.row);
-        let hash = format!("{:016x}", source.hash());
         let mut entry = Map::new();
         match self.mode {
             Mode::References => {}
@@ -1241,7 +1364,7 @@ impl<'g> Run<'g> {
                 Err(e) => self.fail(format!("encoding {png}: {e}")),
             },
             Mode::Golden { bless: false } | Mode::OtherDriver => {
-                self.compare_stored(&png, &hash, got)
+                self.compare_stored(&png, matched, &hash, got)
             }
         }
         self.threshold("same_driver", json!("identical pixels"));
@@ -1258,21 +1381,17 @@ impl<'g> Run<'g> {
         m.append(&mut entry);
         m.insert("what".into(), json!(what));
         m.insert("png".into(), json!(png));
-        m.insert("source".into(), source.about.clone());
-        m.insert("source_fnv64".into(), json!(hash));
+        m.insert("source".into(), about.clone());
+        m.insert("source_fnv64".into(), hash);
         m.insert("view".into(), view);
         self.end(m, true);
     }
 
-    /// [`Self::stored`] for a row that renders a lens pair: the image
-    /// against its stored golden, its entry recording the pair as
-    /// [`Self::end_pair_check`] does.
-    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
-    fn stored_pair(&mut self, what: &str, got: &Image, pair: &PairSource<'_>, view: Value) {
-        todo!("M3.7 unit (a)")
-    }
-
-    fn compare_stored(&mut self, png: &str, hash: &str, got: &Image) {
+    /// `got` against the stored `png`, when the blessed entry's
+    /// `source_fnv64` is `hash` and, if `source` is given, its `source` is
+    /// `source`: otherwise the source changed, and the render isn't
+    /// compared.
+    fn compare_stored(&mut self, png: &str, source: Option<&Value>, hash: &Value, got: &Image) {
         let entry = match &self.manifest {
             Ok(m) => m["images"][&self.row].clone(),
             Err(e) => {
@@ -1287,12 +1406,24 @@ impl<'g> Run<'g> {
             ));
             return;
         }
-        let blessed_hash = entry["source_fnv64"].as_str().unwrap_or("");
+        let blessed_hash = &entry["source_fnv64"];
         if blessed_hash != hash {
+            let (hash, blessed_hash) = (bare(hash), bare(blessed_hash));
             self.fail(format!(
                 "the synthetic source changed (its planes hash {hash}, blessed as {blessed_hash}): \
                  synth or libm moved, not the renderer, so the render isn't compared; check synth \
                  and bless again with `{REGENERATE}`"
+            ));
+            return;
+        }
+        if let Some(source) = source
+            && entry["source"] != *source
+        {
+            self.fail(format!(
+                "the pair's source changed (its calibration, geometry, R or gains): it is {source}, \
+                 blessed as {}; the camera's numbers moved, not the renderer, so the render isn't \
+                 compared; bless again with `{REGENERATE}`",
+                entry["source"]
             ));
             return;
         }
@@ -3633,15 +3764,249 @@ fn blessing_writes_everything_or_nothing() {
     );
 }
 
+/// A lens pair for the harness's own tests: two NV12 ramps at 64² a
+/// lens, unlike each other, under sphere's rig of synth's X5-like camera
+/// infinitely far.
+struct TinyPair {
+    frames: [Frame; 2],
+    rig: Rig,
+    tune: Tune,
+}
+
+fn tiny_pair() -> &'static TinyPair {
+    static PAIR: OnceLock<TinyPair> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        let ramp = |k: u32| {
+            coded(Kind::Nv12, (64, 64), limited709(), move |p, x, y| {
+                if p == 0 {
+                    (16 + (x * 3 + y * k) % 220) as u16
+                } else {
+                    128
+                }
+            })
+        };
+        let tune = far();
+        let rig =
+            common::rig::sphere_rig(&x5_like(), &x5_like_planted(), &tune, FRONT_TRACK, [64; 2])
+                .unwrap();
+        TinyPair {
+            frames: [ramp(1), ramp(2)],
+            rig,
+            tune,
+        }
+    })
+}
+
+impl TinyPair {
+    fn source(&self) -> PairSource<'_> {
+        let geometry = pair_geometry(&x5_like_planted(), &self.tune, f64::INFINITY);
+        PairSource::new(
+            "ramps",
+            [&self.frames[0], &self.frames[1]],
+            &x5_like(),
+            geometry,
+            [[1.0; 3]; 2],
+        )
+    }
+}
+
+/// The harness's own pair rows: the tiny pair stitched to a 64 × 32
+/// equirect and stored, and the same as a check that stores nothing.
+const PAIR_ROWS: &[(&str, Row)] = &[("pair_stored", pair_stored), ("pair_checked", pair_checked)];
+
+fn pair_stored(run: &mut Run<'_>) {
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let opts = StillOptions::default();
+    if let Some(img) = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts) {
+        run.stored_pair("the tiny pair, stored", &img, &pair, view_about(&v, size));
+    }
+}
+
+fn pair_checked(run: &mut Run<'_>) {
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let opts = StillOptions::default();
+    if let Some(img) = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts) {
+        run.measure(
+            "lit",
+            unit(&img).iter().filter(|c| **c > 0.0).count() as f64,
+        );
+    }
+    run.end_pair_check(
+        "the tiny pair, checked",
+        &[&pair],
+        vec![view_about(&v, size)],
+    );
+}
+
+/// Blesses `rows`, those of them `only` names, into `dir` as a run that
+/// says it is `about`.
+fn bless_these(dir: &Path, diffs: &Path, rows: &[(&str, Row)], only: &[&str], about: &'static str) {
+    let mut run = Run::at(gpu(), Mode::Golden { bless: true }, dir, diffs);
+    run.about = about;
+    run_these(&mut run, rows, Some(only));
+    run.finish();
+}
+
+/// Every file directly in `dir` (not in the directories under it), by
+/// name, with its bytes.
+fn files_in(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(e.path()).unwrap())
+        })
+        .collect()
+}
+
+/// A directory's manifest, parsed.
+fn manifest_in(dir: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(MANIFEST)).unwrap()).unwrap()
+}
+
 /// Blessing one directory's rows, a dfish module's into its own, leaves a
 /// sibling directory's manifest and PNGs as they were: each blessing
 /// sweeps its own directory's stale images alone, and writes its own
 /// manifest's `about`. Its control blesses both into one directory, where
 /// the second sweep removes the first's PNGs.
+///
+/// A scratch directory stands for `goldens/`, holding `rect_forward`,
+/// and two directories in it for `goldens/dfish_seam/` and
+/// `goldens/dfish_views/`, holding the harness's own pair rows (a pair
+/// stored, and a pair as a check), each blessed with its module's
+/// `about`. Blessing each again leaves the other two byte for byte, and
+/// a pair's entry records 10.5's fields.
 #[test]
-#[ignore = "M3.7 unit (a)"]
 fn blessing_one_directory_leaves_its_siblings() {
-    todo!()
+    let s = scratch("siblings");
+    let root = s.dir.clone();
+    let seam = root.join("dfish_seam");
+    let views = root.join("dfish_views");
+    let diffs = s.diffs.clone();
+    type Blessing<'r> = (&'r Path, &'r [(&'r str, Row)], &'r [&'r str], &'static str);
+    let blessings: [Blessing<'_>; 3] = [
+        (&root, ROWS, &["rect_forward"], ABOUT),
+        (&seam, PAIR_ROWS, &["pair_stored"], dfish_seam::ABOUT),
+        (
+            &views,
+            PAIR_ROWS,
+            &["pair_stored", "pair_checked"],
+            dfish_views::ABOUT,
+        ),
+    ];
+    for (dir, rows, only, about) in blessings {
+        bless_these(dir, &diffs, rows, only, about);
+    }
+    for (dir, _, only, about) in blessings {
+        let m = manifest_in(dir);
+        assert_eq!(m["about"], json!(about), "{}", dir.display());
+        assert!(
+            dir.join(format!("{}.png", only[0])).exists(),
+            "{}",
+            dir.display()
+        );
+    }
+    // A pair's entry: the calibration's hash, the geometry with R, the
+    // gains, and both lenses' FNV-64, stored or checked.
+    let m = manifest_in(&views);
+    for entry in [&m["images"]["pair_stored"], &m["checks"]["pair_checked"]] {
+        let source = &entry["source"];
+        let hex = |v: &Value| v.as_str().is_some_and(|h| h.len() == 16);
+        assert!(hex(&source["calibration_fnv64"]), "{entry}");
+        assert_eq!(source["geometry"]["r_m"], json!("inf"), "{entry}");
+        assert_eq!(
+            source["gains"],
+            json!([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]),
+            "{entry}"
+        );
+        let hashes = entry["source_fnv64"].as_array().unwrap();
+        assert!(hashes.len() == 2 && hashes.iter().all(hex), "{entry}");
+        assert_ne!(hashes[0], hashes[1], "{entry}");
+    }
+    // Each blessed again: the other two as they were, byte for byte.
+    for (k, (dir, rows, only, about)) in blessings.into_iter().enumerate() {
+        let others: Vec<&Path> = (0..3).filter(|&o| o != k).map(|o| blessings[o].0).collect();
+        let before: Vec<_> = others.iter().map(|d| files_in(d)).collect();
+        bless_these(dir, &diffs, rows, only, about);
+        for (d, was) in others.iter().zip(&before) {
+            assert_eq!(
+                &files_in(d),
+                was,
+                "blessing {} changed {}",
+                dir.display(),
+                d.display()
+            );
+        }
+    }
+    // Control: two runs blessed into one directory, rect_forward then the
+    // pair; the second's sweep takes the first's PNG.
+    let png = root.join("rect_forward.png");
+    let first = std::fs::read(&png).unwrap();
+    bless_these(&root, &diffs, PAIR_ROWS, &["pair_stored"], ABOUT);
+    let kept = std::fs::read(&png).is_ok_and(|b| b == first);
+    must_fail(
+        "the first run's PNG kept by a second blessed into its directory",
+        kept,
+    );
+}
+
+/// A pair whose calibration, geometry, R or gains changed since it was
+/// blessed is a changed source (10.5), and its render isn't compared;
+/// unchanged, it matches its PNG pixel for pixel.
+#[test]
+fn a_changed_pair_is_not_compared_as_a_render() {
+    let s = scratch("pair-source");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
+    bless_these(&dir, &diffs, PAIR_ROWS, &["pair_stored"], dfish_seam::ABOUT);
+    let path = dir.join(MANIFEST);
+    let blessed = manifest_in(&dir);
+    let rerun = || {
+        let mut run = Run::at(gpu(), Mode::Golden { bless: false }, &dir, &diffs);
+        run_these(&mut run, PAIR_ROWS, Some(&["pair_stored"]));
+        (run.failures, run.images)
+    };
+    let (failures, images) = rerun();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        images["pair_stored"]["measured"]["golden_identical"],
+        json!(1.0)
+    );
+    for (field, to) in [
+        ("calibration_fnv64", json!("0123456789abcdef")),
+        ("gains", json!([[1.0, 1.0, 1.0], [1.0, 1.1, 1.0]])),
+    ] {
+        let mut m = blessed.clone();
+        m["images"]["pair_stored"]["source"][field] = to;
+        std::fs::write(&path, m.to_string()).unwrap();
+        let (failures, _) = rerun();
+        assert!(
+            failures.len() == 1 && failures[0].contains("the pair's source changed"),
+            "{field}: {failures:?}"
+        );
+    }
+    let mut m = blessed.clone();
+    m["images"]["pair_stored"]["source"]["geometry"]["r_m"] = json!(2.0);
+    std::fs::write(&path, m.to_string()).unwrap();
+    let (failures, _) = rerun();
+    assert!(
+        failures.len() == 1 && failures[0].contains("the pair's source changed"),
+        "R: {failures:?}"
+    );
+    // A lens's planes hashing otherwise than blessed.
+    let mut m = blessed;
+    m["images"]["pair_stored"]["source_fnv64"][1] = json!("0123456789abcdef");
+    std::fs::write(&path, m.to_string()).unwrap();
+    let (failures, _) = rerun();
+    assert!(
+        failures.len() == 1 && failures[0].contains("the synthetic source changed"),
+        "{failures:?}"
+    );
 }
 
 #[test]
