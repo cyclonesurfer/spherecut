@@ -3407,19 +3407,6 @@ pub(crate) fn set_extra_hw_frames(ctx: &mut ff::codec::context::Context, n: u8) 
     unsafe { (*ctx.as_mut_ptr()).extra_hw_frames = c_int::from(n) };
 }
 
-/// FFmpeg's VA-API device context, `AVVAAPIDeviceContext`: the `hwctx`
-/// of a device context whose type is VA-API. It is the same in n6.1,
-/// n8.1.3 and n9.0.2 (`libavutil/hwcontext_vaapi.h`); ffmpeg-sys-next has
-/// it only when its build found libva's headers. Only `display` is read.
-#[repr(C)]
-#[derive(Debug)]
-// Only FFmpeg makes one, and only `display` is read, through a pointer.
-#[allow(dead_code)]
-pub(crate) struct AVVAAPIDeviceContext {
-    display: *mut c_void,
-    driver_quirks: std::ffi::c_uint,
-}
-
 /// libva's `VAStatus vaSyncSurface(VADisplay dpy, VASurfaceID
 /// render_target)`: a `void *`, an `unsigned int` and an `int` back
 /// (`va/va.h`), which waits until nothing is pending on the surface.
@@ -3489,7 +3476,13 @@ pub(crate) struct VaSurface {
 /// The surface of `frame`, when it is a VA-API frame (`AV_PIX_FMT_VAAPI`)
 /// whose frames context is on a VA-API device; `None` for any other.
 /// FFmpeg keeps the surface's id in `data[3]` (`hwcontext_vaapi.c`, read
-/// at n8.1.3: `(VASurfaceID)(uintptr_t)src->data[3]`).
+/// at n8.1.3: `(VASurfaceID)(uintptr_t)src->data[3]`). The display is
+/// read from the device's `AVVAAPIDeviceContext`, which ffmpeg-sys-next
+/// binds from `libavutil/hwcontext_vaapi.h` whenever the FFmpeg it builds
+/// against has that header, with its own stand-in `va/va.h` for libva's
+/// types, so its layout follows that FFmpeg as the Vulkan contexts' do
+/// (`ffi/vulkan.rs`). It is the same in n6.1, n8.1.3 and n9.0.2, and only
+/// `display` is read.
 pub(crate) fn vaapi_surface(frame: &ff::frame::Video) -> Option<VaSurface> {
     // SAFETY: `frame` wraps a live AVFrame, whose format is an int. A
     // VA-API frame's hw_frames_ctx holds its AVHWFramesContext, which
@@ -3514,7 +3507,7 @@ pub(crate) fn vaapi_surface(frame: &ff::frame::Video) -> Option<VaSurface> {
         {
             return None;
         }
-        let hwctx = (*device).hwctx.cast::<AVVAAPIDeviceContext>();
+        let hwctx = (*device).hwctx.cast::<sys::AVVAAPIDeviceContext>();
         Some(VaSurface {
             ctx: fc.addr(),
             display: (*hwctx).display.expose_provenance(),
@@ -5855,22 +5848,32 @@ mod tests {
         );
     }
 
-    /// FFmpeg's `AVVAAPIDeviceContext` is a pointer and an unsigned int on
-    /// x86-64: 16 bytes, the display first.
+    /// FFmpeg's `AVVAAPIDeviceContext`, as ffmpeg-sys-next binds it from
+    /// the headers this build is against, is a pointer and an unsigned int
+    /// on x86-64: 16 bytes, the display first.
     ///
-    /// Control: the same fields packed are 12 bytes.
+    /// Control: the same fields with the display second fail the check.
     #[test]
     #[cfg(target_arch = "x86_64")]
     fn the_vaapi_device_context_is_laid_out_as_ffmpeg_s() {
-        assert_eq!(std::mem::size_of::<AVVAAPIDeviceContext>(), 16);
-        assert_eq!(std::mem::offset_of!(AVVAAPIDeviceContext, display), 0);
-        assert_eq!(std::mem::offset_of!(AVVAAPIDeviceContext, driver_quirks), 8);
-        #[repr(C, packed)]
-        struct Packed {
-            _display: *mut c_void,
+        use std::mem::{offset_of, size_of};
+        let display_first = |size: usize, display: usize| size == 16 && display == 0;
+        assert!(display_first(
+            size_of::<sys::AVVAAPIDeviceContext>(),
+            offset_of!(sys::AVVAAPIDeviceContext, display)
+        ));
+        #[repr(C)]
+        struct DisplaySecond {
             _driver_quirks: std::ffi::c_uint,
+            _display: *mut c_void,
         }
-        must_fail("the fields packed", std::mem::size_of::<Packed>() == 16);
+        must_fail(
+            "the display second",
+            display_first(
+                size_of::<DisplaySecond>(),
+                offset_of!(DisplaySecond, _display),
+            ),
+        );
     }
 
     /// A VA-API frame's surface is its frames context, its device's
@@ -5894,7 +5897,7 @@ mod tests {
             let mut dev = c::av_hwdevice_ctx_alloc(vaapi);
             assert!(!dev.is_null(), "this FFmpeg has no VA-API");
             let device = (*dev).data.cast::<sys::AVHWDeviceContext>();
-            (*(*device).hwctx.cast::<AVVAAPIDeviceContext>()).display =
+            (*(*device).hwctx.cast::<sys::AVVAAPIDeviceContext>()).display =
                 std::ptr::without_provenance_mut(0xd15);
             let frames = sys::av_hwframe_ctx_alloc(dev);
             sys::av_buffer_unref(&mut dev);
