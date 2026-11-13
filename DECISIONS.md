@@ -9562,10 +9562,11 @@ equirect. `set_source` takes `{"kind": "equirect"}`; the camera form
 `{"kind": "camera", "binding": …}`, which the server makes whole by
 reading the media's file beneath the roots, as it probes
 `add_media`'s path (the binding the one given, its status `user`); or
-a whole `dual_fisheye` source, whose calibration must be the one the
+a whole `dual_fisheye` source, copied unchanged from the project file
+by a client that can read it, whose calibration must be the one the
 file holds (`calibration_mismatch` names the parts that differ). An
-agent never reads or writes a calibration itself, so this entry's rule
-holds. `wired()`, which reads no file, skips the camera form as it
+agent never makes a calibration: the server reads it from the file, or
+checks the one sent against it, so this entry's rule holds. `wired()`, which reads no file, skips the camera form as it
 skips `add_media`. The summary gives each media's source (the camera
 without its serial, the calibration's hash, the geometry with
 `superseded`, the tune, the gains' mode, the profile), never the raw
@@ -9600,7 +9601,18 @@ numbers. Before, `add_media` refused such a file `bad_argument` and
 `create` refused to make the project at all. `trailer_source` is the
 same source unchecked, which a whole `dual_fisheye` source in a
 `set_source` is compared with, so one with a tune that fits can still
-make such a file a source.
+make such a file a source. From R6, a whole source's lens `tracks` and
+its camera's model and firmware must be the file's too, refused
+`calibration_mismatch` at `edits[i].source.tracks` or `.camera`
+before core's rule on the first track is reached: a swapped pair or
+another stream would stitch the wrong pictures once M3.11 renders, and
+the table's geometry is looked up by the camera the file names. The
+front track, geometry, tune, gains and profile stay the client's to
+change. From R5, each refusal's `next` names a way that works: the
+camera form, or the part exactly as the project file holds it; and for
+a file that holds no calibration a stitch reads, keeping it equirect
+or probing the file. No tool gives a calibration whole, so only a
+client that can read the project file sends one.
 
 ## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
 

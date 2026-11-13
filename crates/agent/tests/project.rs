@@ -1093,8 +1093,13 @@ fn set_source_reads_the_camera_form() {
 
 /// A source sent whole whose calibration differs from the file's, in a
 /// raw string with its hash made to fit or in a parsed number, is
-/// `calibration_mismatch`, with nothing saved. Control: sent unchanged, it
-/// applies.
+/// `calibration_mismatch`, with nothing saved and a `next` that names
+/// the two ways to send one that fits (the M3.9 review's R5); so is one
+/// whose lens tracks, swapped or another stream, or whose camera model
+/// and firmware aren't the file's (R6), at the part that differs, and
+/// one sent for a file that holds no calibration a stitch reads, whose
+/// `next` says to keep it equirect. Control: sent unchanged, it applies,
+/// and its front track is the agent's to change.
 #[test]
 fn an_altered_calibration_is_refused() {
     let _t = timed("an_altered_calibration_is_refused");
@@ -1132,6 +1137,12 @@ fn an_altered_calibration_is_refused() {
         }
     };
     let bytes = std::fs::read(&p).unwrap();
+    let next = |part: &str| {
+        format!(
+            "nothing was saved; send the camera form {{\"kind\": \"camera\"}}, which reads the \
+             {part} from the file, or the source's {part} exactly as the project file holds it"
+        )
+    };
     for (what, d, differ) in [
         ("a raw string, its hash made to fit", &raw, "raw, hash"),
         ("a parsed number", &parsed, generation),
@@ -1149,11 +1160,108 @@ fn an_altered_calibration_is_refused() {
             ),
             "{what}"
         );
+        assert_eq!(
+            e.next.as_deref(),
+            Some(next("calibration").as_str()),
+            "{what}"
+        );
         assert_eq!(std::fs::read(&p).unwrap(), bytes, "{what} was saved");
     }
+
+    // The lens tracks, swapped or one another stream, and the camera's
+    // model and firmware: the file's, or refused at the part.
+    let tracks = |t: [u32; 2]| DualFisheye {
+        tracks: t,
+        ..made.clone()
+    };
+    let mut camera = made.clone();
+    camera.camera.model = Some("Insta360 X4".into());
+    camera.camera.firmware = Some("v1.0.0".into());
+    for (what, d, part, message) in [
+        (
+            "swapped tracks",
+            tracks([made.tracks[1], made.tracks[0]]),
+            "tracks",
+            format!(
+                "tracks [{}, {}] aren't its file's lens tracks, [{}, {}]",
+                made.tracks[1], made.tracks[0], made.tracks[0], made.tracks[1]
+            ),
+        ),
+        (
+            "another stream",
+            tracks([made.tracks[0], 2]),
+            "tracks",
+            format!(
+                "tracks [{}, 2] aren't its file's lens tracks, [{}, {}]",
+                made.tracks[0], made.tracks[0], made.tracks[1]
+            ),
+        ),
+        (
+            "another model and firmware",
+            camera,
+            "camera",
+            "camera isn't its file's: model, firmware differ".to_owned(),
+        ),
+    ] {
+        let e = mismatch(&d).unwrap_or_else(|why| panic!("{what}: {why}"));
+        assert_eq!(
+            e.argument.as_deref(),
+            Some(format!("edits[0].source.{part}").as_str()),
+            "{what}: {e:?}"
+        );
+        assert_eq!(
+            e.message,
+            format!("set_source refused: media 1's source.{message}"),
+            "{what}"
+        );
+        assert_eq!(e.next.as_deref(), Some(next(part).as_str()), "{what}");
+        assert_eq!(std::fs::read(&p).unwrap(), bytes, "{what} was saved");
+    }
+
+    // A whole source made up for a file that holds no calibration a
+    // stitch reads: the file's media stays an equirect.
+    let none = dir.faulty_camera("none.insv", InsvFault::NoCalibration);
+    let q = dir.path("none.spherecut");
+    ok(
+        &tools,
+        "project",
+        json!({"file": q, "create": {"media": none}}),
+    );
+    let none_bytes = std::fs::read(&q).unwrap();
+    let e = refused(
+        &tools,
+        "edit",
+        edit(&q, json!([set_source(1, whole(&made))])),
+    );
+    assert_eq!(e.code, codes::CALIBRATION_MISMATCH, "{e:?}");
+    assert_eq!(e.argument.as_deref(), Some("edits[0].source.calibration"));
+    assert_eq!(
+        e.message,
+        "set_source refused: media 1's source.calibration can't be its file's: the file holds \
+         none a stitch reads"
+    );
+    assert_eq!(
+        e.next.as_deref(),
+        Some(
+            "nothing was saved; keep it {\"kind\": \"equirect\"}, or probe the file: its report \
+             says why"
+        )
+    );
+    assert_eq!(std::fs::read(&q).unwrap(), none_bytes);
+
     let applied = must_fail("the source sent unchanged", mismatch(&made));
     assert!(applied.starts_with("applied"), "{applied}");
     assert_eq!(fisheye(&p, 1), made);
+    let front = DualFisheye {
+        front_track: 1,
+        ..made.clone()
+    };
+    ok(
+        &tools,
+        "edit",
+        edit(&p, json!([set_source(1, whole(&front))])),
+    );
+    assert_eq!(fisheye(&p, 1), front);
 }
 
 /// `project create` of a camera file records its camera, calibration and

@@ -59,8 +59,10 @@ pub mod codes {
     /// An edit the project's rules refuse: its op and the rule's code
     /// are in the message. Nothing was saved.
     pub const BAD_EDIT: &str = "bad_edit";
-    /// A `set_source` whose whole `dual_fisheye` source has a calibration
-    /// other than the one its media's file holds. Nothing was saved.
+    /// A `set_source` whose whole `dual_fisheye` source has a calibration,
+    /// lens tracks, or camera model or firmware other than its media's
+    /// file holds, or is sent for a file that holds no calibration a
+    /// stitch reads. Nothing was saved.
     pub const CALIBRATION_MISMATCH: &str = "calibration_mismatch";
     /// The project's revision isn't `if_revision`, or its history was
     /// written with another revision of it.

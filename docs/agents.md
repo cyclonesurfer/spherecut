@@ -522,13 +522,17 @@ source: `set_source`, `set_stitch` (the tune, the gains or both) and
 `{"kind": "camera", "binding": "direct"}`, which the server makes
 whole from the media's file beneath the roots, as `create` would, with
 the geometry's binding the one given and its status `user` (`binding`
-may be left out); or a whole `dual_fisheye` source as the project file
-holds one, whose `calibration` must be the one its media's file holds
-(`calibration_mismatch` names the parts that differ). An agent never
-reads a calibration itself: the server does. Until M3.11 renders a
-project stitched, `look`, `compare`, `check` and `render` refuse a
-project whose clip's media is a camera's pair (`not_yet`), rather than
-show its first lens as an equirect: `look` at the `.insv` itself.
+may be left out); or a whole `dual_fisheye` source, copied unchanged
+from the project file by a client that can read it, whose
+`calibration`, `tracks` and `camera` `model` and `firmware` must be
+what its media's file holds (`calibration_mismatch`, at the part that
+differs, names what does) and whose `front_track`, `geometry`, `tune`,
+`gains` and `profile` are the client's to change. An agent never makes
+a calibration: the server reads it from the file, or checks the one
+sent against it. Until M3.11 renders a project stitched, `look`,
+`compare`, `check` and `render` refuse a project whose clip's media is
+a camera's pair (`not_yet`), rather than show its first lens as an
+equirect: `look` at the `.insv` itself.
 
 **The window's actions that aren't edits**, and what an agent does
 instead:
@@ -590,7 +594,7 @@ the agent as fields do, as a backstop. The codes:
 | `cancelled` | The call was cancelled; the client gets no response for it (a cancelled render's `state`, too) |
 | `internal` | Spherecut's fault, not the agent's |
 | `bad_edit` | An edit the project's rules refuse, at `edits[i]`: its op and the rule (`limit`, `in_use`, `not_found` and so on) are in the message; nothing was saved |
-| `calibration_mismatch` | A `set_source` whose whole `dual_fisheye` source has a calibration other than its media's file holds, at `edits[i].source.calibration`: the parts that differ are in the message; nothing was saved |
+| `calibration_mismatch` | A `set_source` whose whole `dual_fisheye` source has a calibration, lens tracks, or camera model or firmware other than its media's file holds, at `edits[i].source.calibration`, `.tracks` or `.camera`: what differs is in the message, and `next` names the camera form or the part as the project file holds it; for a file that holds no calibration a stitch reads, at `.calibration`, `next` says to keep it `equirect`; nothing was saved |
 | `stale_revision` | The project isn't at `if_revision`, or was written by something else since its history was; read it again |
 | `not_top` | The step to undo or redo is the user's; ask the user, or make an edit that changes it |
 | `nothing_to_undo` | No step to undo |

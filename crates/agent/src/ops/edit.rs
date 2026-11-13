@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use spherecut_core::FrameRate;
 use spherecut_core::project::{
-    AnyKey, AnyKeys, CalibSnapshot, ClipId, Code, DualFisheye, Edit, EditError, Kept, Key,
-    MarkerId, MediaId, Origin, Problem, Project, Source, TargetId,
+    AnyKey, AnyKeys, ClipId, Code, DualFisheye, Edit, EditError, Kept, Key, MarkerId, MediaId,
+    Origin, Problem, Project, Source, TargetId,
 };
 use spherecut_sphere::rig::{Binding, Status};
 
@@ -272,8 +272,8 @@ fn bad_edit(e: EditError) -> ToolError {
 
 /// Edit `i` as the agent wrote it, as an `Edit`: `add_media` probed by
 /// its path, `set_source`'s camera form made whole from the media's file,
-/// and a whole `dual_fisheye` source checked against that file's
-/// calibration; the rest through [`wire`].
+/// and a whole `dual_fisheye` source checked against what that file
+/// holds; the rest through [`wire`].
 fn edit(
     i: usize,
     v: Value,
@@ -308,7 +308,7 @@ fn edit(
                     source: Source::DualFisheye(d),
                 } = &e
                 {
-                    files_calibration(i, *media, &d.calibration, project, cx)?;
+                    files_source(i, *media, d, project, cx)?;
                 }
                 return Ok(e);
             }
@@ -434,56 +434,107 @@ fn file_source(
     Ok(source)
 }
 
-/// Refuses a whole `dual_fisheye` source, edit `i`, whose calibration
-/// isn't the one media `id`'s file holds (M3 plan 11.3): every part of it
-/// is the file's, so that a stitch reads what the camera wrote.
-fn files_calibration(
+/// Refuses a whole `dual_fisheye` source, edit `i`, whose calibration,
+/// lens tracks or camera model and firmware aren't what media `id`'s file
+/// holds (M3 plan 11.3, the M3.9 review's R6): a stitch reads what the
+/// camera wrote, from the streams it wrote it for, and the table's
+/// geometry is looked up by the camera the file names. The front track,
+/// the geometry, the tune, the gains and the profile are the agent's to
+/// change. Each refusal's `next` names the two ways to send one that
+/// fits (R5): the camera form, or the part as the project file holds it,
+/// copied unchanged by a client that can read the file.
+fn files_source(
     i: usize,
     id: MediaId,
-    sent: &CalibSnapshot,
+    sent: &DualFisheye,
     project: &Project,
     cx: &Ctx,
 ) -> Result<(), ToolError> {
-    let mismatch = |why: String| {
+    let mismatch = |part: &str, why: String| {
         ToolError::new(
             codes::CALIBRATION_MISMATCH,
-            format!("set_source refused: media {id}'s source.calibration {why}"),
+            format!("set_source refused: media {id}'s source.{part} {why}"),
         )
-        .at(format!("edits[{i}].source.calibration"))
-        .next(
-            "nothing was saved; send the calibration project gives unchanged, or the camera \
-             form {\"kind\": \"camera\"}, which reads it from the file",
-        )
+        .at(format!("edits[{i}].source.{part}"))
+        .next(format!(
+            "nothing was saved; send the camera form {{\"kind\": \"camera\"}}, which reads the \
+             {part} from the file, or the source's {part} exactly as the project file holds it"
+        ))
     };
     let file = match file_source(i, id, project, cx)? {
-        Ok(Some(d)) => d.calibration,
-        Ok(None) | Err(_) => {
-            return Err(mismatch(
-                "can't be its file's: the file holds none a stitch reads".into(),
-            ));
+        Ok(Some(d)) => d,
+        Ok(None) => return Err(no_calibration(i, id)),
+        Err(why) => {
+            tracing::info!("mcp: media {id}'s calibration can't be read: {why}");
+            return Err(no_calibration(i, id));
         }
     };
-    let differ: Vec<&str> = [
-        ("canvas", sent.canvas == file.canvas),
-        ("window", sent.window == file.window),
-        ("window_offset", sent.window_offset == file.window_offset),
-        ("raw", sent.raw == file.raw),
-        ("hash", sent.hash == file.hash),
-        ("v3", sent.v3 == file.v3),
-        ("v6", sent.v6 == file.v6),
-    ]
-    .into_iter()
-    .filter(|(_, same)| !same)
-    .map(|(name, _)| name)
-    .collect();
-    if differ.is_empty() {
-        Ok(())
-    } else {
-        Err(mismatch(format!(
-            "isn't its file's: {} differ",
-            differ.join(", ")
-        )))
+    let (sent_cal, file_cal) = (&sent.calibration, &file.calibration);
+    let differ = |parts: &[(&'static str, bool)]| -> Vec<&'static str> {
+        parts
+            .iter()
+            .filter(|(_, same)| !same)
+            .map(|(name, _)| *name)
+            .collect()
+    };
+    let calibration = differ(&[
+        ("canvas", sent_cal.canvas == file_cal.canvas),
+        ("window", sent_cal.window == file_cal.window),
+        (
+            "window_offset",
+            sent_cal.window_offset == file_cal.window_offset,
+        ),
+        ("raw", sent_cal.raw == file_cal.raw),
+        ("hash", sent_cal.hash == file_cal.hash),
+        ("v3", sent_cal.v3 == file_cal.v3),
+        ("v6", sent_cal.v6 == file_cal.v6),
+    ]);
+    if !calibration.is_empty() {
+        return Err(mismatch(
+            "calibration",
+            format!("isn't its file's: {} differ", calibration.join(", ")),
+        ));
     }
+    if sent.tracks != file.tracks {
+        let [s0, s1] = sent.tracks;
+        let [f0, f1] = file.tracks;
+        return Err(mismatch(
+            "tracks",
+            format!("[{s0}, {s1}] aren't its file's lens tracks, [{f0}, {f1}]"),
+        ));
+    }
+    // By name only: the camera's words are the file's, which an error
+    // never carries (F051).
+    let camera = differ(&[
+        ("model", sent.camera.model == file.camera.model),
+        ("firmware", sent.camera.firmware == file.camera.firmware),
+    ]);
+    if !camera.is_empty() {
+        return Err(mismatch(
+            "camera",
+            format!("isn't its file's: {} differ", camera.join(", ")),
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal of a whole `dual_fisheye` source, edit `i`, for media
+/// `id`, whose file holds no calibration a stitch reads (or one camera
+/// can't read, whose words went to the log): there is nothing a source
+/// could be checked against, so the media stays as it is.
+fn no_calibration(i: usize, id: MediaId) -> ToolError {
+    ToolError::new(
+        codes::CALIBRATION_MISMATCH,
+        format!(
+            "set_source refused: media {id}'s source.calibration can't be its file's: the file \
+             holds none a stitch reads"
+        ),
+    )
+    .at(format!("edits[{i}].source.calibration"))
+    .next(
+        "nothing was saved; keep it {\"kind\": \"equirect\"}, or probe the file: its report says \
+         why",
+    )
 }
 
 /// A `set_source` refusal of edit `i`, as core's own are worded.
