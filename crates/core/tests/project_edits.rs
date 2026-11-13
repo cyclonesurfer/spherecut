@@ -1610,3 +1610,102 @@ fn set_stitch_needs_a_tune_or_gains() {
         ),
     );
 }
+
+/// `set_stitch` on a camera's EAC pair is refused by the media's kind, as
+/// on an equirect media: an EAC pair has no tune or gains (the M3.9
+/// review's N5). Control: the same edit on the same media as a fisheye
+/// pair applies.
+#[test]
+fn set_stitch_on_an_eac_pair_is_refused() {
+    let fisheyes = camera_project();
+    let m = fisheyes.the_clip().media;
+    let mut pair = fisheyes.clone();
+    pair.apply(&[Edit::SetSource {
+        media: m,
+        source: Source::EacPair(Box::new(EacPair {
+            camera: x5_shaped().camera,
+            tracks: [0, 1],
+            layout: EacLayout {
+                overlap: 64,
+                pre: 1152,
+                post: 1024,
+                size: [4096, 1344],
+            },
+        })),
+    }])
+    .unwrap();
+    let stitch = || Edit::SetStitch {
+        media: m,
+        tune: Some(fixture_tune()),
+        gains: Some(lens_b_gains(0.9)),
+        profile: None,
+    };
+    refuses(&pair, &[stitch()], Code::Invalid).unwrap();
+    let e = pair.clone().apply(&[stitch()]).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("is a camera's two EAC tracks, not a camera's two fisheye lenses"),
+        "{e}"
+    );
+
+    must_fail(
+        "set_stitch on the same media as a fisheye pair refused",
+        refuses(&fisheyes, &[stitch()], Code::Invalid),
+    );
+}
+
+/// Whether `History::record` refuses `edits` with `code` and leaves both
+/// `p` and `h` as they were, a step undone above the cursor included.
+fn record_refuses(p: &Project, h: &History, edits: &[Edit], code: Code) -> Result<(), String> {
+    let (mut q, mut g) = (p.clone(), h.clone());
+    let recorded = g.record(&mut q, "Stitch", Origin::User, edits).map(drop);
+    match recorded {
+        Ok(_) => Err(format!("{edits:?} recorded")),
+        Err(e) if e.code() != code => Err(format!("{e}: {} for {code}", e.code())),
+        Err(_) if q != *p => Err("a refusal changed the project".into()),
+        Err(_) if g != *h => Err("a refusal changed the history".into()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// A stitch op that `set_stitch`'s own checks pass and `validate`
+/// refuses, a tune past its bounds, leaves the project and the history
+/// as they were: no revision, no step, and the undone step above the
+/// cursor kept for redo (the M3.9 review's N5). Control: the same edit
+/// with its tune inside the bounds is recorded.
+#[test]
+fn a_stitch_validate_refuses_leaves_project_and_history() {
+    let mut p = camera_project();
+    let m = p.the_clip().media;
+    let stitch = |feather_deg| {
+        let mut tune = fixture_tune();
+        tune.feather_deg = feather_deg;
+        Edit::SetStitch {
+            media: m,
+            tune: Some(tune),
+            gains: None,
+            profile: None,
+        }
+    };
+    // Two steps, one undone, so a refusal that dropped the redo would show.
+    let mut h = History::new();
+    h.record(&mut p, "Stitch", Origin::User, &[stitch(2.0)])
+        .unwrap();
+    h.record(&mut p, "Stitch", Origin::User, &[stitch(4.0)])
+        .unwrap();
+    h.undo(&mut p).unwrap().unwrap();
+    assert_eq!((h.steps().len(), h.cursor()), (2, 1));
+
+    // Past the feather's 0° to 15° (validate's `FEATHER_DEG`).
+    let past = 16.0;
+    record_refuses(&p, &h, &[stitch(past)], Code::OutOfRange).unwrap();
+    let e = p.clone().apply(&[stitch(past)]).unwrap_err();
+    assert_eq!((e.index, e.op), (0, "set_stitch"), "{e}");
+    assert!(e.to_string().contains("source.tune.feather_deg"), "{e}");
+
+    let recorded = must_fail(
+        "the same stitch with its tune inside the bounds refused",
+        record_refuses(&p, &h, &[stitch(3.0)], Code::OutOfRange),
+    );
+    assert!(recorded.ends_with("recorded"), "{recorded}");
+}
