@@ -215,10 +215,10 @@ and render's, which allows it in `dmabuf` and `vkshare` alone (slice
     order, each surface a decoder has handed out a frame of, at most 64
     (forgetting the oldest past that, counted as overflow), and holds
     the frames context while it keeps any; a surface of another frames
-    context replaces them all. `drain` calls a sync on each surface once, in order, and
-    counts those it waited 0.5 ms or more for and those that failed,
-    forgetting a surface whose sync failed; `drain_vaapi` runs it with
-    libva's `vaSyncSurface`.
+    context replaces them all. `drain` calls a sync on each surface
+    once, in order, and counts those it waited 0.5 ms or more for and
+    those that failed, forgetting a surface whose sync failed;
+    `drain_vaapi` runs it with libva's `vaSyncSurface`.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
@@ -1125,14 +1125,14 @@ without waiting.
   on paths that never drain (software and Vulkan decode, path A's
   exported frames) it is there with no waits and zero counts, and
   `unavailable` counts VA-API decoders that found no `vaSyncSurface` to
-  call. The `drain` stage has samples only where a decoder drained. With
-  the diagnostic
-  `SPHERECUT_GATE_PROBE=<ms>`, off by default, the run starts the gate
-  probe (`render::GateProbe`) as it starts playing, which every period
-  waits at the submit gate (D41) as the uploader does, submits a clear
-  of a 256-byte buffer of its own on the viewer's queue and times it to
-  wgpu's work-done callback, and `probe` lists its jobs slower than 8
-  ms while the run played, to set beside the late UI passes.
+  call. The `drain` stage has samples only where a decoder drained.
+  With the diagnostic `SPHERECUT_GATE_PROBE=<ms>`, off by default, the
+  run starts the gate probe (`render::GateProbe`) as it starts playing,
+  which every period waits at the submit gate (D41) as the uploader
+  does, submits a clear of a 256-byte buffer of its own on the viewer's
+  queue and times it to wgpu's work-done callback, and `probe` lists its
+  jobs slower than 8 ms while the run played, to set beside the late UI
+  passes.
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
   M2.2b, D53) is the toolkit check's (D26): `proto::TimelineProto`, on
   the device the viewer would take, draws 500 seeded clips on 6 tracks
@@ -1454,8 +1454,9 @@ without waiting.
   (`download`, D79), and failed on odin without it. For each run the
   report gives the drain's mode, its `drain` stage and block unless it
   is off, and the probe's slow jobs when `SPHERECUT_GATE_PROBE` is set;
-  no gate checks the drain itself. Its runs are listed in `gui-decode-behind.json` and its screenshots copied beside
-  the report as `<report>-behind-<n>.png`. The
+  no gate checks the drain itself. Its runs are listed in
+  `gui-decode-behind.json` and its screenshots copied beside the report
+  as `<report>-behind-<n>.png`. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at
   60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in

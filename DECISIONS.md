@@ -11998,10 +11998,10 @@ of 40 ms or more had a job submitted in its first 20 ms (those took
 before it completed; under `WAYLAND_DEBUG` a frame callback in a gap
 was done 0.9 ms at p50 after a probe job completed. With `download`
 the probe's p99 was 4.09 ms and its maximum 7.08 ms. Under strace,
-decode-v0 still unmapped about once a download either way (22 and 24
-UNMAPs in G-A and G-Ad), but the main thread's waits of 40 ms or more
-fell from 57 to 0. The free still happens; it no longer finds anything
-to wait for.
+decode-v0 freed buffers at about the same rate either way (147 and 132
+`GEM_CLOSE`s in 20 s in G-A and G-Ad, 22 and 24 of them right after a
+`GEM_VA`), but the main thread's waits of 40 ms or more fell from 57 to
+0. The free still happens; it no longer finds anything to wait for.
 
 Why a drain works (read in Mesa 26.2.5): `vaEndPicture` hands the
 picture's VCN job the surface's fence (`out_fence = &surf->fence`,
@@ -12044,8 +12044,9 @@ What (the modes are `VaapiDrain`, set by `SPHERECUT_VAAPI_DRAIN`):
   built without VA-API is recalled.
 - **Threads.** libva calls on one display may come from several
   threads. FFmpeg already calls `vaSyncSurface` on this display from
-  the decode thread before every download (read, `hwcontext_vaapi.c:866`
-  in the local FFmpeg copy). Mesa 26.2.5 takes `drv->mutex` to look the
+  the decode thread before every download (read at line 866 of a local
+  copy of `hwcontext_vaapi.c`, in `vaapi_map_frame`, whose FFmpeg
+  version wasn't recorded). Mesa 26.2.5 takes `drv->mutex` to look the
   surface up and the context's mutex for the wait (`va/surface.c`
   168-206), and `vaEndPicture` sets the surface's fence under
   `drv->mutex` (`va/picture.c` 304-397). A hardware decoder runs one
@@ -12059,9 +12060,13 @@ Where it applies:
 - **The player**: `PlayerConfig::vaapi_drain`, from the variable, which
   the decode worker puts in each `VideoRequest`. So the viewer, the
   smoke run (`gui_smoke`, `gui_decode_behind`) and the headless playback
-  benchmarks drain; on odin only `--smoke-decoder vaapi` or a
-  `SPHERECUT_ZERO_COPY` setting reaches VA-API's copy path, since the
-  app's default there is Vulkan Video on path B (D25). A frame path A
+  benchmarks drain. On odin the window reaches VA-API's copy path only
+  where VA-API is chosen (the Settings window's decoder, or
+  `--smoke-decoder vaapi` as `gui_decode_behind`'s run 1 does) or is
+  the only kind whose check passes for the stream's format, since
+  `Auto` takes Vulkan Video on a discrete GPU (D34) and plays it on
+  path B (D25); on huginn VA-API copied is the default path. A frame
+  path A
   fails to export (a CPU conversion, layers that don't match, a left or
   top crop, a failed map) is downloaded by its decoder and drains;
   exported frames don't. One the upload thread downloads after the GPU

@@ -174,10 +174,10 @@ back clean, so M0 is done.
 
 The plan is `docs/design/m3-plan.md` (2026-11-01): slices M3.0 to
 M3.21, decisions D60 to D76 reserved (D77 added by M3.8, D78 by the
-review-fix slice, D79 by the VA-API stall slice), the X5 first (Pat's choice). Each slice
-is built by a workflow of agents, one per unit with its own reviewers
-(Pat turned that on for M3), then the full check. The slice notes below
-are in merge order, so M3.3's comes before M3.2's.
+review-fix slice, D79 by the VA-API stall slice), the X5 first (Pat's
+choice). Each slice is built by a workflow of agents, one per unit with
+its own reviewers (Pat turned that on for M3), then the full check. The
+slice notes below are in merge order, so M3.3's comes before M3.2's.
 
 ### M3.0, facts first (2026-11-01)
 
@@ -4141,8 +4141,10 @@ lavapipe):
   report prints nothing for a run with the drain off; and no Tier 2
   gate checks the drain itself (run 1 requires downloads, not drains,
   and `gui_smoke` doesn't check that nothing drains on Vulkan).
-  `PlayerConfig::vaapi_drain`'s doc still says exported-frame decoders
-  don't drain, where since F1 their refused frames do.
+  `PlayerConfig::vaapi_drain`'s doc still says a decoder waits for
+  every picture queued on its device, where it waits for its own, and
+  that exported-frame decoders don't drain, where since F1 their
+  refused frames do.
 
 ## Agent integration (track A): how it got here
 
