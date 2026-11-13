@@ -11313,9 +11313,12 @@ What, as `crates/core/src/project/` has it:
   evidence, and the stored geometry is provisional
   (`media::project::superseded`: the table keeps no date, so "newer"
   is read as "other"), `spherecut render` and `frame --project` warn
-  `provisional_geometry` with the table's evidence, agents' `project`
-  summary gives it as `superseded`, and `check` advises
-  `provisional_geometry`; the project renders as stored.
+  `provisional_geometry` with the table's evidence, and agents'
+  `project` summary gives it as `superseded`; the project renders as
+  stored. `check` advises `provisional_geometry` whenever the stored
+  geometry is provisional, superseded or not, and names the table's
+  evidence when the table has superseded it; no call reaches that
+  advice before M3.11, since `not_yet` refuses the project first.
   `an_old_project_renders_the_same_bytes` (render's `tests/project.rs`)
   holds a project made under an older guess to the render of its
   numbers written out by hand, bit for bit, while a fake newer table

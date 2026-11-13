@@ -616,15 +616,16 @@ shell. The crate has no `unsafe`.
   `EXIT_GRACE`. `spherecut call` refuses both tools.
 - **A project's frames** (A2.5, D59): `ops::sequence` loads a project
   and its media as `render` does (refusing a camera's pair `not_yet`
-  until M3.11, for `look`, `compare`, `check` and `render` alike), maps the render's times to its frames
-  (`Frames`) and renders each through `frame_views_at` with the
-  export's filter at any size, so `look` with a `project` shows the
-  render's frames, and `ops::compare` measures a file against another
-  or against a project's render (luma PSNR and SSIM from
-  `render::compare` at the file's size in 16 bits, the worst and the
-  means, a sheet of the worst, partial at the deadline). `check` with a
-  `project` runs its rules on the `ProbeReport` of the file a render
-  would write, from `spherecut_export::planned`.
+  until M3.11, for `look`, `compare`, `check` and `render` alike),
+  maps the render's times to its frames (`Frames`) and renders each
+  through `frame_views_at` with the export's filter at any size, so
+  `look` with a `project` shows the render's frames, and
+  `ops::compare` measures a file against another or against a
+  project's render (luma PSNR and SSIM from `render::compare` at the
+  file's size in 16 bits, the worst and the means, a sheet of the
+  worst, partial at the deadline). `check` with a `project` runs its
+  rules on the `ProbeReport` of the file a render would write, from
+  `spherecut_export::planned`.
 - **`contract`**: the CLI's JSON contract (D27), here since A1.4 so that
   `still` can return its errors and the CLI re-exports it.
 - **Teaching** (A1.7, A2.6): `initialize` gives the instructions (the
