@@ -688,6 +688,24 @@ fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), 
     check_gains(m, &df.gains)
 }
 
+impl DualFisheye {
+    /// The rules [`Project::validate`] keeps for this source as `media`'s,
+    /// in its order, with no I/O and nothing else of the project: the
+    /// structure and the tune's and gains' bounds, then the rules that
+    /// build its model (θ_max below the limit, the feather short of each
+    /// lens's frame, the coverage rule). `media` gives the id a refusal
+    /// names and the video stream the first track must be; its own
+    /// source isn't read, nor its caps, which are the media's. A client
+    /// that makes a source, as media's `camera_source` does from a file's
+    /// calibration at the default tune, checks it here before it goes
+    /// into a project (the M3.9 review's R7).
+    pub fn check(&self, media: &Media) -> Result<(), Problem> {
+        let test = ValidateTest::default();
+        check_fisheye(media, self, test)?;
+        check_rig(media, self, test)
+    }
+}
+
 /// Fixed gains within 0.25 to 4; an Auto track with a rate above 0, a
 /// sample at least ([`Gains::at`] gives ones without one) and finite
 /// ratios.

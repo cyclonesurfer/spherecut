@@ -838,6 +838,97 @@ fn validate_at_each_bound_and_just_past() {
     assert_eq!(rig.weights(side, [0.0; 2]), [0.0; 2]);
 }
 
+/// The fixture's camera with each block's focals in the set its geometry
+/// reads times `scale`, and the default tune (a 5° feather): a lens's
+/// circle grows with its focal, so θ_frame falls.
+fn focals_times(scale: f64) -> Media {
+    changed(|df| {
+        for block in df.calibration.v6.as_mut().unwrap() {
+            block.fx *= scale;
+            block.fy *= scale;
+        }
+        df.tune = Tune::default();
+    })
+}
+
+/// `media` numbered 1, as the untitled project [`validate`] opens numbers
+/// it, so that a refusal names it alike.
+fn numbered_1(mut media: Media) -> Media {
+    media.id = serde_json::from_value(serde_json::json!(1)).unwrap();
+    media
+}
+
+/// R7: `DualFisheye::check` runs `validate`'s rules for one source,
+/// with no project and no I/O. It gives what `validate` gives on every
+/// dual-fisheye row of the bounds table, but where only the caps are
+/// refused (the media's, not the source's); it accepts the fixture's
+/// source; and on a calibration whose θ_frame is under 95° it refuses
+/// the default tune by the feather's rule, as `validate` does a project
+/// holding it. Controls: each row's `check` against the next row's
+/// `validate` disagrees somewhere, and the feather that frame allows
+/// passes, so the refusal is the frame's.
+#[test]
+fn a_source_is_checked_alone_as_validate_checks_it() {
+    let _time = timed("a_source_is_checked_alone_as_validate_checks_it");
+    // Each dual-fisheye row's name, `check`'s answer and `validate`'s.
+    let mut answers = Vec::new();
+    for Row {
+        name, mut media, ..
+    } in rows()
+    {
+        let whole = validate(media.clone());
+        media = numbered_1(media);
+        if let Source::DualFisheye(df) = &media.source {
+            answers.push((name, df.check(&media), whole));
+        }
+    }
+    let agrees = |alone: &Result<(), Problem>, whole: &Result<(), Problem>| match whole {
+        Err(p) if p.message.contains("'s caps.") => alone.is_ok(),
+        _ => alone == whole,
+    };
+    let differ: Vec<&String> = answers
+        .iter()
+        .filter(|(_, alone, whole)| !agrees(alone, whole))
+        .map(|(name, ..)| name)
+        .collect();
+    assert!(differ.is_empty(), "{differ:?}");
+    assert_eq!(answers.len(), 179, "the dual-fisheye rows compared");
+    // Control: each row's `check` against the next row's `validate`.
+    must_fail(
+        "each row's check against the next row's validate",
+        answers
+            .iter()
+            .zip(answers.iter().skip(1))
+            .all(|((_, alone, _), (_, _, whole))| agrees(alone, whole)),
+    );
+
+    let fixture = camera();
+    assert_eq!(fisheye(&fixture).check(&fixture), Ok(()));
+    let narrow = numbered_1(focals_times(1.06));
+    let df = fisheye(&narrow);
+    let frame = theta_frame(&df.calibration.calibration(), &df.geometry, &df.tune).unwrap();
+    let frame_deg = frame.map(f64::to_degrees);
+    assert!(
+        frame_deg.iter().all(|f| (90.0..95.0).contains(f)),
+        "{frame_deg:?}"
+    );
+    let by_feather = |m: &Media| {
+        matches!(fisheye(m).check(m), Err(p) if p.code == Code::OutOfRange
+            && p.message.contains("source.tune.feather_deg")
+            && p.message.contains(FEATHER))
+    };
+    assert!(by_feather(&narrow), "{:?}", df.check(&narrow));
+    assert_eq!(validate(narrow.clone()), df.check(&narrow));
+    // Control: the feather the frame allows, whole degrees, isn't refused.
+    let allowed = (frame_deg.iter().fold(f64::INFINITY, |a, &f| a.min(f)) - 90.0).floor();
+    let mut fits = narrow.clone();
+    if let Source::DualFisheye(df) = &mut fits.source {
+        df.tune.feather_deg = allowed;
+    }
+    eprintln!("θ_frame {frame_deg:?}°; a feather of {allowed}° fits");
+    must_fail("the feather the frame allows", by_feather(&fits));
+}
+
 /// Lens `b`'s axis in the rig frame.
 fn axis(rig: &Rig, b: usize) -> DVec3 {
     rig.lenses[b].lens_from_rig.inverse() * DVec3::Z

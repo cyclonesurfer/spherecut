@@ -620,7 +620,12 @@ impl CalibTerms {
 /// seam's width and distance. The gains aren't here: under Auto they
 /// change every frame and sphere can't name core's types, so they are the
 /// media's, in core. The default is what a new source opens with
-/// (11.5), inside every one of `validate`'s bounds (11.2).
+/// (11.5), inside each of `validate`'s fixed ranges (11.2), but not
+/// always inside the rules that read the calibration: its 5° feather
+/// passes the feather's bound only where each lens's θ_frame is 95° or
+/// more, and the coverage rule depends on the frame too (the M3.9
+/// review's R7). Core's `DualFisheye::check` runs those rules on a source
+/// before it goes into a project.
 ///
 /// Beside each number's bounds, `validate` refuses a tune that leaves a
 /// direction covered by neither lens at its q (the coverage rule): lens
