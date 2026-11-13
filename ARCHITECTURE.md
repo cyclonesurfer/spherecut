@@ -1051,16 +1051,17 @@ without waiting.
   the viewer's top-left corner, read once a UI frame from `PerfStats`,
   the snapshot and the audio output's stats, all without a lock that
   waits: where the first stream decodes and on which GPU; decode and
-  download; upload's CPU and GPU time; the projection's CPU time and
-  its GPU time from timestamps (`GpuTimers`, read back a frame late,
-  "n/a" without `TIMESTAMP_QUERY_INSIDE_ENCODERS`, "(CPU timing)" on
-  lavapipe); the viewer's size, scale and filter, and the share of the
-  last second's draws that only encoded; UI frame times and hitches;
-  frames shown, dropped and decode-dropped; the A/V offset's median and
-  p95 over the last second; audio; the cache and the slots; RSS, minor
-  faults a second and the GPU allocator's bytes, which the upload
-  thread reads once a second. Sparklines show the UI's and the stages'
-  last samples.
+  download, and under them, once a VA-API decoder has drained a frame
+  or failed to, the drain's mode, time and surfaces waited for;
+  upload's CPU and GPU time; the projection's CPU time and its GPU time
+  from timestamps (`GpuTimers`, read back a frame late, "n/a" without
+  `TIMESTAMP_QUERY_INSIDE_ENCODERS`, "(CPU timing)" on lavapipe); the
+  viewer's size, scale and filter, and the share of the last second's
+  draws that only encoded; UI frame times and hitches; frames shown,
+  dropped and decode-dropped; the A/V offset's median and p95 over the
+  last second; audio; the cache and the slots; RSS, minor faults a
+  second and the GPU allocator's bytes, which the upload thread reads
+  once a second. Sparklines show the UI's and the stages' last samples.
 * **Settings** (File ▸ Settings…, slice 8, D40) are kept in eframe's
   storage beside the tiles: the cache's MiB or automatic, the decoder
   (automatic, software, VA-API or Vulkan Video only), the GPU slots,
@@ -1228,16 +1229,19 @@ without waiting.
     in the process's GPU VM, the window's frame among them, wait for the
     decodes then queued. So before each download a VA-API decoder on
     the copy path calls `vaSyncSurface` on every surface it has handed
-    out a frame of, and the free finds nothing queued; the stage `drain`
-    times it. Exported frames (path A) aren't downloaded and don't
-    drain; `picture`, a mode to compare against, drains after every
-    packet sent too, theirs included; `off` or `0` runs none of it, not
-    even libva's lookup. Software and Vulkan decoders never drain. The
-    window's exports drain as its player does
+    out a frame of, and the free finds none of its pictures queued; the
+    stage `drain` times it. It waits for its own pictures only: another
+    decoder on the device, as a locked pair's other lens, may still have
+    pictures queued when this one downloads. Exported frames (path A)
+    aren't downloaded and don't drain; `picture`, a mode to compare
+    against, drains after every packet sent too, theirs included; `off`
+    or `0` runs none of it, not even libva's lookup. Software and Vulkan
+    decoders never drain. The window's exports drain as its player does
     (`ExportJob::vaapi_drain`); `frame`, `render` and the agents' tools,
     with no window in their process, ask for none
-    (`VideoRequest::default`). Download is the working choice until Pat
-    answers the question asked on 2026-11-13.
+    (`VideoRequest::default` for stills, `ExportJob::new` for renders).
+    Download is the working choice until Pat answers the question asked
+    on 2026-11-13.
   * **The submit gate** (D41, `core::gate::SubmitGate`, one a device,
     `Gpu::submit_gate`): while the UI thread holds a swapchain image,
     no other thread submits to its device, since RADV makes every

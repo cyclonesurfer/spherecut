@@ -189,14 +189,16 @@ pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> ZeroCopy {
 /// `PlayerConfig::vaapi_drain`.
 pub const VAAPI_DRAIN_ENV: &str = "SPHERECUT_VAAPI_DRAIN";
 
-/// Whether a VA-API decoder waits for every picture queued on its device
-/// (`vaSyncSurface` on every surface it has handed out a frame of) before
-/// it copies a frame to memory. On AMD, freeing the copy's staging
+/// Whether a VA-API decoder waits for every picture it has queued on its
+/// device (`vaSyncSurface` on every surface it has handed out a frame of)
+/// before it copies a frame to memory. On AMD, freeing the copy's staging
 /// buffer makes every later GPU submission in the process wait for the
-/// decodes then queued, the window's frame among them; with the queue
-/// drained first there is nothing to wait for. Software and Vulkan
-/// decoders never drain, nor do VA-API decoders that export their frames
-/// unless asked for [`VaapiDrain::Picture`].
+/// decodes then queued, the window's frame among them; with the decoder's
+/// own pictures drained first, none of them is left to wait for. Another
+/// decoder on the device, as a locked pair's other lens, may still have
+/// pictures queued. Software and Vulkan decoders never drain, nor do
+/// VA-API decoders that export their frames unless asked for
+/// [`VaapiDrain::Picture`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaapiDrain {

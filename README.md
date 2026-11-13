@@ -599,17 +599,19 @@ FFmpeg's warnings and errors about each file whatever it is set to.
   copies every frame (Rendering a frame, Decoding).
 - `SPHERECUT_VAAPI_DRAIN`: the fix for the copy path's stall on AMD
   GPUs, on by default. A VA-API decoder that copies its frames to
-  memory first waits for every picture queued on the GPU, so that
-  freeing the copy's staging buffer holds back nothing else, the
-  viewer's frames included. Unset, empty or `download`, the viewer, the
-  window's exports and the playback benchmarks drain that way on the
-  copy path; `frame`, `render` and the agents' tools, which have no
-  window to hold back, never drain. Download is the working choice
-  until Pat answers the question asked on 2026-11-13. `off` or `0`
-  waits for nothing, as before the drain. `picture` waits after every
-  packet too, zero copy's decoders included: a mode to compare against.
-  Software and Vulkan decoders never drain; any other value is warned
-  of and the default applies.
+  memory first waits for every picture it has queued on the GPU, so
+  that freeing the copy's staging buffer doesn't make the viewer's
+  frames wait for them. It waits for its own pictures only: another
+  decoder's, as a locked pair's other lens's, may still be queued.
+  Unset, empty or `download`, the viewer, the window's exports and the
+  playback benchmarks drain that way on the copy path; `frame`,
+  `render` and the agents' tools, which have no window to hold back,
+  never drain. Download is the working choice until Pat answers the
+  question asked on 2026-11-13. `off` or `0` waits for nothing, as
+  before the drain. `picture` waits after every packet too, zero
+  copy's decoders included: a mode to compare against. Software and
+  Vulkan decoders never drain; any other value is warned of and the
+  default applies.
 - `SPHERECUT_GATE_PROBE`: a diagnostic of that stall, off by
   default. Set to a whole number of milliseconds from 2 to 50, a
   `--smoke` run submits a tiny job on the viewer's GPU queue that often
