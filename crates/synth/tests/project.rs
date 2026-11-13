@@ -238,7 +238,7 @@ fn offset_file() -> &'static Path {
 // Reading them.
 
 /// `path`'s source, as `camera_source` gives it after probe.
-fn source_of(path: &Path) -> (Result<Option<DualFisheye>, String>, ProbeReport) {
+fn source_of(path: &Path) -> SourceOf {
     let report = probe(path).unwrap();
     (
         camera_source(spherecut_media::Source::path(path), &report),
@@ -275,6 +275,20 @@ fn media_of(path: &Path, report: &ProbeReport) -> Media {
         .info()
         .clone();
     project_media(spherecut_media::Source::path(path), path, &info).unwrap()
+}
+
+/// What `source_of` gives.
+type SourceOf = (Result<Option<DualFisheye>, String>, ProbeReport);
+
+/// `path`'s media as an agent's `project create` makes it, from `of`,
+/// what `source_of` gave for it: `media_of`, with `camera_source`'s
+/// source when it gives one.
+fn created(path: &Path, (source, report): &SourceOf) -> Media {
+    let mut media = media_of(path, report);
+    if let Ok(Some(d)) = source {
+        media.source = Source::DualFisheye(Box::new(d.clone()));
+    }
+    media
 }
 
 /// The dual-fisheye source of `p`'s one clip's media.
@@ -429,27 +443,37 @@ fn a_camera_file_makes_a_dual_fisheye_media() {
 }
 
 /// A two-lens file without a calibration (`InsvFault::NoCalibration`) and
-/// a plain MP4 (the same file without its trailer) give no source, so
-/// the media `project_media` makes of the first stays equirect. Control:
-/// the whole file gives one.
+/// a plain MP4 (the same file without its trailer) give no source, and
+/// the media made of the first as `project create` makes it (`created`)
+/// stays equirect. Controls: the whole file gives a source, and its
+/// media made so is its two lenses.
 #[test]
 fn a_file_without_calibration_stays_equirect() {
     let _time = timed("a_file_without_calibration_stays_equirect");
     let plain = std::thread::spawn(plain_file);
-    let (source, report) = source_of(uncalibrated_file());
+    // Whether `source_of` gave no source, and whether the media made as
+    // `project create` makes it stays equirect.
+    let gives_none = |of: &SourceOf| matches!(of.0, Ok(None));
+    let equirect = |path: &Path, of: &SourceOf| created(path, of).source == Source::Equirect {};
+    let uncalibrated = source_of(uncalibrated_file());
+    let report = &uncalibrated.1;
     assert!(report.camera_file.lenses.is_some(), "two lens tracks");
     assert!(report.camera_file.calibration.is_none());
-    assert_eq!(source, Ok(None));
-    let media = media_of(uncalibrated_file(), &report);
-    assert_eq!(media.source, Source::Equirect {});
+    assert!(gives_none(&uncalibrated), "{:?}", uncalibrated.0);
+    assert!(equirect(uncalibrated_file(), &uncalibrated));
 
-    let (source, report) = source_of(plain.join().unwrap());
-    assert!(report.camera_file.lenses.is_none(), "no trailer");
-    assert_eq!(source, Ok(None));
+    let plain = plain.join().unwrap();
+    let trailerless = source_of(plain);
+    assert!(trailerless.1.camera_file.lenses.is_none(), "no trailer");
+    assert!(gives_none(&trailerless), "{:?}", trailerless.0);
 
-    // Control.
-    let gives_none = |path: &Path| source_of(path).0.unwrap().is_none();
-    must_fail("the whole file gives no source", gives_none(rung3_file()));
+    // Controls.
+    let whole = source_of(rung3_file());
+    must_fail("the whole file gives no source", gives_none(&whole));
+    must_fail(
+        "the whole file's media stays equirect",
+        equirect(rung3_file(), &whole),
+    );
 }
 
 /// `superseded`: a provisional geometry is superseded by a settled entry,
