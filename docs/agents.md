@@ -335,8 +335,8 @@ when a call gives `output` and `project` when it gives `create`, as are
   gives is the proof. A project of a camera's pair is `not_yet` until
   M3.11; from then its `advice` holds `provisional_geometry` while the
   pair's geometry is provisional, with the evidence of Spherecut's
-  table of cameras when the table has since settled it or guessed
-  again.
+  table of cameras when the table has it settled or guesses
+  differently ("a different guess": the table keeps no order).
 - **`doctor`**: this machine's FFmpeg, decoders, VA-API and Vulkan
   devices, and each problem with its fix (the exact Fedora commands come
   from `spherecut doctor` in a terminal). With `file`, the decode path
@@ -508,9 +508,11 @@ camera's file of two fisheye lenses (an Insta360 `.insv`)
 `{"kind": "dual_fisheye"}` with the `camera` (`make`, `model` and
 `firmware`, never the serial), the `calibration`'s `hash`, the
 `geometry`'s `binding`, `status` and `evidence` with `superseded` (the
-built-in table's `status` and `evidence` when the table now knows
-better than the project, else null), the `tune`, the `gains`' `mode`
-(`off`, `fixed` or `auto`) and the `profile`'s name or null. The
+built-in table's `status` and `evidence` when the project's is
+provisional and the table's is settled, or provisional on other
+evidence, which may be older than the project's; else null), the
+`tune`, the `gains`' `mode` (`off`, `fixed` or `auto`) and the
+`profile`'s name or null. The
 calibration's raw strings and an `auto` gains' samples stay in the
 file, and the camera's words reach a result only as fields (Untrusted
 text). A camera's two EAC tracks (a GoPro MAX file) are

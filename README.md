@@ -493,11 +493,12 @@ geometry it was made with: DECISIONS D68) isn't exported yet: until
 M3.11 stitches a project's export, `render` refuses it with exit 1
 (`not_yet`) and writes nothing, rather than export one lens as an
 equirect; `frame --reference` of the `.insv` itself shows it
-stitched. When the project's geometry was a provisional guess and
-Spherecut's table of cameras has since measured it or guessed again,
-`render` warns (`provisional_geometry`), giving the table's evidence:
-the project keeps its own geometry, and renders the same, until it is
-changed.
+stitched, and an EAC pair has no stitched view yet. When the project's
+geometry was a provisional guess and Spherecut's table of cameras has
+it measured, or guesses differently (the table keeps no order, so the
+project's guess may be the later one), `render` warns
+(`provisional_geometry`), giving the table's evidence: the project
+keeps its own geometry, and renders the same, until it is changed.
 
 ### Agents
 

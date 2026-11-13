@@ -334,7 +334,7 @@ render's `warnings[].code`, which don't fail the run: `stereo_left_eye`,
 | Code | Meaning |
 |---|---|
 | `media_changed` | The clip's media file is there but isn't the one the project added (its size or first MiB differs); it is exported anyway |
-| `provisional_geometry` | The clip's media is a camera's pair whose stored geometry is provisional, and Spherecut's table of cameras has since settled it or guessed again (M3 plan 11.4): the message names the file and gives the table's evidence. The project keeps its own geometry until an edit changes it, so its renders don't change by themselves. Until M3.11 it comes beside `not_yet`, in the failure's `warnings`, and `frame --project` gives it so too |
+| `provisional_geometry` | The clip's media is a camera's pair whose stored geometry is provisional, and Spherecut's table of cameras has it settled ("a settled one") or guesses on other evidence ("a different guess": the table keeps no order, so the project's guess may be the later one) (M3 plan 11.4): the message names the file and gives the table's evidence. The project keeps its own geometry until an edit changes it, so its renders don't change by themselves. Until M3.11 it comes beside `not_yet`, in the failure's `warnings`, and `frame --project` gives it so too |
 | `h264_level_6` | H.264 wider than 4096 pixels needs level 6, which many players' hardware decoders can't play; HEVC or AV1 play more widely |
 | `no_audio` | The clip has no audio stream; the export has no audio track |
 | `audio_encoded` | `--audio copy`, and the audio is encoded again as AAC: its codec or timing can't be copied exactly, or the export is flat and the audio ambiX (encoded as stereo) |

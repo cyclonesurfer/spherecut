@@ -1385,8 +1385,11 @@ fn rewrite_evidence(p: &Path, from: &str, to: &str) {
 
 /// A project whose stored geometry the table has since superseded gets a
 /// `warnings` entry from `render` (M3 plan 11.4), beside the `not_yet`
-/// refusal, which its failure carries; `frame --project`'s too. Control:
-/// the project as made has none.
+/// refusal, which its failure carries; `frame --project`'s too. The
+/// table's provisional entry is "a different guess", never a newer one:
+/// the table keeps no order, and a project made under a later table reads
+/// so in an older build too (the M3.9 review's N4). Control: the project
+/// as made has none.
 #[test]
 fn render_warns_of_a_superseded_geometry() {
     let began = Instant::now();
@@ -1426,7 +1429,8 @@ fn render_warns_of_a_superseded_geometry() {
     assert!(
         m.contains(master.to_str().unwrap())
             && m.contains("provisional")
-            && m.contains("placeholder until the fit")
+            && m.contains("a different guess (placeholder until the fit)")
+            && !m.contains("newer")
             && !m.contains("an older guess"),
         "{m}"
     );

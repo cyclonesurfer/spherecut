@@ -1285,9 +1285,11 @@ fn geometry_advice(id: MediaId, source: &Source) -> Option<Advice> {
         sequence::media_named(id)
     );
     if let Some(s) = spherecut_media::project::superseded_by_table(d) {
+        // The table keeps no order, so a provisional entry is only
+        // different (the M3.9 review's N4).
         let now = match s.status {
             Status::Settled => "a settled one",
-            _ => "a newer guess",
+            _ => "a different guess",
         };
         message.push_str(&format!(
             "; Spherecut's table of cameras now has {now} ({}), which the project takes only \
@@ -1816,8 +1818,9 @@ mod tests {
 
     /// A project whose source's geometry is provisional gets
     /// `provisional_geometry` advice (info), with the table's evidence when
-    /// the table has superseded it (M3 plan 11.4). Control: a geometry of
-    /// status user gets none.
+    /// the table has superseded it (M3 plan 11.4), a provisional entry
+    /// named "a different guess", never a newer one (the M3.9 review's
+    /// N4). Control: a geometry of status user gets none.
     #[test]
     fn provisional_geometry_is_advice() {
         use spherecut_testkit::control::must_fail;
@@ -1843,7 +1846,7 @@ mod tests {
         let id = MediaId(16);
         let table = "placeholder until the fit";
 
-        // Provisional, and the table has nothing newer.
+        // Provisional, and the table has nothing other.
         let a = geometry_advice(id, &with(Status::Provisional, table)).unwrap();
         assert_eq!(a.id, "provisional_geometry");
         assert!(
@@ -1859,7 +1862,8 @@ mod tests {
         let b = geometry_advice(id, &with(Status::Provisional, older)).unwrap();
         assert!(
             b.message.starts_with(&a.message)
-                && b.message.contains(table)
+                && b.message.contains(&format!("a different guess ({table})"))
+                && !b.message.contains("newer")
                 && !b.message.contains(older),
             "{}",
             b.message

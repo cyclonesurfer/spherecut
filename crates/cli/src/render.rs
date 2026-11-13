@@ -533,11 +533,14 @@ pub(crate) fn media(
 }
 
 /// `provisional_geometry`'s message for the media at `path`, whose
-/// stored geometry the table superseded as `s` says (M3 plan 11.4).
+/// stored geometry the table superseded as `s` says (M3 plan 11.4). A
+/// provisional entry is "a different guess", never a newer one: the table
+/// keeps no order, so an older build reading a project made under a
+/// later table finds its own guess different too (the M3.9 review's N4).
 fn superseded_message(path: &Path, s: &Superseded) -> String {
     let now = match s.status {
         Status::Settled => "a settled one",
-        _ => "a newer guess",
+        _ => "a different guess",
     };
     format!(
         "{}: the project's lens geometry is provisional, and Spherecut's table of cameras now \
@@ -816,6 +819,41 @@ mod tests {
         assert!(range("5").unwrap_err().contains("IN..OUT"));
         assert!(range("-1..5").is_err());
         assert!(range("a..5").is_err());
+    }
+
+    /// `provisional_geometry`'s message names the file and the table's
+    /// entry with its evidence: "a settled one" when the entry is
+    /// settled, and "a different guess" when it is provisional, never a
+    /// newer one, since the table keeps no order (the M3.9 review's N4 and
+    /// N11). Control: a provisional entry held to the settled words.
+    #[test]
+    fn a_superseded_geometry_names_the_table_entry() {
+        use spherecut_testkit::control::must_fail;
+
+        let path = Path::new("/clips/cam.insv");
+        let said = |status| {
+            superseded_message(
+                path,
+                &Superseded {
+                    status,
+                    evidence: "measured on clips 8 to 10".into(),
+                },
+            )
+        };
+        let settled = |m: &str| m.contains("now has a settled one (measured on clips 8 to 10)");
+        let m = said(Status::Settled);
+        assert!(m.starts_with("/clips/cam.insv: ") && settled(&m), "{m}");
+        let guess = said(Status::Provisional);
+        assert!(
+            guess.starts_with("/clips/cam.insv: ")
+                && guess.contains("now has a different guess (measured on clips 8 to 10)")
+                && !guess.contains("newer"),
+            "{guess}"
+        );
+        must_fail(
+            "a provisional entry held to the settled words",
+            settled(&guess),
+        );
     }
 
     #[test]

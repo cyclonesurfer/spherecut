@@ -230,23 +230,26 @@ pub struct Superseded {
 
 /// Whether `table`, the table's geometry for a camera, supersedes
 /// `stored`, a media's (11.4): when `stored` is provisional and `table`
-/// is settled, or is provisional on newer evidence. Only an edit changes
+/// is settled, or is provisional on other evidence. Only an edit changes
 /// a project's geometry, so this only says so.
 ///
-/// "Newer" is read as "other": the table keeps no date or version beside
-/// its evidence, and only a new row or a fit changes it, so a provisional
-/// entry whose evidence differs from the one the media was made with is
-/// what the table says now. A settled entry supersedes any provisional
-/// geometry; a stored geometry that is settled, fitted or the user's is
-/// never superseded, nor one whose table entry is fitted or the user's,
-/// which no table entry is.
+/// 11.4's "newer" is read as "other": the table keeps no date, version
+/// or other order beside its evidence, and only a new row or a fit
+/// changes it, so a provisional entry whose evidence differs from the one
+/// the media was made with is what this build's table says, which may be
+/// an older guess than the project's when a later build made it. Its
+/// words name it "a different guess", never a newer one (the M3.9
+/// review's N4). A settled entry supersedes any provisional geometry; a
+/// stored geometry that is settled, fitted or the user's is never
+/// superseded, nor one whose table entry is fitted or the user's, which
+/// no table entry is.
 pub fn superseded(stored: &Geometry, table: &Geometry) -> Option<Superseded> {
-    let newer = match (stored.status, table.status) {
+    let other = match (stored.status, table.status) {
         (Status::Provisional, Status::Settled) => true,
         (Status::Provisional, Status::Provisional) => stored.evidence != table.evidence,
         _ => false,
     };
-    newer.then(|| Superseded {
+    other.then(|| Superseded {
         status: table.status,
         evidence: table.evidence.clone(),
     })
