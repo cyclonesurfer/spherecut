@@ -2070,11 +2070,12 @@ fn masks_match_on_the_scenes_rigs(s: &Scene) {
 /// lens's step 0.46° past 90°, on the seam; each lens turned 3° away from
 /// the other at its yaw opens the seam past both steps in a ring on one
 /// side, which both cover (with the lenses as stored, the steps meet on
-/// the seam and leave no ring). The other is stitched infinitely far
-/// with lens 1 ending at 91° under a feather of 1°: its mask, less the
-/// margin, ends short of where lens 0's feather does, and lens 0 alone
-/// covers the ring between. The feathers alone, as the weights stood,
-/// leave both rings black.
+/// the seam but for the sliver their axes' 0.57° tilt leaves on one
+/// side, 27 pixels at 192 × 96, which rig_shader.rs counts). The other is
+/// stitched infinitely far with lens 1 ending at 91° under a feather of
+/// 1°: its mask, less the margin, ends short of where lens 0's feather
+/// does, and lens 0 alone covers the ring between. The feathers alone, as
+/// the weights stood, leave both rings black.
 fn rings_no_feather_weighs_are_drawn(s: &Scene) {
     let turned = |yaw: f64| LensTune {
         ypr_deg: [yaw, 0.0, 0.0],

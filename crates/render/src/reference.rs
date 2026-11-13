@@ -398,15 +398,48 @@ pub fn lod_map(
 /// to the nearest f16) for the calibration block that weighs more there
 /// (`Rig::weights` at each lens's footprint LOD), block 0 at a tie, and
 /// black where no lens covers. `pair` holds each track's picture, and
-/// chroma's LOD is taken inside it as its sampling takes it.
-#[expect(unused_variables, reason = "M3.7 unit (a) writes the body")]
+/// chroma's LOD is taken inside it as its sampling takes it. A fisheye
+/// view past θ = π is black, as [`render_rig`]'s is.
+///
+/// Refuses what [`render_rig`] refuses of the rig.
 pub fn rig_lod_map(
     pair: &LensPair,
     rig: &Rig,
     view: &ViewParams,
     size: (u32, u32),
 ) -> Result<ImageF64, RenderError> {
-    todo!("M3.7 unit (a)")
+    check_tracks(rig)?;
+    let pixels = per_pixel_rows(size, |(i, j)| {
+        let c = pixel::centre(i, j);
+        if !in_view(view, size, c) {
+            return [0.0; 3];
+        }
+        let rays = Rays::at(|x, y| view.dir(size, x, y), c);
+        let feet = [0, 1].map(|b| Footprint::of(rig, b, &rays));
+        let lods = feet.map(|f| f.map_or(f64::INFINITY, |f| f.lod()));
+        let w = rig.weights(rays.d, lods);
+        if w[0] + w[1] <= 0.0 {
+            return [0.0; 3];
+        }
+        let b = usize::from(w[1] > w[0]);
+        // A lens that weighs has a footprint: it covers the pixel.
+        let Some(f) = feet[b] else {
+            return [0.0; 3];
+        };
+        let source = &pair.sources[rig.lenses[b].track];
+        let s = source.lens_sampled(&f);
+        [
+            s.lod[0].clamp(0.0, s.levels[0] - 1.0),
+            s.lod[1].clamp(0.0, s.levels[1] - 1.0),
+            s.lod[0],
+        ]
+        .map(round_f16)
+    });
+    Ok(ImageF64 {
+        width: size.0,
+        height: size.1,
+        data: pixels.into_iter().flatten().collect(),
+    })
 }
 
 fn per_pixel(size: (u32, u32), f: impl Fn((u32, u32)) -> [f64; 3]) -> ImageF64 {

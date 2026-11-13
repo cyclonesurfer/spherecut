@@ -789,6 +789,10 @@ impl Projector {
         }
     }
 
+    /// The pipeline for `filter`, `debug`, `pass` and `kind`, built the
+    /// first time it is asked for. It is built outside the map's lock, so
+    /// threads preparing different pipelines build them side by side; two
+    /// asking for one at once may both build it, and the first kept wins.
     fn pipeline(
         &self,
         filter: Filter,
@@ -796,39 +800,41 @@ impl Projector {
         pass: Pass,
         kind: SourceKind,
     ) -> wgpu::RenderPipeline {
-        let mut map = self
-            .pipelines
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.entry((filter, debug, pass, kind))
-            .or_insert_with(|| {
-                let (label, entry, pair) = match (pass, kind) {
-                    (Pass::Project, SourceKind::Equirect) => ("project", "fs_project", false),
-                    (Pass::Project, SourceKind::Rig) => ("rig", "fs_rig", true),
-                    (Pass::Flat, _) => ("flat", "fs_flat", false),
-                    (Pass::Strip, _) => ("strip", "fs_rig_strip", true),
-                };
-                // A lens pair's: the view with the rig, lens A's slot, the
-                // sampler with the caps, and lens B's slot.
-                let rig = [
-                    &self.view_rig_layout,
-                    &self.source_layout,
-                    &self.sampler_caps_layout,
-                    &self.source_layout,
-                ];
-                let equirect = [&self.view_layout, &self.source_layout, &self.sampler_layout];
-                let groups: &[&wgpu::BindGroupLayout] = if pair { &rig } else { &equirect };
-                layouts::fullscreen_pipeline(
-                    &self.gpu.device,
-                    label,
-                    &self.module,
-                    entry,
-                    &[("FILTER", filter.code()), ("DEBUG_MODE", debug.code())],
-                    groups,
-                    LinearTarget::FORMAT,
-                )
-            })
-            .clone()
+        let key = (filter, debug, pass, kind);
+        let map = || {
+            self.pipelines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        if let Some(made) = map().get(&key) {
+            return made.clone();
+        }
+        let (label, entry, pair) = match (pass, kind) {
+            (Pass::Project, SourceKind::Equirect) => ("project", "fs_project", false),
+            (Pass::Project, SourceKind::Rig) => ("rig", "fs_rig", true),
+            (Pass::Flat, _) => ("flat", "fs_flat", false),
+            (Pass::Strip, _) => ("strip", "fs_rig_strip", true),
+        };
+        // A lens pair's: the view with the rig, lens A's slot, the sampler
+        // with the caps, and lens B's slot.
+        let rig = [
+            &self.view_rig_layout,
+            &self.source_layout,
+            &self.sampler_caps_layout,
+            &self.source_layout,
+        ];
+        let equirect = [&self.view_layout, &self.source_layout, &self.sampler_layout];
+        let groups: &[&wgpu::BindGroupLayout] = if pair { &rig } else { &equirect };
+        let made = layouts::fullscreen_pipeline(
+            &self.gpu.device,
+            label,
+            &self.module,
+            entry,
+            &[("FILTER", filter.code()), ("DEBUG_MODE", debug.code())],
+            groups,
+            LinearTarget::FORMAT,
+        );
+        map().entry(key).or_insert(made).clone()
     }
 
     /// Records `source` seen through `view` into `target`'s extent, timed

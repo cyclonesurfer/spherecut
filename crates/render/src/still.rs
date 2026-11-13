@@ -16,7 +16,8 @@ use crate::gpu::Gpu;
 use crate::plane::SlotShape;
 use crate::project::{DebugMode, Filter, LinearTarget, Projector, SourceRef, ViewParams};
 use crate::readback::{self, Texels};
-use crate::seam::{StripSpec, Strips};
+use crate::rig::{self, RigUniform, SlotGeom};
+use crate::seam::{Strip, StripSpec, Strips};
 use crate::upload::{UploadPath, Uploader};
 use crate::vkshare::BufferPlane;
 use crate::yuv::{self, YuvConverter, YuvLayout, YuvShape};
@@ -462,7 +463,12 @@ impl StillRenderer {
     /// linear light at unit gain, its `valid` from
     /// [`crate::seam::strip_coverage`], and rgb 0 where it is invalid, as
     /// [`crate::seam::strips_of`] gives them from the CPU reference.
-    #[expect(unused_variables, reason = "M3.7 unit (a) writes the body")]
+    ///
+    /// Each lens is uploaded into its track's slot, whole, as
+    /// [`Self::render_blurred`] uploads a pair's. Refuses a spec with no
+    /// strip to unwrap and a rig whose blocks don't read tracks 0 and 1,
+    /// one each, as [`crate::seam::strips_of`] does, and a pair
+    /// [`rig::pack`] refuses.
     pub fn strips(
         &mut self,
         gpu: &Gpu,
@@ -470,7 +476,72 @@ impl StillRenderer {
         rig: &Rig,
         spec: &StripSpec,
     ) -> Result<Strips, RenderError> {
-        todo!("M3.7 unit (a)")
+        gpu.check()?;
+        let valid = crate::seam::strip_coverage(rig, spec)?;
+        let size = spec.size();
+        gpu.check_size(size)?;
+        let uniform = pair_uniform(&lenses, rig, [[1.0; 3]; 2])?;
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let [a, b] = &mut self.slots;
+        let uploader = &mut self.uploader;
+        let slots = [
+            upload_into(uploader, gpu, a, lenses[0], &Placement::FULL)?,
+            upload_into(uploader, gpu, b, lenses[1], &Placement::FULL)?,
+        ];
+        let target = match self.target.take() {
+            Some(mut t) => {
+                t.resize(gpu, size)?;
+                t
+            }
+            None => LinearTarget::new(gpu, size)?,
+        };
+        let target = &*self.target.insert(target);
+        let mut drawn = Vec::with_capacity(2);
+        for (block, mode) in [DebugMode::Lens0, DebugMode::Lens1].into_iter().enumerate() {
+            let mut enc = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("strip"),
+                });
+            self.projector.record_strip(
+                &mut enc,
+                slots,
+                &uniform,
+                spec,
+                target,
+                Filter::Isotropic,
+                mode,
+            )?;
+            self.pacing.submit(gpu, enc)?;
+            let texels = readback::read_region(gpu, target.texture(), 0, size)?;
+            let rgb = texels
+                .f16_values()
+                .chunks_exact(4)
+                .zip(&valid[block])
+                .map(|(p, valid)| {
+                    if *valid {
+                        [p[0], p[1], p[2]].map(f64::from)
+                    } else {
+                        [0.0; 3]
+                    }
+                })
+                .collect();
+            drawn.push(rgb);
+        }
+        if let Some(e) = pollster::block_on(scope.pop()) {
+            return Err(RenderError::Device(e.to_string()));
+        }
+        let mut valid = valid.into_iter();
+        let mut drawn = drawn.into_iter();
+        let mut strip = || Strip {
+            width: size.0,
+            height: size.1,
+            rgb: drawn.next().unwrap_or_default(),
+            valid: valid.next().unwrap_or_default(),
+        };
+        Ok(Strips {
+            lenses: [strip(), strip()],
+        })
     }
 
     fn render_from(
@@ -514,35 +585,31 @@ impl StillRenderer {
             )));
         }
         gpu.check_size(size)?;
-        let SourceFrames::One(LensFrame { frame, from }) = frames else {
-            todo!("M3.7 unit (a): both lenses uploaded, each to its own slot")
+        // A pair's rig is packed before anything is uploaded, so that what
+        // `rig::pack` refuses costs no upload.
+        let uniform = match &frames {
+            SourceFrames::One(_) => None,
+            SourceFrames::Pair { lenses, rig, gains } => Some(pair_uniform(lenses, rig, *gains)?),
         };
-        let shape = SlotShape::of(frame.layout(), opts.placement.shown(frame.size()))?;
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let [first, _] = &mut self.slots;
-        let slot = match first.take() {
-            Some(s) if s.shape().fits(&shape) => s,
-            _ => GpuFrame::new(gpu, &shape)?,
-        };
-        let slot = &*first.insert(slot);
-        match from {
-            PlaneSource::Bytes => self
-                .uploader
-                .upload_placed(gpu, frame, &opts.placement, slot)?,
-            PlaneSource::Imported(planes) => {
-                self.uploader
-                    .upload_imported(gpu, frame, planes, &opts.placement, slot)?
+        let [first, second] = &mut self.slots;
+        let uploader = &mut self.uploader;
+        let source = match (frames, &uniform) {
+            (SourceFrames::One(lens), _) => {
+                SourceRef::Equirect(upload_into(uploader, gpu, first, lens, &opts.placement)?)
             }
-            PlaneSource::Buffer(buffer, planes) => self.uploader.upload_from_buffer(
-                gpu,
-                frame,
-                buffer,
-                planes,
-                &opts.placement,
-                slot,
-            )?,
+            (SourceFrames::Pair { lenses, .. }, Some(rig)) => {
+                // Both lenses before the draw, each whole into its track's
+                // slot: a lens's picture has no placement on the sphere.
+                let a = upload_into(uploader, gpu, first, lenses[0], &Placement::FULL)?;
+                let b = upload_into(uploader, gpu, second, lenses[1], &Placement::FULL)?;
+                SourceRef::Rig {
+                    lenses: [a, b],
+                    rig,
+                }
+            }
+            (SourceFrames::Pair { .. }, None) => unreachable!("a pair's rig is packed"),
         };
-        let source = SourceRef::Equirect(slot);
         let target = match self.target.take() {
             Some(mut t) => {
                 t.resize(gpu, size)?;
@@ -556,7 +623,7 @@ impl StillRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("still"),
             });
-        if opts.flat {
+        if let (true, SourceRef::Equirect(slot)) = (opts.flat, source) {
             gpu.check()?;
             self.projector
                 .record_flat_unchecked(&mut enc, slot, target, opts.filter, None);
@@ -736,6 +803,50 @@ fn read_back(
     buf.unmap();
     *staging = Some(buf);
     Ok(data)
+}
+
+/// `lens` uploaded into `cell`, placed on the sphere by `placement`: the
+/// slot there when the frame fits it, else a new one.
+fn upload_into<'s>(
+    uploader: &mut Uploader,
+    gpu: &Gpu,
+    cell: &'s mut Option<GpuFrame>,
+    lens: LensFrame<'_>,
+    placement: &Placement,
+) -> Result<&'s GpuFrame, RenderError> {
+    let LensFrame { frame, from } = lens;
+    let shape = SlotShape::of(frame.layout(), placement.shown(frame.size()))?;
+    let slot = match cell.take() {
+        Some(s) if s.shape().fits(&shape) => s,
+        _ => GpuFrame::new(gpu, &shape)?,
+    };
+    let slot = &*cell.insert(slot);
+    match from {
+        PlaneSource::Bytes => uploader.upload_placed(gpu, frame, placement, slot)?,
+        PlaneSource::Imported(planes) => {
+            uploader.upload_imported(gpu, frame, planes, placement, slot)?
+        }
+        PlaneSource::Buffer(buffer, planes) => {
+            uploader.upload_from_buffer(gpu, frame, buffer, planes, placement, slot)?
+        }
+    };
+    Ok(slot)
+}
+
+/// The rig uniform of the pair `lenses` (by track) under `rig` with
+/// `gains` (by block): [`rig::pack`] with each lens's slot as its whole
+/// picture makes one.
+fn pair_uniform(
+    lenses: &[LensFrame<'_>; 2],
+    rig: &Rig,
+    gains: [[f64; 3]; 2],
+) -> Result<RigUniform, RenderError> {
+    let geom = |lens: &LensFrame<'_>| {
+        let frame = lens.frame;
+        SlotShape::of(frame.layout(), Placement::FULL.shown(frame.size()))
+            .map(|shape| SlotGeom { luma: shape.size })
+    };
+    rig::pack(rig, [geom(&lenses[0])?, geom(&lenses[1])?], gains)
 }
 
 fn image(r: Rendered) -> Image {
