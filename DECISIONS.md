@@ -10858,7 +10858,15 @@ here that 10.3 to 10.5 and 13.4 don't say.
   with a test (`tests/rung_copy.rs`) that held the copy to its own
   literals rather than to `instrument.rs`'s; `instrument.rs` now takes
   them from `synth::rung`, with its 132 measurements and its manifest
-  unchanged, and that test is gone.
+  unchanged, and that test is gone. *Updated 2026-11-13 (M3.7):* M3.7
+  lifted them, moved and not copied: `Scene`, `Masks`, the stitches, the
+  ideals and the scores, with the near scene's rigs and the
+  Kannala–Brandt camera, are in render's `tests/common/rung1.rs`, and
+  the attribution in `tests/common/attribution.rs`, pub modules of
+  `tests/common` beside `rig.rs`. `instrument.rs` takes them from there
+  and keeps its tests, its blessing and what its tests alone use, with
+  its numbers and its manifest unchanged; `synth::rung` still holds the
+  camera, the far tune, the frames and the views.
 
 **For the fit** (M3.6): what it must not take on trust.
 

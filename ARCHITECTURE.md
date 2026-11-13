@@ -1596,10 +1596,14 @@ The round trip proves the instrument consistent with synth's camera
 and nothing about a real one; the later rungs (the shader in M3.7, a
 lossless file in M3.5, exports, the viewer, and Pat's footage) take it
 from there. Rung 2 is these planes through the shader. Rung 1's
-camera, far tune, frames and views are `synth::rung`'s (M3.5), which
-`tests/instrument.rs` takes them from, and the boundary and
-`sphere_rig` are in the boundary crate (M3.5, F137): rung 3 and M3.7's
-rung 2 reach both, so every rung's camera is rung 1's. `Scene`,
-`Masks`, the stitches, the ideals and the attribution (`Plant`,
-`Lands`, `attribute_to`, `apart_deg`) stay private to
-`tests/instrument.rs` until M3.7 lifts what rung 2 needs.
+camera, far tune, frames and views are `synth::rung`'s (M3.5), and the
+boundary and `sphere_rig` are in the boundary crate (M3.5, F137):
+rung 3 and M3.7's rung 2 reach both, so every rung's camera is rung
+1's. `Scene`, `Masks`, the stitches, the ideals and the scores, with
+the camera's near scene and its rigs and the Kannala–Brandt camera,
+are in render's `tests/common/rung1.rs`, and the attribution (`Plant`,
+`Lands`, `attribute_to`, `apart_deg`) in `tests/common/attribution.rs`:
+M3.7 lifted them from `tests/instrument.rs` for rung 2 to share, moved
+and not copied, and `tests/instrument.rs` holds them to rung 1's floors,
+its band rule and the matrix. Each test binary that takes them renders
+its own pairs, since `RenderCache::shared()` is one process's.

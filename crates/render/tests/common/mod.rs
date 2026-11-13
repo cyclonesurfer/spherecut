@@ -6,9 +6,11 @@
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
+pub mod attribution;
 pub mod budget;
 pub mod predict;
 pub mod rig;
+pub mod rung1;
 
 use std::sync::OnceLock;
 
