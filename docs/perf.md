@@ -283,6 +283,11 @@ Current benchmarks:
   on up to 16 threads, which a note gives: `render_lens: X5-like, 2 ×
   768², ss 2`, in seconds. M3 plan 7.1 guessed about 2 s on 4 threads;
   no report has run it yet.
+- **`bench_stitch_pass`** (M3.7, M3 plan 4.3's P-SHADE,
+  `crates/render/tests/upload.rs`): the projection pass's GPU time with
+  a lens pair stitched against an equirect frame drawn, at 1080p and
+  4K; the plan's pass is 0.8 ms at 1080p and 2.0 ms at 4K on odin's
+  RADV. M3.7's unit (b) writes it; until then it is an ignored stub.
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
