@@ -84,7 +84,12 @@ Current benchmarks:
   milliseconds: exact and keyframe seeks, in software, on VA-API and on
   Vulkan Video, on the noisy 5760×2880 HEVC 8-bit clip (2 s, open GOPs
   of 30 with B-frames, about 200 Mbps), the longest X5 8K `.insv` (its
-  first 3840² stream) and the longest LRV proxy. A batch is 20 seeks to
+  first 3840² stream) and the longest LRV proxy. The `VA-API` rows
+  open without the VA-API drain, as `frame`, `render` and the agents'
+  tools decode; the `VA-API drained` rows with `download`'s, as the
+  player decodes by default, whatever `SPHERECUT_VAAPI_DRAIN` says
+  where the bench runs, so the drain's cost on a seek is a drained row
+  against the `VA-API` row of the same run. A batch is 20 seeks to
   random times on a decoder opened for it, the same times in every
   batch; the rows are `<mode> seek, <clip>, <path>: median` and `: p95`.
   Exact seeks decode from the keyframe before the time, or forward from

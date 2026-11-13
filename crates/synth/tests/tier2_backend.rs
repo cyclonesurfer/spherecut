@@ -20,7 +20,10 @@
 //! footage does, and every stream of the camera samples. The clips are
 //! generated once and cached in Cargo's per-target temp dir, as
 //! `tier2_hw_decode.rs`'s are. `bench_seek_latency` measures how long a
-//! seek takes to hand out its frame, in software and on both devices.
+//! seek takes to hand out its frame, in software and on both devices,
+//! and on VA-API again with the drain the player runs by default. The
+//! checks and the other rows open without it, as `frame`, `render` and
+//! the agents' tools do; it only waits, so it can't change a frame.
 //!
 //! Run with `cargo xtask hw-test`; plain `cargo test` lists them as ignored.
 
@@ -34,8 +37,8 @@ use spherecut_core::video::{SampleBytes, VideoPlanes};
 use spherecut_core::{FrameRate, Rounding, StopToken, Time};
 use spherecut_media::backend::{
     DecodeMode, DecodePath, DecoderEvent, Exactness, Fallback, Fault, FaultPlan, FfmpegBackend,
-    HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Transfer, VideoDecode,
-    VideoFrame, VideoRequest,
+    HwKind, HwOutput, MediaBackend, NextFrame, SeekMode, SeekOutcome, Transfer, VaapiDrain,
+    VideoDecode, VideoFrame, VideoRequest,
 };
 use spherecut_media::decode::open_vulkan_device;
 use spherecut_media::encode::{ColorTags, EncodeError};
@@ -43,6 +46,7 @@ use spherecut_media::probe::{self, StreamKind};
 use spherecut_media::{HwError, MediaError, capture_hw_decode_log};
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self, Audio, CLIP_COLOR, Codec, Gop, Spec, SynthError};
+use spherecut_testkit::control::must_fail;
 use spherecut_testkit::{bench, tier2};
 
 /// Random exact seeks per stream.
@@ -267,8 +271,12 @@ struct Hw {
 }
 
 impl Hw {
-    fn open(&self, s: &Stream) -> Result<Box<dyn VideoDecode>, MediaError> {
-        let req = VideoRequest {
+    /// The request [`open`](Self::open) makes: `s` on the device, never
+    /// falling back, and the rest as `VideoRequest::default` has it, so
+    /// without VA-API's drain, as `frame`, `render` and the agents' tools
+    /// decode. The drain only waits, so it can't change a frame.
+    fn request(&self, s: &Stream) -> VideoRequest {
+        VideoRequest {
             stream: s.index,
             decode: DecodeMode::Hardware {
                 kind: self.kind,
@@ -277,8 +285,29 @@ impl Hw {
             },
             fault: self.stand_in,
             ..VideoRequest::default()
-        };
-        self.backend.open_video(&s.path, &req)
+        }
+    }
+
+    /// [`request`](Self::request) with download's VA-API drain, as the
+    /// player asks for by default: before the frame a seek hands out is
+    /// copied to memory, the decoder waits for its pictures queued on the
+    /// device. It is set here, not read from `SPHERECUT_VAAPI_DRAIN`, so
+    /// that what a row's name says is what ran.
+    fn drained_request(&self, s: &Stream) -> VideoRequest {
+        VideoRequest {
+            vaapi_drain: VaapiDrain::Download,
+            ..self.request(s)
+        }
+    }
+
+    fn open(&self, s: &Stream) -> Result<Box<dyn VideoDecode>, MediaError> {
+        self.backend.open_video(&s.path, &self.request(s))
+    }
+
+    /// [`open`](Self::open), draining as the player does
+    /// ([`drained_request`](Self::drained_request)).
+    fn open_drained(&self, s: &Stream) -> Result<Box<dyn VideoDecode>, MediaError> {
+        self.backend.open_video(&s.path, &self.drained_request(s))
     }
 
     /// [`open`](Self::open), handing frames out as `output` (slice 5b).
@@ -1081,6 +1110,11 @@ fn bench_seek_latency() {
     if let Ok(vk) = &vk {
         bench::note(format!("Vulkan Video rows ran on {}", vk.about));
     }
+    bench::note(
+        "VA-API rows open without the VA-API drain, as frame, render and the agents' tools \
+         decode; VA-API drained rows with download's, as the player decodes by default, so the \
+         drain's cost on a seek is a drained row against the VA-API row of the same run",
+    );
     let mut clips = vec![(
         "noisy 5760x2880 HEVC 8-bit".to_string(),
         Some(Stream::clip(noisy(8))),
@@ -1095,7 +1129,7 @@ fn bench_seek_latency() {
         for (mode, mode_name) in [(SeekMode::Exact, "exact"), (SeekMode::Keyframe, "keyframe")] {
             let row = |on: &str| format!("{mode_name} seek, {label}, {on}");
             let Some(s) = stream else {
-                for on in ["software", "VA-API", "Vulkan Video"] {
+                for on in ["software", "VA-API", "VA-API drained", "Vulkan Video"] {
                     bench::not_measured(&row(on), "no such sample");
                 }
                 continue;
@@ -1106,6 +1140,10 @@ fn bench_seek_latency() {
             .unwrap_or_else(|e| panic!("{}: software: {e}", s.name));
             bench::try_measure_latency(&row("VA-API"), "ms", || seek_batch(&|| va.open(s), mode))
                 .unwrap_or_else(|e| panic!("{}: {}: {e}", s.name, va.about));
+            bench::try_measure_latency(&row("VA-API drained"), "ms", || {
+                seek_batch(&|| va.open_drained(s), mode)
+            })
+            .unwrap_or_else(|e| panic!("{}: {}, drained: {e}", s.name, va.about));
             let measured = match &vk {
                 Err(no) => Err(no.reason().to_string()),
                 Ok(vk) => match turned_down(vk, s) {
@@ -1218,6 +1256,25 @@ fn the_checks_fail_on_a_device_that_fails() {
     assert!(e.contains("fault injected"), "{e}");
     let e = turned_down(&stand_in(Some(0)), &streams[0]).unwrap_err();
     assert!(e.contains("fault injected"), "{e}");
+}
+
+/// `bench_seek_latency`'s VA-API rows open as they are named, whatever
+/// `SPHERECUT_VAAPI_DRAIN` says where the bench runs: "VA-API" without
+/// the drain, as `frame`, `render` and the agents' tools decode, and
+/// "VA-API drained" with download's, as the player does by default.
+///
+/// Control: the drained rows' check fails the plain rows' request.
+#[test]
+fn the_seek_bench_s_vaapi_rows_drain_as_they_are_named() {
+    let hw = stand_in(None);
+    let s = Stream::clip(PathBuf::from("clip.mp4"));
+    let drains = |req: &VideoRequest| req.vaapi_drain == VaapiDrain::Download;
+    assert!(drains(&hw.drained_request(&s)));
+    assert_eq!(hw.request(&s).vaapi_drain, VaapiDrain::Off);
+    must_fail(
+        "the plain rows' request read as drained",
+        drains(&hw.request(&s)),
+    );
 }
 
 /// NV12 hashes as yuv420p does and P010 as yuv420p10le, channel by
