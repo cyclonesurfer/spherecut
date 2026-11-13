@@ -40,11 +40,13 @@ use spherecut_cli::contract::{
 use spherecut_core::TimeSpec;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
 use spherecut_core::project::{
-    AudioChoice, Codec, Edit, EncoderChoice, Orientation, Output, Project, Quality,
+    AudioChoice, Codec, Edit, EncoderChoice, Orientation, Output, Project, Quality, Source,
 };
 use spherecut_core::time::Time;
 use spherecut_export::{Decoder, Export, ExportError, ExportJob, Preset, Progress, Report};
+use spherecut_media::project::{Superseded, superseded_by_table};
 use spherecut_render::{AdapterChoice, Gpu};
+use spherecut_sphere::rig::Status;
 
 use crate::{DOCUMENT_STARTED, PANICKED, emit, frame, interrupt, print_json, to_stderr};
 
@@ -470,6 +472,33 @@ pub(crate) fn media(
             format!("the clip's media {} isn't in the project", clip.media.0),
         ));
     };
+    // A camera's pair: the table's newer geometry, if it has one, then
+    // the refusal, which the failure's warnings carry it beside.
+    let pair = match &m.source {
+        Source::Equirect {} => None,
+        Source::DualFisheye(d) => {
+            if let Some(s) = superseded_by_table(d) {
+                let message = superseded_message(&m.path, &s);
+                tracing::warn!("{message}");
+                warnings.push(Warning::new(codes::warnings::PROVISIONAL_GEOMETRY, message));
+            }
+            Some("a camera's two fisheye lenses")
+        }
+        Source::EacPair(_) => Some("a camera's two EAC tracks"),
+    };
+    if let Some(pair) = pair {
+        return Err(about(
+            failure(
+                codes::NOT_YET,
+                format!(
+                    "the clip's media {} is {pair}: stitched rendering of projects arrives in \
+                     M3.11; frame the file itself to see it",
+                    m.path.display()
+                ),
+            ),
+            &m.path,
+        ));
+    }
     match status {
         MediaStatus::Present => Ok(()),
         MediaStatus::Missing => Err(about(
@@ -492,6 +521,21 @@ pub(crate) fn media(
             Ok(())
         }
     }
+}
+
+/// `provisional_geometry`'s message for the media at `path`, whose
+/// stored geometry the table superseded as `s` says (M3 plan 11.4).
+fn superseded_message(path: &Path, s: &Superseded) -> String {
+    let now = match s.status {
+        Status::Settled => "a settled one",
+        _ => "a newer guess",
+    };
+    format!(
+        "{}: the project's lens geometry is provisional, and Spherecut's table of cameras now \
+         has {now} ({}); the project keeps its own until an edit takes the table's",
+        path.display(),
+        s.evidence
+    )
 }
 
 /// Step 4's changes to the project, made with its own edits so that its

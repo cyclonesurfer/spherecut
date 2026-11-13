@@ -311,6 +311,7 @@ and `decode_failed` as above:
 | `malformed_project` | 1 | The project file doesn't read as one: a field of the wrong kind, or a time whose `seconds` and `exact` disagree; the message gives the JSON pointer |
 | `invalid_project` | 1 | The project breaks one of its rules, as loaded or with the flags' changes, or its sequence's size isn't a preset (`--preset` gives one) |
 | `media_offline` | 1 | The clip's media file isn't where the project says (relinking a moved file is M5's); `path` is where it was looked for |
+| `not_yet` | 1 | The clip's media is a camera's pair, two fisheye lenses (`dual_fisheye`) or two EAC tracks: stitched rendering of projects arrives in M3.11, and until then nothing is rendered, so no lens is ever shown alone as an equirect. `path` is the media file; `frame` it to see it. Checked before `media_offline`, and `frame --project` refuses it so too |
 | `cannot_export` | 1 | The project can't be exported as it is: an empty trim, a trim of more frames than an export holds, PCM ambiX copied into a 360 MP4 (YouTube takes it only in a MOV: ask for `--audio aac`) |
 | `no_encoder` | 3 | No encoder the run can use for the codec: `--encoder vaapi` without a render node or without the codec's VA-API encoder in this FFmpeg, or no software encoder for it |
 | `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job (or AV1 at a size VA-API would pad: not a multiple of 64 wide and 16 high), or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software, unless VA-API is the only encoder for the codec (as for H.264 with stock Fedora's ffmpeg-free, which has no libx264): then they fail the run with exit 3 as with `vaapi` |
@@ -333,6 +334,7 @@ render's `warnings[].code`, which don't fail the run: `stereo_left_eye`,
 | Code | Meaning |
 |---|---|
 | `media_changed` | The clip's media file is there but isn't the one the project added (its size or first MiB differs); it is exported anyway |
+| `provisional_geometry` | The clip's media is a camera's pair whose stored geometry is provisional, and Spherecut's table of cameras has since settled it or guessed again (M3 plan 11.4): the message names the file and gives the table's evidence. The project keeps its own geometry until an edit changes it, so its renders don't change by themselves. Until M3.11 it comes beside `not_yet`, in the failure's `warnings`, and `frame --project` gives it so too |
 | `h264_level_6` | H.264 wider than 4096 pixels needs level 6, which many players' hardware decoders can't play; HEVC or AV1 play more widely |
 | `no_audio` | The clip has no audio stream; the export has no audio track |
 | `audio_encoded` | `--audio copy`, and the audio is encoded again as AAC: its codec or timing can't be copied exactly, or the export is flat and the audio ambiX (encoded as stereo) |
@@ -690,8 +692,9 @@ PNG. Whatever fails first is the run's `error`, and nothing is written.
 (the last that starts at or before it), and `--frame N` counting at the
 sequence's rate; at or past the sequence's end is `out_of_range`. The
 project and its clip load as `render` loads them, with the same codes
-(`media_offline`, and `media_changed` as a warning). The view, the size
-and the filter are the project's: the views the export renders the
+(`not_yet` until M3.11 for a camera's pair, `media_offline`, and
+`media_changed` and `provisional_geometry` as warnings). The view, the
+size and the filter are the project's: the views the export renders the
 frame through (several over the shutter with motion blur), the
 sequence's output size, and the export's filter, `aniso` where the GPU
 has it. So `--yaw`, `--pitch`, `--roll`, `--fov`, `--projection`,

@@ -47,6 +47,8 @@ use spherecut_media::backend::{
     FfmpegBackend, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoRequest,
 };
 use spherecut_media::hw::DEFAULT_RENDER_NODE;
+use spherecut_media::probe::probe;
+use spherecut_media::project::{camera_source, project_media};
 use spherecut_render::compare::{Plane, psnr_plane, ssim_plane};
 use spherecut_render::{Image, Pixels};
 use spherecut_sphere::orient::Ypr;
@@ -54,6 +56,9 @@ use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Spec};
 use spherecut_testkit::control::must_fail;
+
+#[allow(dead_code)]
+mod insv;
 
 // ---------------------------------------------------------------------
 // Projects and runs
@@ -1217,25 +1222,151 @@ fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
 // ---------------------------------------------------------------------
 // A camera's two lenses, and a project's folder (M3.9)
 
+/// A project of the camera file `master` saved as `dir/{name}`, its media
+/// as `project create` makes it: `project_media` of the first lens's
+/// stream, its source `camera_source`'s, with [`project`]'s settings.
+fn camera_project(dir: &Path, master: &Path, name: &str) -> PathBuf {
+    let report = probe(master).unwrap();
+    let request = VideoRequest {
+        stream: report.camera_file.lenses.as_ref().map(|l| l.tracks[0]),
+        ..VideoRequest::default()
+    };
+    let info = FfmpegBackend::new()
+        .open_video(master, &request)
+        .unwrap()
+        .info()
+        .clone();
+    let source = spherecut_media::Source::path(master);
+    let mut m = project_media(source, master, &info).unwrap();
+    let d = camera_source(source, &report).unwrap().unwrap();
+    m.source = Source::DualFisheye(Box::new(d));
+    let path = dir.join(name);
+    saved(m, &path);
+    path
+}
+
+/// `frame --project P -o OUT` and what it gave.
+fn frame_of(project: &Path, out: &Path) -> (Option<i32>, Value) {
+    frame(&[
+        "--project".as_ref(),
+        project.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ])
+}
+
 /// A short render: half size, the first frame.
 const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
 
 /// `spherecut render` and `frame --project` of a dual-fisheye project
-/// fail `not_yet` until M3.11, writing nothing. Control: an equirect
-/// project renders.
+/// fail `not_yet` until M3.11, writing nothing: the refusal comes before
+/// a render starts, so nothing is ever rendered from lens 0 alone.
+/// Control: an equirect project renders.
 #[test]
-#[ignore = "M3.9 unit (d)"]
 fn a_dual_fisheye_project_is_refused_not_yet() {
-    todo!()
+    let began = Instant::now();
+    let dir = TempDir::new("not-yet");
+    let master = insv::master(&dir, insv::MASTER, None).path;
+    let cam = camera_project(&dir, &master, "cam.spherecut");
+    let out = dir.join("out.mp4");
+    let png = dir.join("still.png");
+    // Both commands' refusals, or what they did instead: each runs, and
+    // then each is held to the refusal.
+    let refused = |p: &Path| -> Result<(), String> {
+        let ran = run(p, &out, SHORT);
+        let (status, still) = frame_of(p, &png);
+        let said = |m: &Value| m.as_str().unwrap_or("").to_string();
+        let doc = ran.last();
+        let e = &doc["error"];
+        if !(ran.status == Some(1)
+            && ran.code() == "not_yet"
+            && ran.lines.len() == 1
+            && doc["schema"] == contract::RENDER
+            && said(&e["message"]).contains("M3.11")
+            && e["path"] == master.to_str().unwrap())
+        {
+            return Err(format!("render: {:?} {:?}", ran.status, ran.lines));
+        }
+        let e = &still["error"];
+        if !(status == Some(1)
+            && e["code"] == "not_yet"
+            && still["schema"] == contract::FRAME
+            && said(&e["message"]).contains("M3.11"))
+        {
+            return Err(format!("frame: {status:?} {still}"));
+        }
+        Ok(())
+    };
+    refused(&cam).unwrap();
+    assert!(!out.exists() && !png.exists());
+    assert_eq!(temp_files(&dir), Vec::<String>::new());
+    eprintln!("refused in {:.3} s", began.elapsed().as_secs_f64());
+
+    let src = clip(&dir, "grid", Pattern::Grid, 2);
+    let flat = project(&dir, &src);
+    must_fail("the equirect project", refused(&flat));
+    assert!(out.exists() && png.exists());
+    eprintln!("with the control, {:.3} s", began.elapsed().as_secs_f64());
+}
+
+/// The project at `p` with its media's stored evidence rewritten from
+/// `from` to `to`, as a project made under an older table holds it.
+fn rewrite_evidence(p: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(p).unwrap();
+    let was = format!("\"evidence\": \"{from}\"");
+    assert_eq!(text.matches(&was).count(), 1, "{text}");
+    std::fs::write(p, text.replace(&was, &format!("\"evidence\": \"{to}\""))).unwrap();
 }
 
 /// A project whose stored geometry the table has since superseded gets a
-/// `warnings` entry from `render` (M3 plan 11.4). Control: the project as
-/// made has none.
+/// `warnings` entry from `render` (M3 plan 11.4), beside the `not_yet`
+/// refusal, which its failure carries; `frame --project`'s too. Control:
+/// the project as made has none.
 #[test]
-#[ignore = "M3.9 unit (d)"]
 fn render_warns_of_a_superseded_geometry() {
-    todo!()
+    let began = Instant::now();
+    let dir = TempDir::new("superseded");
+    let master = insv::master(&dir, insv::MASTER, None).path;
+    let p = camera_project(&dir, &master, "cam.spherecut");
+    let out = dir.join("out.mp4");
+    // Render's and frame's provisional_geometry warning, the same in
+    // both, or the warnings they gave.
+    let warned = |p: &Path| -> Result<String, String> {
+        let ran = run(p, &out, &["--json"]);
+        ran.failed(1, "not_yet");
+        let (_, still) = frame_of(p, &dir.join("still.png"));
+        assert_eq!(still["error"]["code"], "not_yet", "{still}");
+        let theirs = |doc: &Value| -> Vec<Value> {
+            doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["code"] == "provisional_geometry")
+                .cloned()
+                .collect()
+        };
+        match (&theirs(ran.last())[..], &theirs(&still)[..]) {
+            ([w], [v]) if w == v => Ok(w["message"].as_str().unwrap().to_string()),
+            _ => Err(format!(
+                "{} / {}",
+                ran.last()["warnings"],
+                still["warnings"]
+            )),
+        }
+    };
+    must_fail("the project as made", warned(&p));
+
+    rewrite_evidence(&p, "placeholder until the fit", "an older guess");
+    let m = warned(&p).unwrap();
+    assert!(
+        m.contains(master.to_str().unwrap())
+            && m.contains("provisional")
+            && m.contains("placeholder until the fit")
+            && !m.contains("an older guess"),
+        "{m}"
+    );
+    assert!(!out.exists());
+    eprintln!("{m}\nin {:.3} s", began.elapsed().as_secs_f64());
 }
 
 /// F031's CLI half: a project saved in a real folder with its media
