@@ -37,7 +37,7 @@ pub struct Loaded {
 /// The project at `path`, the argument `arg`, beneath any root, and its
 /// clip's media beneath the read roots, the file it was made with. A
 /// project whose clip's media is a camera's pair is refused
-/// ([`not_yet`]) before its file is opened.
+/// ([`codes::NOT_YET`]) before its file is opened.
 pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
     let (folder, name) = cx.roots.project_folder(arg, path, false)?;
     let project = folder
