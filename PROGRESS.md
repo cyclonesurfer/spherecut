@@ -3916,8 +3916,8 @@ the code first, and each fix shown failing first where it could be):
   choice, and schema 2 is built on it); whether `xi_delta`'s range
   should be wider; and whether `validate` should add LOD 0's margin at
   the media's track side, or 10.3's mask stop taking it off where both
-  lenses end. (Pat answered the third, whether 19.6's M3.9 row rises
-  again, at 17:54Z on 2026-11-13: to 6 s, amendment 9.)
+  lenses end. (Pat answered the budget question, whether 19.6's M3.9
+  row rises again, at 17:54Z on 2026-11-13: to 6 s, amendment 9.)
 
 **Measured**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
 lavapipe), at d478083 unless named:
@@ -4049,9 +4049,10 @@ than before; odin's default path (Vulkan Video on path B) is unchanged.
   `render` and the agents' tools, whose processes have no window. The
   window's exports, which decode VA-API with downloads in its process,
   take the player's mode (`ExportJob::vaapi_drain`, 3bb3ef4). The
-  overlay's drain line and the GUI report's drain line say something
-  only where a frame drained or a sync failed (6aef1ce, 03db84d). The
-  docs say a decoder waits for its own pictures only (06ac450).
+  overlay's drain line shows only once a frame has drained or a sync
+  has failed, and where nothing drained the GUI report says so in one
+  clause (6aef1ce, 03db84d). The docs say a decoder waits for its own
+  pictures only (06ac450).
 - **The review's fixes (110683c to a9a2f2b).** F5: the display is read
   through ffmpeg-sys-next's `AVVAAPIDeviceContext`, not a struct of our
   own. F1: a frame path A fails to export, which its decoder downloads,
@@ -4130,9 +4131,11 @@ lavapipe):
   cause. Path A stays opt-in.
 - huginn: VA-API copied is its default path, and nothing is measured
   there: whether a download frees a staging buffer on its APU, whether
-  the gate shows, and what the drain costs. Its next run takes the
-  probe with the drain off and on, `gui_decode_behind` and the headless
-  rows.
+  the gate shows, and what the drain costs. Its gated 5.7K real-time
+  benches run on VA-API copied, so they drain by default; if they
+  fail, `SPHERECUT_VAAPI_DRAIN=off` tells the drain's cost from a
+  decode regression. Its next run takes the probe with the drain off
+  and on, `gui_decode_behind` and the headless rows.
 - A locked pair's two VA-API decoders share one `VADisplay`, and each
   drains only its own surfaces; not measured, since odin plays an X5
   pair on path B.
@@ -4153,7 +4156,13 @@ lavapipe):
   `PlayerConfig::vaapi_drain`'s doc still says a decoder waits for
   every picture queued on its device, where it waits for its own, and
   that exported-frame decoders don't drain, where since F1 their
-  refused frames do.
+  refused frames do. The same "pictures queued on its device" wording,
+  which reads as every picture on the device, is in `Stage::Drain`'s
+  doc (`playback/src/perf.rs`), `ExportJob::vaapi_drain`'s
+  (`export/src/job.rs`), `VideoRequest::vaapi_drain`'s and
+  `DecodeStats::last_drain_ms`'s (`media/src/backend.rs`) and the
+  decode worker's `OpenJob::vaapi_drain` (`playback/src/worker.rs`); a
+  later commit says "its own pictures" in each.
 
 ## Agent integration (track A): how it got here
 
@@ -5869,9 +5878,13 @@ each slice's merge sweeps the list.
   APU (radeonsi reads through staging only from VRAM or write-combined
   GTT, and makes a texture linear after 10 transfers: `si_texture.c`,
   Mesa 26.2.5), whether the gate shows there, and what the drain costs
-  are all open. Its next run takes the gate probe with the drain off
-  and on, `gui_decode_behind` and the headless rows (D79). (as of
-  2026-11-13)
+  are all open. There the drain runs in a gated row: `Auto` picks
+  VA-API copied, so the gated 5.7K real-time benches
+  (`bench_playback_realtime_5k7_8bit` and `_10bit`) drain by default,
+  and if they fail, a run with `SPHERECUT_VAAPI_DRAIN=off` tells the
+  drain's cost from a decode regression. Its next run takes the gate
+  probe with the drain off and on, `gui_decode_behind` and the headless
+  rows (D79). (as of 2026-11-13)
 - Vulkan Video's copy path (where the device can't be shared, or with
   `SPHERECUT_ZERO_COPY=0`) drops frames on odin in some runs and not in
   others. Its download buffers are huge-page mappings, and with THP

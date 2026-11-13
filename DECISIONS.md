@@ -6252,21 +6252,21 @@ neither the slot nor zero copy for later opens is given up
 too (F117): a timeout or a lost device is the GPU's failure
 (`GpuFailed`), not a refused frame.
 
-*Updated 2026-11-13 (the VA-API stall slice, D79):* `PerfStats`' stages
-now end `AvOffset`, `PairWait` (M3.8, D67) and `Drain`: the time a
-VA-API decoder spent waiting for the pictures queued on its device
-before a frame's download (and, with `picture`, after the packets sent
-for it), recorded only for a frame whose drains took some time. Four
-counters follow `PairResyncs`: `DrainWaited` (surfaces synced that
-weren't ready, a sync of 0.5 ms or more), `DrainErrors` (syncs that
-failed), `DrainOverflow` (surfaces a decoder forgot past the 64 it
-keeps) and `DrainUnavailable` (decoders asked to drain on a VA-API
-device that found no `vaSyncSurface`). `PerfStats::drain_waits` is a
-histogram of surfaces waited for a download (`DrainWaits`, 65 buckets,
-the last for 64 or more). `PlayerConfig::vaapi_drain` takes its default
-from `SPHERECUT_VAAPI_DRAIN` (`download` unless set) and goes in each
-decode worker's `VideoRequest`, and `DecodeStats::last_download_ms` is
-the copy alone, without the drain.
+*Updated 2026-11-13 (the VA-API stall slice, D79):* `PerfStats`'
+stages now end `AvOffset`, `PairWait` (M3.8, D67) and `Drain`: the
+time a VA-API decoder spent waiting for the pictures it had queued on
+its device before a frame's download (and, with `picture`, after the
+packets sent for it), recorded only for a frame whose drains took some
+time. Four counters follow `PairResyncs`: `DrainWaited` (surfaces
+synced that weren't ready, a sync of 0.5 ms or more), `DrainErrors`
+(syncs that failed), `DrainOverflow` (surfaces a decoder forgot past
+the 64 it keeps) and `DrainUnavailable` (decoders asked to drain on a
+VA-API device that found no `vaSyncSurface`). `PerfStats::drain_waits`
+is a histogram of surfaces waited for a download (`DrainWaits`, 65
+buckets, the last for 64 or more). `PlayerConfig::vaapi_drain` takes
+its default from `SPHERECUT_VAAPI_DRAIN` (`download` unless set) and
+goes in each decode worker's `VideoRequest`, and
+`DecodeStats::last_download_ms` is the copy alone, without the drain.
 
 ## D35. Audio and A/V sync
 
@@ -12096,11 +12096,15 @@ The choice, and what it costs:
   The official `gui_decode_behind` failed run 1 with the drain off
   (0.75 presented, p99 110.3 ms) and passed with `download` (0.995,
   18.4 ms). `download` met every rule the analysis set before the run:
-  0.95 presented or more in each run, no pass of 95 ms or more, under
-  0.5 passes of 40 to 95 ms a second, a p99 of 25 ms or less, the
-  official test passing, and at least 0.8 of `off`'s frames shown (a
-  mean of 110.3 against 0.8 × 122.7 = 98.1). `picture` met all but the
-  last (82.7).
+  0.95 presented or more in each run, at most 2 passes of 95 ms or
+  more over 30 s covered or more, under 0.5 passes of 40 to 95 ms a
+  second, a p99 of 25 ms or less in at least 2 runs, the official test
+  passing, and at least 0.8 of `off`'s frames shown. It showed 0
+  passes of 95 ms or more in 57.0 s, 0.00 of 40 to 95 ms a second, a
+  p99 of 18.0 to 18.4 ms in all three runs and a mean of 110.3 frames
+  shown against 0.8 × 122.7 = 98.1. `picture` met all but the last
+  (82.7); no official test ran with it, so the report read that rule
+  off `download`'s run.
 - **PR #38** (`hw-reports/stall-tier2-2026-11-12/report.md`, at
   6675318, every call with `SPHERECUT_VAAPI_DRAIN=download`):
   `gui_decode_behind` passed 3 of 3, run 1 presenting 0.994 to 0.995
@@ -12190,8 +12194,15 @@ What stays open:
   GTT, read in `si_texture.c` 2158-2165, and makes a texture linear
   after 10 transfers, 2138-2146), whether the gate shows, and what the
   drain costs (a 3840×1920 VA-API copy ran at 301 fps headless there).
-  huginn's next run takes the probe with the drain off and on, a GUI
-  row (`gui_decode_behind`) and the headless rows.
+  There the drain's cost also falls on a gated row: `Auto` picks
+  VA-API copied, so the gated runs of
+  `bench_playback_realtime_5k7_8bit` and `_10bit` (0 dropped, every
+  unthrottled second at 35.96 fps or more, D42) drain by default,
+  where on odin the drain ran only in a recorded row. If that gate
+  fails there, a run with `SPHERECUT_VAAPI_DRAIN=off` tells the drain's
+  cost from a decode regression. huginn's next run takes the probe with
+  the drain off and on, a GUI row (`gui_decode_behind`) and the
+  headless rows.
 - **A locked pair.** Its two VA-API decoders share one `VADisplay` (one
   device per kind, D30), and each drains only its own surfaces, so one
   lens's download can find the other's pictures queued. Not measured:
