@@ -172,12 +172,14 @@ pub fn plan(whole: &SlotShape, layers: &[DmabufLayer]) -> Result<Vec<PlaneImport
 }
 
 /// The textures [`Importer::import`] made, one a plane, over the memory of
-/// the frame it borrowed: while they live, the frame does, and with it
-/// the fds and the decoder's surface under them (the project review's
-/// F120). They read as a slice of textures, as
+/// the frame it borrowed: while this handle lives, the frame does, and
+/// with it the fds and the decoder's surface under them (the project
+/// review's F120). They read as a slice of textures, as
 /// [`Uploader::upload_imported`](crate::Uploader::upload_imported) and
 /// [`StillRenderer::render_imported`](crate::StillRenderer::render_imported)
-/// take them.
+/// take them. The borrow is the handle's, not each texture's: a
+/// `wgpu::Texture` is `Clone`, and a clone taken from the slice escapes
+/// it, so a caller keeps no clone of these textures past the handle.
 #[derive(Debug)]
 pub struct Imported<'f> {
     textures: Vec<wgpu::Texture>,
@@ -212,9 +214,11 @@ impl Importer {
     /// and acquires them from the decoder for wgpu's queue in a submission
     /// of their own, ahead of anything that reads them. A texture holds a
     /// dup of its layer's fd, but the decoder writes the memory again once
-    /// the frame is let go, so the textures borrow `frame`: it can't be
-    /// let go while they live. The GPU may read them after, so the caller
-    /// holds the frame on until the work that reads them is done
+    /// the frame is let go, so the [`Imported`] handle borrows `frame`: it
+    /// can't be let go while the handle lives. A clone of one of its
+    /// textures escapes the borrow, so the caller keeps none past the
+    /// handle. The GPU may read them after, so the caller holds the frame
+    /// on until the work that reads them is done
     /// (`Queue::on_submitted_work_done`).
     ///
     /// `Invalid` when a plane isn't one of `frame`'s layers. `Import` when
@@ -222,7 +226,7 @@ impl Importer {
     /// modifier or size, with the reason; the copy path still takes the
     /// frame.
     ///
-    /// The frame outlives its textures:
+    /// The frame outlives the handle:
     ///
     /// ```
     /// # use spherecut_core::video::VideoPlanes;
@@ -241,7 +245,7 @@ impl Importer {
     /// }
     /// ```
     ///
-    /// and a frame let go while they live doesn't compile:
+    /// and a frame let go while the handle lives doesn't compile:
     ///
     /// ```compile_fail,E0505
     /// # use spherecut_core::video::VideoPlanes;
