@@ -60,7 +60,7 @@ use spherecut_synth::media::{self, CLIP_COLOR, Codec, Spec};
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{AXIS_MARKERS, Pattern, RgbImage, decode_frame_code, render_equirect};
 use spherecut_testkit::control::must_fail;
-use spherecut_testkit::{Fnv64, fnv64};
+use spherecut_testkit::{Fnv64, bless, fnv64};
 
 use document::document;
 
@@ -1645,8 +1645,8 @@ fn has_two_keys(w: &Value) -> bool {
 
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
-const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
-const LOWER: &str = "lower";
+const UPDATE: &str = bless::UPDATE_GOLDENS;
+const LOWER: &str = bless::LOWER;
 const REGENERATE: &str =
     "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens";
 /// The render goldens' rules (D32): between driver builds, at most
@@ -1888,7 +1888,6 @@ struct Run {
 
 impl Run {
     fn new() -> Run {
-        let update = std::env::var(UPDATE).ok();
         let path = Path::new(GOLDENS).join(MANIFEST);
         let manifest = std::fs::read_to_string(&path)
             .map_err(|e| format!("no manifest at {} ({e})", path.display()))
@@ -1897,8 +1896,8 @@ impl Run {
                     .map_err(|e| format!("{} doesn't parse: {e}", path.display()))
             });
         Run {
-            bless: update.is_some(),
-            lower_floors: update.as_deref() == Some(LOWER),
+            bless: bless::on(UPDATE),
+            lower_floors: bless::lower(UPDATE),
             manifest,
             driver: None,
             row: String::new(),

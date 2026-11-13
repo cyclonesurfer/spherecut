@@ -1502,6 +1502,7 @@ pub fn run(a: Args) -> Result<()> {
         eprintln!("==> {} Tier 2 tests", tests.len());
         return Ok(());
     }
+    crate::refuse_blessing(&|name: &str| std::env::var_os(name))?;
     let started = Instant::now();
     let host = hostname();
     let commit = short_commit();

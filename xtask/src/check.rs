@@ -19,6 +19,7 @@ pub struct Args {
 }
 
 pub fn run(a: Args) -> Result<()> {
+    crate::refuse_blessing(&|name: &str| std::env::var_os(name))?;
     for (sub, pkg) in [("fmt", "rustfmt"), ("clippy", "clippy")] {
         if !have_cargo_subcommand(sub) {
             bail!(

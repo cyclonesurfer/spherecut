@@ -188,7 +188,7 @@ const REGENERATE: &str =
     "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test instrument";
 
 fn blessing() -> bool {
-    std::env::var_os(UPDATE).is_some_and(|v| !v.is_empty() && v != "0")
+    spherecut_testkit::bless::on(UPDATE)
 }
 
 fn may_lower() -> bool {

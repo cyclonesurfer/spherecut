@@ -84,15 +84,15 @@ use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
 use spherecut_testkit::control::{above, at_most, below, must_fail};
-use spherecut_testkit::{Fnv64, bench, tier2};
+use spherecut_testkit::{Fnv64, bench, bless, tier2};
 
 /// Where the stored images and the manifest live.
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
 /// Set to bless; set to [`LOWER`] to let the blessing lower a floor by
 /// more than [`FLOOR_DROP_DB`].
-const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
-const LOWER: &str = "lower";
+const UPDATE: &str = bless::UPDATE_GOLDENS;
+const LOWER: &str = bless::LOWER;
 /// What rewrites the goldens.
 const REGENERATE: &str = "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens";
 
@@ -3381,11 +3381,14 @@ fn widened(v: &ViewParams, size: (u32, u32), px: f64) -> Option<ViewParams> {
 fn goldens() {
     let gpu = gpu();
     assert_eq!(gpu.caps.info.device_type, wgpu::DeviceType::Cpu);
-    let update = std::env::var_os(UPDATE);
-    let bless = update.as_ref().is_some_and(|v| !v.is_empty() && v != "0");
     let _ = std::fs::remove_dir_all(diff_dir());
-    let mut run = Run::new(gpu, Mode::Golden { bless });
-    run.lower_floors = update.is_some_and(|v| v == LOWER);
+    let mut run = Run::new(
+        gpu,
+        Mode::Golden {
+            bless: bless::on(UPDATE),
+        },
+    );
+    run.lower_floors = bless::lower(UPDATE);
     run.tell = true;
     let start = Instant::now();
     run_rows(&mut run, None);
