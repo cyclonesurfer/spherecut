@@ -1261,7 +1261,13 @@ const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
 /// `spherecut render` and `frame --project` of a dual-fisheye project,
 /// or of an EAC pair's, fail `not_yet` until M3.11, writing nothing: the
 /// refusal comes before a render starts, so nothing is ever rendered from
-/// lens 0 alone. Control: an equirect project renders.
+/// lens 0 alone. Each names the media file by `path`, and its advice is
+/// the pair's (the M3.9 review's R9 and N11): `frame --reference` shows
+/// two fisheye lenses stitched, and nothing stitches an EAC pair yet, so
+/// its advice names no flag of frame's (`--equirect` would show one track
+/// alone as an equirect). Controls: an equirect project renders; frame's
+/// refusal held to another file's path; and each pair's advice held to
+/// the other's rule.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
     let began = Instant::now();
@@ -1287,49 +1293,85 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
     saved(m, &eac);
     let out = dir.join("out.mp4");
     let png = dir.join("still.png");
-    // Both commands' refusals of the project at `p` whose media is the
-    // file `media`, and their messages, or what they did instead: each
-    // runs, and then each is held to the refusal.
-    let refused = |p: &Path, media: &Path| -> Result<[String; 2], String> {
-        let ran = run(p, &out, SHORT);
-        let (status, still) = frame_of(p, &png);
-        let said = |m: &Value| m.as_str().unwrap_or("").to_string();
+    let said = |m: &Value| m.as_str().unwrap_or("").to_string();
+    // Both commands on the project at `p`: render's run, and frame's
+    // status and document.
+    let both = |p: &Path| (run(p, &out, SHORT), frame_of(p, &png));
+    // Each one's refusal of a project whose media is the file `media`,
+    // and its message, or what it did instead.
+    let render_refused = |ran: &Ran, media: &Path| -> Result<String, String> {
         let doc = ran.last();
         let e = &doc["error"];
-        if !(ran.status == Some(1)
+        if ran.status == Some(1)
             && ran.code() == "not_yet"
             && ran.lines.len() == 1
             && doc["schema"] == contract::RENDER
             && said(&e["message"]).contains("M3.11")
-            && e["path"] == media.to_str().unwrap())
+            && e["path"] == media.to_str().unwrap()
         {
-            return Err(format!("render: {:?} {:?}", ran.status, ran.lines));
+            Ok(said(&e["message"]))
+        } else {
+            Err(format!("render: {:?} {:?}", ran.status, ran.lines))
         }
-        let f = &still["error"];
-        if !(status == Some(1)
-            && f["code"] == "not_yet"
-            && still["schema"] == contract::FRAME
-            && said(&f["message"]).contains("M3.11"))
-        {
-            return Err(format!("frame: {status:?} {still}"));
-        }
-        Ok([said(&e["message"]), said(&f["message"])])
     };
-    for (p, media, pair) in [
-        (&cam, &master, "two fisheye lenses"),
-        (&eac, &src, "two EAC tracks"),
-    ] {
-        let said = refused(p, media).unwrap();
-        assert!(said.iter().all(|m| m.contains(pair)), "{said:?}");
-    }
+    let frame_refused =
+        |(status, still): &(Option<i32>, Value), media: &Path| -> Result<String, String> {
+            let f = &still["error"];
+            if *status == Some(1)
+                && f["code"] == "not_yet"
+                && still["schema"] == contract::FRAME
+                && said(&f["message"]).contains("M3.11")
+                && f["path"] == media.to_str().unwrap()
+            {
+                Ok(said(&f["message"]))
+            } else {
+                Err(format!("frame: {status:?} {still}"))
+            }
+        };
+    let refused =
+        |(ran, still): &(Ran, (Option<i32>, Value)), media: &Path| -> Result<[String; 2], String> {
+            Ok([render_refused(ran, media)?, frame_refused(still, media)?])
+        };
+    // The pairs' advice: frame's flag that stitches two fisheye lenses,
+    // or neither of frame's flags for a pair.
+    let reference = |said: &[String; 2]| said.iter().all(|m| m.contains("--reference"));
+    let no_flag = |said: &[String; 2]| {
+        said.iter()
+            .all(|m| !m.contains("--reference") && !m.contains("--equirect"))
+    };
+    let fisheye = refused(&both(&cam), &master).unwrap();
+    assert!(
+        fisheye.iter().all(|m| m.contains("two fisheye lenses")) && reference(&fisheye),
+        "{fisheye:?}"
+    );
+    let eac_ran = both(&eac);
+    let pair = refused(&eac_ran, &src).unwrap();
+    assert!(
+        pair.iter()
+            .all(|m| m.contains("two EAC tracks") && m.contains("can't stitch"))
+            && no_flag(&pair),
+        "{pair:?}"
+    );
     assert!(!out.exists() && !png.exists());
     assert_eq!(temp_files(&dir), Vec::<String>::new());
     eprintln!("refused in {:.3} s", began.elapsed().as_secs_f64());
 
+    must_fail(
+        "frame's refusal held to another file's path",
+        frame_refused(&eac_ran.1, &master),
+    );
+    must_fail(
+        "the EAC pair's advice held to --reference",
+        reference(&pair),
+    );
+    must_fail(
+        "the fisheye pair's advice held to no flag",
+        no_flag(&fisheye),
+    );
     let flat = project(&dir, &src);
-    must_fail("the equirect project", refused(&flat, &src));
+    must_fail("the equirect project", refused(&both(&flat), &src));
     assert!(out.exists() && png.exists());
-    eprintln!("with the control, {:.3} s", began.elapsed().as_secs_f64());
+    eprintln!("with the controls, {:.3} s", began.elapsed().as_secs_f64());
 }
 
 /// The project at `p` with its media's stored evidence rewritten from

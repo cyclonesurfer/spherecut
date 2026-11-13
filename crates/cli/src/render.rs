@@ -472,8 +472,11 @@ pub(crate) fn media(
             format!("the clip's media {} isn't in the project", clip.media.0),
         ));
     };
-    // A camera's pair: the table's newer geometry, if it has one, then
-    // the refusal, which the failure's warnings carry it beside.
+    // A camera's pair: the table's other geometry, if it has one, then
+    // the refusal, which the failure's warnings carry it beside, with the
+    // pair's advice (the M3.9 review's R9): `frame --reference` stitches
+    // two fisheye lenses, and nothing stitches an EAC pair yet, whose
+    // advice names no flag (`--equirect` would show one track alone).
     let pair = match &m.source {
         Source::Equirect {} => None,
         Source::DualFisheye(d) => {
@@ -482,17 +485,23 @@ pub(crate) fn media(
                 tracing::warn!("{message}");
                 warnings.push(Warning::new(codes::warnings::PROVISIONAL_GEOMETRY, message));
             }
-            Some("a camera's two fisheye lenses")
+            Some((
+                "a camera's two fisheye lenses",
+                "frame the file itself with --reference to see it stitched",
+            ))
         }
-        Source::EacPair(_) => Some("a camera's two EAC tracks"),
+        Source::EacPair(_) => Some((
+            "a camera's two EAC tracks",
+            "frame can't stitch a GoPro EAC pair yet either",
+        )),
     };
-    if let Some(pair) = pair {
+    if let Some((pair, advice)) = pair {
         return Err(about(
             failure(
                 codes::NOT_YET,
                 format!(
                     "the clip's media {} is {pair}: stitched rendering of projects arrives in \
-                     M3.11; frame the file itself to see it",
+                     M3.11; {advice}",
                     m.path.display()
                 ),
             ),

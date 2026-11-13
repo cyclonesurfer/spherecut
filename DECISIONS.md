@@ -11403,7 +11403,10 @@ What, as `crates/core/src/project/` has it:
   (`spherecut render`, `frame --project`, and agents' `look`,
   `compare`, `check` and `render`) refuses a project whose clip's media
   is a camera's pair with `not_yet`, rather than render one lens as an
-  equirect (plan 14); the window's export refuses such a file by its
+  equirect (plan 14), with advice for the pair's kind (the M3.9
+  review's R9): `frame --reference` shows two fisheye lenses
+  stitched, and nothing stitches an EAC pair yet, so its advice names
+  no flag of frame's; the window's export refuses such a file by its
   streams (M3.0).
 
 **`validate`'s rules for a source** (plan 11.2, with what M3.9
