@@ -1002,8 +1002,10 @@ impl MediaBackend for Slowed {
 /// The synthetic clip, whose decoders' numbers say that each frame
 /// handed out waited 1.5 ms for the pictures queued on a VA-API device,
 /// finding 2 surfaces not yet ready, and that one sync failed and one
-/// surface was forgotten in all; with the drain mode each open asked
-/// for.
+/// surface was forgotten in all; and that the decoder found no
+/// `vaSyncSurface` to call, which no real decoder says beside drains,
+/// but the worker counts it apart, once an open. With the drain mode each
+/// open asked for.
 #[derive(Debug)]
 struct Draining {
     inner: SyntheticBackend,
@@ -1053,6 +1055,7 @@ impl VideoDecode for DrainingVideo {
             drain_waited: 2 * n,
             drain_errors: n.min(1),
             drain_overflow: n.min(1),
+            drain_unavailable: true,
             ..s
         }
     }
@@ -1091,8 +1094,8 @@ impl MediaBackend for Draining {
 
 /// Whether `perf` holds the drains of `decoders` of [`Draining`]'s
 /// decoders: for each frame handed out, a drain stage sample of 1.5 ms
-/// and 2 surfaces waited for; one failed sync and one forgotten surface
-/// a decoder.
+/// and 2 surfaces waited for; one failed sync, one forgotten surface and
+/// one open that found no `vaSyncSurface` a decoder.
 fn drained(perf: &PerfStats, decoders: u64) -> bool {
     let frames = perf.summary(Stage::Decode).recorded;
     let drain = perf.summary(Stage::Drain);
@@ -1106,6 +1109,7 @@ fn drained(perf: &PerfStats, decoders: u64) -> bool {
         && perf.count(Counter::DrainWaited) == 2 * frames
         && perf.count(Counter::DrainErrors) == decoders
         && perf.count(Counter::DrainOverflow) == decoders
+        && perf.count(Counter::DrainUnavailable) == decoders
 }
 
 /// Whether `perf` holds nothing of a drain: no drain stage sample, no
@@ -1131,8 +1135,9 @@ fn no_drain(perf: &PerfStats) -> bool {
 /// never drains, records none of it.
 ///
 /// Controls: the synthetic clip's own decoders, which drain nothing, fail
-/// the check of a decoder that drained; and the draining decoders' numbers
-/// fail the check of one that didn't.
+/// the check of a decoder that drained, and its count of opens that found
+/// no `vaSyncSurface` on its own; and the draining decoders' numbers fail
+/// the check of one that didn't.
 #[test]
 fn a_decoder_s_drains_reach_the_drain_stage_and_counters() {
     let asked = Arc::new(Mutex::new(Vec::new()));
@@ -1192,6 +1197,12 @@ fn a_decoder_s_drains_reach_the_drain_stage_and_counters() {
     must_fail(
         "a decoder that drains nothing read as draining",
         drained(&none, 2),
+    );
+    // The one open of the plain run, under the default drain, found
+    // `vaSyncSurface` as far as its decoder says.
+    must_fail(
+        "a decoder that had vaSyncSurface counted as finding none",
+        none.count(Counter::DrainUnavailable) == 1,
     );
     must_fail(
         "the draining decoders read as draining nothing",
