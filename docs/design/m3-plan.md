@@ -1377,7 +1377,10 @@ symbol); an amendment's are at its own date.*
      fixture was shrunk and no check cut. The largest shares: agent `tests/project.rs` 1.57 to 1.75
      s, cli `tests/render.rs` 1.32 to 1.40 s, the stitch property at 256 cases with its corners 1.11
      to 1.17 s, and synth `tests/project.rs` 1.06 to 1.13 s. The 100k stitch property, the gate
-     before a merge, takes about 425 to 440 s (its file 428.57 s at d478083).
+     before a merge, takes about 425 to 440 s (its file 428.57 s at d478083). *Pat, 2026-11-13
+     17:54Z:* the row rises from 5 s to 6 s, on the fix round's 5.45 to 5.75 s, so the slice is
+     within it. M3's budgets then sum to 137.5 s, and M3 adds at most about 138 s to `cargo xtask
+     check`.
    - **Open.** The coverage rule leaves LOD's margin out: at LOD 0 a tune it passes by less than the
      margin (0.12° to 0.13° at a side of 3840) can leave a ring about as wide; whether `validate`
      adds LOD 0's margin at the media's track side, or 10.3's mask stops taking it off where both
@@ -1387,7 +1390,8 @@ symbol); an amendment's are at its own date.*
      at extreme Auto ratios (M3.11); `camera_source` and the table's `stitchable: false` rows
      (M3.10, M3.11).
    - **Changed in place.** The header's paragraph on section 0 (the items run 1 to 9); 14's
-     list-budget paragraph (12,235 bytes); 19.6's M3.9 line (5 s) and its total (about 137 s);
+     list-budget paragraph (12,235 bytes); 19.6's M3.9 line (5 s, then 6 s) and its total (about
+     137 s, then about 138 s);
      22.1's M3.9 row (media 12, and `not_yet` until M3.11); and 23's D57 entry (media 12). Each but
      the header's count is marked [amendment 9].
 
@@ -3463,8 +3467,8 @@ sphere's properties and rung 0 ≤ 30 s in release [amendment 4: in a debug buil
 opt-level 3] (M3.3); metrics, seam self-tests, the
 attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s [amendment 8: 4.5 s, measured 3.60 to 3.67 s] (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
 recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8, measured: its 32 tests 5.3 to 5.9 s alone and 6.7 to 7.4 s beside four busy loops, 5.5 s alone after D77's compute mips, none measured under load since: amendment 6); schema, edits
-and agents ≤ 3 s [amendment 9: 5 s, measured 4.7 to 4.9 s; 5.45 to 5.75 s after its fix round] (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
-(M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s [amendment 9: about 137 s] to `cargo xtask
+and agents ≤ 3 s [amendment 9: 5 s, measured 4.7 to 4.9 s; 5.45 to 5.75 s after its fix round, and 6 s from Pat's choice of 2026-11-13] (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
+(M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s [amendment 9: about 137 s; about 138 s with the M3.9 row at 6 s] to `cargo xtask
 check`; each slice note records the growth.
 
 ## 20. Dependencies and provenance
