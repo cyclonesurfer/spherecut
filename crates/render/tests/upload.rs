@@ -16,17 +16,21 @@
 
 mod common;
 
+use common::rig::sphere_rig;
 use common::{Frame, Kind, Rng, gpu, lavapipe_unorm8, radv_unorm8, unrounded_mip_mean};
 use spherecut_core::video::{ChromaSiting, Matrix, Range, SampleBytes};
 use spherecut_render::plane::full_chain;
 use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::upload::EightBitMips;
 use spherecut_render::{
-    AdapterChoice, DebugMode, Filter, Gpu, GpuFrame, GpuTimers, LinearTarget, Placement,
-    PlaneFormat, Projector, SlotShape, StillOptions, StillRenderer, UploadPath, Uploader,
-    ViewParams, dmabuf, reference, upload, vkshare,
+    AdapterChoice, DebugMode, Depth, Filter, Gpu, GpuFrame, GpuTimers, Image, LensFrame,
+    LinearTarget, Pixels, Placement, PlaneFormat, PlaneSource, Projector, SlotShape, SourceFrames,
+    StillOptions, StillRenderer, UploadPath, Uploader, ViewParams, dmabuf, reference, upload,
+    vkshare,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_synth::lens::{x5_like, x5_like_planted};
+use spherecut_synth::rung::{FRONT_TRACK, far};
 use spherecut_synth::{Pattern, render_equirect};
 use spherecut_testkit::bench;
 use spherecut_testkit::control::must_fail;
@@ -1822,11 +1826,89 @@ fn buffers_that_dont_fit_are_refused() {
         .unwrap();
 }
 
+/// A picture's linear values, bit for bit.
+fn bits(image: &Image) -> Vec<u32> {
+    match &image.pixels {
+        Pixels::LinearF32(v) => v.iter().map(|x| x.to_bits()).collect(),
+        other => panic!("a linear picture, not {other:?}"),
+    }
+}
+
 /// One pair drawn with each lens's planes as bytes, in a buffer and as
 /// textures already on the GPU, mixed between the lenses too, comes out
 /// byte for byte the same (M3 plan 10.4).
+///
+/// Two NV12 frames of noise at 192², one with padded rows, under sphere's
+/// rig of synth's X5-like camera, stitched to a 128 × 64 equirect read
+/// back linear: both lenses in a buffer, both imported, and bytes with a
+/// buffer, imported with bytes and a buffer with imported, each the
+/// bytes' picture bit for bit. One renderer draws them all and reuses its
+/// slots, so before each it draws the lenses swapped, which a path that
+/// wrote nothing would leave. Control: the lenses' buffers swapped.
 #[test]
-#[ignore = "M3.7 unit (a)"]
 fn a_pair_renders_alike_on_every_upload_path() {
-    todo!()
+    const SIDE: u32 = 192;
+    let gpu = gpu();
+    let frames = [
+        noise(Kind::Nv12, (SIDE, SIDE), 0, 61),
+        noise(Kind::Nv12, (SIDE, SIDE), 16, 62),
+    ];
+    let rig = sphere_rig(
+        &x5_like(),
+        &x5_like_planted(),
+        &far(),
+        FRONT_TRACK,
+        [SIDE; 2],
+    )
+    .unwrap();
+    let buffers = frames.each_ref().map(|f| in_buffer(f, &Placement::FULL));
+    let textures = frames.each_ref().map(on_gpu);
+    let bytes = PlaneSource::Bytes;
+    let buffer = |t: usize| PlaneSource::Buffer(&buffers[t].0, &buffers[t].1);
+    let imported = |t: usize| PlaneSource::Imported(&textures[t]);
+    let view = ViewParams::equirect(glam::DQuat::IDENTITY);
+    let opts = StillOptions {
+        depth: Depth::Linear,
+        ..StillOptions::default()
+    };
+    let mut renderer = StillRenderer::new(gpu);
+    let mut draw = |order: [usize; 2], from: [PlaneSource; 2]| {
+        let lenses = [0, 1].map(|t| LensFrame {
+            frame: &frames[order[t]],
+            from: from[t],
+        });
+        let pair = SourceFrames::Pair {
+            lenses,
+            rig: &rig,
+            gains: [[1.0; 3]; 2],
+        };
+        let image = renderer
+            .render_blurred(gpu, pair, std::slice::from_ref(&view), (128, 64), &opts)
+            .unwrap();
+        bits(&image)
+    };
+    let (ours, swapped) = ([0, 1], [1, 0]);
+    let want = draw(ours, [bytes, bytes]);
+    for (what, from) in [
+        ("both in buffers", [buffer(0), buffer(1)]),
+        ("both imported", [imported(0), imported(1)]),
+        ("bytes with a buffer", [bytes, buffer(1)]),
+        ("imported with bytes", [imported(0), bytes]),
+        ("a buffer with imported", [buffer(0), imported(1)]),
+    ] {
+        assert_ne!(draw(swapped, [bytes, bytes]), want, "{what}: swapped first");
+        let got = draw(ours, from);
+        let differ = got.iter().zip(&want).filter(|(a, b)| a != b).count();
+        assert_eq!(
+            differ, 0,
+            "{what}: {differ} values differ from the bytes' picture"
+        );
+    }
+    let crossed = draw(ours, [buffer(1), buffer(0)]);
+    let differ = crossed.iter().zip(&want).filter(|(a, b)| a != b).count();
+    must_fail("the lenses' buffers swapped", crossed == want);
+    eprintln!(
+        "the lenses' buffers swapped: {differ} of {} values differ",
+        want.len()
+    );
 }
