@@ -1112,7 +1112,9 @@ impl<'g> Run<'g> {
 
     /// Renders `pair` stitched by `rig` with `gains`, as
     /// [`StillRenderer::render_blurred`] renders a pair of its frames'
-    /// bytes, or records why it couldn't.
+    /// bytes, or records why it couldn't. `gains` must be the pair's own,
+    /// which its manifest entry records: other gains are a failure, and
+    /// nothing is rendered.
     #[allow(clippy::too_many_arguments)]
     fn render_pair(
         &mut self,
@@ -1123,6 +1125,14 @@ impl<'g> Run<'g> {
         size: (u32, u32),
         opts: StillOptions,
     ) -> Option<Image> {
+        if gains != pair.gains {
+            self.fail(format!(
+                "render_pair's gains {gains:?} aren't the pair's {:?}, which its manifest \
+                 entry records",
+                pair.gains
+            ));
+            return None;
+        }
         let lenses = pair.frames.map(|frame| LensFrame {
             frame,
             from: PlaneSource::Bytes,
@@ -4007,6 +4017,22 @@ fn a_changed_pair_is_not_compared_as_a_render() {
         failures.len() == 1 && failures[0].contains("the synthetic source changed"),
         "{failures:?}"
     );
+    // Gains other than the pair's, which its entry records, aren't
+    // rendered; its own are (the control).
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let mut run = Run::at(gpu(), Mode::Golden { bless: false }, &dir, &diffs);
+    run.begin("pair_gains");
+    let other = [[1.0, 1.1, 1.0], [1.0; 3]];
+    let drawn = run.render_pair(&pair, &t.rig, other, &v, size, StillOptions::default());
+    assert!(
+        drawn.is_none() && run.failures.len() == 1 && run.failures[0].contains("aren't the pair's"),
+        "gains the pair doesn't record: {:?}",
+        run.failures
+    );
+    let own = run.render_pair(&pair, &t.rig, pair.gains, &v, size, StillOptions::default());
+    must_fail("the pair's own gains refused", own.is_none());
 }
 
 #[test]
