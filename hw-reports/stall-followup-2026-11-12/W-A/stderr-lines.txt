@@ -1,0 +1,4 @@
+2026-11-13T00:40:49.945466Z TRACE wgpu_core::device::surface_config: Automatically choosing presentation mode by rule AutoVsync. Chose Fifo
+2026-11-13T00:40:49.947393Z  WARN arboard::platform::linux: Tried to initialize the wayland data control protocol clipboard, but failed. Falling back to the X11 clipboard protocol. The error was: Unknown error while interacting with the clipboard: A required Wayland protocol (ext-data-control, or wlr-data-control version 1) is not supported by the compositor
+2026-11-13T00:40:49.963191Z TRACE wgpu_core::device::surface_config: Automatically choosing presentation mode by rule AutoVsync. Chose Fifo
+2026-11-13T00:40:50.202101Z  INFO spherecut_app::smoke: the smoke run plays clip=target/hw-media/hevc10-5k7-30fps-noisy-20s.mp4 seconds=20.0

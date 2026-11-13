@@ -7,8 +7,12 @@
 //! 2. the output, before any work, as `frame` checks it: something there
 //!    is refused unless `--overwrite` is given, and a directory, pipe or
 //!    device either way;
-//! 3. the project, loaded (exit 1 with its error's code), and its media:
-//!    offline is exit 1, a file that changed is a warning;
+//! 3. the project, loaded (exit 1 with its error's code), and its media
+//!    files, each looked at: a camera's pair is refused `not_yet` (exit 1)
+//!    until M3.11 stitches a project, before the offline check, after a
+//!    `provisional_geometry` warning when the table of cameras has
+//!    superseded its stored geometry; then offline is exit 1, and a file
+//!    that changed is a warning;
 //! 4. the flags' changes for this run, not saved: `--preset` and
 //!    `--range` (`out_of_range` outside the sequence, exit 1) through the
 //!    project's own edits, so its rules hold, and the export settings;
@@ -40,11 +44,13 @@ use spherecut_cli::contract::{
 use spherecut_core::TimeSpec;
 use spherecut_core::project::file::{self, FileError, MediaStatus};
 use spherecut_core::project::{
-    AudioChoice, Codec, Edit, EncoderChoice, Orientation, Output, Project, Quality,
+    AudioChoice, Codec, Edit, EncoderChoice, Orientation, Output, Project, Quality, Source,
 };
 use spherecut_core::time::Time;
 use spherecut_export::{Decoder, Export, ExportError, ExportJob, Preset, Progress, Report};
+use spherecut_media::project::{Superseded, superseded_by_table};
 use spherecut_render::{AdapterChoice, Gpu};
+use spherecut_sphere::rig::Status;
 
 use crate::{DOCUMENT_STARTED, PANICKED, emit, frame, interrupt, print_json, to_stderr};
 
@@ -449,9 +455,15 @@ pub(crate) fn project_error(path: &Path, e: &FileError) -> Failure {
     about(failure(code, message), path)
 }
 
-/// Step 3's look at the clip's media: an offline clip fails, a changed
-/// file is a warning (M2 plan section 5.3) that says it is `doing`
-/// anyway: `exporting`, or `frame --project`'s `rendering`.
+/// Step 3's look at the clip's media. Every media file is looked at
+/// first ([`file::media_status`]). Then a camera's pair fails `not_yet`
+/// until M3.11 (M3 plan 14), with advice for its kind, before the
+/// offline check, so nothing renders one lens as an equirect; a pair of
+/// fisheye lenses whose stored geometry the table has superseded gets a
+/// `provisional_geometry` warning first (11.4), which the failure
+/// carries. Then an offline clip fails, and a changed file is a warning
+/// (M2 plan section 5.3) that says it is `doing` anyway: `exporting`, or
+/// `frame --project`'s `rendering`.
 pub(crate) fn media(
     project: &Project,
     doing: &str,
@@ -470,6 +482,42 @@ pub(crate) fn media(
             format!("the clip's media {} isn't in the project", clip.media.0),
         ));
     };
+    // A camera's pair: the table's other geometry, if it has one, then
+    // the refusal, which the failure's warnings carry it beside, with the
+    // pair's advice (the M3.9 review's R9): `frame --reference` stitches
+    // two fisheye lenses, and nothing stitches an EAC pair yet, whose
+    // advice names no flag (`--equirect` would show one track alone).
+    let pair = match &m.source {
+        Source::Equirect {} => None,
+        Source::DualFisheye(d) => {
+            if let Some(s) = superseded_by_table(d) {
+                let message = superseded_message(&m.path, &s);
+                tracing::warn!("{message}");
+                warnings.push(Warning::new(codes::warnings::PROVISIONAL_GEOMETRY, message));
+            }
+            Some((
+                "a camera's two fisheye lenses",
+                "frame the file itself with --reference to see it stitched",
+            ))
+        }
+        Source::EacPair(_) => Some((
+            "a camera's two EAC tracks",
+            "frame can't stitch a GoPro EAC pair yet either",
+        )),
+    };
+    if let Some((pair, advice)) = pair {
+        return Err(about(
+            failure(
+                codes::NOT_YET,
+                format!(
+                    "the clip's media {} is {pair}: stitched rendering of projects arrives in \
+                     M3.11; {advice}",
+                    m.path.display()
+                ),
+            ),
+            &m.path,
+        ));
+    }
     match status {
         MediaStatus::Present => Ok(()),
         MediaStatus::Missing => Err(about(
@@ -492,6 +540,24 @@ pub(crate) fn media(
             Ok(())
         }
     }
+}
+
+/// `provisional_geometry`'s message for the media at `path`, whose
+/// stored geometry the table superseded as `s` says (M3 plan 11.4). A
+/// provisional entry is "a different guess", never a newer one: the table
+/// keeps no order, so an older build reading a project made under a
+/// later table finds its own guess different too (the M3.9 review's N4).
+fn superseded_message(path: &Path, s: &Superseded) -> String {
+    let now = match s.status {
+        Status::Settled => "a settled one",
+        _ => "a different guess",
+    };
+    format!(
+        "{}: the project's lens geometry is provisional, and Spherecut's table of cameras now \
+         has {now} ({}); the project keeps its own until an edit takes the table's",
+        path.display(),
+        s.evidence
+    )
 }
 
 /// Step 4's changes to the project, made with its own edits so that its
@@ -763,6 +829,45 @@ mod tests {
         assert!(range("5").unwrap_err().contains("IN..OUT"));
         assert!(range("-1..5").is_err());
         assert!(range("a..5").is_err());
+    }
+
+    /// `provisional_geometry`'s message names the file and the table's
+    /// entry with its evidence: "a settled one" when the entry is
+    /// settled, and "a different guess" when it is provisional, never a
+    /// newer one, since the table keeps no order (the M3.9 review's N4 and
+    /// N11). Controls: a provisional entry held to the settled words, and
+    /// a settled entry to the guess's.
+    #[test]
+    fn a_superseded_geometry_names_the_table_entry() {
+        use spherecut_testkit::control::must_fail;
+
+        let path = Path::new("/clips/cam.insv");
+        let said = |status| {
+            superseded_message(
+                path,
+                &Superseded {
+                    status,
+                    evidence: "measured on clips 8 to 10".into(),
+                },
+            )
+        };
+        let settled = |m: &str| m.contains("now has a settled one (measured on clips 8 to 10)");
+        let guessed = |m: &str| {
+            m.contains("now has a different guess (measured on clips 8 to 10)")
+                && !m.contains("newer")
+        };
+        let m = said(Status::Settled);
+        assert!(m.starts_with("/clips/cam.insv: ") && settled(&m), "{m}");
+        let guess = said(Status::Provisional);
+        assert!(
+            guess.starts_with("/clips/cam.insv: ") && guessed(&guess),
+            "{guess}"
+        );
+        must_fail(
+            "a provisional entry held to the settled words",
+            settled(&guess),
+        );
+        must_fail("a settled entry held to the guess's words", guessed(&m));
     }
 
     #[test]

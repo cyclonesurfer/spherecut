@@ -116,6 +116,10 @@ pub mod codes {
     /// render: the clip's media file isn't where the project says, so the
     /// clip is offline (exit 1).
     pub const MEDIA_OFFLINE: &str = "media_offline";
+    /// render and frame --project: the clip's media is a camera's pair,
+    /// two fisheye lenses or two EAC tracks, which a project renders
+    /// stitched from M3.11; until then nothing is rendered (exit 1).
+    pub const NOT_YET: &str = "not_yet";
 
     /// Every error code above.
     pub const ALL: &[&str] = &[
@@ -134,6 +138,7 @@ pub mod codes {
         MALFORMED_PROJECT,
         INVALID_PROJECT,
         MEDIA_OFFLINE,
+        NOT_YET,
     ];
 
     /// frame's warnings that aren't errors' codes too: what it did with
@@ -161,6 +166,12 @@ pub mod codes {
         /// message gives the table's notice ("geometry assumed from the
         /// X5") and evidence.
         pub const GEOMETRY_ASSUMED: &str = "geometry_assumed";
+        /// render and frame --project: the clip's media is a camera's
+        /// pair whose stored geometry is provisional, and Spherecut's
+        /// table of cameras has since superseded it (M3 plan 11.4); the
+        /// message gives the table's evidence. The project keeps its own
+        /// until an edit changes it.
+        pub const PROVISIONAL_GEOMETRY: &str = "provisional_geometry";
 
         pub const ALL: &[&str] = &[
             STEREO_LEFT_EYE,
@@ -170,6 +181,7 @@ pub mod codes {
             ANISOTROPY_UNAVAILABLE,
             MEDIA_CHANGED,
             GEOMETRY_ASSUMED,
+            PROVISIONAL_GEOMETRY,
         ];
     }
 }

@@ -41,12 +41,19 @@
 //! These types share no code with the synthetic camera's
 //! (`spherecut_synth::lens`), which composes the same rig from the plan's
 //! text with its own code to check this one (4.1 rule 2).
+//!
+//! A project stores the geometry, the tune and each calibration block it
+//! renders with (plan 11.1), so they read and write as JSON: snake_case
+//! words for the small enums, a [`QuarterTurn`] as its whole degrees and
+//! a [`Sign`] as 1 or −1, every field written, and a key a type doesn't
+//! have refused.
 
 use std::cmp::Ordering;
 use std::f64::consts::{FRAC_PI_2, PI};
 use std::fmt;
 
 use glam::{DQuat, DVec2, DVec3, DVec4};
+use serde::{Deserialize, Serialize};
 
 use crate::fisheye::{Canonical, F, LensModel, Unified, V6Reading};
 use crate::orient::Ypr;
@@ -54,7 +61,8 @@ use crate::orient::Ypr;
 /// How a camera's calibration maps to its video, as data (6.2): one
 /// value of each convention the files leave open, with its status and
 /// the evidence for it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Geometry {
     pub binding: Binding,
     pub canvas: CanvasMap,
@@ -75,7 +83,8 @@ pub struct Geometry {
 }
 
 /// Which track each calibration block describes (U2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Binding {
     /// Block b reads track b.
     Direct,
@@ -102,7 +111,8 @@ impl Binding {
 /// reading, D in `docs/formats/insta360.md` §4.4, is unsettled and left
 /// out: the evidence there points away from it, and a convention outside
 /// this space lands as [`Extrinsics::Fitted`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CanvasMap {
     /// Focal f · s/dst, centre c_local · s/src.
     A,
@@ -145,6 +155,20 @@ impl CanvasMap {
         }
     }
 
+    /// The span of a block's own square, in canvas pixels along either
+    /// axis, that its slot shows: the whole square, 0 to src, or under B
+    /// the window, (src − dst)/2 to (src + dst)/2. [`CanvasMap::to_slot`]
+    /// takes its ends to the slot's edges; a principal point outside it
+    /// leaves the lens's axis out of frame, which `validate` refuses (the
+    /// M3.9 review's R2).
+    pub fn slot_span(self, src: u32, dst: u32) -> (f64, f64) {
+        let (src, dst) = (f64::from(src), f64::from(dst));
+        match self {
+            CanvasMap::B => ((src - dst) / 2.0, (src + dst) / 2.0),
+            CanvasMap::A | CanvasMap::C | CanvasMap::Fitted { .. } => (0.0, src),
+        }
+    }
+
     /// The inverse of [`CanvasMap::to_slot`]: a point of a track of side
     /// `side` in its block's square, in canvas pixels. The Stitch pane
     /// turns a drag in the slot into the tune's canvas pixels by it.
@@ -158,7 +182,8 @@ impl CanvasMap {
 }
 
 /// How the lenses' rotations and centres come from the calibration.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum Extrinsics {
     /// Each block's stored angles, composed by an [`EulerConv`] into its
     /// E_b, and its stored translation under [`Geometry::tz`].
@@ -183,7 +208,8 @@ pub enum Extrinsics {
 /// frame, which the strings omit (insta360.md §4.5). Under
 /// [`Extrinsics::Fitted`] the measured relative rotation carries the turn,
 /// and this isn't read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnAxis {
     Y,
     X,
@@ -214,7 +240,8 @@ impl TurnAxis {
 /// +1) gives. And since c_0 = 0, flipping all of c_1 flips c_b − o for
 /// both lenses, so `Negated` at q is exactly `AsStored` at −q: what 8.6's
 /// tz rule reads, since under the wrong sign the wall fits q < 0.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TzSign {
     /// t_1 is lens 1's centre in lens 0's frame: with tz = −31.5 mm it
     /// sits behind lens 0 on lens 0's axis, the physical layout.
@@ -238,8 +265,10 @@ impl TzSign {
     }
 }
 
-/// A quarter turn: 0°, +90°, −90° or 180°.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A quarter turn: 0°, +90°, −90° or 180°. Written as its whole degrees,
+/// −90, 0, 90 or 180.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "i32", try_from = "i32")]
 pub enum QuarterTurn {
     Zero,
     Plus90,
@@ -275,8 +304,31 @@ impl QuarterTurn {
     }
 }
 
+impl From<QuarterTurn> for i32 {
+    fn from(turn: QuarterTurn) -> i32 {
+        match turn {
+            QuarterTurn::Zero => 0,
+            QuarterTurn::Plus90 => 90,
+            QuarterTurn::Minus90 => -90,
+            QuarterTurn::Half => 180,
+        }
+    }
+}
+
+impl TryFrom<i32> for QuarterTurn {
+    type Error = String;
+
+    /// The turn of `deg` whole degrees: −90, 0, 90 or 180.
+    fn try_from(deg: i32) -> Result<QuarterTurn, String> {
+        QuarterTurn::all()
+            .find(|&t| i32::from(t) == deg)
+            .ok_or_else(|| format!("a quarter turn is -90, 0, 90 or 180 degrees, not {deg}"))
+    }
+}
+
 /// The calibration generation the rig reads (insta360.md §4.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Generation {
     /// Mei with k1 k2 k3 and p1 p2.
     V3,
@@ -291,7 +343,8 @@ impl Generation {
 }
 
 /// How far a geometry is to be trusted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Status {
     /// A guess or a placeholder, or measured on other firmware.
     Provisional,
@@ -304,7 +357,8 @@ pub enum Status {
 }
 
 /// A coordinate axis of the frame a rotation turns in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Axis {
     X,
     Y,
@@ -327,7 +381,8 @@ impl Axis {
 }
 
 /// One of a block's three stored angles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Angle {
     Yaw,
     Pitch,
@@ -350,8 +405,9 @@ impl Angle {
     }
 }
 
-/// The sign a stored angle is taken with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The sign a stored angle is taken with. Written as 1 or −1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "i8", try_from = "i8")]
 pub enum Sign {
     Plus,
     Minus,
@@ -360,6 +416,28 @@ pub enum Sign {
 impl Sign {
     pub fn all() -> impl Iterator<Item = Sign> {
         [Sign::Plus, Sign::Minus].into_iter()
+    }
+}
+
+impl From<Sign> for i8 {
+    fn from(sign: Sign) -> i8 {
+        match sign {
+            Sign::Plus => 1,
+            Sign::Minus => -1,
+        }
+    }
+}
+
+impl TryFrom<i8> for Sign {
+    type Error = String;
+
+    /// The sign written as `n`: 1 or −1.
+    fn try_from(n: i8) -> Result<Sign, String> {
+        match n {
+            1 => Ok(Sign::Plus),
+            -1 => Ok(Sign::Minus),
+            _ => Err(format!("a sign is 1 or -1, not {n}")),
+        }
     }
 }
 
@@ -374,7 +452,8 @@ impl Sign {
 /// 3): angle a turns about `axes[a]` by `signs[a]` · (its stored value,
 /// plus `roll_offset` when a is the roll), the signs and axes indexed by
 /// angle whatever the order, and the offset added before the roll's sign.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EulerConv {
     /// The axis each stored angle turns about, by angle (yaw, pitch,
     /// roll): a permutation of X, Y and Z.
@@ -489,7 +568,8 @@ pub struct Calibration {
 }
 
 /// One calibration block's stored numbers. Block 0 is the canvas's left.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LensCalib {
     /// Mei's ξ.
     pub xi: f64,
@@ -517,7 +597,8 @@ pub struct LensCalib {
 
 /// A block's distortion terms as its generation stores them, in token
 /// order.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CalibTerms {
     /// Radial k1, k2 and k3, then Brown's p1 and p2.
     V3 { k: [f64; 3], p: [f64; 2] },
@@ -539,14 +620,28 @@ impl CalibTerms {
 /// seam's width and distance. The gains aren't here: under Auto they
 /// change every frame and sphere can't name core's types, so they are the
 /// media's, in core. The default is what a new source opens with
-/// (11.5), inside every one of `validate`'s bounds (11.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// (11.5), inside each of `validate`'s fixed ranges (11.2), but not
+/// always inside the rules that read the calibration: its 5° feather
+/// passes the feather's bound only where each lens's θ_frame is 95° or
+/// more, and the coverage rule depends on the frame too (the M3.9
+/// review's R7). Core's `DualFisheye::check` runs those rules on a source
+/// before it goes into a project.
+///
+/// Beside each number's bounds, `validate` refuses a tune that leaves a
+/// direction covered by neither lens at its q (the coverage rule): lens
+/// b's mask holds the cap of half-angle min(θ_max, θ_frame) −
+/// asin(q |c_b|) about its axis, and two caps cover the sphere when their
+/// half-angles sum to at least 360° less the angle between the axes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tune {
     /// By calibration block.
     pub lenses: [LensTune; 2],
     /// The feather's half width h, in degrees: each lens's weight falls
     /// from 1 to 0 over 90° ± h (the pane's seam width is 2h). 0 to 15,
-    /// and at most min(θ_max, θ_frame) − 90° for each lens. 5 by default,
+    /// and at most max(0, min(θ_max, θ_frame) − 90°) for each lens, so
+    /// that where a lens's min(θ_max, θ_frame) is under 90° only 0 is: a
+    /// hard switch, which makes no hole of its own. 5 by default,
     /// question 3's recommendation.
     pub feather_deg: f64,
     /// The stitch distance as q = 1/D, in m⁻¹: 0 is infinitely far. 0 to
@@ -566,7 +661,8 @@ impl Default for Tune {
 }
 
 /// One lens's adjustments (6.2, 11.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LensTune {
     /// D33's yaw, pitch and roll of the lens in its block's view frame,
     /// in degrees: yaw > 0 turns the lens right, as seen. Each within
@@ -577,7 +673,10 @@ pub struct LensTune {
     pub centre_px: [f64; 2],
     /// A factor on the focal, 0.9 to 1.1; 1 by default.
     pub radius_scale: f64,
-    /// Added to ξ: 0 unless an own calibration fits it (8.7).
+    /// Added to ξ: 0 unless an own calibration fits it (8.7). Within
+    /// ±0.15, about as far as the radius scale's 0.9 to 1.1 moves θ_frame
+    /// on X5-shaped sets, and ξ plus it above −1, where the unified model
+    /// images nothing (F038).
     pub xi_delta: f64,
     /// θ_max, the widest angle off the axis the lens is used to, in
     /// degrees: 85 to 110 and below the model's `limit_theta`; the pane's
@@ -632,7 +731,8 @@ pub struct RigLens {
     /// θ_max, in radians.
     pub theta_max: f64,
     /// θ_frame (6.1), in radians: the smallest θ at which the lens's
-    /// circle meets its slot's edge.
+    /// circle meets its slot's edge, and 0 where the principal point lies
+    /// outside the slot.
     pub theta_frame: f64,
     /// The slot's side in texels, its track's, which the mask's frame
     /// term reads.
@@ -1030,7 +1130,8 @@ impl Rig {
 /// Each block's θ_frame (6.1), in radians, by block: the smallest θ at
 /// which the lens's circle meets the edge of its square slot, found by
 /// Brent's search, golden sections with parabolic steps, along each edge
-/// through the inverse. Every
+/// through the inverse, and 0 where the principal point lies outside the
+/// slot, so that no lens out of frame passes `validate`. Every
 /// canvas map scales with the side, so it needs no slot size, and
 /// `validate` (11.2) can bound the feather with it from the project
 /// alone.
@@ -1210,7 +1311,14 @@ fn texels_per_radian<const N: usize>(model: &LensModel, thetas: [f64; N]) -> [f6
 /// sixteenth of the side either way of the foot finds it, and over the
 /// whole edge should it land on that bracket's end. An edge pixel the
 /// inverse finds no direction for lies past the limit, and counts as the
-/// limit; a circle that meets no edge gives the limit.
+/// limit; so a circle inside the slot that meets no edge gives the limit.
+///
+/// A principal point outside the slot, [0, side]² (the M3.9 review's
+/// R2), gives 0: the lens's axis is out of frame, so no cap about it lies
+/// in the slot, though the edges alone would find a θ up to the limit (a
+/// circle that meets no edge from outside). The feather's bound is then
+/// 0, `validate`'s coverage rule refuses the lens, and
+/// [`Rig::feather_at`] holds it to its least band.
 ///
 /// Past the limit the search sees the limit plus a millionth of the
 /// pixel's distance from the principal point in sides, which the result
@@ -1222,6 +1330,9 @@ fn frame_theta(model: &LensModel, limit: f64, side: f64) -> f64 {
         LensModel::Mei(u) => (u.cx, u.cy),
         LensModel::Kb(k) => (k.cx, k.cy),
     };
+    if !((0.0..=side).contains(&cx) && (0.0..=side).contains(&cy)) {
+        return 0.0;
+    }
     let centre = DVec2::new(cx, cy);
     let theta = |px: DVec2| match model.unproject_within(px, limit) {
         Some(d) => off_axis(d),

@@ -3184,6 +3184,7 @@ dependencies = [
  "serde",
  "serde_json",
  "spherecut-sphere",
+ "spherecut-testkit",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -3280,6 +3281,7 @@ version = "0.1.0"
 dependencies = [
  "glam",
  "spherecut-boundary",
+ "spherecut-camera",
  "spherecut-core",
  "spherecut-media",
  "spherecut-sphere",

@@ -59,6 +59,11 @@ pub mod codes {
     /// An edit the project's rules refuse: its op and the rule's code
     /// are in the message. Nothing was saved.
     pub const BAD_EDIT: &str = "bad_edit";
+    /// A `set_source` whose whole `dual_fisheye` source has a calibration,
+    /// lens tracks, or camera model or firmware other than its media's
+    /// file holds, or is sent for a file that holds no calibration a
+    /// stitch reads. Nothing was saved.
+    pub const CALIBRATION_MISMATCH: &str = "calibration_mismatch";
     /// The project's revision isn't `if_revision`, or its history was
     /// written with another revision of it.
     pub const STALE_REVISION: &str = "stale_revision";
@@ -86,6 +91,11 @@ pub mod codes {
     /// A project's media file isn't the one the project was made with:
     /// its size or its first MiB differ.
     pub const MEDIA_CHANGED: &str = "media_changed";
+    /// A project whose clip's media is a camera's pair, two fisheye
+    /// lenses or two EAC tracks: stitched rendering of projects arrives
+    /// in M3.11, and until then look, compare, check and render refuse
+    /// it rather than read one lens as an equirect.
+    pub const NOT_YET: &str = "not_yet";
     /// The output's disk hasn't room for the render: both numbers are in
     /// the message.
     pub const NO_SPACE: &str = "no_space";
@@ -133,6 +143,7 @@ pub mod codes {
         CANCELLED,
         INTERNAL,
         BAD_EDIT,
+        CALIBRATION_MISMATCH,
         STALE_REVISION,
         NOT_TOP,
         NOTHING_TO_UNDO,
@@ -145,6 +156,7 @@ pub mod codes {
         IO_ERROR,
         MEDIA_MISSING,
         MEDIA_CHANGED,
+        NOT_YET,
         NO_SPACE,
         JOB_LOST,
         CANNOT_EXPORT,

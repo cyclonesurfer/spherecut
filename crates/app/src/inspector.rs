@@ -917,7 +917,7 @@ fn apply(s: &mut AppState, actions: Vec<Action>) {
 
 #[cfg(test)]
 mod tests {
-    use spherecut_core::project::{Aspect, Fingerprint, Media, MediaId, MediaVideo};
+    use spherecut_core::project::{Aspect, Caps, Fingerprint, Media, MediaId, MediaVideo, Source};
 
     use super::*;
 
@@ -936,6 +936,8 @@ mod tests {
                 rate: FrameRate::FPS_30,
                 duration: Time::from_secs(10),
             },
+            source: Source::default(),
+            caps: Caps::default(),
         };
         Doc::untitled(media, doc::INITIAL_VIEW).unwrap()
     }

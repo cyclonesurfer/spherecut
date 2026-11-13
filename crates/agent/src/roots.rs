@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, ResolveFlags};
 use rustix::io::Errno;
 use spherecut_core::project::ProjectFolder;
+use spherecut_core::project::file::lexical;
 use spherecut_media::Source;
 
 use crate::error::{ToolError, codes};
@@ -75,6 +76,25 @@ impl Root {
     /// Both forms an absolute path may start with.
     fn forms(&self) -> [&Path; 2] {
         [&self.given, &self.canonical]
+    }
+
+    /// Where the folder `fd`, opened beneath this root, is now, below the
+    /// root's real path, as the kernel names it in `/proc/self/fd`. A
+    /// folder removed since is `NOENT`, known by its link count, not by
+    /// the " (deleted)" the kernel adds to its name, which a folder's own
+    /// name may end in; one moved out of the root is `XDEV`, as the lookup
+    /// would have refused it.
+    fn below(&self, fd: BorrowedFd<'_>) -> Result<PathBuf, Errno> {
+        let real = std::fs::read_link(proc_path(fd))
+            .map_err(|e| Errno::from_io_error(&e).unwrap_or(Errno::IO))?;
+        // Counted after the name is read, so that a folder removed before
+        // it was read is seen to be.
+        if rustix::fs::fstat(fd)?.st_nlink == 0 {
+            return Err(Errno::NOENT);
+        }
+        real.strip_prefix(&self.canonical)
+            .map(Path::to_path_buf)
+            .map_err(|_| Errno::XDEV)
     }
 }
 
@@ -359,7 +379,7 @@ impl Roots {
             fd,
             proc,
             name,
-            path: spherecut_core::project::file::lexical(&root.given.join(rest)),
+            path: lexical(&root.given.join(rest)),
         })
     }
 
@@ -367,10 +387,15 @@ impl Roots {
     /// beneath its root, and the project's file name (a2-plan 3.1): to
     /// write, beneath the write root, where a relative path is from, as
     /// for [`create`](Self::create); to read, beneath any root, as for
-    /// [`open_file`](Self::open_file). The folder is named as its root was
-    /// given joined with the rest, lexically, so media paths are read the
-    /// way the agent names them (D47). The project, its history and its
-    /// lock are then opened by name in the folder, never through a link.
+    /// [`open_file`](Self::open_file). The folder is the one the kernel
+    /// finds, a link beneath the root followed, named as its root was
+    /// given joined with the folder's real path below the root's (F031,
+    /// the M3.9 review's R1): so a project's media paths are made
+    /// relative to, and read against, the folder the GUI and the CLI find
+    /// it in, and a `..` in one climbs from where the project really is,
+    /// while the root keeps the name the agent knows it by (D47). The
+    /// project, its history and its lock are then opened by name in the
+    /// folder, never through a link.
     pub fn project_folder(
         &self,
         arg: &str,
@@ -410,23 +435,77 @@ impl Roots {
         let folder = rest.parent().unwrap_or(Path::new(""));
         let fd = beneath(root.fd.as_fd(), folder, OFlags::PATH | OFlags::DIRECTORY)
             .map_err(|e| self.refused(arg, e, want, path))?;
-        let named = if folder.as_os_str().is_empty() {
-            root.given.clone()
-        } else {
-            root.given.join(folder)
-        };
+        // Where the kernel found it, beneath the root's own path.
+        let below = root
+            .below(fd.as_fd())
+            .map_err(|e| self.refused(arg, e, want, path))?;
+        let named = root.given.join(below);
         Ok((ProjectFolder::from_fd(fd, &named), name.to_owned()))
     }
 
     /// `path`, the argument `arg`, as the agent names it: its root's
-    /// given path joined with the rest, lexically, as a project records a
-    /// media file (D47). Nothing is opened: the caller opens it with
-    /// [`open_file`](Self::open_file).
+    /// given path joined with the rest, lexically (D47). Nothing is
+    /// opened: the caller opens it with [`open_file`](Self::open_file).
     pub fn named(&self, arg: &str, path: &Path) -> Result<PathBuf, ToolError> {
         let (root, rest) = self.locate_read(arg, path)?;
-        Ok(spherecut_core::project::file::lexical(
-            &root.given.join(rest),
-        ))
+        Ok(lexical(&root.given.join(rest)))
+    }
+
+    /// `path`, the argument `arg`, as a project in the folder named `near`
+    /// (as [`project_folder`](Self::project_folder) names it) records a
+    /// media file: of the names that its folders give it beneath its root,
+    /// each folder as the kernel finds it, named as `project_folder` names
+    /// one, with the rest of the path kept as the agent gave it, the one
+    /// that shares the most of `near`, and of those the one resolved
+    /// least, [`named`](Self::named)'s first. So a media named through a
+    /// folder link beneath the root is stored from the folder it is really
+    /// in, as the GUI's save stores it (core's `fs::name_near`, the M3.9
+    /// review's R8), not by a path that climbs out of the project's folder
+    /// and back in through the link, which a move of the folder with its
+    /// clip would lose (D47; the review of R1's fix); and one in a folder
+    /// linked within the project's keeps the link's name. Unlike the
+    /// GUI's, nothing outside the root is resolved, and the clip's own
+    /// name never is. Only folders are opened: the caller opens the file
+    /// with [`open_file`](Self::open_file).
+    pub fn named_near(&self, arg: &str, path: &Path, near: &Path) -> Result<PathBuf, ToolError> {
+        let (root, rest) = self.locate_read(arg, path)?;
+        let given = lexical(&root.given);
+        let named = lexical(&given.join(rest));
+        let shared = |p: &Path| {
+            p.components()
+                .zip(near.components())
+                .take_while(|(a, b)| a == b)
+                .count()
+        };
+        let mut best = (shared(&named), named.clone());
+        // A path that climbs above its root as named keeps that name.
+        let Some(parent) = named.strip_prefix(&given).ok().and_then(Path::parent) else {
+            return Ok(best.1);
+        };
+        // From the root down, so that a tie keeps the name resolved least.
+        let mut ancestors: Vec<&Path> = parent
+            .ancestors()
+            .filter(|a| !a.as_os_str().is_empty())
+            .collect();
+        ancestors.reverse();
+        for a in ancestors {
+            // A folder that is missing, or leads out, has none below it
+            // either.
+            let Ok(below) = beneath(root.fd.as_fd(), a, OFlags::PATH | OFlags::DIRECTORY)
+                .and_then(|fd| root.below(fd.as_fd()))
+            else {
+                break;
+            };
+            let Ok(tail) = named.strip_prefix(given.join(a)) else {
+                continue;
+            };
+            let candidate = given.join(below).join(tail);
+            let n = shared(&candidate);
+            if n > best.0 {
+                best = (n, candidate);
+            }
+        }
+        Ok(best.1)
     }
 
     /// The root `path` is under, and the rest of it. A relative path is
@@ -740,5 +819,52 @@ impl Drop for Created {
         {
             tracing::warn!("mcp: an unfinished output wasn't removed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use spherecut_testkit::control::must_fail;
+
+    use super::*;
+
+    /// A folder removed after it was opened is missing by its link count,
+    /// and one whose name ends " (deleted)", as `/proc` marks a removed
+    /// one, is where it is. Control: the name's ending, the rule before,
+    /// calls the second missing.
+    #[test]
+    fn a_removed_folder_is_known_by_its_links_not_its_name() {
+        let dir =
+            std::env::temp_dir().join(format!("spherecut-agent-below-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(dir.join("gone")).unwrap();
+        std::fs::create_dir_all(dir.join("x (deleted)")).unwrap();
+        let root = Root::open(&dir, "--read-root").unwrap();
+        let open = |name: &str| {
+            beneath(
+                root.fd.as_fd(),
+                Path::new(name),
+                OFlags::PATH | OFlags::DIRECTORY,
+            )
+            .unwrap()
+        };
+        let (named, gone) = (open("x (deleted)"), open("gone"));
+        std::fs::remove_dir(dir.join("gone")).unwrap();
+        let by_name = |fd: &OwnedFd| {
+            std::fs::read_link(proc_path(fd.as_fd()))
+                .unwrap()
+                .as_os_str()
+                .as_bytes()
+                .ends_with(b" (deleted)")
+        };
+        let (kept, removed, old_rule) = (
+            root.below(named.as_fd()),
+            root.below(gone.as_fd()),
+            by_name(&named),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(kept, Ok(PathBuf::from("x (deleted)")));
+        assert_eq!(removed, Err(Errno::NOENT));
+        must_fail("the name's ending", !old_rule);
     }
 }

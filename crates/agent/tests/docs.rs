@@ -263,6 +263,7 @@ fn every_warning_code_is_listed() {
     codes.insert(codes::NOT_EQUIRECT.to_owned());
     for code in [
         "history_not_saved",
+        "not_flushed",
         "outside_trim",
         "result_cut",
         "untimed_packets",

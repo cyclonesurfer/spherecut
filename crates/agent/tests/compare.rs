@@ -171,6 +171,8 @@ fn a_file_against_itself_is_identical_at_every_time() {
         );
     }
     assert_eq!(r["mean"], json!({"psnr": "inf", "ssim": 1.0}), "{r}");
+    // F049: its warnings, [] when nothing warned.
+    assert_eq!(r["warnings"], json!([]), "{r}");
     assert_eq!(r["size"], json!([512, 256]));
     assert_eq!(r["against"]["file"], clip.to_string_lossy().as_ref());
     assert!(r.get("partial").is_none(), "{r}");

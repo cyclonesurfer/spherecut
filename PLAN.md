@@ -469,9 +469,11 @@ change or render anything yet.
         1 KiB, with control, ANSI and bidi characters replaced. It never
         appears in tool descriptions, server instructions or error
         messages, and the tool descriptions say that these fields and the
-        pixels of rendered frames are untrusted content. From M3/M4, GPS
-        tracks, camera serial numbers and owner names are left out unless
-        the call asks for them.
+        pixels of rendered frames are untrusted content. An error names a
+        project's media by id ("the project's media 1"), never by the
+        path the project recorded or by text read from a file. From
+        M3/M4, GPS tracks, camera serial numbers and owner names are left
+        out unless the call asks for them.
       - Every tool carries MCP annotations: `readOnlyHint`,
         `destructiveHint` where it can replace a file, and `openWorldHint`
         false.

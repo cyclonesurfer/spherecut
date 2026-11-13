@@ -25,4 +25,7 @@ spherecut-media = { workspace = true, features = ["fault-injection"] }
 # integration tests only: boundary depends on this crate, so a unit test
 # that used it would see a second copy of this crate's types.
 spherecut-boundary.workspace = true
+# The geometry table and the trailer's calibration, which tests/project.rs
+# holds a camera file's source to (M3 plan 11.4 and 11.5).
+spherecut-camera.workspace = true
 spherecut-testkit.workspace = true

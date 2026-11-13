@@ -10,7 +10,7 @@ This plan starts from the verification draft and takes in what the judges named 
 two, with every error they found fixed. Where the judges disagreed, the choice and its evidence
 are given where the choice is made; Appendix B lists them. Tags: **[F]** checked on the code or
 the bytes, **[G]** a guess or proposal, **[C]** computed for this plan from Pat's V3 and V6
-numbers (section 3.4). Section 0 holds the amendments, items 1 to 8. Items 1 and 2, the fresh review
+numbers (section 3.4). Section 0 holds the amendments, items 1 to 9. Items 1 and 2, the fresh review
 and the check of its fixes, are folded into the sections below; items 3 on override the sections
 they name, which keep their old text, marked [amendment N] where a reader would trip, except the
 places each item says it changed in place; an amendment wins where the two differ. File:line
@@ -1181,6 +1181,215 @@ symbol); an amendment's are at its own date.*
      back-hemisphere frame code; 7.2's N video streams; 8.8's mirrored frame codes; 14's frame row
      (stitching by default); 19.6's M3.5 line (4.5 s); and 22.1's M3.5 row (its writer and its
      time). Each is marked [amendment 8].
+9. **What M3.9 settled (2026-11-13).** These override the sections they name, which are not
+   rewritten. D68 (drafted in M3.9), the slice's dated notes in DECISIONS (on D16, D47, D48 and D57)
+   and PROGRESS's M3.9 note hold the detail; where one of them says otherwise, this item holds. The
+   slice was built in four units on the types they share (the check passed at 80bfe47), reviewed
+   afresh (R1 to R9, and the nits N1 to N13) and fixed in a round of four more units. Before launch
+   the orchestrator settled 18 choices for Pat within the plan, each on its recommendation; Pat may
+   overrule any of them.
+   - **The orchestrator's 18 choices (11, 14, 19.6, 21's risk 15, 22.1's M3.9 row).** (1) The
+     feather's bound is floored at 0, and a coverage rule refuses the directions no lens covers
+     (below). (2) `Gains` is tagged by `"mode"`, as section 16's agent literal has it. (3)
+     `validate` holds `front_track` to 0 or 1, and enforces an `xi_delta` range derived from the
+     radius scale's band, with ξ + `xi_delta` above −1 (below). (4) The types, (c) and (d) were
+     built in `wt-m3-file` on `m3/schema2`, made at f216316, and (a) and (b) on branches and
+     worktrees of their own. (5) D47's Open card was checked and is still Pat's; the slice is built
+     on JSON, the working choice, and another answer reworks schema 2 with the rest. (6) The
+     geometry's `tz` stays `TzSign` (F021), and the snapshot carries field 27's offset as
+     `window_offset` (U13); whichever of M3.6 and M3.9 merges second carries M3.6's change into
+     schema 2, as schema 3 if it changes the file. (7) The stitch fixture plants rung 3's Direct
+     binding before its `set_stitch` (below). (8) `camera_source` sits beside an unchanged
+     `project_media` (below). (9) Unit (a) fixed the file layer (F031 to F034, F036), with F031's
+     CLI test in (d). (10) F051: text from files is kept out of MCP errors, media are named by id,
+     and `tools.rs` filters every message as a backstop, so PLAN's ticked A1 criterion stands, with
+     one sentence added that names a project's media by id (amendment 7's F051). (11) M3.6's and
+     M3.7's briefs predate amendment 7 and are refreshed before either launches: M3.6's carries
+     schema 2's `tz` form, `window_offset` and `the_placeholder_writes_the_plans_json`, and M3.7's
+     F055's move of `schema2.spherecut`'s blessing onto `testkit::bless`. (12) No tool's
+     description or schema was to grow; one shrank (below). (13) The 3 s was split among the units
+     and measured, an overrun going to Pat, never to a cut check (below). (14) No generic KB
+     fallback (below). (15) The branches were made at main as it stood at launch. (16) The launch's
+     own checks. (17) 11.4's "newer evidence" is read as other evidence (below). (18) The tune's
+     frame under stored extrinsics stays as `sphere::rig` composes it: M3.6 decides, and moving it
+     is schema 3 with a migration (D68).
+   - **Shape and serde (11.1).** sphere's `Geometry` and every type it holds, `LensCalib`,
+     `CalibTerms`, `Tune` and `LensTune` derive serde in sphere (snake_case, unknown fields
+     refused), and core reads them as they are. `Source`, `Sampling` and `CapMode` are tagged by
+     `"kind"` and `Gains` by `"mode"`; calibration terms and extrinsics are externally tagged
+     (`{"v6": {"d": […]}}`, `{"stored": {…}}`); `Equirect {}`, `Off {}` and `Keyframes {}` are
+     struct variants, so a stray key beside the tag is refused. A prism term's field is `first`, not
+     `at`. `CalibSnapshot` has `window_offset: [u32; 2]` ([0, 0] on the X5), stored and unread until
+     M3.6. `RawStrings::hash` is FNV-1a 64 over each of V1, V2, V3 and V6 followed by a NUL, an
+     absent string a NUL alone; `gains_basis` hashes lens 0's then lens 1's `ypr_deg`, then
+     `q_per_m`, as little-endian f64 bytes; a gain pair is by calibration block, and Auto's
+     `log_ratio` is ln(L1/L0). `Media.caps` is boxed in memory, the JSON unchanged. **Every key is
+     required:** each optional field of a source, and a V6 reading's prism and tangential pair, is a
+     key whose value may be null (`Option::deserialize`), so a missing one is refused, not read as
+     none; `set_stitch`'s optional keys, an edit's and not the file's, stay optional as 11.3 has
+     them, and an agent's `set_caps` writes both `nadir` and `zenith`. A schema 2 media without
+     `source` or `caps`, or with either null, is refused by its id and path (the review's N1 and
+     N13: 11.1's `#[serde(default)]` on both serves schema 1 alone), and a file marked schema 1
+     whose media hold either key is refused as edited (N3).
+   - **Where errors are placed (11.2).** `Source` is internally tagged, so serde reads a whole
+     source before its fields, and an error inside one (its tune, camera, calibration, geometry or
+     gains) is placed at the source's closing brace, not on the bad key's line; keys outside a
+     source keep their own lines. 11.2's "line and column errors" hold that way, and the
+     misspelt-key test checks that the message names the key and gives a position.
+   - **`validate` (11.2; 6.1's `theta_frame`).** In this order, each refusal naming media N's field
+     path, `out_of_range` for a bound and `invalid` otherwise, and the first refusal the one given:
+     a dual-fisheye source's tracks differ, and `tracks[0]` is the media's video stream (R6: create
+     and the camera form held it, a whole source in `set_source` didn't); `front_track` 0 or 1
+     (`out_of_range`); the geometry's generation has its set in the snapshot; the snapshot's hash is
+     its raw strings'; `canvas[1]` and `window[0]` above 0 (`invalid`, "a side of 0 makes no rig");
+     each principal point of the set the geometry reads within the span of its square that the
+     canvas map shows (`CanvasMap::slot_span`: 0 to src, or the window under map B; R2), naming
+     `source.calibration.v6[b].cx` or `.cy`; the tune's ranges as 11.2 gives them; `xi_delta` within
+     ±0.15 and ξ + `xi_delta` above −1 for each lens, ξ from the snapshot's set of the geometry's
+     generation (F038); the feather 0° to 15° and q 0 to 3.34 m⁻¹; fixed gains 0.25 to 4, or an Auto
+     track with at least one sample (`invalid`), a finite rate above 0 and finite ratios; the caps,
+     on every media, with their ring and rotation finite; then one `Rig::build` at the calibration's
+     square, whose `PastLimit` is θ_max's `out_of_range` and whose other refusals are `invalid`; the
+     feather against θ_frame; and the coverage rule. An EAC pair's tracks differ (`invalid`). A call
+     that builds the rig takes 0.034 to 0.037 ms in a debug build. `frame_theta` gives 0 for a lens
+     whose principal point lies outside [0, side]² (R2): its axis is out of frame, no cap about it
+     lies in the slot, and the feather's bound and the coverage rule then refuse it.
+     `DualFisheye::check(&self, media)` runs `validate`'s rules for one source in that order, with
+     no I/O (R7); the bounds table's 181 dual-fisheye rows, of its 184, hold it to `validate`.
+   - **The feather's floor and the coverage rule (11.2; amendment 5's feather).** h ≤ max(0,
+     min(θ_max, θ_frame) − 90°) for each lens; where that would be negative only a feather of 0
+     validates, and θ_max's 85° to 110° stands. Lens b holds every direction within a_b =
+     min(θ_max_b, θ_frame_b) − asin(min(1, q·|c_b|)) of its axis (lens_from_rig_b⁻¹ · ẑ), and
+     `validate` refuses a tune unless a_0 + a_1 ≥ 360° − γ, γ the angle between the axes: the
+     directions neither holds are two caps of 180° − a_b about the axes' opposites. The rule is
+     sufficient, not necessary: it refuses about one radius-scale step of 0.0025 (0.2° to 0.4° of
+     summed cap) that renders whole where θ_frame binds, and agrees within 0.05° where θ_max binds.
+     LOD's margin is left out (open, below).
+   - **`xi_delta`'s range (11.2; F038's handed-on entry).** ±0.15, `out_of_range`. On X5-shaped sets
+     under maps A and C, −0.1428 to −0.1451 moves θ_frame as far down as a radius scale of 1.1 does,
+     and +0.0975 to +0.1241 drives it to the model's limit as 0.9 does; the range rounds both
+     outward. Handed-on's row "ξ = 0 with −0.5 accepted" is now refused by the range, as −1.5 is, so
+     the sum rule binds only where ξ lies within 0.15 of −1 (its test rows sit on a snapshot of
+     their own near ξ = −0.9). The limit is 117.7° at +0.15, so it never binds inside θ_max's range
+     on X5-shaped sets. Since load validates, the range can widen later without refusing a saved
+     file.
+   - **The ops (11.3).** `set_stitch` is `invalid` with neither a tune nor gains, with a profile and
+     no tune, or on a source that isn't a dual fisheye (an EAC pair included, N5); a tune replaces
+     the profile (none clears it), and gains alone keep the tune and the profile. `set_source` and
+     `set_caps` replace whole values, and each inverse holds the old one. The reference project's
+     camera media is **12**, not 11 (11.3, 22.1): target 10's key holds 11. The stitch property
+     (11.5's property at 100k) draws inside `validate`'s rules (yaw, pitch and roll ±0.5°, radius ±1
+     %, `xi_delta` ±0.05, θ_max 95° to 105°, a feather of at most 3°, q up to 3.34), saves at every
+     new state, and runs proptest's 256 cases in Tier 1 and 100,000 before a merge.
+   - **Who builds a source (11.5; 14's `project create` row).**
+     `media::project::camera_source(source, report) -> Result<Option<DualFisheye>, String>`, beside
+     an unchanged `project_media`: 11.5's "`project_media` builds `DualFisheye`" is read as
+     `project_media` and then `camera_source`, whose source the caller sets. The geometry is
+     `camera::insta360::stitching`'s, the table's row with the generation field 136 names (11.5's
+     "the `Known` geometry" read so: `known::lookup`'s row alone reads V6, which `Rig::build`
+     refuses on a trailer that holds only V3); the tune `Tune::default()`, the gains off, the front
+     track 0. It ends with `DualFisheye::check` on the source as the media it becomes (R7): a camera
+     file whose source `validate` refuses at the default tune (a θ_frame under the 95° the 5°
+     feather needs; a lens's ξ at −1 or below) is kept **an equirect with `not_equirect` and
+     `no_calibration`**, as one without a calibration a stitch reads is, the warning carrying
+     `validate`'s words. `trailer_source` is the same source unchecked, which a whole source in an
+     agent's `set_source` is compared with. Agents' `project create` and `add_media` call
+     `camera_source` now; the window's making job (`reframe.rs:614`) calls it in M3.10. 14's generic
+     KB equidistant 200° fallback isn't built (choice 14): `DualFisheye` holds unified (Mei) sets
+     only, and a KB source would be a schema change with its own design.
+   - **The fixture (11.5).** `synth::project::stitch_fixture` is `project_media` and `camera_source`
+     of rung 3's file, then a `set_source` that changes only the binding (Direct, as
+     `InsvSpec::rung3` plants it, where the X5 row says Reversed) and its status (User), keeping the
+     table's evidence, and then 11.5's one `set_stitch` (q 1/1.5 m⁻¹, lens B yawed 0.3°, a 3°
+     feather, Fixed 0.9 on lens B, or the Auto twin's track). The test builds the reference rig as
+     `boundary::sphere_rig` of rung 1's camera and the planted calibration, with the fixture's tune,
+     front track 0 and sides of 768, never from the project, and the project's rig equals it
+     exactly; dropping the tune moves lens B 1.718 px on the seam at 768².
+   - **Superseded (11.4).** `superseded` is some when the stored geometry is provisional and the
+     table's entry is settled, or provisional on evidence that differs: the table keeps no date or
+     revision, so "newer" is read as "other" (choice 17). A settled, fitted or user geometry is
+     never superseded. The words name a provisional entry "a different guess", never "a newer guess"
+     (N4), since an older build reading a project made under a later table finds its own guess
+     different too; a settled entry is "a settled one". 11.4's app notice ("it has since been
+     measured") fits only a settled entry, so M3.10 words the provisional case otherwise.
+   - **11.4 without the window, and `not_yet` until M3.11 (11.4; 12; 14's render row).** `spherecut
+     render` and `frame --project` warn `provisional_geometry`, with the table's evidence, when the
+     table has superseded the stored geometry; agents' summary gives `superseded`; and `check`
+     advises `provisional_geometry` whenever the stored geometry is provisional. Until M3.11 every
+     project renderer outside the window refuses a project whose clip's media is a dual-fisheye or
+     EAC-pair source with `not_yet`: agents' `look`, `compare`, `check` and `render` (in
+     `sequence::load`), and `render` and `frame --project` (exit 1), after `file::media_status` and
+     any `provisional_geometry` warning and before the offline check, with advice for the pair's
+     kind (R9). So **no tool shows `check`'s advice before M3.11**: it first shows when M3.11 lifts
+     `not_yet`, where M3.11's tests should look for it, and the window's notice is M3.10's. Any
+     project whose camera file's media is equirect still renders lens 0 outside the window until
+     then: a schema 1 `.insv` project, and a schema 2 one that `project create` or `add_media` kept
+     equirect with `no_calibration`, R7's fallback for a source `validate` refuses at the default
+     tune among them (PROGRESS, Known issues).
+   - **The same-bytes rule (11.4; 22.1's M3.9 row).** A project keeps its stored geometry under a
+     newer table entry. `an_old_project_renders_the_same_bytes` renders a project made under an
+     older guess to 30db18fc6d97db10 before and while a fake newer entry of the other binding
+     supersedes it, and that entry's own render, cd729b1bb8ceafe8, is the control.
+   - **Agents (11.3; 14).** `set_source` takes `{"kind": "equirect"}`; the camera form, which the
+     server makes whole from the media's file beneath the roots (the binding as given, status user)
+     and checks with `DualFisheye::check`, refusing it `bad_edit` with a `next` to keep the media
+     equirect where the file's source fails at the default tune; or a whole `dual_fisheye` source,
+     copied from the project file by a client that can read it, which must hold the file's
+     calibration, lens tracks, and camera model and firmware (`calibration_mismatch` at the part;
+     R5, R6). The front track, geometry, tune, gains and profile stay the client's to change. A
+     whole source needs the media's file present beneath the roots (`media_missing` or
+     `media_changed` come first). An agent never makes a calibration (D57). The summary gives each
+     media's source without the camera's serial or the raw strings, an `eac_pair` as its kind alone.
+     Every tool result carries `warnings` (F049): the four project tools' in one test, the others in
+     their own suites. Errors name media by id (F051). New: the code `calibration_mismatch`, and the
+     warnings `no_calibration` (one whole field, N8) and `not_flushed`.
+   - **The file layer (11; amendment 7's F031 to F036 bullets).** A project file's own folder is the
+     one the kernel finds it in, for the window, the CLI and agents alike: `fs::real_file` in core,
+     and an agent's `Roots::project_folder`, which reads the `openat2` descriptor's path from
+     `/proc/self/fd` beneath the root's real path, names the folder by the root as given and the
+     real path below it, and knows a removed folder by its link count (R1). Media paths aren't all
+     lexical any more, overriding amendment 7's F031 bullet: on save each is named as near the
+     project's real folder as its folders' real paths let it be (`fs::name_near`, and for the media
+     an agent adds `Roots::named_near` beneath the root; R8), so a clip named through a linked
+     ancestor is stored as `clip.mp4`, and one in a folder linked within the project's keeps the
+     link's name; the clip's own name is never followed, and paths are read back lexically from the
+     folder. An agent's save writes a loaded project's paths as loaded. A folder flush that fails
+     after the rename is a save (R3): the publish is `PublishError::NotFlushed`, and
+     `ProjectFolder::save` and `create` keep the file's identity (its metadata taken before the
+     rename or link), write the history and return `Saved::flush_error`, which the window shows as a
+     warning and agents as `not_flushed`; the public `persist_*` keep their signatures.
+   - **The hint row (14's row for frame's hint, `equirect_doubt` and look's; M3.9's half).**
+     `project create`'s half is in (`no_calibration`: "no calibration: shown as its lenses"), but
+     `equirect_doubt`, through look, compare and a project's media, still says "stitching arrives in
+     M3" of a camera file without a calibration a stitch reads, and names it by its path. That
+     wording moves to whichever of M3.7 and M3.10 rewords look's.
+   - **The list budget (14; amendment 7's F007).** `project`'s `create.media` reads "A video.",
+     since it takes a camera's file too, so `tools/list` is 12,235 of its 12,288 bytes, `project`
+     986 of its 1,000 and A1's five tools 7,109 of 7,168, with `render`'s entry unchanged. No tool's
+     description or schema changed in the fix round.
+   - **The M3.9 row's budget (19.6; Pat's decision of 2026-11-13).** Pat raised 19.6's M3.9 row
+     ("schema, edits and agents") from 3 s to 5 s, on the slice's new tests as measured before the
+     fix round: 4.7 to 4.9 s one thread at a time at 80bfe47 (4.60 to 4.81 s at c370cd0, 3.93 s on
+     four threads). M3's budgets then sum to 136.5 s, so M3 adds at most about 137 s to `cargo xtask
+     check`, not 135 s. After the fix round the 58 tests take 5.45 to 5.75 s one thread at a time
+     and 4.59 s on four threads (the round's 18 new tests added about 0.7 to 1.0 s, most of it the
+     agent's linked-folder and R7 tests), so the row is over its 5 s again and goes back to Pat; no
+     fixture was shrunk and no check cut. The largest shares: agent `tests/project.rs` 1.57 to 1.75
+     s, cli `tests/render.rs` 1.32 to 1.40 s, the stitch property at 256 cases with its corners 1.11
+     to 1.17 s, and synth `tests/project.rs` 1.06 to 1.13 s. The 100k stitch property, the gate
+     before a merge, takes about 425 to 440 s (its file 428.57 s at d478083).
+   - **Open.** The coverage rule leaves LOD's margin out: at LOD 0 a tune it passes by less than the
+     margin (0.12° to 0.13° at a side of 3840) can leave a ring about as wide; whether `validate`
+     adds LOD 0's margin at the media's track side, or 10.3's mask stops taking it off where both
+     lenses end, is M3.7's and Pat's. Whether own calibrations that fit ξ (8.7) need `xi_delta`
+     wider. The tune's frame (choice 18). From the review's refuted findings, handed on: a cap
+     patch's path is neither made relative on save nor read beneath the roots (M3.20); `Gains::at`
+     at extreme Auto ratios (M3.11); `camera_source` and the table's `stitchable: false` rows
+     (M3.10, M3.11).
+   - **Changed in place.** The header's paragraph on section 0 (the items run 1 to 9); 14's
+     list-budget paragraph (12,235 bytes); 19.6's M3.9 line (5 s) and its total (about 137 s);
+     22.1's M3.9 row (media 12, and `not_yet` until M3.11); and 23's D57 entry (media 12). Each but
+     the header's count is marked [amendment 9].
 
 ## 1. Summary
 
@@ -2972,11 +3181,11 @@ Tier 1: probe's JSON contract; `frame` on the synthetic `.insv` (GPU within D32'
 calibration; `look seam` on a planted 0.5° roll reports roll 0.5° ± 0.05° and names it;
 `provisional_geometry`; the new ops' reference examples; `not_yet` before M3.11 and gone after.
 
-`tools/list` is 12,245 of its 12,288 bytes, A1's five tools 7,109 of 7,168 and `render`'s entry 947
-of its 950 in `tools::BUDGETS`, at d39014b and unchanged at 0b3ab9b. Every slice that changes a
-tool's description or schema (M3.7's and M3.13's `look`, M3.9's `project` and `edit`, M3.11's
-`render`) states its bytes against these budgets, and asks Pat before it grows one (the 12 KiB is
-Pat's number, a2-plan) [amendment 7].
+`tools/list` is 12,245 [amendment 9: 12,235 since M3.9] of its 12,288 bytes, A1's five tools 7,109
+of 7,168 and `render`'s entry 947 of its 950 in `tools::BUDGETS`, at d39014b and unchanged at
+0b3ab9b. Every slice that changes a tool's description or schema (M3.7's and M3.13's `look`, M3.9's
+`project` and `edit`, M3.11's `render`) states its bytes against these budgets, and asks Pat before
+it grows one (the 12 KiB is Pat's number, a2-plan) [amendment 7].
 
 ## 15. LRV proxies
 
@@ -3254,8 +3463,8 @@ sphere's properties and rung 0 ≤ 30 s in release [amendment 4: in a debug buil
 opt-level 3] (M3.3); metrics, seam self-tests, the
 attribution matrix and rung 1 ≤ 15 s (M3.4, measured: about 13.6 s on four free cores in the debug build, the instrument binary 10.4 to 10.6 s of an 11 s share with none to spare: amendment 5); rung 3 and `frame --reference` ≤ 3 s [amendment 8: 4.5 s, measured 3.60 to 3.67 s] (M3.5, its own render of rung 1's pair included: amendment 5); the fit's
 recovery ≤ 15 s (M3.6: at about 70 ms for one candidate's strips and signature on one 768² frame, the 15 s holds at most about 200 such evaluations, and stage F as 8.4 writes it takes 220 a class at every step, so M3.6 steps on predicted fields or states its budget, amendment 5; 2 pair renders, 20 encoded frames, stage G on about 40 candidates and stage F on the survivors over 5 frame sets [G]; the 6-geometry and out-of-family runs are `fit-matrix`'s, 8.5); the goldens binary + ≤ 7 s (M3.7, its own renders of rung 1's pairs included: amendment 5); the lock ≤ 10 s (M3.8, measured: its 32 tests 5.3 to 5.9 s alone and 6.7 to 7.4 s beside four busy loops, 5.5 s alone after D77's compute mips, none measured under load since: amendment 6); schema, edits
-and agents ≤ 3 s (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
-(M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s to `cargo xtask
+and agents ≤ 3 s [amendment 9: 5 s, measured 4.7 to 4.9 s; 5.45 to 5.75 s after its fix round] (M3.9); app kittests ≤ 10 s (M3.10, M3.13); export parity and controls ≤ 15 s
+(M3.11); LRV ≤ 5 s; exposure and profiles ≤ 3 s each; GoPro's synthetic EAC rungs ≤ 10 s (M3.18) and the caps' rows and parity ≤ 3 s (M3.20) [G]. M3 adds at most about 135 s [amendment 9: about 137 s] to `cargo xtask
 check`; each slice note records the growth.
 
 ## 20. Dependencies and provenance
@@ -3326,7 +3535,7 @@ one reviewer each.
 | **M3.6** The fit, provisional (review: F017, F019 to F021, F026, F029, F041, F060, F067, F138, F139, F143; U13; amendment 7) | (a) `render::seam::fit` (8.4); (b) `rig-fit`, `xtask fit-matrix` (from then on part of 4.1 rule 6's push rule for any slice that touches `render::seam`, `sphere::rig` or `synth::lens`); (c) `fit_recovers_planted_geometry` (8.5); (d) the run on clips 8 to 10: `known`'s provisional X5 entry, `samples_lens_offset_is_zero`, `samples_thumbnail_orientation` (Pat agreed, 2026-11-01), P-GAIN's first numbers | M3.5 | 8.5's expected verdicts met in Tier 1 and in `fit-matrix`, the redirect and out-of-family truths included; `docs/research/m3/fit-clip{8,9,10}.md` with σ, the ranking, each question settled or open, the directions stage F leaves undetermined, and the fine class open on clips 8 to 10; the image circle's centre on both lenses against readings A to D's principal points (U13) [amendment 7]; the X5 entry written from the run whatever the rules decide (the decisive value, the redirect's, or the best candidate as "best of N, not decisive", 8.6), the placeholder kept, with `stitchable: false`, only if clips 8 and 10 fail the gross rule; k = 0 by 5σ or the offset recorded; D64 and D65's fit half drafted (D65's instrument half is M3.4's: amendment 5) | none | 8, 9, 10 | **the first stitched stills of clip 8** (`spherecut frame`), with the provisional numbers; if the gross rule fails, a note that says so and what the design note will look at |
 | **M3.7** Stitch on the GPU (review: F025, F039, F055, F066, F120; the list budget; amendment 7) | (a) `fs_rig` and its structs (10.3, as amendment 5 corrects it: the weights where no feather weighs, the mask's θ in angle, an output on the strips' grid); (b) the key, group 3, the rig uniform and each `LinearTarget`'s `rig_group` (`layouts::view_rig`), group 2's `layouts::sampler_caps` with `Projector`'s caps-off groups, `SourceRef`, `pack` with the frame's gains, and `StillRenderer`'s pair through `render_from` on all three upload paths (`SourceFrames`, `LensFrame`, `PlaneSource`) (10.1, 10.2, 10.4); (c) the `dfish_*` goldens, rung 2; (d) `frame` and `look` on the GPU through `agent::still`'s pair path (two `copy_out`s under path B, two imports under `--zero-copy`, the bytes otherwise, then `render_blurred`), and frame's hints (14); (e) RADV goldens and P-SHADE | M3.4; merges after M3.5 (rung 3's GPU half, `frame` and `look`) | the 24 old goldens byte-identical; each new row and control on lavapipe, three identical runs; the naga interface test; `a_pair_renders_alike_on_every_upload_path` byte-identical on lavapipe, with its swapped-buffers control differing; RADV goldens and P-SHADE's verdict on odin, and `zero_copy_pair_frame_matches_the_copy` under VA-API (DMA-BUF) and Vulkan (path B), against a software decode, strict, with the pair check's signature label; nothing renders into a slot's 8-bit planes (D77; amendment 6) | odin | none | a stitched still in about a second; agents' `look` at an `.insv` (shown to Pat under M3.6's geometry) |
 | **M3.8** Frame lock | section 9: (a) `MediaBackend::track_timing` (`FfmpegBackend` from P-TRK's MP4 tables, `None` otherwise), the open checks, `LockRefused` and `LensShort`; (b) `pick_pair`, `unpaired_presents` over every stream, `pair_wait`, `pair_resyncs`; (c) the group base in `FrameCache` (`set_group`, Tg as the members' playhead), the group `until`, group seeks and the end, the resync backstop; (d) slots and their floor of 2 per member, per-lens fallback; the `PerStream` test backend and the readback tests | M3.0 (`track_timing`); M3.1 (`mux_video_streams`' MP4 output, the corner codes, the two-track MP4 perf clips and the 2×64² test files) | `pick_pair`'s property at 100k; `a_locked_pair_never_shows_mismatched_frames` at 0 unpaired by tag and by content, its lock-off control above 0 on both; `a_locked_pair_paces_to_its_slowest_lens` meets the pacing rule in every case and its control fails; each planted fault refused by name, and the one-frame-short lens locked and ended at the shorter lens with one `LensShort`; the slot floor unlocks within `WAIT` and its no-floor control times out; the fallback test keeps lens 0 on hardware with one notice; old two-stream tests pass; on odin 0 unpaired by tag and by corner code, `zero_copy_pair_matches_copy` (9), and P-LOCK's verdict (8K25 on path B included) with the slot count | odin | 1, 2, 3, 4 (P-LOCK's 8K30, 8K25, 5.7K60 and 4K120) and 9 (real-time play), and M3.1's MP4 perf clips | the raw view never shows the lenses at different frames, and a lagging lens slows the pair instead of freezing it; `unpaired` and `pair_wait` in the overlay |
-| **M3.9** Schema 2 (review: F031 to F034, F036, F038's ξ bound, F049, F051, F063; F021's and U13's types in schema 2; the list budget; amendment 7) | section 11, once D47's Open card is checked (risk 15): (a) the model, migration and `validate`; (b) the three ops, their inverses, examples and core's per-op samples (`core/tests/project_edits.rs:1095`); the reference project's optional camera media 11, a synthetic `.insv` the agent test writes and probes; agent `edit()`'s server-side expansion of `set_source`'s camera form and `wired()`'s filter for it (11.3); 11.4's comparison in `check`, `render` and the summary; (c) `project_media`, 11.5's export and viewer fixture, agent `project create`, the `not_yet` refusals | M3.5 | both fixtures; the edit property at 100k; `validate` at each bound; the missing-`source` refusal; `project_create_x5` (Tier 2c) gives the trailer's hash; D57's example test with 24 ops, the three new ones applied to media 11 and undone exactly (`set_stitch`'s example setting both a tune and gains), `set_source`'s camera form read from the file (11.3); an old project renders the same bytes under a newer (fake) table entry | none | 8 | agents' projects of `.insv` files record camera, calibration and geometry; agents tag a file as equirect with `set_source` |
+| **M3.9** Schema 2 (review: F031 to F034, F036, F038's ξ bound, F049, F051, F063; F021's and U13's types in schema 2; the list budget; amendment 7) | section 11, once D47's Open card is checked (risk 15): (a) the model, migration and `validate`; (b) the three ops, their inverses, examples and core's per-op samples (`core/tests/project_edits.rs:1095`); the reference project's optional camera media 11 [amendment 9: 12], a synthetic `.insv` the agent test writes and probes; agent `edit()`'s server-side expansion of `set_source`'s camera form and `wired()`'s filter for it (11.3); 11.4's comparison in `check`, `render` and the summary; (c) `project_media`, 11.5's export and viewer fixture, agent `project create`, the `not_yet` refusals [amendment 9: until M3.11, in agents, `render` and `frame --project`] | M3.5 | both fixtures; the edit property at 100k; `validate` at each bound; the missing-`source` refusal; `project_create_x5` (Tier 2c) gives the trailer's hash; D57's example test with 24 ops, the three new ones applied to media 11 [amendment 9: 12] and undone exactly (`set_stitch`'s example setting both a tune and gains), `set_source`'s camera form read from the file (11.3); an old project renders the same bytes under a newer (fake) table entry | none | 8 | agents' projects of `.insv` files record camera, calibration and geometry; agents tag a file as equirect with `set_source` |
 | **M3.10** Stitched in the app (review: F025, F044, F045, F047, F068; amendment 7) | 13.2, 13.3 without profiles, 13.5, 11.4's notice: (a) open flow, `Doc.rig`, `DrawKey`, "Stitch it" and "Treat as equirect" (`set_source`, 18.2), and a `Known` entry with `stitchable: false` shown as lenses with a notice (5.3); (b) viewer, overview, Raw lenses, the lock's notices (`LensShort`, and `LockRefused` by its field, the slot-floor unlock's `"slots"` and a failed member's `"open"` among them, which the app now passes over: amendment 6); (c) the Stitch pane; (d) kittests and smoke, with the perf clips as `.insv` files (synth's trailer appended, 7.2) | M3.7, M3.8 (with P-LOCK's verdict as amendment 6 scores it, a Kill meaning 4.3's design note on the upload schedule first; Pat's answer on capping the all-trailing `until` [amendment 7: no cap for now, so no longer waited for]; and, if D77 doesn't hold on odin, Pat's call on zero copy's default on RADV/GFX11), M3.9, M3.1 (the 2×2880² perf clip `bench_playback_x5_stitched` gates on, 19.4); what Pat sees waits for M3.6 | rung 5 within 1 LSB on 11.5's fixture, its `Tune::default()` control missing; 13.5's kittests, among them "Treat as equirect" in one undo step and the `stitchable: false` notice; on odin `gui_smoke` on clip 8 at 8K30 ≥ 99 % presented with UI p99 within refresh, its stitched run under the raw view's pair gates (locked, 0 unpaired, 0 resyncs, drops counted as pairs: amendment 6), and `bench_playback_x5_stitched` (19.4); seam screenshots in the note, under M3.6's provisional entry (if M3.6 hasn't merged, the note says "placeholder geometry" and the screenshots wait for it) | odin | 1, 3, 8, and M3.1's 2×2880² perf clip | once M3.6 has merged, **clip 8 plays stitched** under its provisional geometry; per-lens numbers in the Stitch pane |
 | **M3.11** Export from the pair (review: F046, F052, F053, F086, F094, F095; the list budget; amendment 7) | section 12: (a) decode, `Held`, the zip and `pairs_ahead` (D56's lead counted in pairs); (b) every project renderer takes the pair, `not_yet` gone; (c) parity, controls and benches; (d) the end-to-end note | M3.7, M3.9, M3.1's K1 verdict; merges after M3.10; its note (d) waits for M3.6 | rung 4 flat (on a side seam) and 360 on 11.5's fixture with its four controls (lens 1 late, both late, the tune dropped, gains off on the Auto twin); an export of an `InsvFault::LensOneFrameShort` file ends at the shorter lens with the viewer's warning ("lens B has N fewer frames"), on the frame the player ends on; the app's `the_export_yields_while_a_locked_pairs_lens_lags` with its per-slot control; on odin `stitched_export_matches_preview` at M2's VA-API floors (47.7 / 50.1 dB) with the frame-late and planted-gain controls, and `bench_export_4k30_from_insv` over the whole export from 5.7K30 (600 frames) and 8K30 (all of clip 8), where a miss goes to Pat as a decision card with stage times; huginn's rows read "pending huginn"; **the note to Pat**, under M3.6's provisional entry: commands, what to look at, the geometry's status, limits | odin; huginn when it answers | 1, 8 | once M3.6 has merged, **clip 8 exported stitched**, flat and 360, from the window, the CLI and agents |
 | **M3.11b** (only if K1 fails, or K4 or K2's export half when huginn answers) | the export decodes onto its own device through path B or A (4.3), each lens's planes reaching `render_yuv`'s `Pair` as `PlaneSource::Buffer` or `Imported` (10.4) | M3.11 | section 12's done-when with the decode stage under 25 ms a pair at 8K30 on odin; where K4 or K2's export half failed, huginn's path A row at ≥ 30 fps, reading "pending huginn" until its paste returns | odin; huginn in that case | 1, 8 | the 8K30 export at real time |
@@ -3419,7 +3628,7 @@ whose diff passes about 3,000 lines gets a fresh review before it merges.
 | **D76** | **Nadir and zenith**: a polar equidistant cap in rig space, fill or patch; the cap's orientation as 18.3 defines it (forward at the nadir PNG's top and at the zenith PNG's bottom, +X right, `rotation_deg` > 0 clockwise as seen), tested with a glyph and a mirrored control; `fs_project_caps` for equirect; `set_caps`; a world anchor waits for M4 | nadir-patcher's radial mapping; its orientation flips both ways, so ours follows sphere's `Down` and `Up` faces; a cap that follows the tripod, turned by M4 with the picture | M3.20 |
 | **D77** | **A slot's 8-bit planes aren't render targets**: a slot's R8 and Rg8 planes are made without `RENDER_ATTACHMENT` (Vulkan `TRANSFER_SRC`, `TRANSFER_DST`, `SAMPLED`); level 0 is written only by copies, levels 1 on by a compute pass (`shaders/mips8.wgsl`) and a copy, byte for byte D31's means; deep planes keep `RENDER_ATTACHMENT`; nothing renders into a slot's 8-bit plane; `zero_copy_pair_matches_copy` stays strict against a software decode, waived only as amendment 6 sets out. Updates D25, D31 | odin's wrong luma blocks (PR #32: 3.3 % of the frames kept on the GPU, 0.17 % of those copied, all on the GFX11 R8 signature) went away under `RADV_DEBUG=nodcc` (PR #33), and RADV gives DCC only to images that can be colour attachments (recalled, not read). The guards on odin in amendment 6 settle it | M3.8; M3.7, M3.10, M3.11, M3.14 keep to it |
 | **D78** | **An independent check on GitHub's runner**: `.github/workflows/check.yml` runs `cargo xtask check` and the compat builds, by hand only until Pat turns on its push trigger; 4.1 rule 6, run by the building agent, stays the gate | the review's F098 (no CI) | review-fix |
-| D9, D15, D22, D25, D28, D31, D32, D34, D40, D45, D47, D48, D52, D54, D55, D56, D57, D58 | Updated in the slice that changes each: the stitched viewer and Raw lenses (D54) and the stitched overview with its band (D55), by D70 in M3.10; Tier 2c, gated on `testkit::tier2::require_samples_cpu` with only `SPHERECUT_SAMPLES` (D9); camera's limits (D15); crate rows (D22); zero copy with pairs (each lens imported or copied out by itself and drawn through `StillRenderer`'s per-lens `PlaneSource`, 10.4) and with the proxy's halves (path B through `Columns::buffer_planes`, no exception), and huginn's path by D25's own revisit rule: K2 makes path A the default where Vulkan Video can't decode if huginn's numbers favour it over the copy and `zero_copy_matches_copy_path` passes there (D25); layout (D28); entry points, group 3, `Columns` (the crop of a packed proxy's half on the copy path and path B) and `upload_from_buffer`'s end check at wgpu's rule (D31); `dfish_*` rows, weighted metrics, `must_fail`, the manifest (D32); the lock (D34); overlay, raw view, proxy setting (D40); profiles under a read root (D45); schema 2 (D47, D48); pair decode (D52); the viewer-first pace counted in pairs for the export and extended to the exposure analysis and Estimate distance (D56); the three ops' examples and the reference project's camera media 11 (D57); an agent's Auto analysis as a job (D58) | | as listed |
+| D9, D15, D22, D25, D28, D31, D32, D34, D40, D45, D47, D48, D52, D54, D55, D56, D57, D58 | Updated in the slice that changes each: the stitched viewer and Raw lenses (D54) and the stitched overview with its band (D55), by D70 in M3.10; Tier 2c, gated on `testkit::tier2::require_samples_cpu` with only `SPHERECUT_SAMPLES` (D9); camera's limits (D15); crate rows (D22); zero copy with pairs (each lens imported or copied out by itself and drawn through `StillRenderer`'s per-lens `PlaneSource`, 10.4) and with the proxy's halves (path B through `Columns::buffer_planes`, no exception), and huginn's path by D25's own revisit rule: K2 makes path A the default where Vulkan Video can't decode if huginn's numbers favour it over the copy and `zero_copy_matches_copy_path` passes there (D25); layout (D28); entry points, group 3, `Columns` (the crop of a packed proxy's half on the copy path and path B) and `upload_from_buffer`'s end check at wgpu's rule (D31); `dfish_*` rows, weighted metrics, `must_fail`, the manifest (D32); the lock (D34); overlay, raw view, proxy setting (D40); profiles under a read root (D45); schema 2 (D47, D48); pair decode (D52); the viewer-first pace counted in pairs for the export and extended to the exposure analysis and Estimate distance (D56); the three ops' examples and the reference project's camera media 11 [amendment 9: 12] (D57); an agent's Auto analysis as a job (D58) | | as listed |
 
 ## 24. Questions for Pat
 

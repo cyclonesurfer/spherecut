@@ -11,9 +11,9 @@ use std::time::Duration;
 use spherecut_core::cancel::StopToken;
 use spherecut_core::project::file::head_hash;
 use spherecut_core::project::{
-    AnyKeys, AudioChoice, Codec, Ease, Edit, EncoderChoice, ExportSettings, Fingerprint,
+    AnyKeys, AudioChoice, Caps, Codec, Ease, Edit, EncoderChoice, ExportSettings, Fingerprint,
     InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output, Project,
-    Quality, Range,
+    Quality, Range, Source,
 };
 use spherecut_core::time::{Rational, Time};
 use spherecut_core::video::VideoPlanes;
@@ -123,6 +123,8 @@ pub fn project(path: &Path, trim: Range, output: Output, codec: Codec, yaw0: f64
             rate: info.frame_rate().unwrap(),
             duration: info.duration.unwrap(),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     };
     let view = InitialView {
         orientation: Orientation::from_ypr(Ypr::from_degrees(yaw0, -15.0, 0.0)).unwrap(),

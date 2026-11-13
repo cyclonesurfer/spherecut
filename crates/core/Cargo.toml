@@ -19,6 +19,7 @@ tracing.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 ron.workspace = true
+spherecut-testkit.workspace = true
 
 [lints]
 workspace = true

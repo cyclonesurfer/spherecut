@@ -17,13 +17,14 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use spherecut_core::project::Codec;
+use spherecut_core::project::{Codec, MediaId, Source};
 use spherecut_export::{ExportJob, Planned};
 use spherecut_media::detect::Layout;
 use spherecut_media::probe::{
     ProbeReport, StreamInfo, StreamKind, VideoInfo, codes as probe_codes,
 };
 use spherecut_media::spherical::{Projection, SpatialAudio, StereoMode};
+use spherecut_sphere::rig::Status;
 
 use super::{Ctx, sequence};
 use crate::error::{ToolError, codes};
@@ -1206,12 +1207,14 @@ const RENDER_NAME: &str = "render.mp4";
 /// render. A render's own check, once `job` has it done, is the proof.
 fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, ToolError> {
     let loaded = sequence::load(cx, "project", path)?;
+    let geometry = geometry_advice(loaded.media.id, &loaded.media.source);
     let media =
         spherecut_media::probe::probe_cancellable(loaded.opened.source(), cx.call.interrupt())
             .map_err(|e| {
                 cx.call.check().err().unwrap_or_else(|| {
                     let (code, message) = super::probe::words(e.code());
-                    ToolError::new(code, format!("the project's media: {message}"))
+                    let named = sequence::media_named(loaded.media.id);
+                    ToolError::new(code, format!("{named}: {message}"))
                         .at("project")
                         .next("probe the project's media file")
                 })
@@ -1244,7 +1247,8 @@ fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, T
     let ten_bit = bits > 8 && !job.eight_bit && planned.file.codec != Codec::H264;
     let report = rendered(&planned, ten_bit);
     let file = File::of(&report, Path::new(RENDER_NAME));
-    let (rules, tips) = rules_of(&file, target);
+    let (rules, mut tips) = rules_of(&file, target);
+    tips.extend(geometry);
     let mut v = response(target, &rules, &tips);
     v["project"] = json!(text::field(&path.to_string_lossy()));
     v["checked"] = json!("the file a render of the project would make");
@@ -1257,6 +1261,43 @@ fn run_project(path: &Path, target: Option<Target>, cx: &Ctx) -> Result<Value, T
         );
     }
     Ok(v)
+}
+
+/// The `provisional_geometry` advice for a project whose clip's media
+/// `id` has `source` (M3 plan 11.4): a camera's pair stitched by a
+/// provisional geometry, and, when the built-in table has since
+/// superseded it, the table's status and evidence. Only an edit changes
+/// the project's geometry, so this only says so. The stored evidence is
+/// the project's text and stays out of the message (F051); the table's is
+/// Spherecut's own.
+///
+/// `sequence::load` refuses a camera's pair `not_yet` until M3.11, so no
+/// call reaches this yet: its test calls it.
+fn geometry_advice(id: MediaId, source: &Source) -> Option<Advice> {
+    let Source::DualFisheye(d) = source else {
+        return None;
+    };
+    if d.geometry.status != Status::Provisional {
+        return None;
+    }
+    let mut message = format!(
+        "{} is stitched by a provisional lens geometry, which its seam may show",
+        sequence::media_named(id)
+    );
+    if let Some(s) = spherecut_media::project::superseded_by_table(d) {
+        // The table keeps no order, so a provisional entry is only
+        // different (the M3.9 review's N4).
+        let now = match s.status {
+            Status::Settled => "a settled one",
+            _ => "a different guess",
+        };
+        message.push_str(&format!(
+            "; Spherecut's table of cameras now has {now} ({}), which the project takes only \
+             by an edit",
+            s.evidence
+        ));
+    }
+    Some(advice("provisional_geometry", message))
 }
 
 /// The report a probe of the render would give, as far as the rules read
@@ -1773,5 +1814,72 @@ mod tests {
                 assert_eq!(r["message"], "short");
             }
         }
+    }
+
+    /// A project whose source's geometry is provisional gets
+    /// `provisional_geometry` advice (info), with the table's evidence when
+    /// the table has superseded it (M3 plan 11.4), a provisional entry
+    /// named "a different guess", never a newer one (the M3.9 review's
+    /// N4). Control: a geometry of status user gets none.
+    #[test]
+    fn provisional_geometry_is_advice() {
+        use spherecut_testkit::control::must_fail;
+
+        // Unit (a)'s schema 2 fixture: its media 16 is an X5's two lenses.
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../core/tests/data/schema2.spherecut"))
+                .unwrap();
+        let fixture: Source =
+            serde_json::from_value(doc["project"]["media"][1]["source"].clone()).unwrap();
+        let Source::DualFisheye(d) = fixture else {
+            panic!("{fixture:?}")
+        };
+        // On the firmware the X5's row was measured on, where the table's
+        // evidence is "placeholder until the fit".
+        let with = |status: Status, evidence: &str| {
+            let mut d = d.clone();
+            d.camera.firmware = Some("v1.1.22_build1".into());
+            d.geometry.status = status;
+            d.geometry.evidence = evidence.into();
+            Source::DualFisheye(d)
+        };
+        let id = MediaId(16);
+        let table = "placeholder until the fit";
+
+        // Provisional, and the table has nothing other.
+        let a = geometry_advice(id, &with(Status::Provisional, table)).unwrap();
+        assert_eq!(a.id, "provisional_geometry");
+        assert!(
+            a.message.starts_with("the project's media 16 ")
+                && a.message.contains("provisional")
+                && !a.message.contains("table"),
+            "{}",
+            a.message
+        );
+        // Made under an older table: the advice names the table's
+        // evidence, never the project's text (F051).
+        let older = "an older guess";
+        let b = geometry_advice(id, &with(Status::Provisional, older)).unwrap();
+        assert!(
+            b.message.starts_with(&a.message)
+                && b.message.contains(&format!("a different guess ({table})"))
+                && !b.message.contains("newer")
+                && !b.message.contains(older),
+            "{}",
+            b.message
+        );
+        // The fixture's own firmware isn't the one the row was measured
+        // on, so the table's entry for it says so.
+        let fixture = geometry_advice(id, &Source::DualFisheye(d.clone())).unwrap();
+        assert!(
+            fixture.message.contains("not this file's"),
+            "{}",
+            fixture.message
+        );
+        assert!(geometry_advice(id, &Source::Equirect {}).is_none());
+        must_fail(
+            "a geometry of status user",
+            geometry_advice(id, &with(Status::User, table)).ok_or("none"),
+        );
     }
 }

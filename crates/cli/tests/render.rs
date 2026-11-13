@@ -37,9 +37,9 @@ use spherecut_core::FrameRate;
 use spherecut_core::StopToken;
 use spherecut_core::project::file::{self, head_hash};
 use spherecut_core::project::{
-    AnyKeys, Aspect, AudioChoice, Codec, Ease, Edit, EncoderChoice, ExportSettings, Fingerprint,
-    InitialView, Key, KeyId, Media, MediaId, MediaVideo, Orient, Orientation, Output, Project,
-    Quality,
+    AnyKeys, Aspect, AudioChoice, Camera, Caps, Codec, EacLayout, EacPair, Ease, Edit,
+    EncoderChoice, ExportSettings, Fingerprint, InitialView, Key, KeyId, Media, MediaId,
+    MediaVideo, Orient, Orientation, Output, Project, Quality, Source,
 };
 use spherecut_core::time::{Rational, Time};
 use spherecut_core::video::VideoPlanes;
@@ -47,12 +47,18 @@ use spherecut_media::backend::{
     FfmpegBackend, MediaBackend, NextFrame, SeekMode, SeekOutcome, VideoRequest,
 };
 use spherecut_media::hw::DEFAULT_RENDER_NODE;
+use spherecut_media::probe::probe;
+use spherecut_media::project::{camera_source, project_media};
 use spherecut_render::compare::{Plane, psnr_plane, ssim_plane};
 use spherecut_render::{Image, Pixels};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Spec};
+use spherecut_testkit::control::must_fail;
+
+#[allow(dead_code)]
+mod insv;
 
 // ---------------------------------------------------------------------
 // Projects and runs
@@ -105,11 +111,19 @@ fn clip(dir: &Path, name: &str, pattern: Pattern, frames: u32) -> PathBuf {
 /// 1920×1080 frame, the camera ahead, H.264 in software at the medium
 /// preset, no audio.
 fn project(dir: &Path, clip: &Path) -> PathBuf {
+    let path = dir.join("p.spherecut");
+    saved(media(clip), &path);
+    path
+}
+
+/// `clip`'s media entry, its stream the first video stream and its
+/// source equirect.
+fn media(clip: &Path) -> Media {
     let dec = FfmpegBackend::new()
         .open_video(clip, &VideoRequest::default())
         .unwrap();
     let info = dec.info();
-    let media = Media {
+    Media {
         id: MediaId::NEW,
         path: clip.to_path_buf(),
         fingerprint: Fingerprint {
@@ -123,7 +137,14 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
             rate: info.frame_rate().unwrap(),
             duration: info.duration.unwrap(),
         },
-    };
+        source: Source::default(),
+        caps: Caps::default(),
+    }
+}
+
+/// An untitled project of `media` saved at `path`, with [`project`]'s
+/// output and export.
+fn saved(media: Media, path: &Path) {
     let view = InitialView {
         orientation: Orientation::IDENTITY,
         fov_deg: 90.0,
@@ -151,9 +172,7 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
         },
     ])
     .unwrap();
-    let path = dir.join("p.spherecut");
-    file::save(&p, &path).unwrap();
-    path
+    file::save(&p, path).unwrap();
 }
 
 /// The command line of `spherecut render PROJECT -o OUT ARGS`, on
@@ -1198,4 +1217,272 @@ fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
     failed(with(&["--project", project]), (1, "media_offline"));
     assert!(!png.exists());
     assert_eq!(temp_files(&dir), Vec::<String>::new());
+}
+
+// ---------------------------------------------------------------------
+// A camera's two lenses, and a project's folder (M3.9)
+
+/// A project of the camera file `master` saved as `dir/{name}`, its media
+/// as `project create` makes it: `project_media` of the first lens's
+/// stream, its source `camera_source`'s, with [`project`]'s settings.
+fn camera_project(dir: &Path, master: &Path, name: &str) -> PathBuf {
+    let report = probe(master).unwrap();
+    let request = VideoRequest {
+        stream: report.camera_file.lenses.as_ref().map(|l| l.tracks[0]),
+        ..VideoRequest::default()
+    };
+    let info = FfmpegBackend::new()
+        .open_video(master, &request)
+        .unwrap()
+        .info()
+        .clone();
+    let source = spherecut_media::Source::path(master);
+    let mut m = project_media(source, master, &info).unwrap();
+    let d = camera_source(source, &report).unwrap().unwrap();
+    m.source = Source::DualFisheye(Box::new(d));
+    let path = dir.join(name);
+    saved(m, &path);
+    path
+}
+
+/// `frame --project P -o OUT` and what it gave.
+fn frame_of(project: &Path, out: &Path) -> (Option<i32>, Value) {
+    frame(&[
+        "--project".as_ref(),
+        project.as_os_str(),
+        "-o".as_ref(),
+        out.as_os_str(),
+    ])
+}
+
+/// A short render: half size, the first frame.
+const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
+
+/// `spherecut render` and `frame --project` of a dual-fisheye project,
+/// or of an EAC pair's, fail `not_yet` until M3.11, writing nothing: the
+/// refusal comes before a render starts, so nothing is ever rendered from
+/// lens 0 alone. Each names the media file by `path`, and its advice is
+/// the pair's (the M3.9 review's R9 and N11): `frame --reference` shows
+/// two fisheye lenses stitched, and nothing stitches an EAC pair yet, so
+/// its advice names no flag of frame's (`--equirect` would show one track
+/// alone as an equirect). Controls: an equirect project renders; frame's
+/// refusal held to another file's path; and each pair's advice held to
+/// the other's rule.
+#[test]
+fn a_dual_fisheye_project_is_refused_not_yet() {
+    let began = Instant::now();
+    let dir = TempDir::new("not-yet");
+    let master = insv::master(&dir, insv::MASTER, None).path;
+    let cam = camera_project(&dir, &master, "cam.spherecut");
+    let src = clip(&dir, "grid", Pattern::Grid, 2);
+    // An EAC pair's project of a clip that is there, which render would
+    // otherwise export as an equirect. The layout is the MAX's
+    // (docs/formats/gopro.md).
+    let eac = dir.join("eac.spherecut");
+    let mut m = media(&src);
+    m.source = Source::EacPair(Box::new(EacPair {
+        camera: Camera::default(),
+        tracks: [0, 1],
+        layout: EacLayout {
+            overlap: 32,
+            pre: 1408,
+            post: 1376,
+            size: [4096, 1344],
+        },
+    }));
+    saved(m, &eac);
+    let out = dir.join("out.mp4");
+    let png = dir.join("still.png");
+    let said = |m: &Value| m.as_str().unwrap_or("").to_string();
+    // Both commands on the project at `p`: render's run, and frame's
+    // status and document.
+    let both = |p: &Path| (run(p, &out, SHORT), frame_of(p, &png));
+    // Each one's refusal of a project whose media is the file `media`,
+    // and its message, or what it did instead.
+    let render_refused = |ran: &Ran, media: &Path| -> Result<String, String> {
+        let doc = ran.last();
+        let e = &doc["error"];
+        if ran.status == Some(1)
+            && ran.code() == "not_yet"
+            && ran.lines.len() == 1
+            && doc["schema"] == contract::RENDER
+            && said(&e["message"]).contains("M3.11")
+            && e["path"] == media.to_str().unwrap()
+        {
+            Ok(said(&e["message"]))
+        } else {
+            Err(format!("render: {:?} {:?}", ran.status, ran.lines))
+        }
+    };
+    let frame_refused =
+        |(status, still): &(Option<i32>, Value), media: &Path| -> Result<String, String> {
+            let f = &still["error"];
+            if *status == Some(1)
+                && f["code"] == "not_yet"
+                && still["schema"] == contract::FRAME
+                && said(&f["message"]).contains("M3.11")
+                && f["path"] == media.to_str().unwrap()
+            {
+                Ok(said(&f["message"]))
+            } else {
+                Err(format!("frame: {status:?} {still}"))
+            }
+        };
+    let refused =
+        |(ran, still): &(Ran, (Option<i32>, Value)), media: &Path| -> Result<[String; 2], String> {
+            Ok([render_refused(ran, media)?, frame_refused(still, media)?])
+        };
+    // The pairs' advice: frame's flag that stitches two fisheye lenses,
+    // or neither of frame's flags for a pair.
+    let reference = |said: &[String; 2]| said.iter().all(|m| m.contains("--reference"));
+    let no_flag = |said: &[String; 2]| {
+        said.iter()
+            .all(|m| !m.contains("--reference") && !m.contains("--equirect"))
+    };
+    let fisheye = refused(&both(&cam), &master).unwrap();
+    assert!(
+        fisheye.iter().all(|m| m.contains("two fisheye lenses")) && reference(&fisheye),
+        "{fisheye:?}"
+    );
+    let eac_ran = both(&eac);
+    let pair = refused(&eac_ran, &src).unwrap();
+    assert!(
+        pair.iter()
+            .all(|m| m.contains("two EAC tracks") && m.contains("can't stitch"))
+            && no_flag(&pair),
+        "{pair:?}"
+    );
+    assert!(!out.exists() && !png.exists());
+    assert_eq!(temp_files(&dir), Vec::<String>::new());
+    eprintln!("refused in {:.3} s", began.elapsed().as_secs_f64());
+
+    must_fail(
+        "frame's refusal held to another file's path",
+        frame_refused(&eac_ran.1, &master),
+    );
+    must_fail(
+        "the EAC pair's advice held to --reference",
+        reference(&pair),
+    );
+    must_fail(
+        "the fisheye pair's advice held to no flag",
+        no_flag(&fisheye),
+    );
+    let flat = project(&dir, &src);
+    must_fail("the equirect project", refused(&both(&flat), &src));
+    assert!(out.exists() && png.exists());
+    eprintln!("with the controls, {:.3} s", began.elapsed().as_secs_f64());
+}
+
+/// The project at `p` with its media's stored evidence rewritten from
+/// `from` to `to`, as a project made under an older table holds it.
+fn rewrite_evidence(p: &Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(p).unwrap();
+    let was = format!("\"evidence\": \"{from}\"");
+    assert_eq!(text.matches(&was).count(), 1, "{text}");
+    std::fs::write(p, text.replace(&was, &format!("\"evidence\": \"{to}\""))).unwrap();
+}
+
+/// A project whose stored geometry the table has since superseded gets a
+/// `warnings` entry from `render` (M3 plan 11.4), beside the `not_yet`
+/// refusal, which its failure carries; `frame --project`'s too. The
+/// table's provisional entry is "a different guess", never a newer one:
+/// the table keeps no order, and a project made under a later table reads
+/// so in an older build too (the M3.9 review's N4). Controls: the project
+/// as made has none, and its warning held to the project's evidence as
+/// the table's.
+#[test]
+fn render_warns_of_a_superseded_geometry() {
+    let began = Instant::now();
+    let dir = TempDir::new("superseded");
+    let master = insv::master(&dir, insv::MASTER, None).path;
+    let p = camera_project(&dir, &master, "cam.spherecut");
+    let out = dir.join("out.mp4");
+    // Render's and frame's provisional_geometry warning, the same in
+    // both, or the warnings they gave.
+    let warned = |p: &Path| -> Result<String, String> {
+        let ran = run(p, &out, &["--json"]);
+        ran.failed(1, "not_yet");
+        let (_, still) = frame_of(p, &dir.join("still.png"));
+        assert_eq!(still["error"]["code"], "not_yet", "{still}");
+        let theirs = |doc: &Value| -> Vec<Value> {
+            doc["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|w| w["code"] == "provisional_geometry")
+                .cloned()
+                .collect()
+        };
+        match (&theirs(ran.last())[..], &theirs(&still)[..]) {
+            ([w], [v]) if w == v => Ok(w["message"].as_str().unwrap().to_string()),
+            _ => Err(format!(
+                "{} / {}",
+                ran.last()["warnings"],
+                still["warnings"]
+            )),
+        }
+    };
+    must_fail("the project as made", warned(&p));
+
+    rewrite_evidence(&p, "placeholder until the fit", "an older guess");
+    let m = warned(&p).unwrap();
+    // The warning names the file and the table's evidence `theirs` as a
+    // different guess, never a newer one, and not the project's `ours`.
+    let names = |theirs: &str, ours: &str| {
+        m.contains(master.to_str().unwrap())
+            && m.contains("provisional")
+            && m.contains(&format!("a different guess ({theirs})"))
+            && !m.contains("newer")
+            && !m.contains(ours)
+    };
+    assert!(names("placeholder until the fit", "an older guess"), "{m}");
+    assert!(!out.exists());
+    eprintln!("{m}\nin {:.3} s", began.elapsed().as_secs_f64());
+    must_fail(
+        "the project's evidence held as the table's",
+        names("an older guess", "placeholder until the fit"),
+    );
+}
+
+/// F031's CLI half: a project saved in a real folder with its media
+/// recorded as `../clip.mp4`, opened through a link to that folder, finds
+/// and exports its media. Control: a project whose media sits where the
+/// lexical rule would look, beside the link's parent, is `media_offline`.
+#[test]
+fn a_project_in_a_linked_folder_renders_its_media() {
+    let began = Instant::now();
+    let tmp = TempDir::new("linked");
+    // Where the target folder is reached through a link, its real path,
+    // so that `other/link` is the only link on the way and the paths
+    // asserted below are the ones the kernel finds on any host.
+    let dir = std::fs::canonicalize(&*tmp).unwrap();
+    let real = dir.join("real");
+    let other = dir.join("other");
+    std::fs::create_dir_all(real.join("proj")).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let src = clip(&real, "clip", Pattern::Grid, 2);
+    saved(media(&src), &real.join("proj/p.spherecut"));
+    let text = std::fs::read_to_string(real.join("proj/p.spherecut")).unwrap();
+    assert!(text.contains("\"../clip.mp4\""), "{text}");
+    std::os::unix::fs::symlink(real.join("proj"), other.join("link")).unwrap();
+    let p = other.join("link/p.spherecut");
+    let out = dir.join("out.mp4");
+    let renders = || -> Result<(), Value> {
+        let ran = run(&p, &out, SHORT);
+        match ran.status {
+            Some(0) => Ok(()),
+            _ => Err(ran.last()["error"].clone()),
+        }
+    };
+    renders().unwrap();
+    assert!(out.exists());
+    std::fs::remove_file(&out).unwrap();
+
+    std::fs::rename(&src, other.join("clip.mp4")).unwrap();
+    let e = must_fail("the media beside the link's parent", renders());
+    assert_eq!(e["code"], "media_offline", "{e}");
+    assert_eq!(e["path"], src.to_str().unwrap(), "{e}");
+    assert!(!out.exists());
+    eprintln!("in {:.3} s", began.elapsed().as_secs_f64());
 }

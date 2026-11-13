@@ -1,0 +1,9 @@
+cpu_user_s 0.533
+cpu_sys_s 1.794
+ticks 10405
+late_ticks_over_1ms 5
+longest_late_ms 3.267
+child_exit 0
+sysfs True
+gnome_shell_pid 4536
+focus_comms decode-v0 spherecut spherecut:cs0 upload
