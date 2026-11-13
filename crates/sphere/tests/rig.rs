@@ -3508,6 +3508,56 @@ fn theta_frame_matches_an_edge_scan() {
     );
 }
 
+/// R2: a lens whose principal point lies outside its slot has θ_frame 0,
+/// as its axis is out of frame and no cap about it lies in the slot,
+/// so the feather's bound is 0 and the coverage rule refuses it: block 1
+/// of Pat's V6 under map C (the schema 2 fixture's set, near enough)
+/// with its principal point about 2000 px past the slot's right edge,
+/// where the circle at the limit still crosses the slot, 2000 px above
+/// it, and a million pixels out. Control: the edges alone, the rule
+/// without the principal point's test, give such a lens most of its θ.
+#[test]
+fn theta_frame_is_0_for_a_principal_point_outside_the_slot() {
+    let _time = timed("theta_frame_is_0_for_a_principal_point_outside_the_slot");
+    let geo = placeholder(CanvasMap::C, Generation::V6, V6Reading::RADIAL_ONLY);
+    let tune = Tune::default();
+    let inside = theta_frame(&pats(), &geo, &tune).unwrap();
+    assert!(inside.iter().all(|&t| t > 95.0 * DEG), "{inside:?}");
+    let moved = |cx: f64, cy: f64| {
+        let mut cal = pats();
+        let block = &mut cal.v6.as_mut().unwrap()[1];
+        (block.cx, block.cy) = (cx, cy);
+        cal
+    };
+    let (cx, cy) = {
+        let block = pats().v6.unwrap()[1];
+        (block.cx, block.cy)
+    };
+    let src = f64::from(SRC);
+    for (what, cal) in [
+        ("2000 px right of the slot", moved(src + 2000.0, cy)),
+        ("2000 px above the slot", moved(cx, -2000.0)),
+        ("a million pixels out", moved(1e6, cy)),
+    ] {
+        let frame = theta_frame(&cal, &geo, &tune).unwrap();
+        assert_eq!(frame, [inside[0], 0.0], "{what}");
+        let rig = Rig::build(&cal, &geo, &tune, 0, [3840; 2]).unwrap();
+        assert_eq!(rig.lenses[1].theta_frame, 0.0, "{what}");
+    }
+    // Control: just past the edge, the circle at the limit still crosses
+    // the slot, and the edges alone find a θ near the limit's.
+    let rig = Rig::build(&moved(src + 2000.0, cy), &geo, &tune, 0, [3840; 2]).unwrap();
+    let edges = scanned(&rig.lenses[1], &[0, 1, 2, 3]);
+    eprintln!(
+        "2000 px out, the edges alone give {:.3}°",
+        edges.to_degrees()
+    );
+    must_fail(
+        "the edges alone, 2000 px out",
+        at_most(edges, rig.lenses[1].theta_frame),
+    );
+}
+
 /// `s` with token `k`'s last digit one more, 9 going to 0.
 fn last_digit_changed(s: &str, k: usize) -> String {
     let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();

@@ -712,7 +712,8 @@ pub struct RigLens {
     /// θ_max, in radians.
     pub theta_max: f64,
     /// θ_frame (6.1), in radians: the smallest θ at which the lens's
-    /// circle meets its slot's edge.
+    /// circle meets its slot's edge, and 0 where the principal point lies
+    /// outside the slot.
     pub theta_frame: f64,
     /// The slot's side in texels, its track's, which the mask's frame
     /// term reads.
@@ -1110,7 +1111,8 @@ impl Rig {
 /// Each block's θ_frame (6.1), in radians, by block: the smallest θ at
 /// which the lens's circle meets the edge of its square slot, found by
 /// Brent's search, golden sections with parabolic steps, along each edge
-/// through the inverse. Every
+/// through the inverse, and 0 where the principal point lies outside the
+/// slot, so that no lens out of frame passes `validate`. Every
 /// canvas map scales with the side, so it needs no slot size, and
 /// `validate` (11.2) can bound the feather with it from the project
 /// alone.
@@ -1290,7 +1292,14 @@ fn texels_per_radian<const N: usize>(model: &LensModel, thetas: [f64; N]) -> [f6
 /// sixteenth of the side either way of the foot finds it, and over the
 /// whole edge should it land on that bracket's end. An edge pixel the
 /// inverse finds no direction for lies past the limit, and counts as the
-/// limit; a circle that meets no edge gives the limit.
+/// limit; so a circle inside the slot that meets no edge gives the limit.
+///
+/// A principal point outside the slot, [0, side]² (the M3.9 review's
+/// R2), gives 0: the lens's axis is out of frame, so no cap about it lies
+/// in the slot, though the edges alone would find a θ up to the limit (a
+/// circle that meets no edge from outside). The feather's bound is then
+/// 0, `validate`'s coverage rule refuses the lens, and
+/// [`Rig::feather_at`] holds it to its least band.
 ///
 /// Past the limit the search sees the limit plus a millionth of the
 /// pixel's distance from the principal point in sides, which the result
@@ -1302,6 +1311,9 @@ fn frame_theta(model: &LensModel, limit: f64, side: f64) -> f64 {
         LensModel::Mei(u) => (u.cx, u.cy),
         LensModel::Kb(k) => (k.cx, k.cy),
     };
+    if !((0.0..=side).contains(&cx) && (0.0..=side).contains(&cy)) {
+        return 0.0;
+    }
     let centre = DVec2::new(cx, cy);
     let theta = |px: DVec2| match model.unproject_within(px, limit) {
         Some(d) => off_axis(d),
