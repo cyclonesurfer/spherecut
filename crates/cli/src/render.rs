@@ -7,9 +7,9 @@
 //! 2. the output, before any work, as `frame` checks it: something there
 //!    is refused unless `--overwrite` is given, and a directory, pipe or
 //!    device either way;
-//! 3. the project, loaded (exit 1 with its error's code), and its media:
-//!    a camera's pair is refused `not_yet` (exit 1) until M3.11 stitches
-//!    a project, before the media is looked for, after a
+//! 3. the project, loaded (exit 1 with its error's code), and its media
+//!    files, each looked at: a camera's pair is refused `not_yet` (exit 1)
+//!    until M3.11 stitches a project, before the offline check, after a
 //!    `provisional_geometry` warning when the table of cameras has
 //!    superseded its stored geometry; then offline is exit 1, and a file
 //!    that changed is a warning;
@@ -455,9 +455,10 @@ pub(crate) fn project_error(path: &Path, e: &FileError) -> Failure {
     about(failure(code, message), path)
 }
 
-/// Step 3's look at the clip's media. A camera's pair fails `not_yet`
-/// until M3.11 (M3 plan 14), with advice for its kind, before the file
-/// is looked for, so nothing renders one lens as an equirect; a pair of
+/// Step 3's look at the clip's media. Every media file is looked at
+/// first ([`file::media_status`]). Then a camera's pair fails `not_yet`
+/// until M3.11 (M3 plan 14), with advice for its kind, before the
+/// offline check, so nothing renders one lens as an equirect; a pair of
 /// fisheye lenses whose stored geometry the table has superseded gets a
 /// `provisional_geometry` warning first (11.4), which the failure
 /// carries. Then an offline clip fails, and a changed file is a warning
@@ -834,7 +835,8 @@ mod tests {
     /// entry with its evidence: "a settled one" when the entry is
     /// settled, and "a different guess" when it is provisional, never a
     /// newer one, since the table keeps no order (the M3.9 review's N4 and
-    /// N11). Control: a provisional entry held to the settled words.
+    /// N11). Controls: a provisional entry held to the settled words, and
+    /// a settled entry to the guess's.
     #[test]
     fn a_superseded_geometry_names_the_table_entry() {
         use spherecut_testkit::control::must_fail;
@@ -850,19 +852,22 @@ mod tests {
             )
         };
         let settled = |m: &str| m.contains("now has a settled one (measured on clips 8 to 10)");
+        let guessed = |m: &str| {
+            m.contains("now has a different guess (measured on clips 8 to 10)")
+                && !m.contains("newer")
+        };
         let m = said(Status::Settled);
         assert!(m.starts_with("/clips/cam.insv: ") && settled(&m), "{m}");
         let guess = said(Status::Provisional);
         assert!(
-            guess.starts_with("/clips/cam.insv: ")
-                && guess.contains("now has a different guess (measured on clips 8 to 10)")
-                && !guess.contains("newer"),
+            guess.starts_with("/clips/cam.insv: ") && guessed(&guess),
             "{guess}"
         );
         must_fail(
             "a provisional entry held to the settled words",
             settled(&guess),
         );
+        must_fail("a settled entry held to the guess's words", guessed(&m));
     }
 
     #[test]

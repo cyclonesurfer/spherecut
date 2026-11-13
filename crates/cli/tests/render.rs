@@ -1388,8 +1388,9 @@ fn rewrite_evidence(p: &Path, from: &str, to: &str) {
 /// refusal, which its failure carries; `frame --project`'s too. The
 /// table's provisional entry is "a different guess", never a newer one:
 /// the table keeps no order, and a project made under a later table reads
-/// so in an older build too (the M3.9 review's N4). Control: the project
-/// as made has none.
+/// so in an older build too (the M3.9 review's N4). Controls: the project
+/// as made has none, and its warning held to the project's evidence as
+/// the table's.
 #[test]
 fn render_warns_of_a_superseded_geometry() {
     let began = Instant::now();
@@ -1426,16 +1427,22 @@ fn render_warns_of_a_superseded_geometry() {
 
     rewrite_evidence(&p, "placeholder until the fit", "an older guess");
     let m = warned(&p).unwrap();
-    assert!(
+    // The warning names the file and the table's evidence `theirs` as a
+    // different guess, never a newer one, and not the project's `ours`.
+    let names = |theirs: &str, ours: &str| {
         m.contains(master.to_str().unwrap())
             && m.contains("provisional")
-            && m.contains("a different guess (placeholder until the fit)")
+            && m.contains(&format!("a different guess ({theirs})"))
             && !m.contains("newer")
-            && !m.contains("an older guess"),
-        "{m}"
-    );
+            && !m.contains(ours)
+    };
+    assert!(names("placeholder until the fit", "an older guess"), "{m}");
     assert!(!out.exists());
     eprintln!("{m}\nin {:.3} s", began.elapsed().as_secs_f64());
+    must_fail(
+        "the project's evidence held as the table's",
+        names("an older guess", "placeholder until the fit"),
+    );
 }
 
 /// F031's CLI half: a project saved in a real folder with its media

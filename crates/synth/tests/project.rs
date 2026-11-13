@@ -280,9 +280,9 @@ fn media_of(path: &Path, report: &ProbeReport) -> Media {
 /// What `source_of` gives.
 type SourceOf = (Result<Option<DualFisheye>, String>, ProbeReport);
 
-/// `path`'s media as an agent's `project create` makes it, from `of`,
-/// what `source_of` gave for it: `media_of`, with `camera_source`'s
-/// source when it gives one.
+/// `path`'s media as an agent's `project create` makes it, from what
+/// `source_of` gave for it: `media_of`, with `camera_source`'s source
+/// when it gives one.
 fn created(path: &Path, (source, report): &SourceOf) -> Media {
     let mut media = media_of(path, report);
     if let Ok(Some(d)) = source {
@@ -480,9 +480,9 @@ fn a_file_without_calibration_stays_equirect() {
 /// or by a provisional one with other evidence; a settled, fitted or user
 /// geometry never is (11.4). `superseded_by_table` reads the table's
 /// entry for the camera the source names: the source `camera_source`
-/// made isn't superseded, one made under an older entry is, and the
-/// fixture's, whose binding the user set, isn't. Control: equal evidence
-/// gives none.
+/// made isn't superseded, one made under another provisional entry is,
+/// and the fixture's, whose binding the user set, isn't. Control: equal
+/// evidence gives none.
 #[test]
 fn a_newer_table_entry_supersedes_a_guess() {
     let _time = timed("a_newer_table_entry_supersedes_a_guess");
@@ -517,7 +517,7 @@ fn a_newer_table_entry_supersedes_a_guess() {
     // Against the table, by the camera the source names.
     let d = source_of(rung3_file()).0.unwrap().unwrap();
     assert_eq!(superseded_by_table(&d), None);
-    let older = DualFisheye {
+    let other = DualFisheye {
         geometry: Geometry {
             evidence: "a guess before the table's row".into(),
             ..d.geometry.clone()
@@ -525,7 +525,7 @@ fn a_newer_table_entry_supersedes_a_guess() {
         ..d.clone()
     };
     assert_eq!(
-        superseded_by_table(&older),
+        superseded_by_table(&other),
         Some(Superseded {
             status: Status::Provisional,
             evidence: "placeholder until the fit".into(),

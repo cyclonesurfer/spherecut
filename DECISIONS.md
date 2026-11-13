@@ -11388,8 +11388,9 @@ What, as `crates/core/src/project/` has it:
   evidence, and the stored geometry is provisional
   (`media::project::superseded`: the table keeps no date, so "newer"
   is read as "other", and the words name such an entry "a different
-  guess", never a newer one, since a project made under a later table
-  finds this build's guess different too: the M3.9 review's N4),
+  guess", never a newer one, since an older build reading a project
+  made under a later table finds its own guess different too: the M3.9
+  review's N4),
   `spherecut render` and `frame --project` warn
   `provisional_geometry` with the table's evidence, and agents'
   `project` summary gives it as `superseded`; the project renders as
