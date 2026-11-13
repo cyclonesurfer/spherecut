@@ -9590,6 +9590,17 @@ reads its `../clip.mp4` beside the folder it is really in, as the
 window and `spherecut render` do, and one an agent makes there loads
 in them with its media. The root keeps the name it was given, so a
 root reached through a link still names its paths as the agent does.
+From R7, `create` and `add_media` make a camera's file a source only
+if `validate` takes it at the default tune: media's `camera_source`
+ends with the source's `check`, and a refusal (a frame under 95°, too
+narrow for the default feather; a lens's ξ at −1 or below) keeps the
+media an equirect with `not_equirect` and `no_calibration`, whose
+parentheses carry `validate`'s words, which name only fields and
+numbers. Before, `add_media` refused such a file `bad_argument` and
+`create` refused to make the project at all. `trailer_source` is the
+same source unchecked, which a whole `dual_fisheye` source in a
+`set_source` is compared with, so one with a tune that fits can still
+make such a file a source.
 
 ## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
 

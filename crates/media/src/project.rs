@@ -6,7 +6,9 @@
 //!
 //! [`project_media`] still makes the equirect entry it made in M2: a
 //! camera file's source is [`camera_source`]'s, which M3.10's open flow
-//! and an agent's `project create` call beside it.
+//! and an agent's `project create` call beside it; [`trailer_source`] is
+//! the same source unchecked, which an agent's `set_source` compares one
+//! sent with.
 
 use std::fs::File;
 use std::path::Path;
@@ -17,6 +19,7 @@ use spherecut_core::project::{
     self, CalibSnapshot, Camera, DualFisheye, Fingerprint, Gains, Media, MediaId, MediaVideo,
     RawStrings, file,
 };
+use spherecut_core::{FrameRate, Time};
 use spherecut_sphere::rig::{Geometry, Status, Tune};
 
 use crate::Source;
@@ -57,23 +60,77 @@ pub fn project_media(
 }
 
 /// The two-lens source of the camera file `source` opens, which `report`
-/// probed (M3 plan 11.5): the calibration `camera::insta360` finds in its
-/// trailer, kept raw and parsed with its hash; the geometry of
-/// `camera::insta360::stitching`'s entry, the table's row for its model
-/// and firmware with the generation its field 136 names (never
+/// probed (M3 plan 11.5), as [`trailer_source`] reads it, and checked by
+/// `validate`'s rules for a source ([`DualFisheye::check`]) before it
+/// goes into a project. `None` for a file with no calibration a stitch
+/// reads, which stays equirect, keeping `not_equirect`'s doubt so it
+/// shows as lenses. An error, in words, when the trailer can't be read
+/// again, its calibration can't be one, or the source it makes at the
+/// default tune isn't one a project takes (the M3.9 review's R7): a
+/// θ_frame under the 95° the default 5° feather needs, a ξ at −1 or
+/// below, or another of the rules that read the calibration. Such a file
+/// stays equirect too, as one whose calibration can't be read does, and
+/// a `set_source` with a tune that fits it can still make it a source.
+/// `validate`'s words give only field names and numbers, never the
+/// file's text.
+pub fn camera_source(
+    source: Source<'_>,
+    report: &ProbeReport,
+) -> Result<Option<DualFisheye>, String> {
+    let Some(d) = trailer_source(source, report)? else {
+        return Ok(None);
+    };
+    // The media the source is checked as, before it has one: `check`
+    // reads only its id, which a refusal names and which is left out
+    // below, and its video stream, the first lens track.
+    let media = Media {
+        id: MediaId::NEW,
+        path: std::path::PathBuf::new(),
+        fingerprint: Fingerprint {
+            bytes: 0,
+            head: String::new(),
+        },
+        video: MediaVideo {
+            stream: d.tracks[0],
+            width: 0,
+            height: 0,
+            rate: FrameRate::FPS_30,
+            duration: Time::ZERO,
+        },
+        source: project::Source::Equirect {},
+        caps: project::Caps::default(),
+    };
+    if let Err(p) = d.check(&media) {
+        let named = format!("media {}'s ", media.id);
+        let why = p.message.strip_prefix(&named).unwrap_or(&p.message);
+        return Err(format!(
+            "{}: its calibration at the default tune isn't a source a project takes: {why}",
+            source.name.display()
+        ));
+    }
+    Ok(Some(d))
+}
+
+/// The two-lens source of the camera file `source` opens, which `report`
+/// probed (M3 plan 11.5), unchecked: the calibration `camera::insta360`
+/// finds in its trailer, kept raw and parsed with its hash; the geometry
+/// of `camera::insta360::stitching`'s entry, the table's row for its
+/// model and firmware with the generation its field 136 names (never
 /// `known::lookup`'s row as it stands, which reads V6 and which a rig
 /// refuses on a trailer of V3 alone); `Tune::default()`, gains off and
 /// the default front track; and its camera's make, model, firmware and
-/// serial as the file names them. `None` for a file with no
-/// calibration a stitch reads, which stays equirect, keeping
-/// `not_equirect`'s doubt so it shows as lenses. An error, in words, when
-/// the trailer can't be read again or its calibration can't be one.
+/// serial as the file names them. `None` for a file with no calibration
+/// a stitch reads. An error, in words, when the trailer can't be read
+/// again or its calibration can't be one. A project takes
+/// [`camera_source`]'s, which is this one checked; this one is what a
+/// source sent whole is compared with, whose own tune may be the one
+/// that fits.
 ///
 /// It calls [`spherecut_core::may_block`] before it opens the file, as
 /// probe does, so on the UI thread it panics in a debug build. The
 /// trailer is read again here, as `agent::still::pair_stitching` reads
 /// it, rather than kept from probe, which holds no raw strings.
-pub fn camera_source(
+pub fn trailer_source(
     source: Source<'_>,
     report: &ProbeReport,
 ) -> Result<Option<DualFisheye>, String> {

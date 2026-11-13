@@ -383,9 +383,13 @@ fn camera_form(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, 
 }
 
 /// The two-lens source of media `id`'s file, as `project create` would
-/// make it: the file opened beneath the roots and checked against what
-/// the project recorded of it, probed, and read by media's
-/// `camera_source`. The inner error is camera's words, for the log.
+/// make it before checking it: the file opened beneath the roots and
+/// checked against what the project recorded of it, probed, and read by
+/// media's `trailer_source`. `validate` checks the source the edit makes
+/// as it checks any (the M3.9 review's R7): the camera form's default
+/// tune is refused there, with its words, where it doesn't fit the
+/// file's frame, and a whole source's own tune may be one that fits. The
+/// inner error is camera's words, for the log.
 fn file_source(
     i: usize,
     id: MediaId,
@@ -413,7 +417,7 @@ fn file_source(
         }
     })?;
     cx.call.check()?;
-    let source = spherecut_media::project::camera_source(opened.source(), &report);
+    let source = spherecut_media::project::trailer_source(opened.source(), &report);
     if let Ok(Some(d)) = &source
         && d.tracks[0] != m.video.stream
     {

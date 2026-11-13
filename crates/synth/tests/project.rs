@@ -30,7 +30,7 @@ use spherecut_core::project::{
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_media::probe::{ProbeReport, probe};
 use spherecut_media::project::{
-    Superseded, camera_source, project_media, superseded, superseded_by_table,
+    Superseded, camera_source, project_media, superseded, superseded_by_table, trailer_source,
 };
 use spherecut_sphere::rig::{Binding, Generation, Geometry, Rig, Status, Tune};
 use spherecut_synth::insv::{InsvFault, InsvSpec, Records, Value, append_trailer};
@@ -314,7 +314,10 @@ fn same_rigs(got: &Rig, want: &Rig) -> Result<(), String> {
 /// which `rig()` builds, with field 27's offset beside it; the media
 /// `project_media` makes of the file is of its first lens track. Control:
 /// a file whose V3 string, the one it holds, differs in one digit hashes
-/// otherwise.
+/// otherwise, read unchecked (`trailer_source`): the digit is the tenths
+/// of lens 1's last distortion term, which draws its frame inside 90°,
+/// so `camera_source` refuses it at the default tune with `validate`'s
+/// words (the M3.9 review's R7).
 #[test]
 fn a_camera_file_makes_a_dual_fisheye_media() {
     let _time = timed("a_camera_file_makes_a_dual_fisheye_media");
@@ -404,10 +407,17 @@ fn a_camera_file_makes_a_dual_fisheye_media() {
     assert_eq!(shifted.calibration.calibration(), s.calibration());
 
     // Control: a string a digit off hashes otherwise, through the same
-    // reading.
+    // reading, unchecked: checked, the source it gives is refused.
     let off = control.join().unwrap();
-    let (other, off_report) = source_of(off);
-    let other = other.unwrap().unwrap();
+    let (refused, off_report) = source_of(off);
+    let refused = refused.unwrap_err();
+    assert!(
+        refused.contains("isn't a source a project takes: source.tune.feather_deg"),
+        "{refused}"
+    );
+    let other = trailer_source(spherecut_media::Source::path(off), &off_report)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         other.calibration.hash,
         off_report.camera_file.calibration.as_ref().unwrap().hash

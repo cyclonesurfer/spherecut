@@ -19,16 +19,17 @@ use spherecut_agent::rpc::{CallCx, Tools};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError, reference, text};
 use spherecut_camera::insta360::limits::MAX_METADATA;
-use spherecut_camera::insta360::{parse_metadata, read_record, read_trailer};
+use spherecut_camera::insta360::{parse_metadata, read_record, read_trailer, stitching};
 use spherecut_core::project::folder::ProjectFolder;
 use spherecut_core::project::{
     Camera, DualFisheye, EacLayout, EacPair, History, Media, Project, Source, file, gains_basis,
 };
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_media::probe::probe;
-use spherecut_media::project::{camera_source, project_media};
-use spherecut_sphere::rig::{Binding, Status, Tune};
-use spherecut_synth::insv::{InsvFault, InsvFiles, InsvSpec, append_trailer, write_insv};
+use spherecut_media::project::{camera_source, project_media, trailer_source};
+use spherecut_sphere::rig::{Binding, Status, Tune, theta_frame};
+use spherecut_synth::insv::{InsvFault, InsvFiles, InsvSpec, Records, append_trailer, write_insv};
+use spherecut_synth::lens::{CalibTruth, x5_like};
 use spherecut_synth::media::{self, Spec};
 use spherecut_testkit::control::must_fail;
 use spherecut_testkit::{samples, tier2};
@@ -139,6 +140,23 @@ impl TempDir {
         let bare = self.plain_camera(&format!(".{name}.mp4"));
         let to = self.path(name);
         append_trailer(&bare, &to, &InsvSpec::small().records, Some(fault)).unwrap();
+        std::fs::remove_file(&bare).unwrap();
+        to
+    }
+
+    /// cam.insv's tracks with a trailer whose one calibration is `cal`,
+    /// printed as cam.insv's own is, as `name`.
+    fn recalibrated_camera(&self, name: &str, cal: &CalibTruth) -> PathBuf {
+        let spec = InsvSpec::small();
+        let records = Records::x5_like(
+            std::slice::from_ref(cal),
+            &spec.calib,
+            spec.frames,
+            spec.rate,
+        );
+        let bare = self.plain_camera(&format!(".{name}.mp4"));
+        let to = self.path(name);
+        append_trailer(&bare, &to, &records, None).unwrap();
         std::fs::remove_file(&bare).unwrap();
         to
     }
@@ -1260,6 +1278,123 @@ fn no_calibration_is_made_with_a_warning() {
     must_fail(
         "cam.insv, whose calibration a stitch reads",
         check("cam.spherecut", &cam, &plain),
+    );
+}
+
+/// Each lens's θ_frame, in degrees, of the calibration camera reads from
+/// the file at `path` under its geometry at the default tune.
+fn frame_deg(path: &Path) -> [f64; 2] {
+    let mut f = File::open(path).unwrap();
+    let len = f.metadata().unwrap().len();
+    let trailer = read_trailer(&mut f, len).unwrap().unwrap();
+    let metadata = read_record(&mut f, &trailer, 1, MAX_METADATA)
+        .unwrap()
+        .unwrap();
+    let s = stitching(&parse_metadata(&metadata).unwrap())
+        .unwrap()
+        .unwrap();
+    theta_frame(&s.calibration, &s.known.geometry, &Tune::default())
+        .unwrap()
+        .map(f64::to_degrees)
+}
+
+/// The M3.9 review's R7: a camera's file whose calibration camera reads,
+/// but whose source at the default tune (11.5) `validate` refuses, makes
+/// a project all the same, through `create` and through `add_media`: an
+/// equirect, shown as its lenses, with `not_equirect` and `no_calibration`
+/// warnings that give `validate`'s words, as one whose calibration can't
+/// be read does. The files: cam.insv's calibration with both blocks'
+/// focals times 1.07, so that each lens's θ_frame is under the 95° the
+/// default 5° feather needs, and with block 0's ξ at −1.5, where the lens
+/// images nothing. The first is made a source after by a whole
+/// `set_source` whose feather fits its frame, while the camera form, at
+/// the default tune, is refused with `validate`'s words. Control: cam.insv
+/// itself is made a dual-fisheye source without the warnings.
+#[test]
+fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
+    let _t = timed("a_calibration_no_project_takes_at_the_default_tune_stays_equirect");
+    let dir = TempDir::new("default-tune");
+    let mut long = x5_like();
+    for block in &mut long.blocks {
+        block.fx *= 1.07;
+        block.fy *= 1.07;
+    }
+    let long = dir.recalibrated_camera("long.insv", &long);
+    let frame = frame_deg(&long);
+    assert!(frame.iter().all(|f| *f < 95.0), "θ_frame {frame:?}°");
+    let mut xi = x5_like();
+    xi.blocks[0].xi = -1.5;
+    let xi = dir.recalibrated_camera("xi.insv", &xi);
+    let p = dir.fixture("a.spherecut");
+    let tools = dir.tools();
+    // `media` made equirect, with both warnings, `validate`'s words
+    // among them, through `create` as `file` and through `add_media` to
+    // the fixture.
+    let check = |file: &str, media: &Path, words: &str| -> Result<(), String> {
+        let created = ok(
+            &tools,
+            "project",
+            json!({"file": file, "create": {"media": media}}),
+        );
+        let added = ok(
+            &tools,
+            "edit",
+            edit(&p, json!([{"op": "add_media", "path": media}])),
+        );
+        let added_source = load(&p).media().last().unwrap().source.clone();
+        for (how, r, source) in [
+            (
+                "create",
+                &created,
+                load(&dir.path(file)).media()[0].source.clone(),
+            ),
+            ("add_media", &added, added_source),
+        ] {
+            let warned = |code: &str| {
+                r["warnings"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|w| w["code"] == code)
+                    .and_then(|w| w["message"].as_str().map(str::to_owned))
+            };
+            let why = warned("no_calibration").unwrap_or_default();
+            if !(why.starts_with("no calibration: shown as its lenses (") && why.contains(words)) {
+                return Err(format!("{file} by {how}: no_calibration {why:?}: {r}"));
+            }
+            if warned(codes::NOT_EQUIRECT).is_none() {
+                return Err(format!("{file} by {how}: no doubt: {r}"));
+            }
+            if !matches!(source, Source::Equirect {}) {
+                return Err(format!("{file} by {how}: {source:?}"));
+            }
+        }
+        Ok(())
+    };
+    check("long.spherecut", &long, "source.tune.feather_deg").unwrap();
+    check("xi.spherecut", &xi, "ξ + xi_delta must stay above −1").unwrap();
+    // The camera form's default tune is refused as `validate` refuses
+    // it; the file's source with a feather that fits its frame applies.
+    let q = dir.path("long.spherecut");
+    let camera = json!({"kind": "camera"});
+    let e = refused(&tools, "edit", edit(&q, json!([set_source(1, camera)])));
+    assert_eq!(e.code, codes::BAD_EDIT, "{e:?}");
+    assert!(e.message.contains("source.tune.feather_deg"), "{e:?}");
+    let report = probe(&long).unwrap();
+    let mut fits = trailer_source(spherecut_media::Source::path(&long), &report)
+        .unwrap()
+        .unwrap();
+    fits.tune.feather_deg = (frame.iter().fold(f64::INFINITY, |a, &f| a.min(f)) - 90.0).floor();
+    ok(
+        &tools,
+        "edit",
+        edit(&q, json!([set_source(1, whole(&fits))])),
+    );
+    assert_eq!(fisheye(&q, 1), fits);
+    let cam = dir.camera("cam.insv");
+    must_fail(
+        "cam.insv, whose source at the default tune validates",
+        check("cam.spherecut", &cam, "source.tune"),
     );
 }
 

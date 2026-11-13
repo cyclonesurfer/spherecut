@@ -512,7 +512,9 @@ calibration's raw strings and an `auto` gains' samples stay in the
 file, and the camera's words reach a result only as fields (Untrusted
 text). `create`, and `edit`'s `add_media`, make a camera's file a
 `dual_fisheye` source of the calibration its trailer holds; a file
-with none a stitch reads stays an equirect, shown as its lenses, with
+with none a stitch reads, or one whose source at the default tune
+`validate` refuses (its frame too narrow for the default feather, a
+lens's ξ at −1 or below), stays an equirect, shown as its lenses, with
 `not_equirect` and `no_calibration` warnings. Three ops change a
 source: `set_source`, `set_stitch` (the tune, the gains or both) and
 `set_caps` (the nadir and zenith caps). `set_source` takes
@@ -655,7 +657,7 @@ and says what it left out or doubts. The tools' own codes:
 | `untimed_packets` | `analyze` | `timing`: packets without a timestamp, which aren't counted |
 | `result_cut` | `check` | Passed rules' messages, then advice, left out to fit 2 KiB (`CHECK_BYTES`) |
 | `not_equirect` | `project`, `edit` | `create` or `add_media` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
-| `no_calibration` | `project`, `edit` | `create` or `add_media` with a camera's two-lens file that holds no calibration a stitch reads (or one camera can't read, its words after, in parentheses): the media stays an equirect, shown as its lenses |
+| `no_calibration` | `project`, `edit` | `create` or `add_media` with a camera's two-lens file that holds no calibration a stitch reads, or one camera can't read or whose source at the default tune `validate` refuses (its words after, in parentheses): the media stays an equirect, shown as its lenses |
 | `history_not_saved` | `edit`, `undo` | The project was saved but its history wasn't: `undo` can't take the step back |
 | `not_flushed` | `project`, `edit`, `undo` | The project was saved, but its folder couldn't be flushed to disk after: the change stands, so don't make it again, though a crash before the disk catches up could lose it |
 | `outside_trim` | `edit` | Keys or markers the edits left outside the clip's trim, which no render shows |
