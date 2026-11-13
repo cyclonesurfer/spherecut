@@ -3852,10 +3852,14 @@ the code first, and each fix shown failing first where it could be):
   crate table moves for M3.9.
 - **(d) The note and the check.** Unit (d) wrote this note and plan
   amendment 9, corrected D68 in place (R7's fallback; an agent never
-  makes a calibration, D57) and dated D47's Open card, ran the touched
-  properties at 100,000 cases and ran the check. The units had already
-  written the round's notes on D16 (`NotFlushed`), D47 (`name_near`, the
-  caps key) and D57 (the folder, `named_near`, R5 to R7).
+  makes a calibration, D57) and dated D47's Open card, and ran the
+  touched properties at 100,000 cases (core's `view_props` after its
+  review). The units had already written the round's notes on D16
+  (`NotFlushed`, which its review moved to a note dated 2026-11-13), D47
+  (`name_near`, the caps key) and D57 (the folder, `named_near`, R5 to
+  R7). Its first check, at 98d2504, was cut off when the unit reported;
+  after its review's fixes the check failed once on a playback timing
+  flake and then passed at 8088143 (below).
 
 **Open, and known limits:**
 - The slice's Tier 1 time is over the 5 s that Pat set for 19.6's M3.9
@@ -3955,9 +3959,19 @@ lavapipe), at d478083 unless named:
 - `cargo xtask check` passed at 80bfe47: 1703 tests passed, 0 failed and
   61 ignored on 143 result lines, against 1663, 0 and 60 on 140 at
   M3.5's 30ad23a. Unit (d)'s first run waited on the disk (10.76 GB free
-  against its 13 GB gate). The fix round's check runs once on the commit
-  that holds this note (`check-m39-fix.log`); its time and count go in
-  at the merge.
+  against its 13 GB gate). The fix round's first check, at 98d2504
+  (`check-m39-fix.log`), stopped in its Tier 1 build when unit (d)
+  reported, since it ran as a task of the unit's session: rustfmt,
+  clippy, rustdoc and the MSRV build had passed, and their controls had
+  failed as they must. At 8088143, after which only this file changed,
+  the second (`check-m39-fix-2.log`) failed after 642 s on one playback
+  test, `a_locked_pair_never_shows_mismatched_frames` (seed 37: "a
+  play's clock never started in 500ms"), with nothing else running
+  (Known issues, the lock suite); the lock suite then passed 10 of 10
+  alone, and the third (`check-m39-fix-3.log`) passed in 803 s: 1721
+  tests passed, 0 failed and 61 ignored on 143 result lines, with
+  clippy's, rustdoc's 4, the MSRV build's and cargo-deny's controls
+  failing as they must.
 - `the_list_fits`: `tools/list` 12,235 of 12,288 bytes in each protocol
   version, A1's tools 7,109 of 7,168; the fix round changed no tool's
   description or schema.
@@ -6180,6 +6194,16 @@ each slice's merge sweeps the list.
   and the lock suite 10 of 10. M3.5 didn't touch playback, so it is
   taken as a timing flake under load; another failure would need a look
   at the test's margins. (as of 2026-11-12)
+- Another of the lock suite's tests,
+  `a_locked_pair_never_shows_mismatched_frames` (playback
+  `tests/lock/play.rs`), failed once in M3.9's fix round, in `cargo
+  xtask check` at 8088143 with nothing else running: seed 37's locked
+  play stayed `Seeking` with both lenses shown at pts 48, and "a
+  play's clock never started in 500ms" (play.rs:316). The suite then
+  passed 10 of 10 alone (5.38 to 5.75 s) and the check's rerun passed.
+  M3.9 didn't touch playback. It is the suite's second failure,
+  without load this time, so its margins want the look the entry above
+  asks for. (as of 2026-11-13)
 - On FFmpeg 9.0.2 two Tier 1 tests failed, at 073715b as at the
   review-fix slice. M3.5 fixed both, and both pass in compat's Tier 1
   on 9.0.2 at 7bc2745 (and on 8.1.3).
