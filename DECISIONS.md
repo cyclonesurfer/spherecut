@@ -8,7 +8,8 @@ section 0), so each of those lands in its place with its slice, and D38
 came before some of them. M3's plan reserves D60 to D76 for M3's slices
 (`docs/design/m3-plan.md`, section 23), so a number there with no
 heading belongs to a slice not yet built (D66 is M3.7's);
-D77 came from M3.8 and D78 from the review-fix slice. Superseded
+D77 came from M3.8, D78 from the review-fix slice and D79 from the
+VA-API stall slice. Superseded
 entries stay and say so.
 
 Index:
@@ -82,6 +83,7 @@ Index:
 - D68. Schema 2: each media's source, with the calibration, geometry, tune and gains its render reads
 - D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
 - D78. An independent check on GitHub's runner
+- D79. The VA-API copy path's stall: a shared VM's page-table gate, and draining VCN before each download
 
 ## D1. Rust stable, edition 2024, MSRV 1.95
 
@@ -2148,6 +2150,27 @@ under `RADV_DEBUG=nodcc`. RADV's DCC on the slots' 8-bit planes is the
 likely mechanism, so those planes can no longer be rendered to, which
 keeps DCC off them (D77). Path A's old "19 of 2764800" flake is probably
 the same fault.
+
+*Noted 2026-11-13 (the VA-API stall slice, D79).* Path A imports every
+frame afresh, and each import's unmap may gate the window. RADV maps
+each DMA-BUF it imports into the process's VM and unmaps it when the
+import is freed, without `AMDGPU_VM_DELAY_UPDATE` (read, Mesa 26.2.5
+`radv_amdgpu_bo.c` 33-80, 368-394, 885-934). Such an unmap can make the
+window's next submission wait for the VCN decodes queued at that moment,
+as the copy path's staging free did (D79); that this is what still
+gates path A is likely, not measured. On odin path A missed refreshes
+with or without a drain: 1.86 passes of 40 to 95 ms a second without
+one and 1.25 with `picture`, presenting 0.82 to 0.85 at a UI p99 of 57
+to 64 ms (`hw-reports/stall-followup-2026-11-12/report.md`, arms B and
+Bp). So path A stays opt-in, and a fix (an import cache, or another) is
+a slice of its own. `extra_hw_frames` does nothing for a VA-API decoder
+on FFmpeg 8.1.3 and 9.0.2, whose decode pool is dynamic and grows as
+needed (`initial_pool_size = 0`, read in n8.1.3 and n9.0.2
+`libavcodec/vaapi_decode.c:629`; n8.1.3 `libavcodec/decode.c` 1148-1152
+adds `extra_hw_frames` only to a fixed pool); n6.1's pool is fixed
+(read, `vaapi_decode.c` 604-619). So zero copy's 24 spare surfaces
+matter only on 6.1; on 8.1.3 and 9.0.2 the pool has no cap, and nothing
+is lost.
 
 Revisit if: path B fails or is refused on a GPU that doctor said could
 share its device (the copy path takes over, said once a file); huginn's
@@ -6229,6 +6252,22 @@ neither the slot nor zero copy for later opens is given up
 too (F117): a timeout or a lost device is the GPU's failure
 (`GpuFailed`), not a refused frame.
 
+*Updated 2026-11-13 (the VA-API stall slice, D79):* `PerfStats`' stages
+now end `AvOffset`, `PairWait` (M3.8, D67) and `Drain`: the time a
+VA-API decoder spent waiting for the pictures queued on its device
+before a frame's download (and, with `picture`, after the packets sent
+for it), recorded only for a frame whose drains took some time. Four
+counters follow `PairResyncs`: `DrainWaited` (surfaces synced that
+weren't ready, a sync of 0.5 ms or more), `DrainErrors` (syncs that
+failed), `DrainOverflow` (surfaces a decoder forgot past the 64 it
+keeps) and `DrainUnavailable` (decoders asked to drain on a VA-API
+device that found no `vaSyncSurface`). `PerfStats::drain_waits` is a
+histogram of surfaces waited for a download (`DrainWaits`, 65 buckets,
+the last for 64 or more). `PlayerConfig::vaapi_drain` takes its default
+from `SPHERECUT_VAAPI_DRAIN` (`download` unless set) and goes in each
+decode worker's `VideoRequest`, and `DecodeStats::last_download_ms` is
+the copy alone, without the drain.
+
 ## D35. Audio and A/V sync
 
 *2026-10-30, M1 slice 6. The M1 plan's D33 (section 9), adjusted to
@@ -7300,6 +7339,22 @@ control failed as it must. A short slice traces the stall on odin and
 fixes it before huginn's run, beside M3.5. That is the working default
 until Pat answers the card of 2026-11-12 (PROGRESS's Known issues).
 
+*Noted 2026-11-13 (the VA-API stall slice, D79):* with the drain,
+`gui_decode_behind`'s run 1 passes. On odin at 6675318 the official
+test failed run 1 with the drain off (0.75 presented, UI p99 110.3 ms)
+and passed it with `download` (0.995, 18.4 ms;
+`hw-reports/stall-followup-2026-11-12/report.md`). With
+`SPHERECUT_VAAPI_DRAIN=download` it then passed 3 of 3, run 1
+presenting 0.994 to 0.995 at a UI p99 of 18.1 to 18.5 ms with 0.17 to
+0.18 of the frames expected shown, so still behind, and run 2's control
+failed as it must (`hw-reports/stall-tier2-2026-11-12/report.md`,
+section 2). The smoke document now has `vaapi_drain`, `stages.drain`,
+a `drain` block and, with `SPHERECUT_GATE_PROBE`, a `probe` block;
+hw-test's GUI report prints them. The card of 2026-11-12 was withdrawn;
+the card of 2026-11-13 asks Pat whether to accept the drain's cost in
+frames shown (D79), and `download` is the working default until Pat
+answers.
+
 ## D41. The submit gate
 
 *2026-10-30, M1 slice 9, from odin's GUI runs with zero copy the
@@ -7384,6 +7439,24 @@ compositor shows frames without waiting for their writers; FFmpeg
 stops calling `lock_queue` (libavutil 62), which would take FFmpeg's
 decodes out of the gate; or a benchmark with a window shows the hold
 costing decode time.
+
+*Noted 2026-11-13 (the VA-API stall slice, D79):* there is a second
+route to the compositor's wait, which no submit gate covers: the VM's
+page-table gate. When the process frees a mapped buffer without
+`AMDGPU_VM_DELAY_UPDATE`, the kernel's clearing job waits for every
+fence the VM owns, VCN's queued decodes among them, and every later
+submission in the VM waits for that job (read, Linux 7.2.9
+`amdgpu_gem.c` 779-787, `amdgpu_vm.c` 1550-1597, `amdgpu_cs.c:1195`).
+RADV and radeonsi share the VM through one drm file (read, Mesa 26.2.5
+`amdgpu_winsys.c` 476-482), so a VA-API decoder's download, which frees
+a staging buffer of the whole frame, held the window's next frame for
+the VCN work queued then. The gate can't help: it holds submissions on
+the UI's VkDevice for a few milliseconds around the present, while the
+decodes the clearing job waits for came through radeonsi, outside it,
+and were queued before. So "VA-API ... don't" above holds for the held
+image's route only. D79 drains VCN before each download instead. Whether
+FFmpeg's Vulkan Video on a device of its own (the copy path) gates the
+same way, through frees in the same VM, is inferred, not measured.
 
 ## D42. The real-time gate plays as the app does
 
@@ -11841,6 +11914,305 @@ Revisit if: a warm run takes over 60 minutes; Tier 1 flakes on the
 runner (lavapipe on GitHub's CPUs, or a timing-bound test); or Pat
 wants branch protection, which would make a passing run required
 before a merge.
+
+## D79. The VA-API copy path's stall: a shared VM's page-table gate, and draining VCN before each download
+
+*2026-11-13, the VA-API stall slice (branch `proto/vaapi-drain`), from
+odin's PRs #36 to #38. Updates D25, D34, D40 and D41. Each fact about
+Mesa, Linux or FFmpeg says where it was read (the file, its version and
+its lines) or that it is recalled, not read. Most were read for the
+slice's analysis of PR #36, in Mesa 26.2.5, Linux 7.2.9 (whose
+`amdgpu_gem.c`, `amdgpu_cs.c` and `amdgpu_sync.c` are v7.2's) and
+FFmpeg n6.1, n8.1.3 and n9.0.2.*
+
+The stall:
+
+- **What failed.** `gui_decode_behind`'s run 1 (D40): VA-API with its
+  frames copied (`SPHERECUT_ZERO_COPY=0`) on the noisy 5.7K 10-bit perf
+  clip, decode behind. On odin at 0b3ab9b it presented 74 to 78 % of
+  the UI frames at a UI p99 of 92.7 to 122.3 ms, while the UI's own work
+  took 1.4 to 2.1 ms at p95 (D40's note of 2026-11-12).
+- **Where.** odin: an RX 7600 (Navi 33, discrete), Fedora 44, kernel
+  7.2.9, Mesa 26.2.5 (radeonsi's VA-API driver and RADV, from RPM
+  Fusion's freeworld packages), libva 2.23.0, FFmpeg 8.1.3, mutter and
+  gnome-shell 50.5 (`hw-reports/stall-followup-2026-11-12/report.md`,
+  section 1).
+
+The mechanism, link by link:
+
+1. **The window waits for the compositor** (established). In every gap
+   the UI's main thread sleeps in winit's `epoll_pwait`: over PR #36's
+   112 gaps of 95 ms or more it spent 12,182 ms there and 176 ms
+   runnable, and none had 50 ms in `AMDGPU_CS`
+   (`hw-reports/stall-2026-11-12/report.md`, section 3). winit 0.30.13
+   sends no redraw while a frame callback is pending (read,
+   `wayland/event_loop/mod.rs:486`), and egui-wgpu 0.37.0 asks for one
+   right before each present (read, `src/winit.rs:787`). So a gap is
+   our frame shown late.
+2. **Each download frees a staging buffer of the whole frame** (read;
+   where in the download, inferred from timing). FFmpeg 8.1.3 maps a
+   VA-API frame for reading, so each download runs `vaCreateImage`,
+   `vaGetImage`, `vaMapBuffer2`, the copy and `vaDestroyImage` (read,
+   `hwcontext_vaapi.c` 824-1000). In Mesa 26.2.5, `vaGetImage` copies
+   the surface plane by plane (`va/image.c` 541-571) through a linear
+   staging texture, which a VRAM surface on a discrete GPU always takes
+   (`radeonsi/si_texture.c` 2160-2161). Plane 0 carries the planar
+   format (1538, 2040-2041), so its staging is the whole 5760×2880 P010
+   frame, 47.46 MiB. A multi-plane allocation is bound `SHARED`
+   (1488-1493), which keeps it out of pb_cache (`si_buffer.c` 84-87,
+   `winsys/amdgpu/drm/amdgpu_bo.c` 1513-1524), so the staging is
+   destroyed when it is unmapped, with a `GEM_VA` UNMAP without
+   `AMDGPU_VM_DELAY_UPDATE` (`amdgpu_bo.c` 245-262). Measured in PR #36:
+   decode-v0 made 1.01 buffers and 1.99 VA operations a download, and
+   32 of A-1's 39 up-steps of GTT use were 47.5 MiB.
+3. **The unmap gates every later submission in the process's VM**
+   (likely). In Linux 7.2.9 such an unmap calls
+   `amdgpu_vm_clear_freed(adev, vm, &vm->last_update)` (read,
+   `amdgpu_gem.c` 779-787). The clearing job waits for the fences on
+   the VM's root that the VM owns (`AMDGPU_SYNC_EQ_OWNER`,
+   `amdgpu_vm.c` 1550-1597, `amdgpu_sync.c` 216-219), which every
+   submission of the VM adds, VCN's decodes among them (`amdgpu_cs.c`
+   298, 1344-1361), and every later submission waits for
+   `vm->last_update` (`amdgpu_cs.c:1195`). The kernel gives a drm file
+   one VM (read, `amdgpu_kms.c` 1435-1475, v7.2), and radeonsi and RADV
+   share one drm file through libdrm's deduplicating initializer (read,
+   Mesa 26.2.5 `amdgpu_winsys.c` 476-482; measured: fdinfo showed one
+   client with gfx, compute and enc in every VA-API arm). So the
+   window's next frame waited for every VCN decode queued when
+   radeonsi freed the staging.
+4. **The compositor shows a frame once its GPU work is done**
+   (recalled, not read: mutter's source wasn't read). D41 measured the
+   same behaviour of this compositor through another route.
+
+PR #36 tied the gaps to the free by timing: in A-1, 49 of the 50 gaps
+of 40 ms or more began −2 to +13 ms after decode-v0 began its GPU wait
+right after the free, and all 50 ended 0 to 20 ms after that wait
+ended, while the wait for the same VCN work just before the free, as
+long, preceded none of them (0 of 31). PR #37 measured the gate on the
+GPU itself, with the gate probe (`render::GateProbe`,
+`SPHERECUT_GATE_PROBE=4`: a 256-byte clear on the viewer's queue every
+4 ms, timed to wgpu's work-done callback). With the drain off, its jobs
+took 0.94 ms at p50, 97.59 ms at p99 and 149.01 ms at most, every gap
+of 40 ms or more had a job submitted in its first 20 ms (those took
+58.0 ms at p50), and each gap ended 1.7 ms at p50 after the last job
+before it completed; under `WAYLAND_DEBUG` a frame callback in a gap
+was done 0.9 ms at p50 after a probe job completed. With `download`
+the probe's p99 was 4.09 ms and its maximum 7.08 ms. Under strace,
+decode-v0 still unmapped about once a download either way (22 and 24
+UNMAPs in G-A and G-Ad), but the main thread's waits of 40 ms or more
+fell from 57 to 0. The free still happens; it no longer finds anything
+to wait for.
+
+Why a drain works (read in Mesa 26.2.5): `vaEndPicture` hands the
+picture's VCN job the surface's fence (`out_fence = &surf->fence`,
+`va/picture.c:397`), radeonsi's decoder flushes the job with it
+(`mm/si_video_dec.c:1389`), and `vaSyncSurface` waits on that fence
+(`va/surface.c` 154-208). So syncing every surface a decoder has
+used waits for every picture it has queued.
+
+What (the modes are `VaapiDrain`, set by `SPHERECUT_VAAPI_DRAIN`):
+
+- **`download`, the default.** Before each download a VA-API decoder
+  calls `vaSyncSurface` on every surface it has handed out a frame of,
+  then copies. The stage `drain` times it, a sync of 0.5 ms or more
+  counts as a surface waited for, and a sync that fails forgets its
+  surface. `DecodeStats::last_download_ms` is the copy alone.
+- **`picture`.** Also after every packet sent, which keeps about one
+  picture queued at a time, path A's decoders included. A mode to
+  compare against.
+- **`off`** (or `0`). As before the slice: no libva lookup, no surface
+  noted, no drain timed.
+- **The surfaces.** FFmpeg 8.1.3 and 9.0.2 decode VA-API into a pool
+  that grows as needed (`initial_pool_size = 0`, read in n8.1.3 and
+  n9.0.2 `libavcodec/vaapi_decode.c:629`), whose frames context lists
+  no surfaces (`surface_ids` NULL and `nb_surfaces` 0, read in
+  `hwcontext_vaapi.c` 541-569 and 645-660). So the decoder notes each
+  frame's surface (`data[3]`, FFmpeg's own rule, read in n8.1.3
+  `hwcontext_vaapi.c:840`) as it comes out, in a `SurfaceSet` of at most
+  64 that forgets the oldest past that (counted as `overflow`) and holds
+  the frames context while it keeps any of its surfaces. Once the pool
+  has grown the set is the whole pool; a surface added while it grows
+  can be missed by one download.
+- **libva.** `vaSyncSurface` is looked up once in the libva the process
+  has already loaded (`dlopen` with `RTLD_NOLOAD`, then the global
+  scope), so the lookup never loads a library; where there is none,
+  nothing drains, and the smoke document's `unavailable` counts the
+  decoders. The display is read through ffmpeg-sys-next 9.0.1's binding
+  of `AVVAAPIDeviceContext` (read: its `hwcontext_wrapper.h` 63-66 and
+  `build.rs` 1621-1632 and 1867), which is the same struct in 6.1,
+  n8.1.3 and n9.0.2 (read); that FFmpeg installs the header even when
+  built without VA-API is recalled.
+- **Threads.** libva calls on one display may come from several
+  threads. FFmpeg already calls `vaSyncSurface` on this display from
+  the decode thread before every download (read, `hwcontext_vaapi.c:866`
+  in the local FFmpeg copy). Mesa 26.2.5 takes `drv->mutex` to look the
+  surface up and the context's mutex for the wait (`va/surface.c`
+  168-206), and `vaEndPicture` sets the surface's fence under
+  `drv->mutex` (`va/picture.c` 304-397). A hardware decoder runs one
+  thread (D3), so none of this decoder's decodes changes a surface's
+  fence while the drain waits on it. How Intel's and NVIDIA's VA-API
+  drivers lock is not read; the drain is the default on every VA-API
+  device.
+
+Where it applies:
+
+- **The player**: `PlayerConfig::vaapi_drain`, from the variable, which
+  the decode worker puts in each `VideoRequest`. So the viewer, the
+  smoke run (`gui_smoke`, `gui_decode_behind`) and the headless playback
+  benchmarks drain; on odin only `--smoke-decoder vaapi` or a
+  `SPHERECUT_ZERO_COPY` setting reaches VA-API's copy path, since the
+  app's default there is Vulkan Video on path B (D25). A frame path A
+  fails to export (a CPU conversion, layers that don't match, a left or
+  top crop, a failed map) is downloaded by its decoder and drains;
+  exported frames don't. One the upload thread downloads after the GPU
+  refused its import doesn't drain, and the next opens download in the
+  decoder and drain.
+- **The window's exports**, which decode VA-API on the window's render
+  node with downloads (`Decoder::Auto`, `HwOutput::Download`), in the
+  window's process: `ExportJob::vaapi_drain` takes the player's mode.
+- **Not `frame`, `render` or the agents' tools.** No window shares
+  their process's VM, so a drain would only cost them speed.
+  `VideoRequest::default` and `ExportJob::new` are `off`, whatever the
+  variable says, and so are synth's stream reads and doctor's checks.
+- Software and Vulkan Video decoders never drain.
+
+The choice, and what it costs:
+
+- **PR #37** (`hw-reports/stall-followup-2026-11-12/report.md`, at
+  6675318, 22 runs interleaved in one session). Run 1's arms, three
+  runs each:
+
+  | arm | presented | UI p99 ms | passes of 95 ms or more; of 40 to 95 ms a second | frames shown | drain p50 / p95 ms | download p50 ms |
+  |---|---|---|---|---|---|---|
+  | `off` (A) | 0.760 to 0.795 | 92.9 to 103.2 | 18 over 37.5 s; 3.20 | 119 to 125 | none | 150.3 to 155.5 |
+  | `download` (Ad) | 0.996 to 0.997 | 18.0 to 18.4 | 0 over 57.0 s; 0.00 | 109 to 113 | 76.4 to 92.3 / 139.9 to 154.6 | 68.4 to 68.8 |
+  | `picture` (Ap) | 0.993 to 0.996 | 17.7 to 18.2 | 0 over 57.0 s; 0.00 | 81 to 85 | 181.0 to 183.8 / 251.5 to 256.3 | 68.7 to 69.1 |
+
+  The official `gui_decode_behind` failed run 1 with the drain off
+  (0.75 presented, p99 110.3 ms) and passed with `download` (0.995,
+  18.4 ms). `download` met every rule the analysis set before the run:
+  0.95 presented or more in each run, no pass of 95 ms or more, under
+  0.5 passes of 40 to 95 ms a second, a p99 of 25 ms or less, the
+  official test passing, and at least 0.8 of `off`'s frames shown (a
+  mean of 110.3 against 0.8 × 122.7 = 98.1). `picture` met all but the
+  last (82.7).
+- **PR #38** (`hw-reports/stall-tier2-2026-11-12/report.md`, at
+  6675318, every call with `SPHERECUT_VAAPI_DRAIN=download`):
+  `gui_decode_behind` passed 3 of 3, run 1 presenting 0.994 to 0.995
+  at a UI p99 of 18.1 to 18.5 ms, still behind (0.17 to 0.18 of the
+  frames expected shown), its drain 96.2 to 107.6 ms at p50. The whole
+  Tier 2 passed 59, failed 0 and skipped 1, against 56, 1 and 1 at
+  0b3ab9b (`hw-reports/odin-0b3ab9b4d0.md`). `gui_smoke` (Vulkan,
+  nothing drains), the zero-copy tests and
+  `vaapi_render_matches_software` passed as before.
+- **The cost.** VCN no longer decodes while the frame is copied, so
+  where VA-API's copied decode is behind, fewer frames are shown. In
+  the window's run 1, 109 to 113 frames against `off`'s 119 to 125 in
+  the same session (0.90 of its mean). In the headless VA-API row of
+  `bench_playback_realtime_5k7_10bit` (PR #38), 4.00 frames a second
+  shown in real time against the reference's 6.00, 0.67 of it, under
+  the 0.8 the build brief set, with the download 64.83 / 67.07 ms at
+  p50 / p95 against 153.57 / 196.56, the drain 103.89 / 127.68 ms, and
+  no UI tick missed (PR #37's headless arms: 6.00 off, 5.00 `download`,
+  4.00 `picture`). `bench_seek_latency`'s VA-API rows came within
+  −0.0 to +12.1 % of the reference, but they opened their decoders
+  without the drain, as `frame` does (`VideoRequest::default`; the
+  variable sets only the player's), so that is the spread of undrained
+  seeks between runs, not the drain's cost: the drain's cost on a seek
+  is not measured yet, and the brief's "within +15 %" for it is not
+  met, only untested. The bench's `VA-API drained` rows (a9a2f2b)
+  measure it beside the undrained ones from odin's next run.
+- **Pat's question.** Whether to accept that cost was put to Pat on
+  2026-11-13: `download` by default; `download` by default and a
+  separate decode process later; or the drain opt-in, as the prototype
+  had it. `download` is the working default until Pat answers.
+
+Considered:
+
+- **`picture`**: the window as good, but fewer frames shown (above),
+  and it still leaves path A's gaps (below).
+- **A persistent VAImage with recycled memory** (PR #36's arm D, which
+  stood for it): downloads of 45 ms, and gaps unchanged (4.0 to 4.3 of
+  40 to 95 ms a second), since `vaGetImage` frees the same staging.
+- **Pacing downloads against the present, or chunking them**: a gate
+  lasts 3 to 11 refreshes and starts at an unmap the UI can't schedule.
+- **A separate decode process**: its own drm file and VM, so its frees
+  never wait for its VCN work in ours (PR #36's arm L, a second VA-API
+  process, presented 0.97 to 0.99) and no throughput is lost; but it is
+  large: IPC, a frame transport (memfd or DMA-BUF over `SCM_RIGHTS`),
+  seeks and cancels across it, its crashes, and one cache budget over
+  two processes. It is the fallback if Pat wants the throughput back.
+- **Avoiding VA-API's copy**: odin already plays Vulkan Video on path B
+  by default; huginn has no Vulkan Video H.264 or HEVC in Fedora's Mesa
+  (`docs/perf.md`), and software is heavy on the CPU.
+- **Raising VCN's clocks** (load, or sysfs): needs root, or burns power.
+- **A Mesa change** (keep multi-plane staging in pb_cache, or bind
+  staging without `SHARED`): outside our control, and worth reporting.
+  `DELAY_UPDATE` alone would only move the clear to `GEM_CLOSE`;
+  whether later page-table jobs would then queue behind it is recalled,
+  not read.
+
+Tested, in Tier 1 (lavapipe and software decode; no VA-API device):
+the variable's parsing, with the unset, empty and unknown values
+`download` and `VideoRequest::default` `off`; `SurfaceSet` (each
+surface once, in order, a new frames context clears it, at most 64
+with the overflow counted, the context held); `drain` with a recording
+fake and a fake clock (each surface once, in order, waits and errors
+counted, a failing surface forgotten, an empty set makes no call); the
+loader never loads libva (`/proc/self/maps` before and after); the
+binding's layout; a frame's surface is its `data[3]`; `drain_on`'s
+table (VA-API only, path A's downloads included); a software decode
+asked to drain records nothing; the engine's drain stage and counters
+from a fake backend, with `unavailable` counted per decoder; the
+probe's period and its wait at a closed submit gate; the smoke
+document's drain and probe blocks, the overlay's drain line and the
+GUI report; the window's exports and the export pipeline's request
+carrying the mode; and `bench_seek_latency`'s rows asking for the
+drain they are named for. Each has a control that must fail.
+
+What stays open:
+
+- **Path A's gaps.** Neither mode fixes them: with path A, 1.86 passes
+  of 40 to 95 ms a second without a drain and 1.25 with `picture`,
+  presenting 0.82 to 0.85 at a UI p99 of 57 to 64 ms (PR #37's B and
+  Bp). RADV maps every DMA-BUF import afresh and unmaps it without
+  `DELAY_UPDATE` (read, Mesa 26.2.5 `radv_amdgpu_bo.c` 33-80, 368-394,
+  885-934), which is one likely cause (D25's note). Path A stays
+  opt-in; an import cache, or another fix, is a slice of its own.
+- **huginn.** VA-API copied is its default path, and nothing there is
+  measured: whether a download frees a staging buffer at all (on an
+  APU radeonsi reads through staging only from VRAM or write-combined
+  GTT, read in `si_texture.c` 2158-2165, and makes a texture linear
+  after 10 transfers, 2138-2146), whether the gate shows, and what the
+  drain costs (a 3840×1920 VA-API copy ran at 301 fps headless there).
+  huginn's next run takes the probe with the drain off and on, a GUI
+  row (`gui_decode_behind`) and the headless rows.
+- **A locked pair.** Its two VA-API decoders share one `VADisplay` (one
+  device per kind, D30), and each drains only its own surfaces, so one
+  lens's download can find the other's pictures queued. Not measured:
+  odin plays an X5 pair on path B.
+- **Mutter.** Its version (50.5) and the protocols Spherecut binds
+  (fifo, commit timing, linux-drm-syncobj, presentation) are recorded
+  now (PR #37); that it shows a buffer only once its fences signal is
+  still recalled.
+- **Warm-up.** A surface added while the pool grows can be missed by
+  one download, which leaves at most one gate.
+- **Unmaps outside our download**, such as pb_cache's expiry after
+  500 ms or a bitstream buffer resized in warm-up (Mesa 26.2.5
+  `mm/si_video_dec.c` 42-70), aren't drained; PR #37's `download` runs
+  had no gap of 40 ms or more in 57 covered seconds.
+- **A VCN hang** blocks `vaSyncSurface`, as it blocks `vaGetImage`.
+- **No Tier 2 gate checks the drain itself**: run 1 requires downloads,
+  not drains, and `gui_smoke` doesn't check that nothing drains on
+  Vulkan; the reports show both.
+
+Revisit if: Pat answers otherwise; huginn shows a gate the drain
+doesn't clear, or a cost there that matters; the drained seek rows come
+out more than 15 % slower than the plain ones; a locked VA-API pair
+misses refresh; path A becomes a default anywhere; a Mesa caches
+multi-plane staging or unmaps it with `DELAY_UPDATE`; a kernel stops
+making later submissions wait for a freed range's clearing; or
+FFmpeg's VA-API decode returns to a pool that lists its surfaces.
 
 ## Open
 
