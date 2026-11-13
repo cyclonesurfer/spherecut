@@ -53,6 +53,7 @@ use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::Projection;
 use spherecut_synth::Pattern;
 use spherecut_synth::media::{self as synth, Spec};
+use spherecut_testkit::control::must_fail;
 
 // ---------------------------------------------------------------------
 // Projects and runs
@@ -105,11 +106,19 @@ fn clip(dir: &Path, name: &str, pattern: Pattern, frames: u32) -> PathBuf {
 /// 1920×1080 frame, the camera ahead, H.264 in software at the medium
 /// preset, no audio.
 fn project(dir: &Path, clip: &Path) -> PathBuf {
+    let path = dir.join("p.spherecut");
+    saved(media(clip), &path);
+    path
+}
+
+/// `clip`'s media entry, its stream the first video stream and its
+/// source equirect.
+fn media(clip: &Path) -> Media {
     let dec = FfmpegBackend::new()
         .open_video(clip, &VideoRequest::default())
         .unwrap();
     let info = dec.info();
-    let media = Media {
+    Media {
         id: MediaId::NEW,
         path: clip.to_path_buf(),
         fingerprint: Fingerprint {
@@ -125,7 +134,12 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
         },
         source: Source::default(),
         caps: Caps::default(),
-    };
+    }
+}
+
+/// An untitled project of `media` saved at `path`, with [`project`]'s
+/// output and export.
+fn saved(media: Media, path: &Path) {
     let view = InitialView {
         orientation: Orientation::IDENTITY,
         fov_deg: 90.0,
@@ -153,9 +167,7 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
         },
     ])
     .unwrap();
-    let path = dir.join("p.spherecut");
-    file::save(&p, &path).unwrap();
-    path
+    file::save(&p, path).unwrap();
 }
 
 /// The command line of `spherecut render PROJECT -o OUT ARGS`, on
@@ -1202,6 +1214,12 @@ fn frame_project_takes_the_view_from_the_project_and_no_frame_past_its_end() {
     assert_eq!(temp_files(&dir), Vec::<String>::new());
 }
 
+// ---------------------------------------------------------------------
+// A camera's two lenses, and a project's folder (M3.9)
+
+/// A short render: half size, the first frame.
+const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
+
 /// `spherecut render` and `frame --project` of a dual-fisheye project
 /// fail `not_yet` until M3.11, writing nothing. Control: an equirect
 /// project renders.
@@ -1223,9 +1241,37 @@ fn render_warns_of_a_superseded_geometry() {
 /// F031's CLI half: a project saved in a real folder with its media
 /// recorded as `../clip.mp4`, opened through a link to that folder, finds
 /// and exports its media. Control: a project whose media sits where the
-/// lexical rule would look is `media_offline`.
+/// lexical rule would look, beside the link's parent, is `media_offline`.
 #[test]
-#[ignore = "M3.9 unit (d)"]
 fn a_project_in_a_linked_folder_renders_its_media() {
-    todo!()
+    let began = Instant::now();
+    let dir = TempDir::new("linked");
+    let real = dir.join("real");
+    let other = dir.join("other");
+    std::fs::create_dir_all(real.join("proj")).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let src = clip(&real, "clip", Pattern::Grid, 2);
+    saved(media(&src), &real.join("proj/p.spherecut"));
+    let text = std::fs::read_to_string(real.join("proj/p.spherecut")).unwrap();
+    assert!(text.contains("\"../clip.mp4\""), "{text}");
+    std::os::unix::fs::symlink(real.join("proj"), other.join("link")).unwrap();
+    let p = other.join("link/p.spherecut");
+    let out = dir.join("out.mp4");
+    let renders = || -> Result<(), Value> {
+        let ran = run(&p, &out, SHORT);
+        match ran.status {
+            Some(0) => Ok(()),
+            _ => Err(ran.last()["error"].clone()),
+        }
+    };
+    renders().unwrap();
+    assert!(out.exists());
+    std::fs::remove_file(&out).unwrap();
+
+    std::fs::rename(&src, other.join("clip.mp4")).unwrap();
+    let e = must_fail("the media beside the link's parent", renders());
+    assert_eq!(e["code"], "media_offline", "{e}");
+    assert_eq!(e["path"], src.to_str().unwrap(), "{e}");
+    assert!(!out.exists());
+    eprintln!("in {:.3} s", began.elapsed().as_secs_f64());
 }
