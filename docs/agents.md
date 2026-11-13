@@ -510,9 +510,13 @@ better than the project, else null), the `tune`, the `gains`' `mode`
 (`off`, `fixed` or `auto`) and the `profile`'s name or null. The
 calibration's raw strings and an `auto` gains' samples stay in the
 file, and the camera's words reach a result only as fields (Untrusted
-text). `create`, and `edit`'s `add_media`, make a camera's file a
-`dual_fisheye` source of the calibration its trailer holds; a file
-with none a stitch reads, or one whose source at the default tune
+text). A camera's two EAC tracks (a GoPro MAX file) are
+`{"kind": "eac_pair"}` alone: nothing makes such a source but a whole
+one sent in `set_source` or a project file written by hand, and the
+tools that render refuse it (`not_yet`). `create`, and `edit`'s
+`add_media`, make a camera's file a `dual_fisheye` source of the
+calibration its trailer holds; a file with none a stitch reads, or
+one whose source at the default tune
 `validate` refuses (its frame too narrow for the default feather, a
 lens's ξ at −1 or below), stays an equirect, shown as its lenses, with
 `not_equirect` and `no_calibration` warnings. Three ops change a
@@ -532,7 +536,8 @@ a calibration: the server reads it from the file, or checks the one
 sent against it. Until M3.11 renders a project stitched, `look`,
 `compare`, `check` and `render` refuse a project whose clip's media is
 a camera's pair (`not_yet`), rather than show its first lens as an
-equirect: `look` at the `.insv` itself.
+equirect: `look` at the file itself with `mode` `raw`, or, for two
+fisheye lenses, `frame --reference` it in a terminal.
 
 **The window's actions that aren't edits**, and what an agent does
 instead:
@@ -607,7 +612,7 @@ the agent as fields do, as a backstop. The codes:
 | `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved (a save that put the file in place but couldn't flush its folder succeeds, with `not_flushed`) |
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
-| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; look at or frame the `.insv` itself |
+| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; `next` says to `look` at the file itself with `mode` `raw`, and for `dual_fisheye` to `frame` it with `--reference` in a terminal, which an `eac_pair` has no stitched view in yet |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
 | `job_lost` | A job of another server (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |

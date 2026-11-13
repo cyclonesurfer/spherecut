@@ -1757,7 +1757,10 @@ fn errors_name_media_by_id_and_keep_file_text_out() {
 
 /// `look`, `compare`, `check` and `render` of a dual-fisheye project, or
 /// of an EAC pair's, are `not_yet` until M3.11 (M3 plan 14), with no file
-/// written and no job started. Control: none of the four is `not_yet` on
+/// written and no job started, and a `next` for the pair's kind (the M3.9
+/// review's R9 and N9): `look`'s raw mode, and for two fisheye lenses
+/// `frame --reference`, which stitches them; an EAC pair has no stitched
+/// view and isn't an `.insv`. Control: none of the four is `not_yet` on
 /// an equirect project.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
@@ -1789,6 +1792,14 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
     }));
     let eac = dir.made("eac.spherecut", m, None);
     let equirect = dir.fixture("equirect.spherecut");
+    // The summary gives an EAC pair's source as its kind alone, as
+    // docs/agents.md says (N9).
+    let summary = ok(&tools, "project", json!({"file": eac}));
+    assert_eq!(
+        summary["media"][0]["source"],
+        json!({"kind": "eac_pair"}),
+        "{summary}"
+    );
 
     // Each tool with the project, as its argument names it, writing to
     // an output where it takes one.
@@ -1838,11 +1849,17 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         n
     };
     let before = names();
-    for (project, pair) in [(&p, "two fisheye lenses"), (&eac, "two EAC tracks")] {
+    let raw = "look at the file itself with mode \"raw\"";
+    let fisheye_next = format!("{raw}, or frame it with --reference in a terminal");
+    for (project, pair, next) in [
+        (&p, "two fisheye lenses", fisheye_next.as_str()),
+        (&eac, "two EAC tracks", raw),
+    ] {
         for said in calls(project) {
             not_yet(&said).unwrap();
             let e = said.2.as_ref().unwrap_err();
             assert!(e.message.contains(pair), "{}: {e:?}", said.0);
+            assert_eq!(e.next.as_deref(), Some(next), "{}: {pair}", said.0);
         }
     }
     // Nothing written beside the project: no picture, no render and no
