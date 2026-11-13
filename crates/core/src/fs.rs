@@ -95,9 +95,11 @@ pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
 /// from the real folder of the link, and the folder that holds the file
 /// is resolved physically (`realpath`), so a `..` in a link's target or
 /// in the path is taken where the kernel takes it, never lexically
-/// across a linked folder. Media paths in a project stay lexical from
-/// the folder this gives (D47). The file itself need not exist, as when
-/// a project is saved for the first time, but its folder must.
+/// across a linked folder. A project's media paths are made relative to
+/// the folder this gives once their own folders are named so too
+/// ([`in_real_folder`], R8), and read back lexically from it (D47). The
+/// file itself need not exist, as when a project is saved for the first
+/// time, but its folder must.
 pub fn real_file(path: &Path) -> io::Result<PathBuf> {
     may_block("resolving a file's folder");
     let mut p = std::path::absolute(path)?;
@@ -121,6 +123,34 @@ pub fn real_file(path: &Path) -> io::Result<PathBuf> {
         }
     }
     Err(io::Error::other("too many levels of symbolic links"))
+}
+
+/// `path` (absolute and lexical) with its folder named physically, as
+/// [`real_file`] names a project's folder, and its own name kept: a link
+/// at the name is not followed, so a linked clip keeps its name. Where the
+/// folder is missing (media offline), the deepest folder of the path that
+/// is there is resolved and the rest kept as it is; where none can be,
+/// `path` itself. So a media path and the folder of the project that names
+/// it are made relative alike, and one named through a linked ancestor of
+/// the folder doesn't climb to the root and back (the M3.9 review's R8).
+pub fn in_real_folder(path: &Path) -> PathBuf {
+    may_block("resolving a file's folder");
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    let mut rest = vec![name];
+    let mut folder = path.parent();
+    while let Some(f) = folder {
+        if let Ok(real) = std::fs::canonicalize(f) {
+            return rest.iter().rev().fold(real, |p, c| p.join(c));
+        }
+        match f.file_name() {
+            Some(c) => rest.push(c),
+            None => break,
+        }
+        folder = f.parent();
+    }
+    path.to_path_buf()
 }
 
 /// What is at `dest`, if it is a regular file that a rename may replace;
@@ -928,6 +958,39 @@ mod tests {
         symlink("loop-a", dir.join("loop-b")).unwrap();
         let e = follow_links(&dir.join("loop-a")).unwrap_err();
         assert!(e.to_string().contains("symbolic links"), "{e}");
+    }
+
+    /// R8: `in_real_folder` names a path's folder physically and keeps its
+    /// own name, a link there included; a folder that is missing has its
+    /// deepest folder that is there resolved and the rest kept.
+    ///
+    /// Control: `canonicalize`, which follows the clip's own link too,
+    /// names its target instead.
+    #[test]
+    fn a_media_path_is_named_from_its_real_folder() {
+        use std::os::unix::fs::symlink;
+
+        use spherecut_testkit::control::must_fail;
+        let tmp = tmpdir("real-folder");
+        let dir = std::fs::canonicalize(&*tmp).unwrap();
+        std::fs::create_dir_all(dir.join("real/trip")).unwrap();
+        std::fs::write(dir.join("real/trip/take.mp4"), b"").unwrap();
+        symlink("real", dir.join("alias")).unwrap();
+        symlink("take.mp4", dir.join("real/trip/clip.mp4")).unwrap();
+        let named = |p: &str| in_real_folder(&dir.join(p));
+        assert_eq!(named("alias/trip/clip.mp4"), dir.join("real/trip/clip.mp4"));
+        assert_eq!(named("alias/trip/new.mp4"), dir.join("real/trip/new.mp4"));
+        // Offline: the folders that are there resolved, the rest kept.
+        assert_eq!(
+            named("alias/gone/deeper/clip.mp4"),
+            dir.join("real/gone/deeper/clip.mp4")
+        );
+        assert_eq!(named("nowhere/clip.mp4"), dir.join("nowhere/clip.mp4"));
+        must_fail(
+            "the clip's own link followed",
+            std::fs::canonicalize(dir.join("alias/trip/clip.mp4")).unwrap()
+                == dir.join("real/trip/clip.mp4"),
+        );
     }
 
     /// F033: each atomic publish syncs its folder once, as best it can: a

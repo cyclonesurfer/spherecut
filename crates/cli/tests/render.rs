@@ -1399,7 +1399,11 @@ fn render_warns_of_a_superseded_geometry() {
 #[test]
 fn a_project_in_a_linked_folder_renders_its_media() {
     let began = Instant::now();
-    let dir = TempDir::new("linked");
+    let tmp = TempDir::new("linked");
+    // Where the target folder is reached through a link, its real path,
+    // so that `other/link` is the only link on the way and the paths
+    // asserted below are the ones the kernel finds on any host.
+    let dir = std::fs::canonicalize(&*tmp).unwrap();
     let real = dir.join("real");
     let other = dir.join("other");
     std::fs::create_dir_all(real.join("proj")).unwrap();

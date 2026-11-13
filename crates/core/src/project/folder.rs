@@ -9,8 +9,12 @@
 //! through `/proc/self/fd/N`, so a write lands in the folder that was
 //! opened whatever has happened to its path since. The descriptor is for
 //! I/O only: media paths are made relative to, and read against, the
-//! folder's path as it was named, lexically (D47), so the GUI and an agent
-//! read a project's paths alike.
+//! folder's path (D47). The GUI's folder, from [`ProjectFolder::of_file`],
+//! is named as the kernel finds it (F031), and its saves name each media
+//! path's folder so too before making it relative (R8), as `file::save`
+//! does; a folder opened by [`ProjectFolder::open`] or
+//! [`ProjectFolder::from_fd`] is named as given, lexically, and its media
+//! paths with it.
 //!
 //! ```text
 //! trip.spherecut            the project (D47)
@@ -214,6 +218,9 @@ pub struct ProjectFolder {
     path: PathBuf,
     /// `/proc/self/fd/N`, what writes go through.
     proc: PathBuf,
+    /// Whether `path` is the folder's real path ([`ProjectFolder::of_file`]),
+    /// so that a save names each media path's folder physically too (R8).
+    real: bool,
 }
 
 /// A project's lock, held until dropped.
@@ -250,6 +257,7 @@ impl ProjectFolder {
             fd,
             path: file::lexical(path),
             proc,
+            real: false,
         }
     }
 
@@ -259,7 +267,9 @@ impl ProjectFolder {
     /// the one an agent takes there. The folder is the one the kernel
     /// finds the file in, its path resolved physically
     /// ([`crate::fs::real_file`], F031), so a `..` across a linked folder
-    /// names the folder the file is really in.
+    /// names the folder the file is really in, and its saves name each
+    /// media path's folder physically before making it relative (R8), as
+    /// `file::save` does.
     pub fn of_file(path: &Path) -> Result<(ProjectFolder, OsString), FolderError> {
         let io = |source| FolderError::Io {
             path: path.to_path_buf(),
@@ -271,7 +281,21 @@ impl ProjectFolder {
             .ok_or_else(|| io(io::Error::new(io::ErrorKind::InvalidInput, "no file name")))?
             .to_os_string();
         let parent = path.parent().unwrap_or(Path::new("/"));
-        Ok((ProjectFolder::open(parent)?, name))
+        let folder = ProjectFolder {
+            real: true,
+            ..ProjectFolder::open(parent)?
+        };
+        Ok((folder, name))
+    }
+
+    /// `project`'s text for a file in this folder: its media paths named
+    /// physically first when the folder's path is real (R8).
+    fn text(&self, project: &Project) -> Result<String, FileError> {
+        if self.real {
+            file::to_json_from_real_folder(project, &self.path)
+        } else {
+            file::to_json(project, &self.path)
+        }
     }
 
     /// The folder's path as named.
@@ -428,7 +452,7 @@ impl ProjectFolder {
     ) -> Result<Saved, FolderError> {
         may_block("saving a project");
         self.check_name(name)?;
-        let text = file::to_json(project, &self.path)?;
+        let text = self.text(project)?;
         let check = || -> Result<(), FolderError> {
             let now = self.identity(name)?;
             match expect {
@@ -478,7 +502,7 @@ impl ProjectFolder {
         may_block("saving a project");
         self.check_name(name)?;
         let path = self.path_of(name);
-        let text = file::to_json(project, &self.path)?;
+        let text = self.text(project)?;
         if self.identity(name)?.is_some() {
             return Err(FolderError::Exists { path });
         }

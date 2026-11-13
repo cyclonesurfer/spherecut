@@ -584,6 +584,78 @@ fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
     }
 }
 
+/// A media path named through a linked ancestor of the project's folder
+/// is stored from that folder as the kernel finds it, as the folder
+/// itself is (R8): `base/alias` names `base/real`, the media is named
+/// `base/alias/trip/clip.mp4` (lexically, as `std::path::absolute`
+/// names a clip the GUI opens) and the project is saved as
+/// `base/alias/trip/p.spherecut` by `file::save`, and by
+/// `ProjectFolder::of_file` with `create` and then `save`. Each stores
+/// `clip.mp4`, so the folder moved or copied with its media keeps
+/// working (D47), and loads it back from the real folder.
+///
+/// Control: the base's save, the lexical media path made relative to
+/// the folder's real path (`to_json`, which names nothing), stores a
+/// path that climbs to the root and back down through the link.
+#[cfg(unix)]
+#[test]
+fn a_media_named_through_a_linked_ancestor_is_stored_from_the_real_folder() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new("linked-ancestor");
+    // Where the system's temp folder is reached through a link, its
+    // real path, so that `base/alias` is the only link on the way.
+    let base = std::fs::canonicalize(&dir.0).unwrap();
+    std::fs::create_dir_all(base.join("real/trip")).unwrap();
+    symlink("real", base.join("alias")).unwrap();
+    let media = base.join("alias/trip/clip.mp4");
+    std::fs::write(&media, b"a clip").unwrap();
+    let given = base.join("alias/trip/p.spherecut");
+    let real = base.join("real/trip/p.spherecut");
+    let p = project_at(media.to_str().unwrap());
+    let stored = |text: &str| -> PathBuf {
+        let v: serde_json::Value = serde_json::from_str(text).unwrap();
+        PathBuf::from(v["project"]["media"][0]["path"].as_str().unwrap())
+    };
+
+    file::save(&p, &given).unwrap();
+    let text = std::fs::read_to_string(&real).unwrap();
+    assert_eq!(stored(&text), Path::new("clip.mp4"), "file::save: {text}");
+    let loaded = file::load(&given).unwrap();
+    assert_eq!(loaded.media()[0].path, base.join("real/trip/clip.mp4"));
+    std::fs::remove_file(&real).unwrap();
+
+    let (folder, name) = ProjectFolder::of_file(&given).unwrap();
+    let saved = folder.create(&name, &p, &History::new()).unwrap();
+    let text = std::fs::read_to_string(&real).unwrap();
+    assert_eq!(stored(&text), Path::new("clip.mp4"), "create: {text}");
+    let mut q = p.clone();
+    let s = sequence(&q);
+    q.apply(&[Edit::Rename {
+        id: s.0,
+        name: "Again".into(),
+    }])
+    .unwrap();
+    folder
+        .save(&name, &q, &History::new(), Some(&saved.identity))
+        .unwrap();
+    let text = std::fs::read_to_string(&real).unwrap();
+    assert_eq!(stored(&text), Path::new("clip.mp4"), "save: {text}");
+    let loaded = folder.load(&name).unwrap().project;
+    assert_eq!(loaded.media()[0].path, base.join("real/trip/clip.mp4"));
+
+    // The base's save: the folder's real path, the media's lexical one.
+    let base_save = file::to_json(&p, real.parent().unwrap()).unwrap();
+    must_fail(
+        "the lexical media path stored from the real folder",
+        stored(&base_save) == Path::new("clip.mp4"),
+    );
+    assert!(
+        stored(&base_save).starts_with(".."),
+        "{}",
+        stored(&base_save).display()
+    );
+}
+
 /// `file::load` behaves as `ProjectFolder::load` does (F034): it opens
 /// without blocking, refuses what isn't a regular file (a FIFO at the
 /// path), and calls a file that isn't UTF-8 `not_project`. The FIFO is
@@ -865,7 +937,10 @@ fn media_paths() {
 #[test]
 fn a_project_saved_through_a_link_keeps_its_paths_from_the_files_folder() {
     let dir = TempDir::new("link");
-    let (home, nas) = (dir.0.join("home"), dir.0.join("nas/proj"));
+    // Where the system's temp folder is reached through a link, its real
+    // path, which load gives the media back in.
+    let root = std::fs::canonicalize(&dir.0).unwrap();
+    let (home, nas) = (root.join("home"), root.join("nas/proj"));
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&nas).unwrap();
     let link = home.join("p.spherecut");

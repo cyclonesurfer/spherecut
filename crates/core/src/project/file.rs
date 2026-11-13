@@ -14,7 +14,10 @@
 //! saves shows what changed. `schema` is read first: a newer one is
 //! refused, an older one migrated. Unknown fields are refused, so a typo
 //! in a hand edit is caught instead of dropped. Media paths are written
-//! relative to the file's folder. A time's `seconds` and an orientation's
+//! relative to the file's folder, which [`save`] and [`load`] take as the
+//! kernel finds it, and [`save`] names each media path's folder so too
+//! first (R8); they are read back lexically from that folder (D47). A
+//! time's `seconds` and an orientation's
 //! `ypr_deg` are written for readers; a hand edit that changes one without
 //! the exact value beside it is refused, saying which to edit.
 
@@ -116,8 +119,44 @@ struct EnvelopeIn {
 }
 
 /// `project` as a project file's text, its media paths relative to
-/// `folder` (the folder the file will be in, absolute).
+/// `folder` (the folder the file will be in, absolute), each taken as it
+/// is named.
 pub fn to_json(project: &Project, folder: &Path) -> Result<String, FileError> {
+    write_json(project, folder, lexical)
+}
+
+/// [`to_json`] for a file in `folder` as the kernel finds it, named
+/// physically ([`crate::fs::real_file`], F031): each media path's folder
+/// is named physically too before it is made relative
+/// ([`crate::fs::in_real_folder`]), so that a media named through a
+/// linked ancestor is stored from the folder it is really in rather than
+/// climbing to the root and back (R8). The project's own paths are left
+/// as they are. `file::save` and a folder from [`ProjectFolder::of_file`]
+/// save so; an agent's folder, named lexically beneath its roots, doesn't.
+///
+/// [`ProjectFolder::of_file`]: super::ProjectFolder::of_file
+pub(crate) fn to_json_from_real_folder(
+    project: &Project,
+    folder: &Path,
+) -> Result<String, FileError> {
+    write_json(project, folder, |p| {
+        let real = crate::fs::in_real_folder(&lexical(p));
+        // A link's target that isn't UTF-8 is left unread.
+        if real.to_str().is_some() {
+            real
+        } else {
+            lexical(p)
+        }
+    })
+}
+
+/// `project`'s text with each media path, as `name` names it, relative
+/// to `folder`.
+fn write_json(
+    project: &Project,
+    folder: &Path,
+    name: impl Fn(&Path) -> PathBuf,
+) -> Result<String, FileError> {
     let mut p = project.clone();
     let folder = lexical(folder);
     for m in &mut p.media {
@@ -127,7 +166,7 @@ pub fn to_json(project: &Project, folder: &Path) -> Result<String, FileError> {
                 path: m.path.clone(),
             });
         }
-        m.path = relative(&lexical(&m.path), &folder);
+        m.path = relative(&name(&m.path), &folder);
     }
     let envelope = EnvelopeOut {
         format: FORMAT,
@@ -201,10 +240,11 @@ pub fn save(project: &Project, path: &Path) -> Result<(), FileError> {
     };
     // Through a link the file is written where it points, so its paths
     // are relative to that folder, which load reads them from too: the
-    // folder the kernel finds it in (F031).
+    // folder the kernel finds it in (F031), from which each media is
+    // named as the kernel finds its folder too (R8).
     let dest = crate::fs::real_file(path).map_err(io)?;
     let folder = dest.parent().unwrap_or(Path::new("/"));
-    let text = to_json(project, folder)?;
+    let text = to_json_from_real_folder(project, folder)?;
     let mut tmp = TempFile::create(&dest).map_err(io)?;
     tmp.file_mut().write_all(text.as_bytes()).map_err(io)?;
     tmp.persist_replace().map_err(io)
