@@ -11,10 +11,10 @@
 //! I/O only: media paths are made relative to, and read against, the
 //! folder's path (D47). The GUI's folder, from [`ProjectFolder::of_file`],
 //! is named as the kernel finds it (F031), and its saves name each media
-//! path's folder so too before making it relative (R8), as `file::save`
-//! does; a folder opened by [`ProjectFolder::open`] or
-//! [`ProjectFolder::from_fd`] is named as given, lexically, and its media
-//! paths with it.
+//! path as near it as its folders' real paths let it be before making it
+//! relative (R8), as `file::save` does; a folder opened by
+//! [`ProjectFolder::open`] or [`ProjectFolder::from_fd`] is named as
+//! given, lexically, and its media paths with it.
 //!
 //! ```text
 //! trip.spherecut            the project (D47)
@@ -224,7 +224,7 @@ pub struct ProjectFolder {
     /// `/proc/self/fd/N`, what writes go through.
     proc: PathBuf,
     /// Whether `path` is the folder's real path ([`ProjectFolder::of_file`]),
-    /// so that a save names each media path's folder physically too (R8).
+    /// so that a save names each media path as near it as it can (R8).
     real: bool,
 }
 
@@ -273,8 +273,8 @@ impl ProjectFolder {
     /// finds the file in, its path resolved physically
     /// ([`crate::fs::real_file`], F031), so a `..` across a linked folder
     /// names the folder the file is really in, and its saves name each
-    /// media path's folder physically before making it relative (R8), as
-    /// `file::save` does.
+    /// media path as near it as its folders' real paths let it be before
+    /// making it relative (R8), as `file::save` does.
     pub fn of_file(path: &Path) -> Result<(ProjectFolder, OsString), FolderError> {
         let io = |source| FolderError::Io {
             path: path.to_path_buf(),
@@ -294,7 +294,7 @@ impl ProjectFolder {
     }
 
     /// `project`'s text for a file in this folder: its media paths named
-    /// physically first when the folder's path is real (R8).
+    /// near it first when the folder's path is real (R8).
     fn text(&self, project: &Project) -> Result<String, FileError> {
         if self.real {
             file::to_json_from_real_folder(project, &self.path)

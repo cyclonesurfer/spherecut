@@ -8088,18 +8088,22 @@ in (`fs::real_file`: links at the path's end followed, the folder
 that holds the file resolved physically), on save and load alike, so
 a project in a linked folder reads its `../clip.mp4` beside the real
 folder (F031, which `a_project_in_a_linked_folder_renders_its_media`
-holds through `spherecut render`). On save, from that folder, each
-media path's own folder is named as the kernel finds it too before
-the path is made relative (`fs::in_real_folder`, its own name never
-followed, the deepest folder there resolved when it is missing), so a
+holds through `spherecut render`). On save, each media path is first
+named as near that folder as its folders' real paths let it be
+(`fs::name_near`: of the names that one of its folders named
+physically gives, with the rest kept as named, the one sharing the
+most of the folder, and of those the one that resolves least; its own
+name is never followed, and a missing folder gives no name), so a
 clip named through a linked ancestor of the project's folder is
 stored from where it is (`clip.mp4`, not a path that climbs to the
-root and back) and the folder moved with its media keeps working (the
-M3.9 review's R8); `file::save` and the GUI's `ProjectFolder::of_file`
-save so, and media paths are read back lexically from the folder, as
-above. `file::load` opens without waiting, and refuses a
-path that isn't a regular file, and text that isn't UTF-8, as
-`not_project` (F034).
+root and back; the M3.9 review's R8), and one in a folder linked
+within the project's, footage on another disk, keeps the link's name
+(`footage/f.mp4`), so the folder moved with its media, or with its
+link, keeps working; `file::save` and the GUI's
+`ProjectFolder::of_file` save so, and media paths are read back
+lexically from the folder, as above. `file::load` opens without
+waiting, and refuses a path that isn't a regular file, and text that
+isn't UTF-8, as `not_project` (F034).
 
 ## D48. The project model and `Edit`
 

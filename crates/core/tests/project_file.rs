@@ -641,64 +641,104 @@ fn a_project_in_a_linked_folder_finds_media_by_its_real_folder() {
     }
 }
 
-/// A media path named through a linked ancestor of the project's folder
-/// is stored from that folder as the kernel finds it, as the folder
-/// itself is (R8): `base/alias` names `base/real`, the media is named
-/// `base/alias/trip/clip.mp4` (lexically, as `std::path::absolute`
-/// names a clip the GUI opens) and the project is saved as
-/// `base/alias/trip/p.spherecut` by `file::save`, and by
-/// `ProjectFolder::of_file` with `create` and then `save`. Each stores
-/// `clip.mp4`, so the folder moved or copied with its media keeps
-/// working (D47), and loads it back from the real folder.
+/// A media path is stored as it is named nearest the project's folder as
+/// the kernel finds it (R8 and its review): `base/alias` names
+/// `base/real`, and the project is saved by `file::save`, and by
+/// `ProjectFolder::of_file` with `create` and then `save`.
 ///
-/// Control: the base's save, the lexical media path made relative to
-/// the folder's real path (`to_json`, which names nothing), stores a
-/// path that climbs to the root and back down through the link.
+/// * The media named `base/alias/trip/clip.mp4` (lexically, as
+///   `std::path::absolute` names a clip the GUI opens), the project saved
+///   as `base/alias/trip/p.spherecut`: `clip.mp4`, not a path that climbs
+///   to the root and back down through the link.
+/// * The same media, the project saved by its real path,
+///   `base/real/trip/q.spherecut`: `clip.mp4` too.
+/// * A folder linked within the project's, `trip/footage` naming
+///   `base/nas/trip` (footage on another disk): `footage/f.mp4`, the
+///   link kept, so the project's folder moved with its link keeps its
+///   media (D47).
+///
+/// Controls: the base's save, the lexical media path made relative to
+/// the folder's real path (`to_json`, which names nothing), climbs out
+/// for the first; the R8 fix's first rule, each media's whole folder
+/// named physically, climbs out through the link for the third.
 #[cfg(unix)]
 #[test]
 fn a_media_named_through_a_linked_ancestor_is_stored_from_the_real_folder() {
     use std::os::unix::fs::symlink;
     let dir = TempDir::new("linked-ancestor");
     // Where the system's temp folder is reached through a link, its
-    // real path, so that `base/alias` is the only link on the way.
+    // real path, so that the links made here are the only ones.
     let base = std::fs::canonicalize(&dir.0).unwrap();
     std::fs::create_dir_all(base.join("real/trip")).unwrap();
+    std::fs::create_dir_all(base.join("nas/trip")).unwrap();
     symlink("real", base.join("alias")).unwrap();
+    symlink(base.join("nas/trip"), base.join("real/trip/footage")).unwrap();
     let media = base.join("alias/trip/clip.mp4");
     std::fs::write(&media, b"a clip").unwrap();
-    let given = base.join("alias/trip/p.spherecut");
-    let real = base.join("real/trip/p.spherecut");
-    let p = project_at(media.to_str().unwrap());
+    std::fs::write(base.join("nas/trip/f.mp4"), b"footage").unwrap();
     let stored = |text: &str| -> PathBuf {
         let v: serde_json::Value = serde_json::from_str(text).unwrap();
         PathBuf::from(v["project"]["media"][0]["path"].as_str().unwrap())
     };
-
-    file::save(&p, &given).unwrap();
-    let text = std::fs::read_to_string(&real).unwrap();
-    assert_eq!(stored(&text), Path::new("clip.mp4"), "file::save: {text}");
-    let loaded = file::load(&given).unwrap();
-    assert_eq!(loaded.media()[0].path, base.join("real/trip/clip.mp4"));
-    std::fs::remove_file(&real).unwrap();
-
-    let (folder, name) = ProjectFolder::of_file(&given).unwrap();
-    let saved = folder.create(&name, &p, &History::new()).unwrap();
-    let text = std::fs::read_to_string(&real).unwrap();
-    assert_eq!(stored(&text), Path::new("clip.mp4"), "create: {text}");
-    let mut q = p.clone();
-    let s = sequence(&q);
-    q.apply(&[Edit::Rename {
-        id: s.0,
-        name: "Again".into(),
-    }])
-    .unwrap();
-    folder
-        .save(&name, &q, &History::new(), Some(&saved.identity))
+    // What each save stores for `p` saved as `given`, which is the file
+    // `real`: `file::save`, then `of_file`'s `create` and `save`. Each
+    // loads its media back from the real folder.
+    let each = |p: &Project, given: &Path, real: &Path, back: &Path| -> [PathBuf; 3] {
+        file::save(p, given).unwrap();
+        let by_save = stored(&std::fs::read_to_string(real).unwrap());
+        assert_eq!(file::load(given).unwrap().media()[0].path, back);
+        std::fs::remove_file(real).unwrap();
+        let (folder, name) = ProjectFolder::of_file(given).unwrap();
+        let saved = folder.create(&name, p, &History::new()).unwrap();
+        let by_create = stored(&std::fs::read_to_string(real).unwrap());
+        let mut q = p.clone();
+        let s = sequence(&q);
+        q.apply(&[Edit::Rename {
+            id: s.0,
+            name: "Again".into(),
+        }])
         .unwrap();
-    let text = std::fs::read_to_string(&real).unwrap();
-    assert_eq!(stored(&text), Path::new("clip.mp4"), "save: {text}");
-    let loaded = folder.load(&name).unwrap().project;
-    assert_eq!(loaded.media()[0].path, base.join("real/trip/clip.mp4"));
+        folder
+            .save(&name, &q, &History::new(), Some(&saved.identity))
+            .unwrap();
+        let by_folder = stored(&std::fs::read_to_string(real).unwrap());
+        assert_eq!(folder.load(&name).unwrap().project.media()[0].path, back);
+        [by_save, by_create, by_folder]
+    };
+    let clip = PathBuf::from("clip.mp4");
+    let p = project_at(media.to_str().unwrap());
+    let real = base.join("real/trip/p.spherecut");
+    let back = base.join("real/trip/clip.mp4");
+    let by_alias = each(&p, &base.join("alias/trip/p.spherecut"), &real, &back);
+    assert_eq!(by_alias, [clip.clone(), clip.clone(), clip.clone()]);
+    let q = base.join("real/trip/q.spherecut");
+    assert_eq!(each(&p, &q, &q, &back), [clip.clone(), clip.clone(), clip]);
+
+    let footage = PathBuf::from("footage/f.mp4");
+    let in_footage = base.join("real/trip/footage/f.mp4");
+    for (named, name) in [
+        ("alias/trip/footage/f.mp4", "f1.spherecut"),
+        ("real/trip/footage/f.mp4", "f2.spherecut"),
+    ] {
+        let f = project_at(base.join(named).to_str().unwrap());
+        let given = base.join("alias/trip").join(name);
+        let real = base.join("real/trip").join(name);
+        let by = each(&f, &given, &real, &in_footage);
+        assert_eq!(
+            by,
+            [footage.clone(), footage.clone(), footage.clone()],
+            "{named}"
+        );
+    }
+    // The folder moved, its footage link with it: the media is there.
+    std::fs::create_dir_all(base.join("archive/2026")).unwrap();
+    std::fs::rename(base.join("real/trip"), base.join("archive/2026/trip")).unwrap();
+    let moved = file::load(&base.join("archive/2026/trip/f1.spherecut")).unwrap();
+    assert_eq!(
+        moved.media()[0].path,
+        base.join("archive/2026/trip/footage/f.mp4")
+    );
+    assert!(moved.media()[0].path.exists());
 
     // The base's save: the folder's real path, the media's lexical one.
     let base_save = file::to_json(&p, real.parent().unwrap()).unwrap();
@@ -711,6 +751,15 @@ fn a_media_named_through_a_linked_ancestor_is_stored_from_the_real_folder() {
         "{}",
         stored(&base_save).display()
     );
+    // The R8 fix's first rule: the footage's whole folder named
+    // physically, which names the link's target.
+    let whole = std::fs::canonicalize(base.join("nas/trip")).unwrap();
+    let first_rule = file::relative(&whole.join("f.mp4"), &base.join("real/trip"));
+    must_fail(
+        "the media's whole folder named physically",
+        first_rule == footage,
+    );
+    assert!(first_rule.starts_with(".."), "{}", first_rule.display());
 }
 
 /// `file::load` behaves as `ProjectFolder::load` does (F034): it opens

@@ -15,11 +15,12 @@
 //! refused, an older one migrated. Unknown fields are refused, so a typo
 //! in a hand edit is caught instead of dropped. Media paths are written
 //! relative to the file's folder, which [`save`] and [`load`] take as the
-//! kernel finds it, and [`save`] names each media path's folder so too
-//! first (R8); they are read back lexically from that folder (D47). A
-//! time's `seconds` and an orientation's
-//! `ypr_deg` are written for readers; a hand edit that changes one without
-//! the exact value beside it is refused, saying which to edit.
+//! kernel finds it, and [`save`] first names each media path as near
+//! that folder as its folders' real paths let it be (R8); they are read
+//! back lexically from that folder (D47). A time's `seconds` and an
+//! orientation's `ypr_deg` are written for readers; a hand edit that
+//! changes one without the exact value beside it is refused, saying
+//! which to edit.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -126,11 +127,12 @@ pub fn to_json(project: &Project, folder: &Path) -> Result<String, FileError> {
 }
 
 /// [`to_json`] for a file in `folder` as the kernel finds it, named
-/// physically ([`crate::fs::real_file`], F031): each media path's folder
-/// is named physically too before it is made relative
-/// ([`crate::fs::in_real_folder`]), so that a media named through a
-/// linked ancestor is stored from the folder it is really in rather than
-/// climbing to the root and back (R8). The project's own paths are left
+/// physically ([`crate::fs::real_file`], F031): each media path is named
+/// as near that folder as its folders' real paths let it be before it is
+/// made relative ([`crate::fs::name_near`]), so that a media named
+/// through a linked ancestor is stored from the folder it is really in
+/// rather than climbing to the root and back (R8), while a folder linked
+/// within the project's keeps its name. The project's own paths are left
 /// as they are. `file::save` and a folder from [`ProjectFolder::of_file`]
 /// save so; an agent's folder, named lexically beneath its roots, doesn't.
 ///
@@ -139,11 +141,12 @@ pub(crate) fn to_json_from_real_folder(
     project: &Project,
     folder: &Path,
 ) -> Result<String, FileError> {
+    let real_folder = lexical(folder);
     write_json(project, folder, |p| {
-        let real = crate::fs::in_real_folder(&lexical(p));
+        let near = crate::fs::name_near(&lexical(p), &real_folder);
         // A link's target that isn't UTF-8 is left unread.
-        if real.to_str().is_some() {
-            real
+        if near.to_str().is_some() {
+            near
         } else {
             lexical(p)
         }
@@ -238,8 +241,8 @@ pub fn save(project: &Project, path: &Path) -> Result<(), FileError> {
     };
     // Through a link the file is written where it points, so its paths
     // are relative to that folder, which load reads them from too: the
-    // folder the kernel finds it in (F031), from which each media is
-    // named as the kernel finds its folder too (R8).
+    // folder the kernel finds it in (F031), near which each media is
+    // named (R8).
     let dest = crate::fs::real_file(path).map_err(io)?;
     let folder = dest.parent().unwrap_or(Path::new("/"));
     let text = to_json_from_real_folder(project, folder)?;

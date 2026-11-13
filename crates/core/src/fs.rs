@@ -96,8 +96,8 @@ pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
 /// is resolved physically (`realpath`), so a `..` in a link's target or
 /// in the path is taken where the kernel takes it, never lexically
 /// across a linked folder. A project's media paths are made relative to
-/// the folder this gives once their own folders are named so too
-/// ([`in_real_folder`], R8), and read back lexically from it (D47). The
+/// the folder this gives once each is named nearest it ([`name_near`],
+/// R8), and read back lexically from it (D47). The
 /// file itself need not exist, as when a project is saved for the first
 /// time, but its folder must.
 pub fn real_file(path: &Path) -> io::Result<PathBuf> {
@@ -125,32 +125,49 @@ pub fn real_file(path: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("too many levels of symbolic links"))
 }
 
-/// `path` (absolute and lexical) with its folder named physically, as
-/// [`real_file`] names a project's folder, and its own name kept: a link
-/// at the name is not followed, so a linked clip keeps its name. Where the
-/// folder is missing (media offline), the deepest folder of the path that
-/// is there is resolved and the rest kept as it is; where none can be,
-/// `path` itself. So a media path and the folder of the project that names
-/// it are made relative alike, and one named through a linked ancestor of
-/// the folder doesn't climb to the root and back (the M3.9 review's R8).
-pub fn in_real_folder(path: &Path) -> PathBuf {
-    may_block("resolving a file's folder");
-    let Some(name) = path.file_name() else {
+/// `path` (absolute and lexical) named as near `folder` (a real folder,
+/// as [`real_file`] names a project's) as the kernel lets it be: of the
+/// names of it that one of its folders gives, named physically with the
+/// rest of `path` kept as it is, the one that shares the most of
+/// `folder`, and of those the one that resolves least, `path` itself
+/// first. Its own name is never resolved, so a linked clip keeps its
+/// name, and a folder that is missing (media offline) gives no name. So
+/// a media named through a linked ancestor of the project's folder is
+/// stored from the folder it is really in, not by a path that climbs to
+/// the root and back down (the M3.9 review's R8), and one in a linked
+/// folder within the project's (footage on another disk) keeps the
+/// link's name, so the folder moved with its link keeps its media (that
+/// fix's review). Each name is the same file, as `path` holds no `..`.
+pub fn name_near(path: &Path, folder: &Path) -> PathBuf {
+    may_block("resolving a file's folders");
+    let Some(parent) = path.parent() else {
         return path.to_path_buf();
     };
-    let mut rest = vec![name];
-    let mut folder = path.parent();
-    while let Some(f) = folder {
-        if let Ok(real) = std::fs::canonicalize(f) {
-            return rest.iter().rev().fold(real, |p, c| p.join(c));
+    let shared = |p: &Path| {
+        p.components()
+            .zip(folder.components())
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    let mut best = (shared(path), path.to_path_buf());
+    // From the root down, so that a tie keeps the name resolved least.
+    let mut ancestors: Vec<&Path> = parent.ancestors().collect();
+    ancestors.reverse();
+    for a in ancestors {
+        // A folder that is missing has none below it either.
+        let Ok(real) = std::fs::canonicalize(a) else {
+            break;
+        };
+        let Ok(rest) = path.strip_prefix(a) else {
+            continue;
+        };
+        let named = real.join(rest);
+        let n = shared(&named);
+        if n > best.0 {
+            best = (n, named);
         }
-        match f.file_name() {
-            Some(c) => rest.push(c),
-            None => break,
-        }
-        folder = f.parent();
     }
-    path.to_path_buf()
+    best.1
 }
 
 /// What is at `dest`, if it is a regular file that a rename may replace;
@@ -1030,32 +1047,55 @@ mod tests {
         assert!(e.to_string().contains("symbolic links"), "{e}");
     }
 
-    /// R8: `in_real_folder` names a path's folder physically and keeps its
-    /// own name, a link there included; a folder that is missing has its
-    /// deepest folder that is there resolved and the rest kept.
+    /// R8 and its review: `name_near` names a media path as near the
+    /// project's real folder (`real/trip`) as its folders' real paths let
+    /// it be. Through the linked ancestor `alias`, a clip in the folder is
+    /// named in it and one in a sibling folder from their shared parent;
+    /// a folder linked within the project's (`footage`) keeps its name,
+    /// as does a clip's own link (`clip.mp4`); a folder that is missing
+    /// has the folders that are there resolved and the rest kept.
     ///
-    /// Control: `canonicalize`, which follows the clip's own link too,
-    /// names its target instead.
+    /// Controls: the R8 fix's first rule, the media's whole folder named
+    /// physically, names the footage by the link's target; `canonicalize`
+    /// follows the clip's own link.
     #[test]
-    fn a_media_path_is_named_from_its_real_folder() {
+    fn a_media_path_is_named_nearest_its_projects_folder() {
         use std::os::unix::fs::symlink;
 
         use spherecut_testkit::control::must_fail;
-        let tmp = tmpdir("real-folder");
+        let tmp = tmpdir("name-near");
         let dir = std::fs::canonicalize(&*tmp).unwrap();
-        std::fs::create_dir_all(dir.join("real/trip")).unwrap();
+        for d in ["real/trip", "real/clips", "nas/footage"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
         std::fs::write(dir.join("real/trip/take.mp4"), b"").unwrap();
         symlink("real", dir.join("alias")).unwrap();
         symlink("take.mp4", dir.join("real/trip/clip.mp4")).unwrap();
-        let named = |p: &str| in_real_folder(&dir.join(p));
-        assert_eq!(named("alias/trip/clip.mp4"), dir.join("real/trip/clip.mp4"));
-        assert_eq!(named("alias/trip/new.mp4"), dir.join("real/trip/new.mp4"));
-        // Offline: the folders that are there resolved, the rest kept.
-        assert_eq!(
-            named("alias/gone/deeper/clip.mp4"),
-            dir.join("real/gone/deeper/clip.mp4")
+        symlink(dir.join("nas/footage"), dir.join("real/trip/footage")).unwrap();
+        let folder = dir.join("real/trip");
+        let named = |p: &str| name_near(&dir.join(p), &folder);
+        for (given, near) in [
+            ("alias/trip/clip.mp4", "real/trip/clip.mp4"),
+            ("alias/trip/new.mp4", "real/trip/new.mp4"),
+            ("alias/clips/c.mp4", "real/clips/c.mp4"),
+            ("real/trip/footage/f.mp4", "real/trip/footage/f.mp4"),
+            ("alias/trip/footage/f.mp4", "real/trip/footage/f.mp4"),
+            ("alias/gone/deeper/clip.mp4", "real/gone/deeper/clip.mp4"),
+            ("nowhere/clip.mp4", "nowhere/clip.mp4"),
+            ("nas/footage/f.mp4", "nas/footage/f.mp4"),
+        ] {
+            assert_eq!(named(given), dir.join(near), "{given}");
+        }
+        let whole = |p: &str| {
+            let p = dir.join(p);
+            std::fs::canonicalize(p.parent().unwrap())
+                .unwrap()
+                .join(p.file_name().unwrap())
+        };
+        must_fail(
+            "the media's whole folder named physically",
+            whole("real/trip/footage/f.mp4") == dir.join("real/trip/footage/f.mp4"),
         );
-        assert_eq!(named("nowhere/clip.mp4"), dir.join("nowhere/clip.mp4"));
         must_fail(
             "the clip's own link followed",
             std::fs::canonicalize(dir.join("alias/trip/clip.mp4")).unwrap()
