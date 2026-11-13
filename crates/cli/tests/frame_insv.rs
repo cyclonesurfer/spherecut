@@ -645,6 +645,14 @@ fn frame_insv_needs_reference_until_m3_7() {
     must_fail("M1's words", refused_until_m3_7(&m1_words, &ran[0].1));
 }
 
+/// Without `--reference`, `frame <insv>` stitches on the GPU, its
+/// picture held to the reference's by D32's reference rule.
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn frame_insv_stitches_on_the_gpu() {
+    todo!()
+}
+
 /// `--lens 0` and `--lens 1` show one lens raw, its corner code naming
 /// its track and frame, with or without a calibration; `--seam weights`
 /// and `--seam difference` show the stitch's weights and seam difference

@@ -528,6 +528,24 @@ fn shared_vulkan_frame_matches_the_copy() {
     );
 }
 
+/// `frame --zero-copy` of the synthetic `.insv` under VA-API stitches
+/// what the copy path does, both lenses imported by DMA-BUF, against a
+/// software decode, strict (rung 7).
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn zero_copy_pair_frame_matches_the_copy() {
+    todo!()
+}
+
+/// `frame --zero-copy --decoder vulkan` of the synthetic `.insv`
+/// stitches what the copy path does, both lenses copied out on the
+/// shared device (path B), against a software decode, strict (rung 7).
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn shared_vulkan_pair_frame_matches_the_copy() {
+    todo!()
+}
+
 /// doctor plans a device for path B as the renderer opens it: on the
 /// machine's GPU (`auto`), doctor's `shared_decode` for it and whether
 /// `Gpu::headless_shared` shared its device agree, and where they can't

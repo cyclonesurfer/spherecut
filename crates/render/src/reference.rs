@@ -23,7 +23,7 @@ use spherecut_sphere::{equirect, pixel};
 use crate::color::{self, Placement};
 use crate::error::RenderError;
 use crate::plane::{LayoutKind, PlaneFormat, SlotShape};
-use crate::project::ViewParams;
+use crate::project::{DebugMode, ViewParams};
 use crate::readback::round_f16;
 
 /// A rendered picture in f64: R, G, B per pixel, rows top to bottom,
@@ -51,10 +51,10 @@ pub struct Options {
 }
 
 /// What [`render_rig`] writes instead of the stitched picture, for checks:
-/// M3 plan 10.3's debug modes 4 to 7. They stay apart from
-/// [`crate::DebugMode`], every one of whose values the pipeline tests
-/// build for the equirect pass, until the shader's stitch (M3.7) joins
-/// the two.
+/// M3 plan 10.3's debug modes 4 to 7, which are [`crate::DebugMode`]'s
+/// for a lens pair. [`RigDebug::mode`] and [`crate::DebugMode::rig`] join
+/// the two; this one holds no equirect mode, which the reference draws
+/// through [`Options`] (and level 0 through [`RigOptions::level0`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RigDebug {
     #[default]
@@ -73,12 +73,42 @@ pub enum RigDebug {
     SeamDiff,
 }
 
+impl RigDebug {
+    /// The shader's debug mode that draws this one: `Off`, or modes 4 to
+    /// 7. The inverse of [`crate::DebugMode::rig`].
+    pub fn mode(self) -> DebugMode {
+        match self {
+            RigDebug::Off => DebugMode::Off,
+            RigDebug::Lens0 => DebugMode::Lens0,
+            RigDebug::Lens1 => DebugMode::Lens1,
+            RigDebug::Weights => DebugMode::Weights,
+            RigDebug::SeamDiff => DebugMode::SeamDiff,
+        }
+    }
+}
+
 /// How [`render_rig`] renders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RigOptions {
     pub debug: RigDebug,
     /// Level 0 only, as `DebugMode::Level0`.
     pub level0: bool,
+}
+
+impl RigOptions {
+    /// The shader's debug mode that renders as these options do: `level0`
+    /// alone is [`DebugMode::Level0`], and `debug` alone its own mode.
+    /// `Invalid` for level 0 beside a debug mode other than `Off`, which
+    /// the shader, one mode a pipeline, has no form for.
+    pub fn mode(self) -> Result<DebugMode, RenderError> {
+        match (self.level0, self.debug) {
+            (false, debug) => Ok(debug.mode()),
+            (true, RigDebug::Off) => Ok(DebugMode::Level0),
+            (true, debug) => Err(RenderError::Invalid(format!(
+                "level 0 beside {debug:?}: the shader draws one debug mode at a time"
+            ))),
+        }
+    }
 }
 
 /// The world direction through point `(x, y)` of a `size` view, in
@@ -284,7 +314,7 @@ pub fn render_rig_of(
 }
 
 /// Refuses a gain that isn't a finite number of 0 or more.
-fn check_gains(gains: &[[f64; 3]; 2]) -> Result<(), RenderError> {
+pub(crate) fn check_gains(gains: &[[f64; 3]; 2]) -> Result<(), RenderError> {
     match gains
         .iter()
         .flatten()
@@ -343,11 +373,7 @@ pub fn render_flat(
 /// luma's and chroma's LOD as sampled, then luma's before clamping.
 ///
 /// This is one equirect frame's map, the frame placed on the sphere by
-/// `placement`. A rig has none yet: [`RigDebug`] has no LOD mode, and
-/// [`lens_footprint`] gives luma's footprint alone, with chroma's LOD
-/// and the levels that both clamp to left inside the sampler. The M3
-/// plan's `dfish_lod_heatmap` (10.5) holds the shader's debug mode 3
-/// against such a map for each lens, which is M3.7's to build.
+/// `placement`. A lens pair's is [`rig_lod_map`].
 pub fn lod_map(
     frame: &dyn VideoPlanes,
     view: &ViewParams,
@@ -364,6 +390,23 @@ pub fn lod_map(
         ]
         .map(round_f16)
     }))
+}
+
+/// What `DebugMode::LodHeatmap` writes for a lens pair, read back with
+/// `Depth::Linear`: at each pixel, [`lod_map`]'s three numbers (luma's
+/// and chroma's LOD as sampled, then luma's before clamping, each rounded
+/// to the nearest f16) for the calibration block that weighs more there
+/// (`Rig::weights` at each lens's footprint LOD), block 0 at a tie, and
+/// black where no lens covers. `pair` holds each track's picture, and
+/// chroma's LOD is taken inside it as its sampling takes it.
+#[expect(unused_variables, reason = "M3.7 unit (a) writes the body")]
+pub fn rig_lod_map(
+    pair: &LensPair,
+    rig: &Rig,
+    view: &ViewParams,
+    size: (u32, u32),
+) -> Result<ImageF64, RenderError> {
+    todo!("M3.7 unit (a)")
 }
 
 fn per_pixel(size: (u32, u32), f: impl Fn((u32, u32)) -> [f64; 3]) -> ImageF64 {

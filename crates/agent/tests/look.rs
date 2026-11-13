@@ -337,6 +337,21 @@ fn a_file_that_isnt_equirect_is_seen_raw() {
     assert_eq!(r["tiles"][0]["time"]["frame"], 4);
 }
 
+/// `look` at a calibrated `.insv` stitches its lens pair on the GPU.
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn look_stitches_an_insv() {
+    todo!()
+}
+
+/// `look` at an `.insv` with no calibration shows its lenses side by
+/// side, raw, and says why.
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn look_shows_an_uncalibrated_insv_as_lenses() {
+    todo!()
+}
+
 #[test]
 fn a_sheet_spreads_its_times_over_the_clip() {
     let dir = TempDir::new("sheet");

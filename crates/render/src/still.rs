@@ -1,9 +1,11 @@
 //! One frame, headless (M1 plan section 4.5): upload, project, encode and
-//! read back. `spherecut frame` and the goldens use it.
+//! read back. `spherecut frame` and the goldens use it. A lens pair's two
+//! pictures render stitched the same way (M3 plan 10.4).
 
 use std::time::{Duration, Instant};
 
 use spherecut_core::video::VideoPlanes;
+use spherecut_sphere::rig::Rig;
 
 use crate::blur::Blur;
 use crate::color::Placement;
@@ -12,8 +14,9 @@ use crate::error::RenderError;
 use crate::frame::GpuFrame;
 use crate::gpu::Gpu;
 use crate::plane::SlotShape;
-use crate::project::{DebugMode, Filter, LinearTarget, Projector, ViewParams};
+use crate::project::{DebugMode, Filter, LinearTarget, Projector, SourceRef, ViewParams};
 use crate::readback::{self, Texels};
+use crate::seam::{StripSpec, Strips};
 use crate::upload::{UploadPath, Uploader};
 use crate::vkshare::BufferPlane;
 use crate::yuv::{self, YuvConverter, YuvLayout, YuvShape};
@@ -165,8 +168,8 @@ impl Image {
 }
 
 /// The pipelines and buffers of [`render_still`], kept for rendering
-/// more than one still: one slot and one target, remade when a frame or a
-/// size no longer fits.
+/// more than one still: two slots and one target, remade when a frame or
+/// a size no longer fits.
 #[derive(Debug)]
 pub struct StillRenderer {
     uploader: Uploader,
@@ -176,7 +179,8 @@ pub struct StillRenderer {
     yuv: Option<YuvConverter>,
     /// Made when first asked to blur.
     blur: Option<Blur>,
-    slot: Option<GpuFrame>,
+    /// By track: one frame's slot is the first.
+    slots: [Option<GpuFrame>; 2],
     target: Option<LinearTarget>,
     output: Option<wgpu::Texture>,
     /// The YUV pass's output and the buffer it is read back through,
@@ -282,7 +286,7 @@ impl StillRenderer {
             encoder: Encoder::new(gpu, Self::OUTPUT_FORMAT),
             yuv: None,
             blur: None,
-            slot: None,
+            slots: [None, None],
             target: None,
             output: None,
             yuv_out: None,
@@ -323,13 +327,22 @@ impl StillRenderer {
     }
 
     /// The slot the last render uploaded its frame into, as that render
-    /// left it; `None` before the first. Only tests read it, back through
+    /// left it (track 0's after a lens pair); `None` before the first.
+    /// Only tests read it, back through
     /// [`read_texture`](crate::readback::read_texture): the Tier 2
     /// zero-copy check, to tell a slot that holds other bytes than the
     /// frame's from a render that drew the right bytes wrong.
     #[doc(hidden)]
     pub fn slot(&self) -> Option<&GpuFrame> {
-        self.slot.as_ref()
+        self.slots[0].as_ref()
+    }
+
+    /// Both slots, by track, as the last render left them: the Tier 2
+    /// zero-copy check of a lens pair reads them as [`Self::slot`]'s
+    /// reader reads one.
+    #[doc(hidden)]
+    pub fn slots(&self) -> [Option<&GpuFrame>; 2] {
+        self.slots.each_ref().map(Option::as_ref)
     }
 
     /// `frame` through `view`, `size` pixels large.
@@ -343,24 +356,21 @@ impl StillRenderer {
     ) -> Result<Image, RenderError> {
         let want = Want::Image(opts.depth);
         let views = std::slice::from_ref(view);
-        Ok(image(self.render_from(
-            gpu,
-            frame,
-            Source::Bytes,
-            views,
-            size,
-            opts,
-            want,
-        )?))
+        let frames = SourceFrames::from(frame);
+        Ok(image(
+            self.render_from(gpu, frames, views, size, opts, want)?,
+        ))
     }
 
-    /// `frame` seen through each of `views` (a frame's views over the
+    /// `frames` seen through each of `views` (a frame's views over the
     /// shutter, [`crate::blur`]) and averaged in linear light, `size`
-    /// pixels large: motion blur. One view is [`Self::render`].
-    pub fn render_blurred(
+    /// pixels large: motion blur. One view is [`Self::render`]. `frames`
+    /// is one frame (a [`VideoPlanes`] reference is one, its own bytes
+    /// uploaded), or a lens pair stitched ([`SourceFrames::Pair`]).
+    pub fn render_blurred<'f>(
         &mut self,
         gpu: &Gpu,
-        frame: &dyn VideoPlanes,
+        frames: impl Into<SourceFrames<'f>>,
         views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
@@ -368,8 +378,7 @@ impl StillRenderer {
         let want = Want::Image(opts.depth);
         Ok(image(self.render_from(
             gpu,
-            frame,
-            Source::Bytes,
+            frames.into(),
             views,
             size,
             opts,
@@ -377,21 +386,21 @@ impl StillRenderer {
         )?))
     }
 
-    /// `frame` through `views`, averaged as [`Self::render_blurred`]
+    /// `frames` through `views`, averaged as [`Self::render_blurred`]
     /// does, `size` pixels large, as an encoder's planes in `layout`: the
     /// YUV pass's output, which the export's parity tests compare against
     /// (M2 plan amendment 2 item 5). `opts.depth` goes unused.
-    pub fn render_yuv(
+    pub fn render_yuv<'f>(
         &mut self,
         gpu: &Gpu,
-        frame: &dyn VideoPlanes,
+        frames: impl Into<SourceFrames<'f>>,
         views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
         layout: YuvLayout,
     ) -> Result<YuvImage, RenderError> {
         let want = Want::Yuv(layout);
-        match self.render_from(gpu, frame, Source::Bytes, views, size, opts, want)? {
+        match self.render_from(gpu, frames.into(), views, size, opts, want)? {
             Rendered::Yuv(y) => Ok(y),
             Rendered::Image(_) => unreachable!("a YUV render reads back planes"),
         }
@@ -412,10 +421,13 @@ impl StillRenderer {
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
         let want = Want::Image(opts.depth);
-        let source = Source::Imported(planes);
-        Ok(image(self.render_from(
-            gpu, frame, source, views, size, opts, want,
-        )?))
+        let frames = SourceFrames::One(LensFrame {
+            frame,
+            from: PlaneSource::Imported(planes),
+        });
+        Ok(image(
+            self.render_from(gpu, frames, views, size, opts, want)?,
+        ))
     }
 
     /// [`render_blurred`](Self::render_blurred) of a frame whose shown
@@ -435,18 +447,36 @@ impl StillRenderer {
         opts: &StillOptions,
     ) -> Result<Image, RenderError> {
         let want = Want::Image(opts.depth);
-        let source = Source::Buffer(buffer, planes);
-        Ok(image(self.render_from(
-            gpu, frame, source, views, size, opts, want,
-        )?))
+        let frames = SourceFrames::One(LensFrame {
+            frame,
+            from: PlaneSource::Buffer(buffer, planes),
+        });
+        Ok(image(
+            self.render_from(gpu, frames, views, size, opts, want)?,
+        ))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Both calibration blocks' strips of the lens pair `lenses` (by
+    /// track) about its seam, drawn by the strip pass
+    /// ([`Projector::record_strip`]) and read back: each pixel's rgb in
+    /// linear light at unit gain, its `valid` from
+    /// [`crate::seam::strip_coverage`], and rgb 0 where it is invalid, as
+    /// [`crate::seam::strips_of`] gives them from the CPU reference.
+    #[expect(unused_variables, reason = "M3.7 unit (a) writes the body")]
+    pub fn strips(
+        &mut self,
+        gpu: &Gpu,
+        lenses: [LensFrame<'_>; 2],
+        rig: &Rig,
+        spec: &StripSpec,
+    ) -> Result<Strips, RenderError> {
+        todo!("M3.7 unit (a)")
+    }
+
     fn render_from(
         &mut self,
         gpu: &Gpu,
-        frame: &dyn VideoPlanes,
-        source: Source<'_>,
+        frames: SourceFrames<'_>,
         views: &[ViewParams],
         size: (u32, u32),
         opts: &StillOptions,
@@ -459,6 +489,20 @@ impl StillRenderer {
                 views.len()
             )));
         }
+        match frames {
+            SourceFrames::Pair { .. } if opts.flat => {
+                return Err(RenderError::Invalid(
+                    "the picture as coded is one lens's: a lens pair has no flat form".into(),
+                ));
+            }
+            SourceFrames::One(_) if !DebugMode::ALL.contains(&opts.debug) => {
+                return Err(RenderError::Invalid(format!(
+                    "debug mode {:?} draws a lens pair: one frame has no such mode",
+                    opts.debug
+                )));
+            }
+            _ => {}
+        }
         let yuv_shape = match want {
             Want::Yuv(layout) => Some(YuvShape::new(layout, size)?),
             Want::Image(_) => None,
@@ -470,22 +514,26 @@ impl StillRenderer {
             )));
         }
         gpu.check_size(size)?;
+        let SourceFrames::One(LensFrame { frame, from }) = frames else {
+            todo!("M3.7 unit (a): both lenses uploaded, each to its own slot")
+        };
         let shape = SlotShape::of(frame.layout(), opts.placement.shown(frame.size()))?;
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let slot = match self.slot.take() {
+        let [first, _] = &mut self.slots;
+        let slot = match first.take() {
             Some(s) if s.shape().fits(&shape) => s,
             _ => GpuFrame::new(gpu, &shape)?,
         };
-        let slot = &*self.slot.insert(slot);
-        match source {
-            Source::Bytes => self
+        let slot = &*first.insert(slot);
+        match from {
+            PlaneSource::Bytes => self
                 .uploader
                 .upload_placed(gpu, frame, &opts.placement, slot)?,
-            Source::Imported(planes) => {
+            PlaneSource::Imported(planes) => {
                 self.uploader
                     .upload_imported(gpu, frame, planes, &opts.placement, slot)?
             }
-            Source::Buffer(buffer, planes) => self.uploader.upload_from_buffer(
+            PlaneSource::Buffer(buffer, planes) => self.uploader.upload_from_buffer(
                 gpu,
                 frame,
                 buffer,
@@ -494,6 +542,7 @@ impl StillRenderer {
                 slot,
             )?,
         };
+        let source = SourceRef::Equirect(slot);
         let target = match self.target.take() {
             Some(mut t) => {
                 t.resize(gpu, size)?;
@@ -516,7 +565,7 @@ impl StillRenderer {
             if let [_] = bands.as_slice() {
                 self.projector.record(
                     &mut enc,
-                    slot,
+                    source,
                     view,
                     target,
                     opts.filter,
@@ -527,7 +576,7 @@ impl StillRenderer {
                 for rows in bands {
                     self.projector.record_rows(
                         &mut enc,
-                        slot,
+                        source,
                         view,
                         target,
                         opts.filter,
@@ -550,7 +599,7 @@ impl StillRenderer {
             for view in views {
                 self.projector.record(
                     &mut enc,
-                    slot,
+                    source,
                     view,
                     target,
                     opts.filter,
@@ -697,13 +746,63 @@ fn image(r: Rendered) -> Image {
 }
 
 /// Where a still's planes come from.
-enum Source<'a> {
+#[derive(Debug, Clone, Copy)]
+pub enum PlaneSource<'a> {
     /// The frame's own bytes.
     Bytes,
-    /// Textures on the GPU, one a plane.
+    /// Textures on the GPU, one a plane, as
+    /// [`Uploader::upload_imported`] takes them.
     Imported(&'a [wgpu::Texture]),
-    /// A buffer on the GPU holding the shown planes.
+    /// A buffer on the GPU holding the shown planes, as
+    /// [`Uploader::upload_from_buffer`] takes them.
     Buffer(&'a wgpu::Buffer, &'a [BufferPlane]),
+}
+
+/// One picture a still renders from: the frame, which gives its layout,
+/// size and colour, and where its planes come from. Not
+/// `spherecut_synth::rung::LensFrame`, a synthetic lens's picture.
+#[derive(Debug, Clone, Copy)]
+pub struct LensFrame<'a> {
+    /// The picture's layout, size and colour, and its bytes when `from`
+    /// is [`PlaneSource::Bytes`].
+    pub frame: &'a dyn VideoPlanes,
+    /// Where its planes are uploaded from.
+    pub from: PlaneSource<'a>,
+}
+
+/// What [`StillRenderer::render_blurred`] and
+/// [`StillRenderer::render_yuv`] render: one frame, through the
+/// projection's equirect pass, or a lens pair stitched by `rig`.
+#[derive(Debug, Clone, Copy)]
+pub enum SourceFrames<'a> {
+    One(LensFrame<'a>),
+    Pair {
+        /// By track, as `reference::render_rig` takes the pictures.
+        lenses: [LensFrame<'a>; 2],
+        rig: &'a Rig,
+        /// The frame's gains (`Gains::at`), by calibration block.
+        gains: [[f64; 3]; 2],
+    },
+}
+
+/// A frame's own bytes.
+impl<'a, F: VideoPlanes> From<&'a F> for SourceFrames<'a> {
+    fn from(frame: &'a F) -> SourceFrames<'a> {
+        SourceFrames::One(LensFrame {
+            frame,
+            from: PlaneSource::Bytes,
+        })
+    }
+}
+
+/// A frame's own bytes.
+impl<'a, 'b: 'a> From<&'a (dyn VideoPlanes + 'b)> for SourceFrames<'a> {
+    fn from(frame: &'a (dyn VideoPlanes + 'b)) -> SourceFrames<'a> {
+        SourceFrames::One(LensFrame {
+            frame,
+            from: PlaneSource::Bytes,
+        })
+    }
 }
 
 /// One frame, headless: upload, project, encode, read back. Makes its

@@ -422,6 +422,14 @@ fn an_insv_without_its_trailer_fails_archive() {
     assert_eq!(r["pass"], false);
 }
 
+/// `check` on an `.insv` points the agent to `frame` and `look`, which
+/// stitch it, in its next hint.
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn an_insv_is_pointed_to_frame_and_look() {
+    todo!()
+}
+
 /// The most rules a synthetic file fails at once stay under
 /// `CHECK_BYTES` (a1-plan section 6.4): HEVC 4:2:2 tagged top-bottom on
 /// a 2:1 picture at 15 fps, head-locked SA3D on 44.1 kHz stereo.

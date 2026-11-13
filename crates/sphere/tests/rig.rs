@@ -3428,6 +3428,14 @@ fn weights_are_symmetric_under_a_mirrored_swap() {
     );
 }
 
+/// The band where both lenses carry weight is 2h wide at the closest
+/// stitch, q = 3.34 m⁻¹, not 2(h − δ) (the project review's F025).
+#[test]
+#[ignore = "M3.7 unit (a)"]
+fn the_blend_band_is_2h_wide_at_the_closest_stitch() {
+    todo!()
+}
+
 /// A point at R seen with q = 1/R puts both lenses' rays through it
 /// within 1e-9 m, the error growing with |q − 1/R|.
 #[test]

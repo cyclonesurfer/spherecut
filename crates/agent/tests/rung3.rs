@@ -492,6 +492,14 @@ fn rung3_render_equals_rung1() {
     });
 }
 
+/// Rung 3's GPU half: `StillPair::render` of the file on lavapipe equals
+/// rung 2's stitch of the same planes and rig.
+#[test]
+#[ignore = "M3.7 unit (d)"]
+fn rung3_gpu_render_equals_rung2() {
+    todo!()
+}
+
 /// `StillPair::seek` lands both lenses on the frame asked for, at one
 /// time with equal pts, from any frame before or after it.
 #[test]

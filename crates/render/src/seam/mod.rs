@@ -37,10 +37,11 @@ pub use strips::{band_weights, lens_coverage, strip_coverage, strips, strips_of}
 /// target with the whole sphere and takes no framing, and a strip is no
 /// crop of an equirect at its scale: Tier 1's rows are 16°/61 each with
 /// the middle row's centre on the seam, where an equirect 1372 wide has
-/// rows of 180°/686 and a boundary between two of them. So a shader that
-/// draws a strip (M3.7) needs an output whose pixel (i, j) looks along
-/// [`StripSpec::dir`] at (i + ½, j + ½) in the rig frame, and takes the
-/// strip's `valid` from [`strip_coverage`].
+/// rows of 180°/686 and a boundary between two of them. So the shader
+/// draws a strip into an output of its own,
+/// [`crate::StillRenderer::strips`], whose pixel (i, j) looks along
+/// [`StripSpec::dir`] at (i + ½, j + ½) in the rig frame, and which takes
+/// the strip's `valid` from [`strip_coverage`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StripSpec {
     /// The strip's scale along the seam and across it, in pixels a

@@ -1642,6 +1642,14 @@ fn bench_upload_5k7() {
     );
 }
 
+/// P-SHADE (M3 plan 4.3): the projection pass's GPU time stitched
+/// against equirect, at 1080p and 4K.
+#[test]
+#[ignore = "M3.7 unit (b)"]
+fn bench_stitch_pass() {
+    todo!()
+}
+
 /// Whether level 0 of each plane of `slot` holds 8-bit `frame`'s codes;
 /// or the first plane that doesn't, and how many of its bytes differ.
 fn holds(slot: &GpuFrame, frame: &Frame) -> Result<(), String> {
@@ -1812,4 +1820,13 @@ fn buffers_that_dont_fit_are_refused() {
     uploader
         .upload_from_buffer(gpu, &frame, &buffer, &planes, &Placement::FULL, &slot)
         .unwrap();
+}
+
+/// One pair drawn with each lens's planes as bytes, in a buffer and as
+/// textures already on the GPU, mixed between the lenses too, comes out
+/// byte for byte the same (M3 plan 10.4).
+#[test]
+#[ignore = "M3.7 unit (a)"]
+fn a_pair_renders_alike_on_every_upload_path() {
+    todo!()
 }

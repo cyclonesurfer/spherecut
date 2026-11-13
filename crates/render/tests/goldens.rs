@@ -40,6 +40,15 @@
 //! `tests/upload.rs` (45 to 22 and 23 to 11, R8, Rg8, R16Float and
 //! Rg16Float, against an independent area mean), which covers it whole.
 //!
+//! A lens pair's goldens (M3 plan 10.5) are rows of their own, in
+//! submodules that bless into directories of their own beside these:
+//! [`dfish_seam`] into `goldens/dfish_seam/`, [`dfish_views`] into
+//! `goldens/dfish_views/`, each with its manifest, since a blessing
+//! removes the PNGs its own manifest doesn't list; and [`rung2`], the
+//! shader's stitch held to rung 1's, which stores floors alone, in
+//! `goldens/rung2.json`. They share rung 1's pairs (`tests/common/rung1.rs`)
+//! with the rest of the binary, rendered once a run.
+//!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
 //! CPU and ideal references only, at the floors blessed here, and on the
 //! machine's own llvmpipe by the other-driver rule, recording the drift;
@@ -55,6 +64,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
+#[path = "dfish/seam.rs"]
+mod dfish_seam;
+#[path = "dfish/views.rs"]
+mod dfish_views;
+#[path = "dfish/rung2.rs"]
+mod rung2;
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -82,6 +97,7 @@ use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
+use spherecut_sphere::rig::Rig;
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
 use spherecut_testkit::control::{above, at_most, below, must_fail};
 use spherecut_testkit::{Fnv64, bench, bless, tier2};
@@ -89,6 +105,10 @@ use spherecut_testkit::{Fnv64, bench, bless, tier2};
 /// Where the stored images and the manifest live.
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
+/// What the goldens' manifest says it is.
+const ABOUT: &str = "The render goldens (M1 plan section 6, DECISIONS D32): images rendered on \
+                     lavapipe from synth's in-memory planes, with each check's thresholds and \
+                     what it measured when blessed.";
 /// Set to bless; set to [`LOWER`] to let the blessing lower a floor by
 /// more than [`FLOOR_DROP_DB`].
 const UPDATE: &str = bless::UPDATE_GOLDENS;
@@ -268,16 +288,45 @@ impl Source {
 
     /// FNV-64 of the planes' samples, row by row without the padding.
     fn hash(&self) -> u64 {
-        let mut h = Fnv64::new();
-        for (desc, (bytes, stride, (w, rows))) in
-            self.frame.layout.planes.iter().zip(&self.frame.planes)
-        {
-            let row = desc.row_bytes(*w);
-            for y in 0..*rows as usize {
-                h.write(&bytes[y * stride..y * stride + row]);
-            }
+        planes_fnv64(&self.frame)
+    }
+}
+
+/// FNV-64 of `frame`'s planes' samples, row by row without the padding.
+fn planes_fnv64(frame: &dyn VideoPlanes) -> u64 {
+    let mut h = Fnv64::new();
+    for (i, desc) in frame.layout().planes.iter().enumerate() {
+        let Some(plane) = frame.plane(i) else {
+            continue;
+        };
+        let row = desc.row_bytes(plane.width);
+        for y in 0..plane.height {
+            h.write(plane.row(y, row).unwrap());
         }
-        h.finish()
+    }
+    h.finish()
+}
+
+/// A lens pair and what it is, for a dfish manifest (M3 plan 10.5).
+#[expect(dead_code, reason = "M3.7 units (a) to (c) make and record pairs")]
+struct PairSource<'a> {
+    /// The scene, as rung 1 names it.
+    name: String,
+    /// By track.
+    frames: [&'a dyn VideoPlanes; 2],
+    /// FNV-64 of the calibration the rig is built from.
+    calibration_fnv64: u64,
+    /// The geometry the rig is built under and the scene's distance R.
+    geometry: Value,
+    /// The frame's gains, by calibration block.
+    gains: [[f64; 3]; 2],
+}
+
+#[expect(dead_code, reason = "M3.7 unit (a) records pairs by it")]
+impl PairSource<'_> {
+    /// Each track's [`planes_fnv64`].
+    fn hash(&self) -> [u64; 2] {
+        self.frames.map(planes_fnv64)
     }
 }
 
@@ -652,6 +701,12 @@ fn diff_dir() -> PathBuf {
     tmp.parent().unwrap_or(tmp).join("golden-diffs")
 }
 
+/// `golden-diffs-<name>/`, beside [`diff_dir`] and never inside it, which
+/// [`goldens`] removes as it starts: a dfish module's diffs.
+fn diff_dir_beside(name: &str) -> PathBuf {
+    diff_dir().with_file_name(format!("golden-diffs-{name}"))
+}
+
 /// An 8-bit picture of `rgb` (unit scale).
 fn rgb8(size: (u32, u32), rgb: &[f64]) -> Image {
     Image {
@@ -796,10 +851,12 @@ struct Run<'g> {
     /// don't.
     tell: bool,
     /// Where the goldens are read and blessed, and where failures' diffs
-    /// go: [`GOLDENS`] and [`diff_dir`], or scratch directories for the
-    /// harness's own tests.
+    /// go: [`GOLDENS`] and [`diff_dir`], a dfish module's own, or scratch
+    /// directories for the harness's own tests.
     dir: PathBuf,
     diffs: PathBuf,
+    /// What the manifest says it is: [`ABOUT`], or a dfish module's own.
+    about: &'static str,
 }
 
 impl<'g> Run<'g> {
@@ -835,6 +892,7 @@ impl<'g> Run<'g> {
             tell: false,
             dir: dir.to_path_buf(),
             diffs: diffs.to_path_buf(),
+            about: ABOUT,
         }
     }
 
@@ -966,6 +1024,23 @@ impl<'g> Run<'g> {
         }
     }
 
+    /// Renders `pair` stitched by `rig` with `gains`, as
+    /// [`StillRenderer::render_blurred`] renders a pair of its frames'
+    /// bytes, or records why it couldn't.
+    #[allow(clippy::too_many_arguments)]
+    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
+    fn render_pair(
+        &mut self,
+        pair: &PairSource<'_>,
+        rig: &Rig,
+        gains: [[f64; 3]; 2],
+        view: &ViewParams,
+        size: (u32, u32),
+        opts: StillOptions,
+    ) -> Option<Image> {
+        todo!("M3.7 unit (a)")
+    }
+
     fn render_with(
         &mut self,
         f: &Frame,
@@ -1092,6 +1167,14 @@ impl<'g> Run<'g> {
         self.end(m, false);
     }
 
+    /// [`Self::end_check`] for rows that render lens pairs: each pair's
+    /// entry as 10.5 asks, its calibration's hash, the geometry, the
+    /// gains, R and both lenses' FNV-64, beside every view.
+    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
+    fn end_pair_check(&mut self, what: &str, pairs: &[&PairSource<'_>], views: Vec<Value>) {
+        todo!("M3.7 unit (a)")
+    }
+
     /// Ends the row with its manifest entry, which must say what it
     /// rendered, from what and how (D32).
     fn end(&mut self, entry: Map<String, Value>, image: bool) {
@@ -1175,6 +1258,14 @@ impl<'g> Run<'g> {
         m.insert("source_fnv64".into(), json!(hash));
         m.insert("view".into(), view);
         self.end(m, true);
+    }
+
+    /// [`Self::stored`] for a row that renders a lens pair: the image
+    /// against its stored golden, its entry recording the pair as
+    /// [`Self::end_pair_check`] does.
+    #[expect(dead_code, unused_variables, reason = "M3.7 unit (a) writes the body")]
+    fn stored_pair(&mut self, what: &str, got: &Image, pair: &PairSource<'_>, view: Value) {
+        todo!("M3.7 unit (a)")
     }
 
     fn compare_stored(&mut self, png: &str, hash: &str, got: &Image) {
@@ -1276,9 +1367,7 @@ impl<'g> Run<'g> {
         }
         let manifest = json!({
             "schema": "spherecut.goldens/1",
-            "about": "The render goldens (M1 plan section 6, DECISIONS D32): images rendered on \
-                      lavapipe from synth's in-memory planes, with each check's thresholds and \
-                      what it measured when blessed.",
+            "about": self.about,
             "regenerate": REGENERATE,
             "images": self.images,
             "checks": self.checks,
@@ -1338,7 +1427,13 @@ const ROWS: &[(&str, Row)] = &[
 ];
 
 fn run_rows(run: &mut Run<'_>, only: Option<&[&str]>) {
-    for (name, row) in ROWS {
+    run_these(run, ROWS, only);
+}
+
+/// Runs `rows`, or those of them `only` names, in order: [`ROWS`], or a
+/// dfish module's.
+fn run_these(run: &mut Run<'_>, rows: &[(&str, Row)], only: Option<&[&str]>) {
+    for (name, row) in rows {
         if only.is_some_and(|o| !o.contains(name)) {
             continue;
         }
@@ -3532,6 +3627,17 @@ fn blessing_writes_everything_or_nothing() {
     assert!(
         run.checks["lod_heatmap"]["thresholds"]["levels_off_by_more_than_half_max"].is_number()
     );
+}
+
+/// Blessing one directory's rows, a dfish module's into its own, leaves a
+/// sibling directory's manifest and PNGs as they were: each blessing
+/// sweeps its own directory's stale images alone, and writes its own
+/// manifest's `about`. Its control blesses both into one directory, where
+/// the second sweep removes the first's PNGs.
+#[test]
+#[ignore = "M3.7 unit (a)"]
+fn blessing_one_directory_leaves_its_siblings() {
+    todo!()
 }
 
 #[test]
