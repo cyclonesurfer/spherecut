@@ -206,6 +206,19 @@ and render's, which allows it in `dmabuf` and `vkshare` alone (slice
     the copy, exactly, as software decoding applies it (`as_downloaded`
     gives the fields the frame will have). It serves VA-API and Vulkan
     alike (D30).
+  * The VA-API drain (D79): `va_sync_surface` looks `vaSyncSurface` up
+    once in the libva the process has already loaded (`dlopen` with
+    `RTLD_NOLOAD`, then the global scope), so it never loads a library,
+    and gives `None` where there is none. `vaapi_surface` reads a
+    VA-API frame's surface (`data[3]`) and its frames context's display
+    (ffmpeg-sys-next's `AVVAAPIDeviceContext`). A `SurfaceSet` keeps, in
+    order, each surface a decoder has handed out a frame of, at most 64
+    (forgetting the oldest past that, counted as overflow), and holds
+    the frames context while it keeps any; a surface of another frames
+    context replaces them all. `drain` calls a sync on each surface once, in order, and
+    counts those it waited 0.5 ms or more for and those that failed,
+    forgetting a surface whose sync failed; `drain_vaapi` runs it with
+    libva's `vaSyncSurface`.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
@@ -1108,8 +1121,12 @@ without waiting.
   (below, "Testing tiers"). The VA-API copy path's stall shows in the
   document too: `vaapi_drain` names the drain the player ran with
   (`SPHERECUT_VAAPI_DRAIN`, `download` by default, "The VA-API drain"
-  below), and unless it is off `drain` says what it waited for, nothing
-  on paths that never drain; and with the diagnostic
+  below), and unless it is off `drain` says what the drains waited for:
+  on paths that never drain (software and Vulkan decode, path A's
+  exported frames) it is there with no waits and zero counts, and
+  `unavailable` counts VA-API decoders that found no `vaSyncSurface` to
+  call. The `drain` stage has samples only where a decoder drained. With
+  the diagnostic
   `SPHERECUT_GATE_PROBE=<ms>`, off by default, the run starts the gate
   probe (`render::GateProbe`) as it starts playing, which every period
   waits at the submit gate (D41) as the uploader does, submits a clear
@@ -1432,8 +1449,12 @@ without waiting.
   frames expected shown), runs 0 and 1 must hold the UI's gates above
   (90% presented, a p99 of at most 1.5 refresh periods) with no
   blocking call on the UI thread, and the control must block and fail
-  them; run 1 keeping up is inconclusive, not a failure. Its runs are
-  listed in `gui-decode-behind.json` and its screenshots copied beside
+  them; run 1 keeping up is inconclusive, not a failure. Run 1 drains
+  VCN before each download under the default `SPHERECUT_VAAPI_DRAIN`
+  (`download`, D79), and failed on odin without it. For each run the
+  report gives the drain's mode, its `drain` stage and block unless it
+  is off, and the probe's slow jobs when `SPHERECUT_GATE_PROBE` is set;
+  no gate checks the drain itself. Its runs are listed in `gui-decode-behind.json` and its screenshots copied beside
   the report as `<report>-behind-<n>.png`. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at

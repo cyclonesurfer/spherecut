@@ -10,7 +10,7 @@ reference, at the end.
 
 | Target | Measured by |
 |---|---|
-| The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (on odin at 0b3ab9b, in three samples, run 0 passed and the control failed as it must, and run 1 failed each time, presenting 74 to 78% of the UI frames at a UI p99 of 92.7 to 122.3 ms: [`odin-0b3ab9b4d0.md`](../hw-reports/odin-0b3ab9b4d0.md):1752-1754, [`odin-0b3ab9b-behind-2.md`](../hw-reports/odin-0b3ab9b-behind-2.md):232-234 and [`odin-0b3ab9b-125.md`](../hw-reports/odin-0b3ab9b-125.md):232-234, and PROGRESS's Known issues); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
+| The UI stays at display refresh even when decode falls behind | `gui_decode_behind` (D40): with decode held to 20 fps on the default path, and with VA-API's frames copied on the noisy 5.7K 10-bit clip, the UI must present 90% of its frames with a p99 of at most 1.5 refresh periods and no blocking call on the UI thread, and its control, a UI that waits for each decoded frame, must fail those gates (on odin at 0b3ab9b, in three samples, run 0 passed and the control failed as it must, and run 1 failed each time, presenting 74 to 78% of the UI frames at a UI p99 of 92.7 to 122.3 ms: [`odin-0b3ab9b4d0.md`](../hw-reports/odin-0b3ab9b4d0.md):1752-1754, [`odin-0b3ab9b-behind-2.md`](../hw-reports/odin-0b3ab9b-behind-2.md):232-234 and [`odin-0b3ab9b-125.md`](../hw-reports/odin-0b3ab9b-125.md):232-234; with the VA-API drain (D79) at 6675318 run 1 passed, presenting 0.995 at a UI p99 of 18.4 ms against 0.75 and 110.3 ms with it off in the same session, [`stall-followup-2026-11-12/report.md`](../hw-reports/stall-followup-2026-11-12/report.md):31-38, and then 3 of 3, presenting 0.994 to 0.995 at 18.1 to 18.5 ms, [`stall-tier2-2026-11-12/report.md`](../hw-reports/stall-tier2-2026-11-12/report.md):18-20; odin's results below); beside it the GUI smoke run's frame times (`gui_smoke`, from M1), decode keeping up |
 | 5.7K30 raw or stitched footage plays in real time with hardware decode on odin and huginn | `bench_playback_realtime_5k7_8bit` and `bench_playback_realtime_5k7_10bit` (the gate, M1 slice 5), `bench_playback_stitched_samples`, `bench_samples_realtime_decode`, `bench_decode_hevc_4k_and_5k7`; the GUI smoke run from M1 slice 8 |
 | 8K30 plays in real time, at least on proxies | `bench_playback_x5_raw`'s `Vulkan (Auto, zero copy)` rows (the app's path on odin); its copy rows and `bench_playback_realtime_8k_8bit` (copy path only) are recorded; and the decode rows on 8K samples and their LRV proxies (`bench_samples_realtime_decode`) |
 | A random seek shows a frame in under ~150 ms on proxies | `bench_seek_latency` (M1 slice 2b), on the X5's LRV proxy among others |
@@ -144,9 +144,11 @@ Current benchmarks:
   says how even it was); `dropped after 1 s`, `decode-dropped after 1 s`
   and `late presents after 1 s` (a present whose frame had already
   ended). A note per run gives its loops, the UI ticks it missed, each
-  stream's decode path and every stage's p50/p95 in ms (`decode`,
-  `download`, `convert`, `upload_cpu`, `upload_gpu`, `render_cpu`,
-  `render_gpu`, `ui_frame`, `shown_interval`, `av_offset`).
+  stream's decode path and the p50/p95 in ms of every stage that
+  recorded any (`decode`, `download`, `convert`, `upload_cpu`,
+  `upload_gpu`, `render_cpu`, `render_gpu`, `ui_frame`,
+  `shown_interval`, `av_offset`, `pair_wait`, `drain`; `drain` only on
+  a VA-API decoder with the drain on, D79).
   - `bench_playback_realtime_5k7_8bit` and
     `bench_playback_realtime_5k7_10bit` play the 5.7K perf clips (below)
     and **gate**: on `Auto`'s hardware as the app plays
@@ -1445,6 +1447,76 @@ on odin, decoded the pair at 81 (80 to 82.5) and dropped nothing
 (:486-492). Whether direct compaction makes these drops, as it made
 H3's (the eighth run above), isn't known: the attribution waits on
 vmstat deltas (M3.11).
+
+The VA-API stall slice's runs (D79), 2026-11-12, measure only:
+[`hw-reports/stall-2026-11-12/report.md`](../hw-reports/stall-2026-11-12/report.md)
+at b0df927 (main, no drain; PR #36),
+[`hw-reports/stall-followup-2026-11-12/report.md`](../hw-reports/stall-followup-2026-11-12/report.md)
+at 6675318 (branch `proto/vaapi-drain`, 22 runs interleaved in one
+session; PR #37) and
+[`hw-reports/stall-tier2-2026-11-12/report.md`](../hw-reports/stall-tier2-2026-11-12/report.md)
+at 6675318 with `SPHERECUT_VAAPI_DRAIN=download` on every call (the
+whole Tier 2 and `gui_decode_behind` three times; PR #38).
+`gui_decode_behind`'s run 1, VA-API with its frames copied on the noisy
+5.7K 10-bit clip, decode behind, before the drain and with it (the
+`off` arms ran without it; the official test's rows are the test
+itself, the others its run 1 alone, as the smoke run):
+
+| Report | Run | Drain | Presented | UI p99 ms | Frames shown | Drain p50 / p95 ms | Download p50 ms |
+|---|---|---|---:|---:|---:|---:|---:|
+| [b0df927](../hw-reports/stall-2026-11-12/report.md):42-45, :77-80 | A-1 to A-end | none | 0.733 to 0.782 | 100.0 to 116.5 | 119 to 130 | | 149.1 to 152.5 |
+| [6675318](../hw-reports/stall-followup-2026-11-12/report.md):48-51 | A-1 to A-end | `off` | 0.760 to 0.795 | 92.9 to 114.9 | 119 to 130 | | 150.3 to 155.5 |
+| 6675318:31-34 | the official test | `off` | 0.75 (failed) | 110.3 | 123 | | |
+| 6675318:52-54 | Ad-1 to Ad-3 | `download` | 0.996 to 0.997 | 18.0 to 18.4 | 109 to 113 | 76.4 to 92.3 / 139.9 to 154.6 | 68.4 to 68.8 |
+| 6675318:35-40 | the official test | `download` | 0.995 (passed) | 18.4 | 101 | 107.6 / 155.7 | |
+| 6675318:55-57 | Ap-1 to Ap-3 | `picture` | 0.993 to 0.996 | 17.7 to 18.2 | 81 to 85 | 181.0 to 183.8 / 251.5 to 256.3 | 68.7 to 69.1 |
+| [6675318, Tier 2](../hw-reports/stall-tier2-2026-11-12/report.md):18-20 | the official test, 3 samples | `download` | 0.994 to 0.995 (passed) | 18.1 to 18.5 | 102 to 108 | 96.2 to 107.6 / 127.6 to 129.5 | 64.9 to 65.8 |
+
+Every official run's run 0 passed and its control (run 2) failed as it
+must. The Ad arms had no UI pass of 95 ms or more, nor one of 40 to
+95 ms, in 57 s covered; the A arms had 18 of 95 ms or more in 37.5 s
+and 3.20 of 40 to 95 ms a second (PR #37, :237-240). With the drain on
+the download is the copy alone, about 65 to 69 ms against about 150
+without, likely because it no longer waits for the VCN work the drain
+now waits for. The frames
+shown fall with the drain: 0.90 of `off`'s mean with `download` in the
+same session (110.3 against 122.7) and 0.67 with `picture` (82.7).
+The gate probe (`SPHERECUT_GATE_PROBE=4`, a 256-byte clear on the
+viewer's queue every 4 ms, PR #37 :138-148) took 0.94 / 97.59 /
+149.01 ms at p50 / p99 / max with the drain off and 0.70 / 4.09 /
+7.08 ms with `download`. Path A (zero copy, B and Bp, :58-61, :241-242)
+presented 0.82 to 0.85 at a UI p99 of 57 to 64 ms with the drain off
+or `picture`, so the drain doesn't fix it (D25's note of 2026-11-13).
+
+`bench_playback_realtime_5k7_10bit`'s headless VA-API row
+(`hevc10-5k7-30fps-noisy-20s, VA-API`), recorded, not gated, with its
+`drain` stage:
+
+| Report | Drain | Shown per second, real time | Download p50 / p95 ms | Drain p50 / p95 ms | `shown_interval` p50 ms | UI ticks missed |
+|---|---|---:|---:|---:|---:|---:|
+| [0b3ab9b](../hw-reports/odin-0b3ab9b4d0.md):462, :1359 | none | 6.00 (4.00 to 11.00) | 153.57 / 196.56 | | 166.67 | 0 |
+| [6675318](../hw-reports/stall-followup-2026-11-12/report.md):229 | `off` | 6.00 | 149.37 / 190.09 | | 150.01 | 0 |
+| 6675318:230 | `download` | 5.00 | 66.05 / 67.18 | 91.72 / 153.25 | 183.33 | 0 |
+| 6675318:231 | `picture` | 4.00 | 65.53 / 66.85 | 141.82 / 214.45 | 216.66 | 0 |
+| [6675318, Tier 2](../hw-reports/stall-tier2-2026-11-12/report.md):38 | `download` | 4.00 (3.00 to 9.00) | 64.83 / 67.07 | 103.89 / 127.68 | 200.00 | 0 |
+
+With `download` the row showed 4.00 frames a second against 0b3ab9b's
+6.00, 0.67 of it, under the 0.8 the stall slice's build brief set: VCN
+no longer decodes while a frame is copied. That is the cost D79 puts to
+Pat (the card of 2026-11-13). Each figure is the median of 20 one-second
+samples, and the row's spread is wide (117 % at 0b3ab9b).
+
+`bench_seek_latency`'s VA-API rows at 6675318 (PR #38, :58-69) came
+within −0.0 to +12.1 % of 0b3ab9b's, the most the keyframe seek on the
+noisy 5.7K 8-bit clip (+11.1 % at the median, +12.1 % at p95). Those
+rows open their decoders without the drain (`VideoRequest::default`;
+the variable sets the player's alone), so that is the spread between
+runs, not the drain's cost; the `VA-API drained` rows, added after
+(a9a2f2b), measure it from odin's next run. The rest of PR #38's
+Tier 2 passed as at 0b3ab9b (59 passed, 0 failed, 1 skipped, against
+56, 1 and 1): `gui_smoke` (Vulkan, path B, nothing drains) presented
+100 % on all five clips at a UI p99 of 17.1 to 17.2 ms (:47-52), and
+the zero-copy tests and `vaapi_render_matches_software` passed.
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
