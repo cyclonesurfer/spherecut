@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-11-12, after the review-fix slice: where each milestone stands and what it waits on is the Status table below, and the update notes this line used to carry are under "History", at the end. Milestone criteria are in `PLAN.md`;
+Updated 2026-11-13, after M3.9 (schema 2): where each milestone stands and what it waits on is the Status table below, and the update notes this line used to carry are under "History", at the end. Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -10,9 +10,9 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because huginn's Mesa is Fedora's build, without RPM Fusion's `mesa-vulkan-drivers-freeworld`, which leaves H.264 and HEVC out of Vulkan Video. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S (`hw-run-8.md`, sent 2026-11-01), Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12 at 5.7K30, a Studio export of take 16 (`docs/SAMPLES.md`), for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). D25 decided 2026-10-30: path B on odin by default; VA-API's import stays opt-in until huginn's numbers. How it got here: below, "M1: how it got here" |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn (`hw-run-8.md`, sent 2026-11-01). Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). Next, M3.9, M3.7 and M3.6 (plan 22.2), and the short slice that traces and fixes that stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12). Waiting on Pat: that card, huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). So is M3.9: schema 2. A project records each media's camera, calibration, geometry, tune and gains, which `set_source`, `set_stitch` and `set_caps` change and undo exactly; agents make a project of a camera's file with its source and edit it; and every renderer outside the window refuses a camera pair's project `not_yet` until M3.11, after a fresh review's R1 to R9 and N1 to N13 were fixed (below, "M3.9"; D68, plan amendment 9). Next, the merge of the short slice that traces and fixes the `gui_decode_behind` stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12), then M3.7 and M3.6 (plan 22.2), then M3.10 once M3.7 is in beside M3.8. Waiting on Pat: that card, D47's project-format card (JSON is the working choice, and schema 2 is built on it), huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
 | M4–M9 | Not started |
-| Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,245 of its 12,288 bytes (the review-fix slice). How it got here: below, "Agent integration (track A): how it got here" |
+| Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,235 of its 12,288 bytes (M3.9, whose `project` takes a camera's file and whose `set_source` reads its calibration from it). How it got here: below, "Agent integration (track A): how it got here" |
 
 ## Environments
 
@@ -272,8 +272,10 @@ second reader upheld 13, and they are fixed here.
   two or more lenses ("Stitched export arrives with M3.11"), whatever
   the viewer has opened, and the window's Start is off while the
   lenses show. `spherecut render` and the agents' `render` of such a
-  project still export lens 0, as on main, until M3.9 and M3.11's
-  `not_yet`.
+  project still export lens 0, as on main: since M3.9 an agent's
+  project of a camera file holds its dual-fisheye source, which they
+  refuse `not_yet` until M3.11, but one made before, whose media is
+  equirect, still renders as lens 0 (Known issues).
 
 New controls (4.1 rule 8), each run every time: `must_fail`'s own
 (a passing Result, bool or Comparison panics; NaN is not comparable);
@@ -709,7 +711,10 @@ above about 1.09 (A) puts θ_frame under 90° on Pat's V6; `Fitted
 the view frame, so a twin whose E_b holds a quarter or half turn of
 roll applies the tune that far off as seen through the lens, which
 upright can't fix: should it sit in each lens's own view frame, as
-under Fitted?
+under Fitted? (M3.9 answered the first four: a feather of 0 validates
+where the bound would be negative, and a coverage rule refuses the
+holes; the tune's frame is M3.6's, and moving it is schema 3. D68,
+plan amendment 9.)
 
 **The reviews found** that the pass-count bounds could not fail (now
 each count is checked against the work, k passes meet 1e-12 and k − 1
@@ -3091,7 +3096,8 @@ Pat's questions (new unless marked):
 - Fonts: does the 2026-10-24 decision to keep egui's fonts stand, now
   that their licences are corrected?
 - Project format (D47, asked before): confirm JSON, or choose now,
-  before M3.9?
+  before M3.9? (Still open at M3.9, 2026-11-13: schema 2 is built on
+  JSON, the working choice.)
 - Should there be a short M2 try-it note for odin, and should M3.6 move
   up to right after M3.5?
 - May the merged remote branches be deleted (81 remote-tracking refs
@@ -3636,6 +3642,313 @@ lavapipe), at 7f444b6 unless named:
   install for want of Vulkan and libsvtav1, and failed there on one
   test (Known issues); cargo stopped at that binary, so testkit, xtask
   and the doctests didn't run on 9.0.2.
+
+### M3.9, schema 2 (2026-11-13)
+
+Branch `m3/schema2`, from f216316 (main after M3.5) to d478083: 74
+commits (2 of them merges), 57 files, 11,337 lines added and 340
+removed, before this note's commit. The types the units share came first
+(a5a6340 to c7fdfd5), then units (a) and (b) side by side on branches
+and worktrees of their own (`m3/schema2-a` and `m3/schema2-b`, merged at
+053cf11 and 256d2e4), then (c) and (d) on the merge, each unit with a
+reviewer and a fixer: 49 commits to 80bfe47, where `cargo xtask check`
+passed. Before launch the orchestrator settled 18 choices on their
+recommendations, within the plan (amendment 9's first item). A fresh
+review of the whole slice, which ran nothing, then found nine minors (R1
+to R9, each upheld by one or two skeptics) and thirteen nits (N1 to
+N13). A fix round of four units, each with a reviewer, checked every
+finding against the code and answered all of them: (a) the file layer
+and `validate`, (b) the agents, (c) the CLI, the words and the docs, and
+(d) this note, plan amendment 9 and the check (25 commits, b3dc516 to
+d478083, then (d)'s). Amendment 9 holds what the slice settled and where
+it departed from the plan. Pat sees nothing new in the window, which
+takes schema 2's sources in M3.10; what changes is the project file,
+which now records each media's camera, calibration, geometry, tune and
+gains (D68), and the projects agents make of a camera's file.
+
+- **Types (a5a6340 to c7fdfd5).** sphere's `Geometry` and every type it
+  holds, `LensCalib`, `CalibTerms`, `Tune` and `LensTune` read and write
+  JSON (snake_case, unknown fields refused), and sphere still depends on
+  no crate of ours. core's `project::source` holds `Source` (`equirect`,
+  `dual_fisheye`, `eac_pair`, tagged `kind`), `DualFisheye`,
+  `CalibSnapshot` (the canvas, field 27's window and its offset,
+  `window_offset`, the raw V1, V2, V3 and V6 strings, their hash, and
+  the V3 and V6 sets), `Gains` (tagged `mode`: `off`, `fixed`, `auto`)
+  and `Caps` (boxed in `Media`, for its size; the JSON is the same). The
+  three ops `set_source`, `set_stitch` and `set_caps`, with the
+  reference's examples, and media's `camera_source` and the superseded
+  check were named, and every unit's tests named and ignored. The
+  geometry's `tz` stays `TzSign` (`as_stored` or `negated`), since M3.6
+  hadn't merged (F021); `window_offset` answers U13 (F041), which
+  c55c96e's message credits to F021 by mistake. Every hash is 16 hex
+  digits of core's FNV-1a 64. Its review fix made every optional key of
+  a source a required key that may be null (`Option::deserialize`), so a
+  hand edit that drops one is refused, not read as none.
+- **(a) The file layer and `validate` (014196d to 5ba8414, merged at
+  053cf11).** F031: a project file's own folder is the one the kernel
+  finds it in (`fs::real_file`), on save and load alike. F032:
+  `ProjectFolder::create` names the file it published, the copy's
+  identity when it published by copying. F033: each atomic publish
+  flushes its folder, best effort for a filesystem that can't. F034:
+  `file::load` opens without waiting and refuses a FIFO, or text that
+  isn't UTF-8, as `not_project`. F036: a link at a project's history
+  name is refused. `Gains::at` reads its track. `schema2.spherecut` is
+  the current schema's fixture, which `SPHERECUT_BLESS_PROJECT`
+  rewrites, and `schema1.spherecut` is frozen and loads unchanged
+  (F063). A schema 2 media without `source` is refused by its path, and
+  a misspelt key in a tune, the gains or a cap by name (inside a source
+  serde places it at the source's closing brace). `validate` holds a
+  dual-fisheye source to 11.2's rules and what the slice added (D68):
+  `front_track` 0 or 1; `xi_delta` within ±0.15 and ξ + `xi_delta` above
+  −1 (F038's ξ bound); the feather's bound floored at 0; the coverage
+  rule, a₀ + a₁ ≥ 360° − γ; θ_max past the model's limit `out_of_range`,
+  and any other refusal of `Rig::build` `invalid`; an Auto track's
+  samples, rate and ratios, and a cap's numbers, finite; an EAC pair's
+  tracks distinct. The mangled-files property fuzzes the schema 2
+  fixture too.
+- **(b) The stitch ops and `camera_source` (f214fdd to ae7a5b0, merged
+  at 256d2e4).** `set_source`, `set_stitch` and `set_caps` apply and
+  undo exactly, each inverse holding the old value. `set_stitch` is
+  `invalid` with neither a tune nor gains, with a profile and no tune,
+  or on a source that isn't a dual fisheye; a tune replaces the profile,
+  or clears it, and gains alone keep both. `stitch_edits_undo_and_save`
+  (core `tests/project_props.rs`) applies and undoes random tunes,
+  sources and caps through the ops and saves and loads each new state,
+  at 256 cases in Tier 1; its control applies a dropped inverse and
+  fails on the comparison. `the_drawn_tunes_clear_the_frame` holds the
+  property's draws (yaw, pitch and roll ±0.5°, radius ±1 %, `xi_delta`
+  ±0.05, θ_max 95° to 105°, a feather of at most 3°, q up to 3.34)
+  inside `validate`'s rules: the least frame room is 4.336° against the
+  3° feather, and the least coverage slack 1.185°. media's
+  `camera_source(source, report)` reads a camera file's source through
+  camera's `stitching` (the table's row with field 136's generation,
+  `Tune::default()`, gains off, front track 0), beside an unchanged
+  `project_media`; `superseded` says when the table's entry is settled,
+  or provisional on other evidence, over a provisional stored geometry.
+  synth's `project::stitch_fixture`, 11.5's fixture, is `project_media`
+  and `camera_source` of rung 3's file, then a `set_source` that changes
+  only the binding (Direct, as rung 3 plants it, status user) and one
+  `set_stitch` (q 1/1.5 m⁻¹, lens B yawed 0.3°, a 3° feather, and Fixed
+  0.9 on lens B or an Auto track). Its rig equals the boundary's
+  exactly, and dropping the tune moves lens B 1.718 px on the seam at
+  768² (11.5: 1 to 5 px).
+- **(c) Agents (48304c8 to 18f0030).** F049: every tool result carries
+  `warnings`, `[]` when nothing warned, set once in `tools.rs`. F051: an
+  error names a project's media by id, never by its path or by text from
+  a file, and every error's message, `valid` and `next` pass the fields'
+  filter. `project create` and `add_media` of a camera's file make its
+  dual-fisheye source on the server; a file without a calibration a
+  stitch reads stays equirect, with `not_equirect` and the new warning
+  `no_calibration`. `set_source` takes `{"kind": "equirect"}`, the
+  camera form `{"kind": "camera", "binding": …}`, which the server makes
+  whole from the media's file beneath the roots, or a whole
+  `dual_fisheye` source, which is checked against its file (the new code
+  `calibration_mismatch`). The summary gives each media's source: the
+  camera without its serial, the calibration's hash, the geometry with
+  `superseded`, the tune, the gains' mode and the profile. D57's test
+  runs all 24 ops on the reference, whose camera is media 12. Tier 2c's
+  `project_create_x5` gives clip 8's trailer hash, 840fcc4eb186a389.
+  F007: `project`'s `create.media` reads "A video.", so `tools/list` is
+  12,235 of its 12,288 bytes, `project` 986 of 1,000 and A1's five tools
+  7,109 of 7,168.
+- **(d) 11.4 without the window, and the docs (4c2c390 to 80bfe47).**
+  Every project renderer outside the window refuses a project whose
+  clip's media is a camera's pair (dual fisheye or EAC pair) with
+  `not_yet` until M3.11: agents' `look`, `compare`, `check` and `render`
+  (in `sequence::load`), and `spherecut render` and `frame --project`
+  (exit 1); the agents' control holds each of the four tools alone.
+  render and frame warn `provisional_geometry` when the table has
+  superseded the stored geometry, and `check` advises it whenever the
+  stored geometry is provisional, but no call reaches that advice before
+  M3.11, since `not_yet` refuses first. F031's CLI half:
+  `a_project_in_a_linked_folder_renders_its_media`.
+  `an_old_project_renders_the_same_bytes` (render's `tests/project.rs`):
+  a project made under an older guess renders 30db18fc6d97db10 as
+  stored, and the same again while a fake newer table entry of the other
+  binding supersedes it; that entry's own render, cd729b1bb8ceafe8, is
+  the control. D68, notes on D47, D48 and D57, and the docs.
+
+**The fix round** (R1 to R9 and N1 to N13; each finding checked against
+the code first, and each fix shown failing first where it could be):
+- **(a) The file layer and `validate` (b3dc516 to a92f091).** R8 and its
+  review: on save a media path is named as near the project's real
+  folder as its folders' real paths let it be (`fs::name_near`: of the
+  names that one of its folders, resolved physically with the rest kept
+  as named, gives, the one that shares the most of the folder, and of
+  those the one resolved least, the path as given first; the clip's own
+  name is never followed, and a missing folder gives no name). So a clip
+  named through a linked ancestor of the folder is stored as `clip.mp4`,
+  not a path that climbs to the root and back, and one in a folder
+  linked within the project's keeps the link's name (`footage/f.mp4`),
+  so the folder moved with its media or its link keeps working;
+  `file::save` and `ProjectFolder::of_file` (create and save) save so.
+  R3: a folder flush that fails after the rename is a save. The
+  crate-private publishes return `PublishError::NotFlushed` with the
+  file's metadata (taken before the rename or link), and
+  `ProjectFolder::save` and `create` keep the new identity, write the
+  history and return the flush's error as `Saved::flush_error`, which
+  the window shows as a warning ("Saved, but the folder couldn't be
+  flushed to disk") and agents' `project`, `edit` and `undo` as
+  `not_flushed`; before, the next save was refused as changed on disk.
+  R2: `frame_theta` gives 0 for a lens whose principal point lies
+  outside its slot, so the feather and coverage rules refuse a lens that
+  covers nothing, and `validate` holds each principal point of the set
+  the geometry reads to its square's span (`CanvasMap::slot_span`: 0 to
+  src, or the window under map B), naming `source.calibration.v6[b].cx`
+  or `.cy`, after it refuses a canvas height or window width of 0 by
+  name. R6's core half: `validate` holds a source's `tracks[0]` to the
+  media's video stream. R7's core half: `DualFisheye::check(media)` runs
+  `validate`'s rules for one source. N1, N3 and N13: a schema 2 media
+  without `caps`, or with null caps, is refused as one without `source`
+  is, and a file marked schema 1 holding either key is refused as
+  edited. N2: F034's test reads the reason, and each control changes
+  only the rule's trigger. N5: example tests of `set_stitch` on an EAC
+  pair and of a stitch op that `validate` refuses, which leaves the
+  project and the history as they were. The bounds table has 184 rows,
+  181 of them dual-fisheye rows that `DualFisheye::check` answers as
+  `validate` does.
+- **(b) Agents (dd6a145 to 9b8a0fd).** R1: an agent's project folder is
+  the one the kernel finds, as the window's and the CLI's are:
+  `Roots::project_folder` reads the `openat2` descriptor's path from
+  `/proc/self/fd`, refuses one no longer beneath the root
+  (`outside_roots`) or removed (`not_found`, by its link count), and
+  names the folder by the root as given and the real path below it. Its
+  review: a media an agent adds is named near the project's folder,
+  beneath the root (`Roots::named_near`), so a project made in a linked
+  folder of a clip beside it stores `clip.mp4`. R7: `camera_source` ends
+  with `DualFisheye::check`, so a camera file whose source `validate`
+  refuses at the default tune (a frame under the 95° the default 5°
+  feather needs, or a lens's ξ at −1 or below) stays an equirect with
+  `not_equirect` and `no_calibration` carrying `validate`'s words, where
+  `create` had refused to make the project and `add_media` refused the
+  file `bad_argument`; media's `trailer_source` is the same source
+  unchecked, which a whole source is compared with, and the camera form
+  on such a file is refused `bad_edit` with a `next` to keep it
+  equirect. R6 and R5: a whole source's lens tracks and its camera's
+  model and firmware must be its file's (`calibration_mismatch` at
+  `.tracks` or `.camera`), and each branch's `next` names a way that
+  works. R4 and N8: the summary's camera text and the `no_calibration`
+  message are whole fields, with tests that only `text::field` passes.
+  R9's agent half and N9: `not_yet`'s `next` follows the pair's kind,
+  and docs/agents.md gives the summary's `eac_pair` shape.
+- **(c) The CLI, words and docs (5816b26 to d478083).** R9's CLI half:
+  render's and frame's `not_yet` advice follows the kind (`--reference`
+  for two fisheye lenses; for an EAC pair, that frame can't stitch one
+  either, naming no flag), and N11: frame's error path is held to the
+  media file, as render's was. N4: a provisional table entry with other
+  evidence is "a different guess", never "a newer guess", since nothing
+  orders two provisional entries; a settled one stays "a settled one".
+  render, frame, `check`, docs/agents.md, docs/cli-json.md and README
+  say so, each word held by a control. N10: render's step 3, `media()`'s
+  doc and frame's step 4 say that a camera's pair is refused `not_yet`
+  after any `provisional_geometry` warning and before the offline check
+  (every media file is looked at first). N6: the uncalibrated file's
+  media is made as `project create` makes it. N7 and N12: ARCHITECTURE's
+  crate table moves for M3.9.
+- **(d) The note and the check.** Unit (d) wrote this note and plan
+  amendment 9, corrected D68 in place (R7's fallback; an agent never
+  makes a calibration, D57) and dated D47's Open card, ran the touched
+  properties at 100,000 cases and ran the check. The units had already
+  written the round's notes on D16 (`NotFlushed`), D47 (`name_near`, the
+  caps key) and D57 (the folder, `named_near`, R5 to R7).
+
+**Open, and known limits:**
+- The slice's Tier 1 time is over the 5 s that Pat set for 19.6's M3.9
+  row on 2026-11-13 (from 3 s; measured 4.7 to 4.9 s then): 5.45 to 5.75
+  s serially after the fix round, 4.59 s on four threads (Known issues).
+  No fixture was shrunk and no check cut.
+- A camera pair's project is refused `not_yet` outside the window until
+  M3.11, so `check`'s `provisional_geometry` advice shows nowhere yet;
+  M3.11's tests should look for it. A schema 1 project of an `.insv`,
+  whose media is equirect (as M3.0 (b)'s agent-made projects are), is
+  still rendered as lens 0 by the CLI and agents; only the window's
+  export refuses it, by probing the file.
+- `not_equirect` for an Insta360 file of two lenses without a
+  calibration a stitch reads still says "stitching arrives in M3" and
+  names the file by its path (`still::INSTA360_UNSTITCHED` and
+  `equirect_doubt`), in look, compare and the project tools.
+- The coverage rule leaves LOD's margin out: at LOD 0 a tune it passes
+  by less than the margin (0.12° to 0.13° at a side of 3840, doubling at
+  each LOD) can leave a ring about as wide, as it did in three yawed
+  sweeps.
+- `xi_delta`'s ±0.15 refuses handed-on's F038 row (ξ 0 with −0.5
+  accepted); own calibrations that fit ξ (8.7) may need it wider, which
+  refuses nothing saved.
+- The 100k stitch property takes about 425 to 440 s, the slice's longest
+  gate.
+- An agent's save writes a loaded project's media paths as loaded
+  (`ProjectFolder::from_fd`), and names near only the media it adds,
+  where the window's save names every media path near.
+- Where a stored tune sits under stored extrinsics is M3.6's question,
+  and moving it is schema 3 (D68).
+- `front_track`'s refusal is `out_of_range`, though the brief listed it
+  among the structural rules; the fixture's raw V1 and V2 strings are
+  null, so only `RawStrings::hash`'s own tests reach their part of the
+  hash; F049's eleven-tool check is split, the project tools in
+  `every_tool_result_carries_warnings` and compare, render, job and
+  cancel in their own suites (about 0.3 s less Tier 1).
+- M3.6's and M3.7's briefs predate amendment 7 and this slice (open.md
+  item 11): M3.6's must carry schema 2's `tz` form and `window_offset`,
+  and M3.7's F055's move of `schema2.spherecut`'s blessing onto
+  `testkit::bless`.
+- From the review's refuted findings, handed on: a cap patch's path is
+  neither made relative on save nor read beneath the roots (M3.20);
+  `Gains::at` at extreme Auto ratios (M3.11, where the blend reads it);
+  `camera_source` and the table's `stitchable: false` rows (M3.10 and
+  M3.11).
+- The orchestrator's 18 choices stand for Pat to overrule (amendment 9).
+  Pat's questions: D47's format card is still open (JSON is the working
+  choice, and schema 2 is built on it); whether 19.6's M3.9 row rises
+  again, now that the fix round's tests take it past 5 s; whether
+  `xi_delta`'s range should be wider; and whether `validate` should add
+  LOD 0's margin at the media's track side, or 10.3's mask stop taking
+  it off where both lenses end.
+
+**Measured**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
+lavapipe), at d478083 unless named:
+- Tier 1 against 19.6's M3.9 row, "schema, edits and agents" (5 s by
+  amendment 9, Pat's decision of 2026-11-13; 3 s before): the slice's 58
+  new Tier 1 tests, 18 of them new in the fix round, run one thread at a
+  time, suite by suite, three runs: 5.45, 5.75 and 5.73 s; 4.59 s on
+  four threads. By suite, in the three runs: agent `tests/project.rs`
+  (14 tests) 1.57 to 1.75 s; cli `tests/render.rs` (3) 1.32 to 1.40 s;
+  core `tests/project_props.rs` (the stitch property at 256 cases and
+  its corners) 1.11 to 1.17 s; synth `tests/project.rs` (4) 1.06 to 1.13
+  s; render `tests/project.rs` (1) 0.12 to 0.14 s; core
+  `tests/project_file.rs` (7) 0.08 to 0.09 s, `tests/project_source.rs`
+  (6) 0.08 to 0.09 s, its lib's (8) 0.07 to 0.08 s and
+  `tests/project_edits.rs` (4) 0.00 s; sphere `tests/rig.rs` (2) 0.01 s;
+  agent's lib (5) 0.00 to 0.01 s; app's (1) and cli's bin (1) 0.00 s.
+  Apart, 38 of the 40 tests from before the fix round take 4.78 to 4.79
+  s (unit (d) measured the 40 at 4.60 to 4.81 s at c370cd0 and about 4.7
+  to 4.9 s at 80bfe47), and the round's 18 with the two it changed most
+  (check's advice test, and the missing-source test that now refuses a
+  missing `caps` too) take 1.22 to 1.31 s, agent's six of them 1.14 s
+  with their own `cam.insv` write (0.39 to 0.46 s); together they share
+  that write, so the round added about 0.7 to 1.0 s, most of it the
+  agent's linked-folder and R7 tests. The whole agent `tests/project.rs`
+  (30 passed, 1 ignored) takes 1.39 to 1.50 s on four threads and 2.46
+  to 2.63 s serially (unit (b)). `validate` takes 0.034 to 0.037 ms a
+  call on the rows that build the rig, 0.020 to 0.022 ms over the bounds
+  table. Tier 2c's `project_create_x5`: 1.70 to 1.83 s.
+- Property tests at `PROPTEST_CASES=100000` at d478083, wall times, one
+  file at a time with nothing else building: core
+  `tests/project_file.rs` 82.76 s (`mangled_files_load_or_are_refused`
+  82.67 s; 82.6 s at 80bfe47, 52.1 s on schema 1 alone); core
+  `tests/project_props.rs` 428.57 s (437.75 s at 80bfe47;
+  `stitch_edits_undo_and_save` alone took 424.83 s at unit (d), and
+  281.17 s on unit (b)'s branch, before the merge brought unit (a)'s
+  `validate`, which every apply and load runs; the cause of the growth
+  isn't confirmed); sphere `tests/rig.rs` 15.91 s (16.1 s at M3.5).
+- `cargo xtask check` passed at 80bfe47: 1703 tests passed, 0 failed and
+  61 ignored on 143 result lines, against 1663, 0 and 60 on 140 at
+  M3.5's 30ad23a. Unit (d)'s first run waited on the disk (10.76 GB free
+  against its 13 GB gate). The fix round's check runs once on the commit
+  that holds this note (`check-m39-fix.log`); its time and count go in
+  at the merge.
+- `the_list_fits`: `tools/list` 12,235 of 12,288 bytes in each protocol
+  version, A1's tools 7,109 of 7,168; the fix round changed no tool's
+  description or schema.
 
 ## Agent integration (track A): how it got here
 
@@ -5318,7 +5631,7 @@ On `m1/slice9` (D37, D40):
 
 ## Known issues and limits
 
-Last reviewed 2026-11-12, in M3.5's fix round. Each entry's date is the
+Last reviewed 2026-11-13, in M3.9's fix round. Each entry's date is the
 day its text last changed, or the review's for the entries it rewrote;
 each slice's merge sweeps the list.
 
@@ -5829,8 +6142,10 @@ each slice's merge sweeps the list.
   `--reference`, M3.7 and `--equirect`); with it, `--decoder vaapi` or
   `vulkan` is a usage error (exit 2) naming `--decoder`, and `auto`
   decodes in software. `--lens N` decodes its lens as any stream is
-  decoded. look, compare and the project tools refuse a pair as before.
-  (as of 2026-11-12)
+  decoded. look and compare refuse a pair as before (`not_equirect`);
+  since M3.9 the project tools make a camera file's dual-fisheye
+  source, and the renderers refuse its project `not_yet` until M3.11
+  (below). (as of 2026-11-13)
 - Plan 19.6's M3.5 row (rung 3 and `frame --reference`, 3 s) isn't met
   on the 4-core cloud box: 3.42 to 3.61 s at unit (b)'s tip in the fix
   round, and 3.60 to 3.67 s run by run at 7f444b6, with `rung3.rs` at
@@ -5900,6 +6215,57 @@ each slice's merge sweeps the list.
   `mux_video_streams_with_audio` delays a track by moving its packets
   instead (M3.5's `StartPtsDiffer`). (as of 2026-11-12)
 
+- A camera pair's project (a dual-fisheye or EAC-pair source, which
+  agents' `project create` and `set_source` now make) is refused
+  `not_yet` by every renderer outside the window until M3.11: agents'
+  `look`, `compare`, `check` and `render`, and `spherecut render` and
+  `frame --project` (exit 1), with advice for the pair's kind (D68). So
+  `check`'s `provisional_geometry` advice, which plan 11.4 asks for,
+  shows nowhere yet, and render's and frame's `provisional_geometry`
+  warning comes only beside the refusal. A schema 1 project of an
+  `.insv`, whose media is equirect as M3.0 (b)'s agent-made projects
+  are, is still rendered as lens 0 by the CLI and agents; only the
+  window's export refuses it, by probing the file. (as of 2026-11-13)
+- `validate` holds each lens's `xi_delta` within ±0.15 (D68), the reach
+  of the radius scale's 0.9 to 1.1 on θ_frame on X5-shaped sets, rounded
+  outward. It refuses handed-on's F038 row (ξ 0 with −0.5 accepted).
+  Whether own calibrations that fit ξ (plan 8.7) need it wider is open;
+  widening it refuses no saved file, narrowing it would. (as of
+  2026-11-13)
+- core's `stitch_edits_undo_and_save` at `PROPTEST_CASES=100000`, the
+  gate before a merge, takes about 425 to 440 s on the cloud box (its
+  file 428.57 s at d478083, 437.75 s at 80bfe47), from 281 s on unit
+  (b)'s branch, before the merge brought unit (a)'s `validate`, which
+  every apply and load runs (the cause of the growth isn't confirmed);
+  it also saves and loads the project at every new state. (as of
+  2026-11-13)
+- Plan 19.6's M3.9 row ("schema, edits and agents"), 5 s since Pat's
+  decision of 2026-11-13 (amendment 9), isn't met on the 4-core cloud
+  box after the fix round: the slice's 58 new Tier 1 tests take 5.45 to
+  5.75 s run one thread at a time (4.59 s on four threads), from 4.7 to
+  4.9 s before the round. agent's `tests/project.rs` share grew from
+  about 1.0 s to 1.57 to 1.75 s with the round's linked-folder and R7
+  tests. The largest costs are fixtures (`cam.insv`, rung 3's file) and
+  the stitch property's 256 cases, and none was cut. (as of 2026-11-13)
+- `not_equirect` for an Insta360 file of two lenses without a
+  calibration a stitch reads (look, compare, and the doubt of a
+  project's media) still says "stitching arrives in M3", and names the
+  file by its path, in a warning that F051's rule for errors doesn't
+  reach (`still::INSTA360_UNSTITCHED`, `equirect_doubt`). It predates
+  M3.9; the slice that rewords look's message (M3.7 or M3.10) takes it.
+  (as of 2026-11-13)
+- `validate`'s coverage rule (D68) leaves LOD's margin out: at LOD 0 a
+  tune it passes by less than the margin (0.12° to 0.13° at a side of
+  3840, doubling at each LOD) can leave a ring of unweighed directions
+  about as wide. In 0.05° θ_max sweeps it passed one step before the
+  grid was whole, with lens 1 yawed 15° at q 0.5 and 3.34, and yawed
+  −15° at q 0.5. (as of 2026-11-13)
+- An agent's save writes a loaded project's media paths as they were
+  loaded (`ProjectFolder::from_fd`), and names near the project's real
+  folder only the media it adds (`Roots::named_near`), where the
+  window's save names every media path near (`fs::name_near`, D47). (as
+  of 2026-11-13)
+
 ## Next
 
 1. **huginn's hardware rows.** Pat pastes
@@ -5915,19 +6281,23 @@ each slice's merge sweeps the list.
    and `gui_decode_behind`'s run 1 may be inconclusive there if VA-API
    keeps up. On odin that run fails (Known issues); under the working
    default (item 2), huginn's run follows the slice that fixes it.
-2. **M3**: M3.0 to M3.5, M3.8 and the review-fix slice are in. Next
-   M3.9 (schema 2), M3.7 (GPU stitch) and M3.6 (the fit), per
-   `docs/design/m3-plan.md` 22.2, with what amendments 7 and 8 hand
-   each of them. The short slice that traces `gui_decode_behind`'s run 1
-   stall on odin and fixes it before huginn's run is still to come
-   (Known issues; the working default until Pat answers the card of
-   2026-11-12). Plan amendments 5 to 8 record what M3.4, M3.8, the
-   review-fix slice and M3.5 settled for the slices after them. The
-   agent briefs for M3.9, M3.7 and M3.6 were drafted and reviewed
-   before amendment 8. Pat's takes 14 to 17 and the
-   plan's questions 3 and 4 are open, and nothing waits on them. Filing
-   D77's drafted Mesa report is Pat's call. Pat answered whether to cap
-   the lock's all-trailing catch-up on 2026-11-11: no cap for now
+2. **M3**: M3.0 to M3.5, M3.8, M3.9 and the review-fix slice are in.
+   Next, the merge of the short slice that traces `gui_decode_behind`'s
+   run 1 stall on odin and fixes it before huginn's run (Known issues;
+   the working default until Pat answers the card of 2026-11-12). Then
+   M3.7 (GPU stitch) and M3.6 (the fit), per `docs/design/m3-plan.md`
+   22.2, with what amendments 7 to 9 hand each of them; their briefs
+   predate amendment 7 and M3.9, and are refreshed before either
+   launches (M3.6's carries schema 2's `tz` form and `window_offset`,
+   M3.7's the move of `schema2.spherecut`'s blessing onto
+   `testkit::bless`). Then M3.10, stitched in the app, once M3.7 is in
+   beside M3.8: it calls `camera_source` in the window's making job and
+   shows plan 11.4's warning and advice, and M3.11 lifts `not_yet`. Plan
+   amendments 5 to 9 record what M3.4, M3.8, the review-fix slice, M3.5
+   and M3.9 settled for the slices after them. Pat's takes 14 to 17 and
+   the plan's questions 3 and 4 are open, and nothing waits on them.
+   Filing D77's drafted Mesa report is Pat's call. Pat answered whether
+   to cap the lock's all-trailing catch-up on 2026-11-11: no cap for now
    (amendments 6 and 7; odin showed no slide), so M3.10 no longer waits
    on it.
 3. **A1's open box** (`PLAN.md:516`): Pat's runs of the recipes with two
@@ -5937,9 +6307,10 @@ each slice's merge sweeps the list.
    #14; `mcp_render_vaapi`, PR #26). A2's boxes are all ticked.
 4. **M2's open boxes.** huginn's 4K30 row and toolkit check wait for
    item 1, and the project format and interpolation choices for Pat
-   (JSON and Level are the working ones, D47 and D50). odin's run at
-   0663e05 is recorded above. Pat's private YouTube upload of an ambiX
-   360 export, when Pat has time, is the one check that YouTube reads
+   (JSON and Level are the working ones, D47 and D50; M3.9's schema 2
+   is built on JSON). odin's run at 0663e05 is recorded above. Pat's
+   private YouTube upload of an ambiX 360 export, when Pat has time, is
+   the one check that YouTube reads
    the metadata and takes the audio's edit list
    (`docs/design/m2-plan.md` risk 6 and question 3), with D33's pose
    check.
