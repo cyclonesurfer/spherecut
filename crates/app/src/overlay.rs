@@ -106,8 +106,10 @@ pub struct Readings {
     pub download: StageSummary,
     pub decoded_fps: Option<f64>,
     pub catching_up: bool,
-    /// The VA-API drain's numbers, with it on (`SPHERECUT_VAAPI_DRAIN`):
-    /// a line of their own under the decoder's.
+    /// The VA-API drain's numbers (`SPHERECUT_VAAPI_DRAIN`), once it has
+    /// drained a frame or failed to: a line of their own under the
+    /// decoder's. With it on by default, paths that never drain have no
+    /// line.
     pub drain: Option<DrainReading>,
     pub upload_cpu: StageSummary,
     pub upload_gpu: StageSummary,
@@ -176,6 +178,18 @@ pub struct DrainReading {
 }
 
 impl DrainReading {
+    /// Whether it has a line: with the drain on, once a frame has been
+    /// drained or a drain has failed, so that software, Vulkan and
+    /// exported frames' decoders, which never drain on download, add
+    /// none.
+    fn shown(&self) -> bool {
+        self.mode != VaapiDrain::Off
+            && (self.stage.recorded > 0
+                || self.errors > 0
+                || self.overflow > 0
+                || self.unavailable > 0)
+    }
+
     /// "drain     download   2.1 ms p95 5.0   surfaces waited p50 2 max
     /// 12   errors 0   overflow 0", and the decoders that couldn't drain,
     /// if any.
@@ -225,14 +239,16 @@ impl Readings {
             catching_up: snap.streams.iter().any(|st| st.catching_up),
             drain: s.player.as_ref().and_then(|pl| {
                 let mode = pl.config().vaapi_drain;
-                (mode != VaapiDrain::Off).then(|| DrainReading {
-                    mode,
-                    stage: *p.stage(Stage::Drain),
-                    waits: pl.perf().drain_waits(),
-                    errors: p.counter(Counter::DrainErrors),
-                    overflow: p.counter(Counter::DrainOverflow),
-                    unavailable: p.counter(Counter::DrainUnavailable),
-                })
+                (mode != VaapiDrain::Off)
+                    .then(|| DrainReading {
+                        mode,
+                        stage: *p.stage(Stage::Drain),
+                        waits: pl.perf().drain_waits(),
+                        errors: p.counter(Counter::DrainErrors),
+                        overflow: p.counter(Counter::DrainOverflow),
+                        unavailable: p.counter(Counter::DrainUnavailable),
+                    })
+                    .filter(DrainReading::shown)
             }),
             upload_cpu: *p.stage(Stage::UploadCpu),
             upload_gpu: *p.stage(Stage::UploadGpu),
@@ -784,6 +800,54 @@ mod tests {
             "drain     picture   - p95 -   surfaces waited p50 - max -   errors 0   overflow 0   \
              unavailable 2"
         );
+    }
+
+    /// The drain's line shows once the drain has done something: drained
+    /// a frame, or failed a sync, forgotten a surface or found no
+    /// `vaSyncSurface` to call. Download, the default, adds none where
+    /// nothing drains (software and Vulkan decode, and VA-API's exported
+    /// frames), and off never does.
+    ///
+    /// Control: a line whenever the drain is on, as the prototype had it,
+    /// shows one for the default where nothing drained.
+    #[test]
+    fn the_drain_line_waits_for_the_drain_to_do_something() {
+        use VaapiDrain::{Download, Off, Picture};
+        use spherecut_testkit::control::must_fail;
+
+        let perf = spherecut_playback::PerfStats::new();
+        perf.record_drain_waits(2);
+        let reading = |mode, recorded, errors, overflow, unavailable| DrainReading {
+            mode,
+            stage: StageSummary {
+                recorded,
+                p50: (recorded > 0).then_some(1.0),
+                ..StageSummary::default()
+            },
+            waits: if recorded > 0 {
+                perf.drain_waits()
+            } else {
+                DrainWaits::default()
+            },
+            errors,
+            overflow,
+            unavailable,
+        };
+        let table = [
+            // Nothing drained: the default on a path that never drains.
+            (reading(Download, 0, 0, 0, 0), false),
+            (reading(Picture, 0, 0, 0, 0), false),
+            (reading(Download, 4, 0, 0, 0), true),
+            (reading(Picture, 4, 0, 0, 0), true),
+            (reading(Download, 0, 1, 0, 0), true),
+            (reading(Download, 0, 0, 1, 0), true),
+            (reading(Picture, 0, 0, 0, 2), true),
+            (reading(Off, 4, 1, 1, 1), false),
+        ];
+        let holds =
+            |rule: fn(&DrainReading) -> bool| table.iter().all(|(r, shown)| rule(r) == *shown);
+        assert!(holds(DrainReading::shown));
+        must_fail("a line whenever the drain is on", holds(|r| r.mode != Off));
     }
 
     #[test]

@@ -581,7 +581,9 @@ fn gate(g: &Value) -> String {
 /// "The VA-API drain (`download`): 380 frames drained, p50 / p95 / max
 /// 0.4 / 2.1 / 9.1 ms each, waiting for p50 2 and at most 12 surfaces
 /// not yet ready; 0 failed syncs, 1 surface forgotten past the 64 a
-/// decoder keeps.": what the copy path's drain did over the run. None
+/// decoder keeps.": what the copy path's drain did over the run, or
+/// "The VA-API drain (`download`): no frame drained." where nothing
+/// drained or failed, as on software and Vulkan decode by default. None
 /// with the drain off, or for a document from before it.
 fn drain(res: &Value) -> Option<String> {
     let mode = res["vaapi_drain"].as_str().filter(|m| *m != "off")?;
@@ -590,6 +592,11 @@ fn drain(res: &Value) -> Option<String> {
     let w = &d["waited_per_download"];
     let count = |v: &Value| v.as_u64().map_or_else(|| "-".into(), |n| n.to_string());
     let frames = st["samples"].as_u64().unwrap_or(0);
+    let [errors, overflow, unavailable] =
+        ["errors", "overflow", "unavailable"].map(|k| d[k].as_u64().unwrap_or(0));
+    if frames == 0 && errors == 0 && overflow == 0 && unavailable == 0 {
+        return Some(format!("The VA-API drain (`{mode}`): no frame drained."));
+    }
     let drained = if frames > 0 {
         format!(
             "{frames} frame{} drained, p50 / p95 / max {} / {} / {} ms each, waiting for p50 {} \
@@ -604,16 +611,13 @@ fn drain(res: &Value) -> Option<String> {
     } else {
         "no frame drained".into()
     };
-    let (errors, overflow) = (
-        d["errors"].as_u64().unwrap_or(0),
-        d["overflow"].as_u64().unwrap_or(0),
-    );
-    let unavailable = match d["unavailable"].as_u64() {
-        Some(n) if n > 0 => format!(
-            "; {n} decoder{} found no vaSyncSurface to call, so drained nothing",
-            plural(n)
-        ),
-        _ => String::new(),
+    let unavailable = if unavailable > 0 {
+        format!(
+            "; {unavailable} decoder{} found no vaSyncSurface to call, so drained nothing",
+            plural(unavailable)
+        )
+    } else {
+        String::new()
     };
     Some(format!(
         "The VA-API drain (`{mode}`): {drained}; {errors} failed sync{}, {overflow} surface{} \
@@ -1158,6 +1162,29 @@ mod tests {
             proto_section(&s.0.join("nothing"), &report, "wasn't listed"),
             "No run: `gui_proto` wasn't listed.\n\n"
         );
+    }
+
+    /// Where nothing drained and nothing failed, as on software and
+    /// Vulkan decode under the default drain, the drain's paragraph is
+    /// one clause.
+    ///
+    /// Control: a drain that drained no frame because its decoders found
+    /// no `vaSyncSurface` to call isn't said as briefly.
+    #[test]
+    fn the_drain_says_little_where_nothing_drained() {
+        let res = |unavailable: u64| {
+            serde_json::json!({
+                "vaapi_drain": "download",
+                "stages": {"drain": {"samples": 0}},
+                "drain": {"waited_per_download": {"p50": null, "max": null},
+                          "errors": 0, "overflow": 0, "unavailable": unavailable},
+            })
+        };
+        let brief = |r: &Value| {
+            drain(r).as_deref() == Some("The VA-API drain (`download`): no frame drained.")
+        };
+        assert!(brief(&res(0)), "{:?}", drain(&res(0)));
+        must_fail("a drain that found nothing to call", brief(&res(2)));
     }
 
     /// With the VA-API drain and the gate probe on, a run's paragraphs
