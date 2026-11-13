@@ -1867,7 +1867,11 @@ mod tests {
         // The fixture's own firmware isn't the one the row was measured
         // on, so the table's entry for it says so.
         let fixture = geometry_advice(id, &Source::DualFisheye(d.clone())).unwrap();
-        assert!(fixture.message.contains("not this file's"), "{}", fixture.message);
+        assert!(
+            fixture.message.contains("not this file's"),
+            "{}",
+            fixture.message
+        );
         assert!(geometry_advice(id, &Source::Equirect {}).is_none());
         must_fail(
             "a geometry of status user",

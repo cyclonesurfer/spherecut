@@ -1434,24 +1434,21 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         ]
         .map(|(tool, at, args)| (tool, at, call(&tools, tool, args)))
     };
-    // Every call refused `not_yet` at the project's argument, naming the
+    // A call refused `not_yet` at the project's argument, naming the
     // media by id and M3.11, and pointing at the file itself.
-    let not_yet = |said: &[(&str, &str, Result<Value, ToolError>)]| -> Result<(), String> {
-        for (tool, at, r) in said {
-            match r {
-                Err(e) if e.code == "not_yet" && e.argument.as_deref() == Some(*at) => {
-                    let next = e.next.as_deref().unwrap_or("");
-                    if !(e.message.starts_with("the project's media 1 ")
-                        && e.message.contains("M3.11")
-                        && next.contains("look"))
-                    {
-                        return Err(format!("{tool}: {e:?}"));
-                    }
-                }
-                other => return Err(format!("{tool}: {other:?}")),
+    let not_yet = |(tool, at, r): &(&str, &str, Result<Value, ToolError>)| -> Result<(), String> {
+        match r {
+            Err(e)
+                if e.code == "not_yet"
+                    && e.argument.as_deref() == Some(*at)
+                    && e.message.starts_with("the project's media 1 ")
+                    && e.message.contains("M3.11")
+                    && e.next.as_deref().is_some_and(|n| n.contains("look")) =>
+            {
+                Ok(())
             }
+            other => Err(format!("{tool}: {other:?}")),
         }
-        Ok(())
     };
     let names = || -> Vec<PathBuf> {
         let mut n: Vec<PathBuf> = std::fs::read_dir(&dir.0)
@@ -1462,10 +1459,20 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         n
     };
     let before = names();
-    not_yet(&calls(&p)).unwrap();
+    for said in calls(&p) {
+        not_yet(&said).unwrap();
+    }
     // Nothing written beside the project: no picture, no render and no
-    // render's temporary file; a refused render answers with no job.
+    // render's temporary file. A refused render answers with an error,
+    // so no job's id exists to ask after.
     assert_eq!(names(), before);
 
-    must_fail("the equirect project", not_yet(&calls(&equirect)));
+    // None of the four is `not_yet` on the equirect project, whose media
+    // isn't there: each is refused otherwise, or answers.
+    for said in calls(&equirect) {
+        must_fail(
+            &format!("{} of the equirect project", said.0),
+            not_yet(&said),
+        );
+    }
 }
