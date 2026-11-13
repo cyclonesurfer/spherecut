@@ -1,0 +1,62 @@
+{
+  "env": [
+    "WAYLAND_DISPLAY=wayland-0"
+  ],
+  "inconclusive": [],
+  "locked": false,
+  "max_shown_behind": 0.85,
+  "not_run": [],
+  "runs": [
+    {
+      "asked": [
+        "--smoke-decode-floor-ms 50"
+      ],
+      "behind": "179 of 270 frames shown (66%)",
+      "clip": "/home/pat/spherecut/target/hw-gui/media/gui-behind.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-behind-0.json",
+      "failed": [],
+      "gates": [],
+      "label": "decode held to 20 fps (default path)",
+      "n": 0,
+      "role": "run",
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-behind-0.png"
+    },
+    {
+      "asked": [
+        "--smoke-decoder vaapi",
+        "SPHERECUT_ZERO_COPY=0"
+      ],
+      "behind": "99 of 570 frames shown (17%)",
+      "clip": "/home/pat/spherecut/target/hw-media/hevc10-5k7-30fps-noisy-20s.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-behind-1.json",
+      "failed": [],
+      "gates": [],
+      "label": "VA-API copied, noisy 5.7K 10-bit",
+      "n": 1,
+      "role": "run",
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-behind-1.png"
+    },
+    {
+      "asked": [
+        "--smoke-decode-floor-ms 50 --smoke-control-ui-waits"
+      ],
+      "behind": "1 of 269 frames shown (0%)",
+      "clip": "/home/pat/spherecut/target/hw-gui/media/gui-behind.mp4",
+      "document": "/home/pat/spherecut/target/hw-gui/gui-behind-2.json",
+      "failed": [],
+      "gates": [
+        "33% of the UI frames expected were presented, the window drawn (0 passes without the UI): the UI was slow, each pass's own work 49.3 ms at p95",
+        "UI p99 51.0 ms, over 1.5 × the 60 Hz period (25.0 ms)"
+      ],
+      "label": "the control: decode held, the UI waiting for each decoded frame",
+      "n": 2,
+      "role": "control",
+      "screenshot": "/home/pat/spherecut/target/hw-gui/gui-behind-2.png"
+    }
+  ],
+  "session": "WAYLAND_DISPLAY set",
+  "vaapi_hevc": [
+    "HEVC Main",
+    "HEVC Main 10"
+  ]
+}
