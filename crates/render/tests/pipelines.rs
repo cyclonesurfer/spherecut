@@ -9,18 +9,20 @@ mod common;
 use std::mem::{offset_of, size_of};
 
 use common::gpu;
+use spherecut_render::blur::SumUniform;
 use spherecut_render::layouts::{
-    ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, MIPS8_WGSL, PROJECT_WGSL, YUV_WGSL,
+    BLUR_WGSL, ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, MIPS8_WGSL, PROJECT_WGSL, YUV_WGSL,
 };
 use spherecut_render::readback::{read_region, read_region_in_bands, read_texture};
 use spherecut_render::upload::EightBitMips;
 use spherecut_render::yuv::YuvUniform;
 use spherecut_render::{
-    DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform, Projector,
-    RenderError, SlotShape, SourceUniform, StillOptions, UploadPath, Uploader, ViewParams,
-    ViewUniform, render_still,
+    Blur, DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform,
+    Projector, RenderError, SlotShape, SourceUniform, StillOptions, UploadPath, Uploader,
+    ViewParams, ViewUniform, render_still,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_testkit::control::must_fail;
 
 /// Runs `f` inside a validation error scope and fails on any error, so
 /// that a bad shader or pipeline is this test's failure with wgpu's
@@ -64,9 +66,12 @@ fn every_pipeline_builds() {
         validated("encode", || Encoder::new(gpu, format));
     }
     validated("yuv", || spherecut_render::YuvConverter::new(gpu));
+    // The blur's compute pass and its resolve (the project review's F066).
+    validated("blur", || Blur::new(gpu));
     // And each shader on its own through naga, for its messages.
     for (name, src) in [
         ("project", PROJECT_WGSL),
+        ("blur", BLUR_WGSL),
         ("mips", MIPS_WGSL),
         ("mips8", MIPS8_WGSL),
         ("ingest", INGEST_WGSL),
@@ -101,17 +106,39 @@ fn wgsl_struct(src: &str, name: &str) -> (Vec<(String, u32)>, u32) {
     panic!("no struct {name}");
 }
 
+/// Each WGSL member against the Rust field at the same position: how
+/// they differ, if they do.
+fn layout_matches(
+    src: &str,
+    name: &str,
+    rust: &[(&str, usize)],
+    size: usize,
+) -> Result<(), String> {
+    let (wgsl, span) = wgsl_struct(src, name);
+    if span as usize != size {
+        return Err(format!("{name}'s size: {span} in WGSL, {size} in Rust"));
+    }
+    if wgsl.len() != rust.len() {
+        return Err(format!("{name}'s members: {wgsl:?} against {rust:?}"));
+    }
+    for ((w, off), (r, roff)) in wgsl.iter().zip(rust) {
+        if *off as usize != *roff {
+            return Err(format!("{name}.{w} at {off} against {r} at {roff}"));
+        }
+        // Padding is named differently on each side; the rest match.
+        if !w.starts_with('_') && w != r {
+            return Err(format!(
+                "{name}'s members are in another order: {w} against {r}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks each WGSL member against the Rust field at the same position.
 fn same_layout(src: &str, name: &str, rust: &[(&str, usize)], size: usize) {
-    let (wgsl, span) = wgsl_struct(src, name);
-    assert_eq!(span as usize, size, "{name}'s size");
-    assert_eq!(wgsl.len(), rust.len(), "{name}'s members: {wgsl:?}");
-    for ((w, off), (r, roff)) in wgsl.iter().zip(rust) {
-        assert_eq!(*off as usize, *roff, "{name}.{w} against {r}");
-        // Padding is named differently on each side; the rest match.
-        if !w.starts_with('_') {
-            assert_eq!(w, r, "{name}'s members are in another order");
-        }
+    if let Err(e) = layout_matches(src, name, rust, size) {
+        panic!("{e}");
     }
 }
 
@@ -150,6 +177,30 @@ fn uniforms_match_their_wgsl_structs() {
         fields!(YuvUniform: offsets, strides, size, bits, planar, shift).to_vec();
     yuv.extend((0..3).map(|i| ("_pad", offset_of!(YuvUniform, _pad) + 4 * i)));
     same_layout(YUV_WGSL, "Yuv", &yuv, size_of::<YuvUniform>());
+    // The blur's (F066).
+    same_layout(
+        BLUR_WGSL,
+        "Sum",
+        fields!(SumUniform: size, n, _pad),
+        size_of::<SumUniform>(),
+    );
+    // Control: the same fields with two swapped, so that the shader would
+    // read its count where Rust put the size's second half.
+    #[repr(C)]
+    struct Swapped {
+        n: f32,
+        size: [u32; 2],
+        _pad: f32,
+    }
+    must_fail(
+        "Sum's size and n swapped",
+        layout_matches(
+            BLUR_WGSL,
+            "Sum",
+            fields!(Swapped: n, size, _pad),
+            size_of::<Swapped>(),
+        ),
+    );
 }
 
 /// Writes `w`×`h` texels of `format` with a pattern, and reads them back.
