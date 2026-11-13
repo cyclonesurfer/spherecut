@@ -108,10 +108,13 @@ pub fn run(req: Request, cx: &Ctx, jobs: &Jobs) -> Result<Value, ToolError> {
     let encoder = prepared.encoder();
     let output = out.path().to_path_buf();
     let folder_named = output.parent().map(Path::to_path_buf).unwrap_or_default();
+    // The export's words name the media by the path it read, which the
+    // job's turn into "the project's media 1", never the path the project
+    // recorded (F051).
     let paths = vec![
         (out.exact(), output.clone()),
         (out.dir().to_path_buf(), folder_named),
-        (proc, media.path.clone()),
+        (proc, PathBuf::from(sequence::media_named(media.id))),
     ];
     let (id, ahead) = jobs.submit(
         output.clone(),

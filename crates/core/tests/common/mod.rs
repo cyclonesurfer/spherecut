@@ -25,6 +25,8 @@ pub fn media(path: &str, seconds: i64) -> Media {
             rate: FrameRate::FPS_30,
             duration: Time::from_secs(seconds),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     }
 }
 

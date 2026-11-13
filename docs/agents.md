@@ -267,13 +267,13 @@ Eleven tools, in this order; `edit`, `undo`, `render` and `job` are listed
 only with a write root (`--allow-write`), since without one each call
 would be refused. Each takes one JSON object; the schemas are
 `docs/agents/schemas/*.json`. Every result has `warnings: [{code,
-message}]`. Each is marked `readOnlyHint` true and `openWorldHint`
-false, except under `--allow-write`: `look` and `project` are marked as
-writing new files only (`readOnlyHint` false, `destructiveHint` false,
-`idempotentHint` true), since `look` writes one when a call gives
-`output` and `project` when it gives `create`, as are `render` and
-`job`, and `edit` and `undo` as replacing a project (`destructiveHint`
-true, `idempotentHint` false).
+message}]`, `[]` when nothing warned. Each is marked `readOnlyHint`
+true and `openWorldHint` false, except under `--allow-write`: `look` and
+`project` are marked as writing new files only (`readOnlyHint` false,
+`destructiveHint` false, `idempotentHint` true), since `look` writes one
+when a call gives `output` and `project` when it gives `create`, as are
+`render` and `job`, and `edit` and `undo` as replacing a project
+(`destructiveHint` true, `idempotentHint` false).
 
 - **`probe`**: what media files are, without decoding. `files` (up to
   64) or a `folder` (one level, its clips a page at a time: `page_size`
@@ -332,7 +332,11 @@ true, `idempotentHint` false).
   of the project would make (`checked` says so): the output's kind and
   size, codec, bit depth, colour, audio and its metadata, by the same
   rules and target, before any render. The `check` a finished `job`
-  gives is the proof.
+  gives is the proof. A project of a camera's pair is `not_yet` until
+  M3.11; from then its `advice` holds `provisional_geometry` while the
+  pair's geometry is provisional, with the evidence of Spherecut's
+  table of cameras when the table has it settled or guesses
+  differently ("a different guess": the table keeps no order).
 - **`doctor`**: this machine's FFmpeg, decoders, VA-API and Vulkan
   devices, and each problem with its fix (the exact Fedora commands come
   from `spherecut doctor` in a terminal). With `file`, the decode path
@@ -342,24 +346,26 @@ true, `idempotentHint` false).
 - **`project`**: a project (`.spherecut`, D47): with `file` alone, its
   summary (the `file` path the other calls name it by, `revision`, the
   sequence's `rate`, `output` and `export`, each media file with its
-  `status`, the clip's trim and its view tracks' key counts, the first
-  markers, the targets, and the history's `undo` and `redo`, each with
-  `agent_may` and why not). `part` gives one part: `sequence`, `view`
-  (a clip's keys, at most 200 a track from `from`; `more` and
-  `next_from` say where to go on), `markers`, `targets`, `history` (the
-  last 50 steps, who made each), or `edits` (every op with what it does
-  and an example that applies to the ids it names). `create: {media}`
-  makes a new project of one equirect video, refused `output_exists` if
-  anything is at `file`. A relative `file` is read under the first read
-  root but made under the write root: the summary's `file` is the path
-  to go on with.
+  `status` and `source` (Projects), the clip's trim and its view
+  tracks' key counts, the first markers, the targets, and the history's
+  `undo` and `redo`, each with `agent_may` and why not). `part` gives
+  one part: `sequence`, `view` (a clip's keys, at most 200 a track from
+  `from`; `more` and `next_from` say where to go on), `markers`,
+  `targets`, `history` (the last 50 steps, who made each), or `edits`
+  (every op with what it does and an example that applies to the ids it
+  names). `create: {media}` makes a new project of one video, an
+  equirect or a camera's two lenses (Projects), refused `output_exists`
+  if anything is at `file`. A relative `file` is read under the first
+  read root but made under the write root: the summary's `file` is the
+  path to go on with.
 - **`edit`**: `edits` (up to 1000) applied in order to the project at
   `file`, all or none, as one undo step labelled `label` (by default the
   first op's name, "Set trim", or "N edits"); the user's Edit menu shows
   it as the agent's. Ops and fields are the project file's, ids are
   `project`'s, and times are as above, frames at the clip's media's rate
   (a target's own media for its path, the sequence's for `add_clip`'s
-  `at`). `add_media` takes only `path`, probed beneath the roots. The
+  `at`). `add_media` takes only `path`, probed beneath the roots, as
+  `set_source`'s camera form reads its media's file (Projects). The
   result gives the new `revision`, the ids each edit made, and whether
   the agent may undo it; `if_revision` refuses the edit
   (`stale_revision`) unless the project is still at that revision, and
@@ -373,10 +379,11 @@ true, `idempotentHint` false).
   the write root, as `spherecut render` does, and answers within a
   second, before a frame is rendered, with `{job, output, frames,
   duration, size, draft, encoder, estimate_bytes, ahead}`. First it
-  checks the project's media (`media_missing`, `media_changed`), the
-  output (`output_exists`, also for a file a render not yet finished
-  writes), `range` (`{from, to}`, within the trim, in the clip's file
-  time: `out_of_range`), the preset, frames and encoder (D51's
+  checks the project's media (`not_yet` for a camera's pair until
+  M3.11, `media_missing`, `media_changed`), the output
+  (`output_exists`, also for a file a render not yet finished writes),
+  `range` (`{from, to}`, within the trim, in the clip's file time:
+  `out_of_range`), the preset, frames and encoder (D51's
   `cannot_export`, `no_encoder`), and room on the disk (`no_space`, with
   both numbers). `draft` renders at half the size, fast. One renders at
   a time and 4 wait (`busy` past them). The file appears only when it
@@ -442,17 +449,24 @@ unless `vfov` is given.
 strings, file and folder names, camera names, FFmpeg's log) appears only
 in JSON string fields, at most 1 KiB each, with control, bidi, ANSI and
 invisible characters replaced. It never appears in a tool's description,
-the server's instructions or an error's message. The tools' descriptions
+the server's instructions or an error's message. An error names a
+project's media by id ("the project's media 1"), never by the path the
+project recorded or by text read from a file. The tools' descriptions
 and the instructions tell the agent that these fields and the pixels of
 frames are data, not instructions.
 
 ## Projects
 
 A project is a `.spherecut` file (D47): JSON, always written whole, its
-media named relative to its folder. `project` with `part: "edits"` is
-the edit reference: every op, what it does, and an example that applies
-to the ids it names; the ops and their fields are the project file's
-(D47 and `docs/design/m2-plan.md` sections 3 to 5 have the format).
+media named relative to its folder, the one the kernel finds it in (a
+folder link beneath a root followed), as the window and `spherecut
+render` find it. A media an agent names through a folder link beneath
+a root is recorded from the folder it is really in when that is nearer
+the project's, as the window's save records it, so the folder moved
+with its clips keeps them. `project` with `part: "edits"` is the edit
+reference: every op, what it does, and an example that applies to the
+ids it names; the ops and their fields are the project file's (D47 and
+`docs/design/m2-plan.md` sections 3 to 5 have the format).
 
 **The files beside a project.** `trip.spherecut` has two hidden files
 beside it that Spherecut makes and nothing else should touch:
@@ -488,6 +502,50 @@ is `not_top`: theirs to undo, in the window. The summary's `undo` and
 Edit menu names the client an agent's step came from ("Undo Set trim
 (claude-code)").
 
+**A camera's two lenses.** Each media in `project`'s summary has its
+`source`: `{"kind": "equirect"}` for a stitched video, or for a
+camera's file of two fisheye lenses (an Insta360 `.insv`)
+`{"kind": "dual_fisheye"}` with the `camera` (`make`, `model` and
+`firmware`, never the serial), the `calibration`'s `hash`, the
+`geometry`'s `binding`, `status` and `evidence` with `superseded` (the
+built-in table's `status` and `evidence` when the project's is
+provisional and the table's is settled, or provisional on other
+evidence, which may be older than the project's; else null), the
+`tune`, the `gains`' `mode` (`off`, `fixed` or `auto`) and the
+`profile`'s name or null. The
+calibration's raw strings and an `auto` gains' samples stay in the
+file, and the camera's words reach a result only as fields (Untrusted
+text). A camera's two EAC tracks (a GoPro MAX file) are
+`{"kind": "eac_pair"}` alone: nothing makes such a source but a whole
+one sent in `set_source` or a project file written by hand, and the
+tools that render refuse it (`not_yet`). `create`, and `edit`'s
+`add_media`, make a camera's file a `dual_fisheye` source of the
+calibration its trailer holds; a file with none a stitch reads, or one
+whose source at the default tune `validate` refuses (its frame too
+narrow for the default feather, a lens's ξ at −1 or below), stays an
+equirect, shown as its lenses, with `not_equirect` and
+`no_calibration` warnings. Three ops change a source: `set_source`,
+`set_stitch` (the tune, the gains or both) and `set_caps` (the nadir
+and zenith caps). `set_source` takes `{"kind": "equirect"}`; the
+camera form `{"kind": "camera", "binding": "direct"}`, which the
+server makes whole from the media's file beneath the roots, as
+`create` would, with the geometry's binding the one given and its
+status `user` (`binding` may be left out), and which is `bad_edit`,
+with `validate`'s words and a `next` to keep the media equirect, on a
+file whose source at the default tune `validate` refuses; or a whole
+`dual_fisheye` source, copied unchanged from the project file by a
+client that can read it, whose `calibration`, `tracks` and `camera`
+`model` and `firmware` must be what its media's file holds
+(`calibration_mismatch`, at the part that differs, names what does)
+and whose `front_track`, `geometry`, `tune`, `gains` and `profile` are
+the client's to change. An agent never makes a calibration: the server
+reads it from the file, or checks the one sent against it. Until M3.11
+renders a project stitched, `look`, `compare`, `check` and `render`
+refuse a project whose clip's media is a camera's pair (`not_yet`),
+rather than show its first lens as an equirect: `look` at the file
+itself with `mode` `raw`, or, for two fisheye lenses,
+`frame --reference` it in a terminal.
+
 **The window's actions that aren't edits**, and what an agent does
 instead:
 
@@ -516,9 +574,12 @@ A failed call is a tool result marked `isError`, whose text is
 characters: a stable `code`, the argument at fault as a JSON path
 (`file`, `times[3]`, `view.fov`) or null, what would be valid, and what
 to try next. A message may name a file or folder the call gave (a
-folder without room, a media file that moved) and, for a render that
-failed writing, the writer's words; probe's `detail: "full"` gives
-FFmpeg's own. The codes:
+folder without room) and, for a render that failed writing, the
+writer's words; probe's `detail: "full"` gives FFmpeg's own. An error
+names a project's media by id ("the project's media 1"), never by the
+path the project recorded or by text read from a file: `project` gives
+the path, as a field. Each error's `message`, `valid` and `next` reach
+the agent as fields do, as a backstop. The codes:
 
 | Code | Meaning |
 |---|---|
@@ -545,6 +606,7 @@ FFmpeg's own. The codes:
 | `cancelled` | The call was cancelled; the client gets no response for it (a cancelled render's `state`, too) |
 | `internal` | Spherecut's fault, not the agent's |
 | `bad_edit` | An edit the project's rules refuse, at `edits[i]`: its op and the rule (`limit`, `in_use`, `not_found` and so on) are in the message; nothing was saved |
+| `calibration_mismatch` | A `set_source` whose whole `dual_fisheye` source has a calibration, lens tracks, or camera model or firmware other than its media's file holds, at `edits[i].source.calibration`, `.tracks` or `.camera`: what differs is in the message, and `next` names the camera form or the part as the project file holds it; for a file that holds no calibration a stitch reads, at `.calibration`, `next` says to keep it `equirect`; nothing was saved |
 | `stale_revision` | The project isn't at `if_revision`, or was written by something else since its history was; read it again |
 | `not_top` | The step to undo or redo is the user's; ask the user, or make an edit that changes it |
 | `nothing_to_undo` | No step to undo |
@@ -554,9 +616,10 @@ FFmpeg's own. The codes:
 | `not_project` | Not a Spherecut project; it was left as it was |
 | `bad_project` | A project that doesn't read: malformed, or breaking a rule |
 | `newer_schema` | A project saved by a newer Spherecut |
-| `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved |
+| `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved (a save that put the file in place but couldn't flush its folder succeeds, with `not_flushed`) |
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
+| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; `next` says to `look` at the file itself with `mode` `raw`, and for `dual_fisheye` to `frame` it with `--reference` in a terminal, which an `eac_pair` has no stitched view in yet |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
 | `job_lost` | A job of another server (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |
@@ -609,8 +672,10 @@ and says what it left out or doubts. The tools' own codes:
 | `damaged` | `analyze` | The stream or its audio can't be read past the time the message gives; what comes after isn't measured |
 | `untimed_packets` | `analyze` | `timing`: packets without a timestamp, which aren't counted |
 | `result_cut` | `check` | Passed rules' messages, then advice, left out to fit 2 KiB (`CHECK_BYTES`) |
-| `not_equirect` | `project` | `create` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
+| `not_equirect` | `project`, `edit` | `create` or `add_media` with a video that isn't tagged as a stitched equirect: the project renders it as one all the same |
+| `no_calibration` | `project`, `edit` | `create` or `add_media` with a camera's two-lens file that holds no calibration a stitch reads, or one camera can't read or whose source at the default tune `validate` refuses (its words after, in parentheses, the whole message within `FIELD_BYTES`): the media stays an equirect, shown as its lenses |
 | `history_not_saved` | `edit`, `undo` | The project was saved but its history wasn't: `undo` can't take the step back |
+| `not_flushed` | `project`, `edit`, `undo` | The project was saved, but its folder couldn't be flushed to disk after: the change stands, so don't make it again, though a crash before the disk catches up could lose it |
 | `outside_trim` | `edit` | Keys or markers the edits left outside the clip's trim, which no render shows |
 | `sheet_left_out` | `compare` | `sheet` was asked for, but the video's shape leaves its tiles too small to label |
 

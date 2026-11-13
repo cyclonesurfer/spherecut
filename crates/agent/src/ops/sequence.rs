@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use spherecut_core::project::{Media, Output, Project, Range, file};
+use spherecut_core::project::{Media, MediaId, Output, Project, Range, Source, file};
 use spherecut_core::{FrameRate, Rounding, Time, TimeSpec};
 use spherecut_export::FramePlan;
 use spherecut_media::backend::SeekMode;
@@ -23,7 +23,6 @@ use crate::contract::Warning;
 use crate::error::{ToolError, codes};
 use crate::roots::Opened;
 use crate::still::{self, Decoded, Failure, Still};
-use crate::text;
 
 /// A project as a render reads it.
 #[derive(Debug)]
@@ -36,7 +35,9 @@ pub struct Loaded {
 }
 
 /// The project at `path`, the argument `arg`, beneath any root, and its
-/// clip's media beneath the read roots, the file it was made with.
+/// clip's media beneath the read roots, the file it was made with. A
+/// project whose clip's media is a camera's pair is refused
+/// ([`codes::NOT_YET`]) before its file is opened.
 pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
     let (folder, name) = cx.roots.project_folder(arg, path, false)?;
     let project = folder
@@ -47,6 +48,7 @@ pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
         .media_by_id(project.the_clip().media)
         .ok_or_else(|| ToolError::internal("the clip's media isn't in the project"))?
         .clone();
+    not_yet(arg, &media)?;
     let opened = media_file(cx, arg, &media)?;
     Ok(Loaded {
         project,
@@ -55,17 +57,49 @@ pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
     })
 }
 
+/// `not_yet` for a project whose clip's media `m` is a camera's pair
+/// (M3 plan 14): until M3.11 stitches a project, every tool that renders
+/// one would read its first lens as an equirect, so look, compare, check
+/// and render refuse it at `arg` instead. An equirect media passes. The
+/// `next` is the pair's (the M3.9 review's R9 and N9): `look`'s raw mode
+/// shows either file as it is, and `frame --reference` stitches two
+/// fisheye lenses; nothing stitches an EAC pair yet.
+fn not_yet(arg: &str, m: &Media) -> Result<(), ToolError> {
+    let (pair, next) = match m.source {
+        Source::Equirect {} => return Ok(()),
+        Source::DualFisheye(_) => (
+            "a camera's two fisheye lenses",
+            "look at the file itself with mode \"raw\", or frame it with --reference in a terminal",
+        ),
+        Source::EacPair(_) => (
+            "a camera's two EAC tracks",
+            "look at the file itself with mode \"raw\"",
+        ),
+    };
+    Err(ToolError::new(
+        codes::NOT_YET,
+        format!(
+            "{} is {pair}: stitched rendering of projects arrives in M3.11",
+            media_named(m.id)
+        ),
+    )
+    .at(arg)
+    .next(next))
+}
+
 /// The project's media file, opened beneath the roots and checked
 /// against what the project recorded of it (D45, a2-plan amendment 6).
-fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
-    let named = text::field(&m.path.to_string_lossy());
+/// Its errors name it by id, never by its path, whose text is the file's
+/// (F051): `project` gives the path as a field.
+pub(crate) fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
+    let named = media_named(m.id);
     let missing = |why: &str| {
-        ToolError::new(
-            codes::MEDIA_MISSING,
-            format!("the project's media {named} {why}"),
-        )
-        .at(arg)
-        .next("put the file back where the project says, or make a project of the file where it is")
+        ToolError::new(codes::MEDIA_MISSING, format!("{named} {why}"))
+            .at(arg)
+            .next(
+                "put the file back at the path project gives for it, or make a project of the \
+                 file where it is",
+            )
     };
     let opened = match cx.roots.open_file(arg, &m.path) {
         Ok(f) => f,
@@ -78,7 +112,7 @@ fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
     let changed = |why: String| {
         ToolError::new(
             codes::MEDIA_CHANGED,
-            format!("the project's media {named} isn't the file it was made with: {why}"),
+            format!("{named} isn't the file it was made with: {why}"),
         )
         .at(arg)
         .next("make a new project of the file as it is now")
@@ -95,6 +129,12 @@ fn media_file(cx: &Ctx, arg: &str, m: &Media) -> Result<Opened, ToolError> {
         Ok(h) if h != m.fingerprint.head => Err(changed("its first MiB is different".into())),
         Ok(_) => Ok(opened),
     }
+}
+
+/// How an error names a project's media: by id, as "the project's media
+/// 1" (F051).
+pub(crate) fn media_named(id: MediaId) -> String {
+    format!("the project's media {id}")
 }
 
 /// The frames a render of a project makes, from `from` to the trim's

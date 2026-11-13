@@ -10,8 +10,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use spherecut_core::project::file::FileError;
 use spherecut_core::project::{
-    By, Clip, FolderError, History, INITIAL_VIEW, Kept, Key, Loaded, Media, Origin, Project,
-    ProjectFolder, ProjectLock, Step, file,
+    By, Clip, DualFisheye, FolderError, Gains, History, INITIAL_VIEW, Kept, Key, Loaded, Media,
+    Origin, Project, ProjectFolder, ProjectLock, Source, Step, file,
 };
 use spherecut_core::{FrameRate, Time, TimeSpec};
 
@@ -131,7 +131,7 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
         Err(e) => return Err(folder_error("file", e)),
     }
     let mut doubts = Vec::new();
-    let entry = probe_media("create.media", media, cx, &mut doubts)?;
+    let entry = probe_media("create.media", media, folder.path(), cx, &mut doubts)?;
     let project = Project::untitled(entry, INITIAL_VIEW).map_err(|p| {
         ToolError::new(
             codes::BAD_ARGUMENT,
@@ -142,12 +142,15 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
     // As the GUI's Save As does: the target's lock before anything is
     // written.
     let _lock = lock(&folder, &name)?;
-    folder
+    let saved = folder
         .create(&name, &project, &History::new())
         .map_err(|e| match e {
             FolderError::Exists { .. } => taken(),
             e => folder_error("file", e),
         })?;
+    if let Some(why) = &saved.flush_error {
+        doubts.push(not_flushed(why));
+    }
     let loaded = folder.load(&name).map_err(|e| folder_error("file", e))?;
     let mut s = summary(&folder, &name, &loaded, cx);
     s["created"] = json!(true);
@@ -157,22 +160,34 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
     Ok(s)
 }
 
-/// The media entry of the video at `path`, the argument `arg`: opened
-/// beneath the roots, probed through what was opened, its stream opened
-/// for its rate and length, and recorded as the agent names it. Like
-/// the GUI's, it takes footage whatever its metadata says, with a
+/// The media entry of the video at `path`, the argument `arg`, for a
+/// project in the folder named `near`: opened beneath the roots, probed
+/// through what was opened, its stream opened for its rate and length,
+/// and recorded as the agent names it, from the folder nearest the
+/// project's that its folders' real paths beneath the root give
+/// ([`Roots::named_near`](crate::roots::Roots::named_near)). Like the
+/// GUI's, it takes footage whatever its metadata says, with a
 /// `not_equirect` warning in `doubts` when it isn't tagged a stitched
 /// equirect: looking at the project shows what a render makes of it.
+///
+/// A camera's two-lens file (M3 plan 11.5) is a `dual_fisheye` source of
+/// the calibration its trailer holds, with no such doubt, its `video` its
+/// first lens's stream. One with no calibration a stitch reads stays an
+/// equirect, with the doubt and a `no_calibration` warning: it shows as
+/// its lenses. So does one whose calibration reads but whose source at
+/// the default tune `validate` refuses (the M3.9 review's R7), its
+/// warning giving `validate`'s words.
 pub(crate) fn probe_media(
     arg: &str,
     path: &Path,
+    near: &Path,
     cx: &Ctx,
     doubts: &mut Vec<Warning>,
 ) -> Result<Media, ToolError> {
     let opened = cx.roots.open_file(arg, path)?;
-    let named = cx.roots.named(arg, path)?;
+    let named = cx.roots.named_near(arg, path, near)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
-    let opts = still::Options {
+    let mut opts = still::Options {
         decoder: Decoder::Software,
         equirect: true,
         ..still::Options::default()
@@ -190,20 +205,87 @@ pub(crate) fn probe_media(
             e
         }
     };
-    let probed =
-        still::probe(opened.source(), &opts, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    let report = still::probe_report(opened.source(), &stop).map_err(|f| failed(&f))?;
+    // A camera's media is its first lens's stream, whose timing the clip
+    // follows.
+    opts.stream = report.camera_file.lenses.as_ref().map(|l| l.tracks[0]);
+    let probed = still::probed(report, &opts, &stop, &mut warnings).map_err(|f| failed(&f))?;
+    let open = Still::open(opened.source(), &probed, None, &opts, &stop, &mut warnings)
+        .map_err(|f| failed(&f))?;
+    let info = open.info().clone();
+    drop(open);
+    let mut media = spherecut_media::project::project_media(opened.source(), &named, &info)
+        .map_err(|why| ToolError::new(codes::NO_VIDEO, why).at(arg))?;
+    cx.call.check()?;
+    let camera = camera_source(&opened, &probed.report);
+    if let Ok(Some(d)) = &camera
+        && d.tracks[0] != media.video.stream
+    {
+        return Err(ToolError::internal(format!(
+            "the camera's first lens is stream {}, not the {} opened",
+            d.tracks[0], media.video.stream
+        )));
+    }
+    match camera {
+        Ok(Some(d)) => {
+            media.source = Source::DualFisheye(Box::new(d));
+            return Ok(media);
+        }
+        Ok(None) if probed.report.camera_file.lenses.is_some() => {
+            doubts.push(no_calibration(None));
+        }
+        Ok(None) => {}
+        Err(why) => doubts.push(no_calibration(Some(&why))),
+    }
     if let Some(why) = still::equirect_doubt(&probed) {
         doubts.push(Warning::new(
             codes::NOT_EQUIRECT,
             format!("{why}; the project renders it as a stitched equirect all the same"),
         ));
     }
-    let open = Still::open(opened.source(), &probed, None, &opts, &stop, &mut warnings)
-        .map_err(|f| failed(&f))?;
-    let info = open.info().clone();
-    drop(open);
-    spherecut_media::project::project_media(opened.source(), &named, &info)
-        .map_err(|why| ToolError::new(codes::NO_VIDEO, why).at(arg))
+    Ok(media)
+}
+
+/// The two-lens source of the file `opened`, which `report` probed:
+/// media's [`camera_source`](spherecut_media::project::camera_source),
+/// its words for why not without the file's name, which begins them.
+fn camera_source(
+    opened: &crate::roots::Opened,
+    report: &spherecut_media::probe::ProbeReport,
+) -> Result<Option<DualFisheye>, String> {
+    let source = opened.source();
+    spherecut_media::project::camera_source(source, report).map_err(|why| {
+        let name = format!("{}: ", source.name.display());
+        why.strip_prefix(&name).map_or(why.clone(), str::to_owned)
+    })
+}
+
+/// The warning for a camera's file with no calibration a stitch reads,
+/// and the words for why when it has one that can't be read or that
+/// makes no source a project takes. The whole message is a field, so the
+/// words and what wraps them stay within its bound together (the M3.9
+/// review's N8).
+fn no_calibration(why: Option<&str>) -> Warning {
+    let message = match why {
+        None => "no calibration: shown as its lenses".to_owned(),
+        Some(why) => text::field(&format!("no calibration: shown as its lenses ({why})")),
+    };
+    Warning::new("no_calibration", message)
+}
+
+/// The warning of a save that put the project in place but couldn't
+/// flush its folder to disk after (the M3.9 review's R3): the call did
+/// what it said, so it isn't to be made again, though a crash before the
+/// disk catches up could still lose it. `why` is the system's words for
+/// the failed flush, which quote no file.
+pub(crate) fn not_flushed(why: &str) -> Warning {
+    Warning::new(
+        "not_flushed",
+        format!(
+            "the project was saved, but its folder couldn't be flushed to disk ({why}): the \
+             change stands, so don't make it again"
+        ),
+    )
 }
 
 /// The lock on `name` for one call: another call's is waited for
@@ -500,6 +582,7 @@ fn summary(folder: &ProjectFolder, name: &OsString, loaded: &Loaded, cx: &Ctx) -
                     "duration": time(m.video.duration),
                 },
                 "status": status,
+                "source": source(&m.source),
             });
             if let Some(why) = why {
                 v["why"] = json!(why);
@@ -570,6 +653,47 @@ fn summary(folder: &ProjectFolder, name: &OsString, loaded: &Loaded, cx: &Ctx) -
         Err(e) => tracing::warn!("mcp: the project's lock couldn't be read: {e}"),
     }
     out
+}
+
+/// A media's source as the summary gives it: its kind and, for a
+/// camera's two lenses, the camera (no serial: PLAN's A1 leaves it out
+/// unless asked), the calibration's hash, the geometry's binding, status
+/// and evidence with what the built-in table has since superseded it
+/// with (11.4), the tune, the gains' mode and the profile's name. Never
+/// the raw strings or an analysis's samples, and the camera's words and
+/// the project's text only as fields.
+fn source(s: &Source) -> Value {
+    let d = match s {
+        Source::Equirect {} => return json!({"kind": "equirect"}),
+        Source::EacPair(_) => return json!({"kind": "eac_pair"}),
+        Source::DualFisheye(d) => d,
+    };
+    let field = |t: &Option<String>| t.as_deref().map(text::field);
+    let g = &d.geometry;
+    let superseded = spherecut_media::project::superseded_by_table(d)
+        .map(|s| json!({"status": value(&s.status), "evidence": text::field(&s.evidence)}));
+    json!({
+        "kind": "dual_fisheye",
+        "camera": {
+            "make": field(&d.camera.make),
+            "model": field(&d.camera.model),
+            "firmware": field(&d.camera.firmware),
+        },
+        "calibration": {"hash": text::field(&d.calibration.hash)},
+        "geometry": {
+            "binding": value(&g.binding),
+            "status": value(&g.status),
+            "evidence": text::field(&g.evidence),
+            "superseded": superseded,
+        },
+        "tune": value(&d.tune),
+        "gains": {"mode": match d.gains {
+            Gains::Off {} => "off",
+            Gains::Fixed { .. } => "fixed",
+            Gains::Auto { .. } => "auto",
+        }},
+        "profile": d.profile.as_ref().map(|p| text::field(&p.name)),
+    })
 }
 
 /// Whether media `m` is there and the same, through the roots: a file
@@ -862,4 +986,51 @@ fn step(s: &Step, done: bool) -> Value {
         "after": s.after,
         "done": done,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use spherecut_testkit::control::must_fail;
+
+    use super::*;
+    use crate::limits::FIELD_BYTES;
+
+    /// Whether `message` is within a field's bound and holds no character
+    /// a field refuses.
+    fn a_field(message: &str) -> Result<(), String> {
+        if message.len() > FIELD_BYTES {
+            return Err(format!("{} bytes, past {FIELD_BYTES}", message.len()));
+        }
+        if message.chars().any(text::refused) {
+            return Err(format!("{message:?} holds a refused character"));
+        }
+        Ok(())
+    }
+
+    /// The `no_calibration` warning with camera's words is a field as a
+    /// whole (the M3.9 review's N8): one exactly `FIELD_BYTES` long is
+    /// kept whole, one a byte longer is cut to the bound, and words a
+    /// whole field long, a newline in them, are cut with the wrapper.
+    /// Control: the words fielded and then wrapped, as before, pass the
+    /// bound.
+    #[test]
+    fn no_calibration_stays_within_a_field() {
+        let plain = no_calibration(None).message;
+        let room = FIELD_BYTES - plain.len() - " ()".len();
+        let whole = no_calibration(Some(&"w".repeat(room))).message;
+        assert_eq!(whole, format!("{plain} ({})", "w".repeat(room)));
+        assert_eq!(whole.len(), FIELD_BYTES);
+        let cut = no_calibration(Some(&"w".repeat(room + 1))).message;
+        assert_eq!(a_field(&cut), Ok(()));
+        assert!(
+            cut.starts_with(&format!("{plain} (w")) && cut.ends_with('…'),
+            "{cut}"
+        );
+        let long = format!("line\n{}", "w".repeat(FIELD_BYTES));
+        assert_eq!(a_field(&no_calibration(Some(&long)).message), Ok(()));
+        must_fail(
+            "the words fielded, then wrapped",
+            a_field(&format!("{plain} ({})", text::field(&long))),
+        );
+    }
 }

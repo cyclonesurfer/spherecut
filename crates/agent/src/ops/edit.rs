@@ -9,19 +9,21 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use spherecut_core::FrameRate;
 use spherecut_core::project::{
-    AnyKey, AnyKeys, ClipId, Edit, EditError, Kept, Key, MarkerId, MediaId, Origin, Project,
-    TargetId,
+    AnyKey, AnyKeys, ClipId, Code, DualFisheye, Edit, EditError, Kept, Key, MarkerId, MediaId,
+    Origin, Problem, Project, Source, TargetId,
 };
+use spherecut_sphere::rig::{Binding, Status};
 
 use super::Ctx;
-use super::look::TimeArg;
+use super::look::{self, TimeArg};
 use super::project::{
     self as proj, Writing, folder_error, history_of, next_step, probe_media, refusal,
 };
+use super::sequence::media_file;
 use crate::contract::Warning;
 use crate::error::{ToolError, codes};
 use crate::limits::{EDITS_PER_CALL, LABEL_CHARS};
-use crate::text;
+use crate::{still, text};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,7 +78,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
         .edits
         .into_iter()
         .enumerate()
-        .map(|(i, v)| edit(i, v, &project, cx, &mut doubts))
+        .map(|(i, v)| edit(i, v, &project, folder.path(), cx, &mut doubts))
         .collect::<Result<Vec<_>, _>>()?;
     cx.call.check()?;
     let (mut history, reset) = history_of(loaded.history);
@@ -106,6 +108,9 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
             .map_err(|e| folder_error("file", e))?;
         if saved.dropped > 0 {
             out["history_dropped"] = json!(saved.dropped);
+        }
+        if let Some(why) = &saved.flush_error {
+            warnings.push(proj::not_flushed(why));
         }
         drop(lock);
         out["undo"] = match saved.history_error {
@@ -186,13 +191,20 @@ pub fn undo(req: UndoRequest, cx: &Ctx) -> Result<Value, ToolError> {
         "undo": next_step(&kept, false, revision),
         "redo": next_step(&kept, true, revision),
     });
+    let mut warnings = Vec::new();
     if let Some(e) = saved.history_error {
         out["undo"] = unsaved_history();
         out["redo"] = unsaved_history();
-        out["warnings"] = json!([Warning::new(
+        warnings.push(Warning::new(
             "history_not_saved",
             format!("the project was saved, its history wasn't: {e}"),
-        )]);
+        ));
+    }
+    if let Some(why) = &saved.flush_error {
+        warnings.push(proj::not_flushed(why));
+    }
+    if !warnings.is_empty() {
+        out["warnings"] = json!(warnings);
     }
     Ok(out)
 }
@@ -259,11 +271,15 @@ fn bad_edit(e: EditError) -> ToolError {
 }
 
 /// Edit `i` as the agent wrote it, as an `Edit`: `add_media` probed by
-/// its path, the rest through [`wire`].
+/// its path and named for the project's folder, named `near`;
+/// `set_source`'s camera form made whole from the media's file, and a
+/// whole `dual_fisheye` source checked against what that file holds;
+/// the rest through [`wire`].
 fn edit(
     i: usize,
     v: Value,
     project: &Project,
+    near: &Path,
     cx: &Ctx,
     doubts: &mut Vec<Warning>,
 ) -> Result<Edit, ToolError> {
@@ -281,10 +297,266 @@ fn edit(
             .at(arg)
             .valid(r#"{"op": "add_media", "path": "clips/b.mp4"}"#));
         };
-        let media = probe_media(&format!("{arg}.path"), Path::new(path), cx, doubts)?;
+        let media = probe_media(&format!("{arg}.path"), Path::new(path), near, cx, doubts)?;
         return Ok(Edit::AddMedia { media });
     }
+    if v.get("op").and_then(Value::as_str) == Some("set_source") {
+        match v.pointer("/source/kind").and_then(Value::as_str) {
+            Some("camera") => return camera_form(i, v, project, cx),
+            Some("dual_fisheye") => {
+                let e = wire(&arg, v, project)?;
+                if let Edit::SetSource {
+                    media,
+                    source: Source::DualFisheye(d),
+                } = &e
+                {
+                    files_source(i, *media, d, project, cx)?;
+                }
+                return Ok(e);
+            }
+            _ => {}
+        }
+    }
     wire(&arg, v, project)
+}
+
+/// `set_source`'s camera form, `{"kind": "camera", "binding": …}`, which
+/// the server makes whole (M3 plan 11.3).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CameraForm {
+    #[serde(rename = "op")]
+    _op: String,
+    media: MediaId,
+    source: CameraSource,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CameraSource {
+    #[serde(rename = "kind")]
+    _kind: String,
+    binding: Option<Binding>,
+}
+
+/// Edit `i`, `set_source`'s camera form, as the whole source it stands
+/// for: the two-lens source of the media's file, read beneath the roots
+/// and checked against what the project recorded of it, as `project
+/// create` makes one, its geometry's binding the asked one and the user's
+/// when one is asked. A source that `validate`'s rules for one refuse at
+/// the default tune (the M3.9 review's R7) is refused here with their
+/// words and a `next` to keep the media equirect, as `create` and
+/// `add_media` keep such a file: the form has nothing to fix.
+fn camera_form(i: usize, v: Value, project: &Project, cx: &Ctx) -> Result<Edit, ToolError> {
+    let arg = format!("edits[{i}]");
+    let form: CameraForm = serde_json::from_value(v).map_err(|e| {
+        ToolError::new(
+            codes::BAD_ARGUMENT,
+            format!("doesn't read as set_source's camera form: {e}"),
+        )
+        .at(&arg)
+        .valid(r#"{"op": "set_source", "media": 1, "source": {"kind": "camera", "binding": "direct"}}"#)
+    })?;
+    let id = form.media;
+    let mut d = match file_source(i, id, project, cx)? {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            return Err(bad_edit(set_source_error(
+                i,
+                Code::Invalid,
+                format!("media {id}'s file holds no calibration a stitch reads"),
+            )));
+        }
+        Err(why) => {
+            tracing::info!("mcp: media {id}'s calibration can't be read: {why}");
+            return Err(bad_edit(set_source_error(
+                i,
+                Code::Invalid,
+                format!("media {id}'s file has a calibration that can't be read"),
+            ))
+            .next("nothing was saved; probe the file: its report says why"));
+        }
+    };
+    if let Some(b) = form.source.binding {
+        d.geometry.binding = b;
+        d.geometry.status = Status::User;
+    }
+    if let Some(m) = project.media().iter().find(|m| m.id == id)
+        && let Err(p) = d.check(m)
+    {
+        return Err(bad_edit(set_source_error(i, p.code, p.message)).next(
+            "nothing was saved; the file's calibration makes no source a project takes at the \
+             default tune: keep it {\"kind\": \"equirect\"}",
+        ));
+    }
+    Ok(Edit::SetSource {
+        media: id,
+        source: Source::DualFisheye(Box::new(d)),
+    })
+}
+
+/// The two-lens source of media `id`'s file, as `project create` would
+/// make it before checking it: the file opened beneath the roots and
+/// checked against what the project recorded of it, probed, and read by
+/// media's `trailer_source`. `validate` checks the source the edit makes
+/// as it checks any (the M3.9 review's R7): the camera form's default
+/// tune is refused there, with its words, where it doesn't fit the
+/// file's frame, and a whole source's own tune may be one that fits. The
+/// inner error is camera's words, for the log.
+fn file_source(
+    i: usize,
+    id: MediaId,
+    project: &Project,
+    cx: &Ctx,
+) -> Result<Result<Option<DualFisheye>, String>, ToolError> {
+    let arg = format!("edits[{i}]");
+    let Some(m) = project.media().iter().find(|m| m.id == id) else {
+        return Err(bad_edit(set_source_error(
+            i,
+            Code::NotFound,
+            format!("there is no media {id}"),
+        )));
+    };
+    let opened = media_file(cx, &arg, m)?;
+    let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
+    let report = still::probe_report(opened.source(), &stop).map_err(|f| {
+        if f.code == codes::CANCELLED {
+            cx.call
+                .check()
+                .err()
+                .unwrap_or_else(|| ToolError::new(codes::CANCELLED, "the call was stopped"))
+        } else {
+            look::file_failed(&f).at(&arg)
+        }
+    })?;
+    cx.call.check()?;
+    let source = spherecut_media::project::trailer_source(opened.source(), &report);
+    if let Ok(Some(d)) = &source
+        && d.tracks[0] != m.video.stream
+    {
+        return Err(bad_edit(set_source_error(
+            i,
+            Code::Invalid,
+            format!(
+                "media {id}'s video is stream {}, not its file's first lens, stream {}: make \
+                 a new project of the file",
+                m.video.stream, d.tracks[0]
+            ),
+        )));
+    }
+    Ok(source)
+}
+
+/// Refuses a whole `dual_fisheye` source, edit `i`, whose calibration,
+/// lens tracks or camera model and firmware aren't what media `id`'s file
+/// holds (M3 plan 11.3, the M3.9 review's R6): a stitch reads what the
+/// camera wrote, from the streams it wrote it for, and the table's
+/// geometry is looked up by the camera the file names. The front track,
+/// the geometry, the tune, the gains and the profile are the agent's to
+/// change. Each refusal's `next` names the two ways to send one that
+/// fits (R5): the camera form, or the part as the project file holds it,
+/// copied unchanged by a client that can read the file.
+fn files_source(
+    i: usize,
+    id: MediaId,
+    sent: &DualFisheye,
+    project: &Project,
+    cx: &Ctx,
+) -> Result<(), ToolError> {
+    let mismatch = |part: &str, why: String| {
+        ToolError::new(
+            codes::CALIBRATION_MISMATCH,
+            format!("set_source refused: media {id}'s source.{part} {why}"),
+        )
+        .at(format!("edits[{i}].source.{part}"))
+        .next(format!(
+            "nothing was saved; send the camera form {{\"kind\": \"camera\"}}, which reads the \
+             {part} from the file, or the source's {part} exactly as the project file holds it"
+        ))
+    };
+    let file = match file_source(i, id, project, cx)? {
+        Ok(Some(d)) => d,
+        Ok(None) => return Err(no_calibration(i, id)),
+        Err(why) => {
+            tracing::info!("mcp: media {id}'s calibration can't be read: {why}");
+            return Err(no_calibration(i, id));
+        }
+    };
+    let (sent_cal, file_cal) = (&sent.calibration, &file.calibration);
+    let differ = |parts: &[(&'static str, bool)]| -> Vec<&'static str> {
+        parts
+            .iter()
+            .filter(|(_, same)| !same)
+            .map(|(name, _)| *name)
+            .collect()
+    };
+    let calibration = differ(&[
+        ("canvas", sent_cal.canvas == file_cal.canvas),
+        ("window", sent_cal.window == file_cal.window),
+        (
+            "window_offset",
+            sent_cal.window_offset == file_cal.window_offset,
+        ),
+        ("raw", sent_cal.raw == file_cal.raw),
+        ("hash", sent_cal.hash == file_cal.hash),
+        ("v3", sent_cal.v3 == file_cal.v3),
+        ("v6", sent_cal.v6 == file_cal.v6),
+    ]);
+    if !calibration.is_empty() {
+        return Err(mismatch(
+            "calibration",
+            format!("isn't its file's: {} differ", calibration.join(", ")),
+        ));
+    }
+    if sent.tracks != file.tracks {
+        let [s0, s1] = sent.tracks;
+        let [f0, f1] = file.tracks;
+        return Err(mismatch(
+            "tracks",
+            format!("[{s0}, {s1}] aren't its file's lens tracks, [{f0}, {f1}]"),
+        ));
+    }
+    // By name only: the camera's words are the file's, which an error
+    // never carries (F051).
+    let camera = differ(&[
+        ("model", sent.camera.model == file.camera.model),
+        ("firmware", sent.camera.firmware == file.camera.firmware),
+    ]);
+    if !camera.is_empty() {
+        return Err(mismatch(
+            "camera",
+            format!("isn't its file's: {} differ", camera.join(", ")),
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal of a whole `dual_fisheye` source, edit `i`, for media
+/// `id`, whose file holds no calibration a stitch reads (or one camera
+/// can't read, whose words went to the log): there is nothing a source
+/// could be checked against, so the media stays as it is.
+fn no_calibration(i: usize, id: MediaId) -> ToolError {
+    ToolError::new(
+        codes::CALIBRATION_MISMATCH,
+        format!(
+            "set_source refused: media {id}'s source.calibration can't be its file's: the file \
+             holds none a stitch reads"
+        ),
+    )
+    .at(format!("edits[{i}].source.calibration"))
+    .next(
+        "nothing was saved; keep it {\"kind\": \"equirect\"}, or probe the file: its report says \
+         why",
+    )
+}
+
+/// A `set_source` refusal of edit `i`, as core's own are worded.
+fn set_source_error(i: usize, code: Code, message: String) -> EditError {
+    EditError {
+        index: i,
+        op: "set_source",
+        problem: Problem::new(code, message),
+    }
 }
 
 /// The fields whose values are times.
@@ -530,17 +802,24 @@ mod tests {
     use crate::reference;
 
     fn project() -> Project {
-        reference::project(reference::media(Path::new("/m/a.mp4")))
+        reference::project(reference::media(Path::new("/m/a.mp4")), None)
             .unwrap()
             .0
     }
 
-    /// Every example in the reference, in the file's form.
+    /// Every example in the reference, in the file's form, but those the
+    /// server expands by reading a file: `add_media`, probed by its path,
+    /// and `set_source`'s camera form, which reads the file's calibration
+    /// (M3 plan 11.3).
     fn wired() -> Vec<(&'static str, Value)> {
         let p = project();
         reference::OPS
             .iter()
-            .filter(|o| o.op != "add_media")
+            .filter(|o| {
+                let example = reference::example(o);
+                o.op != "add_media"
+                    && example.pointer("/source/kind").and_then(Value::as_str) != Some("camera")
+            })
             .map(|o| {
                 let e = wire("edits[0]", reference::example(o), &p)
                     .unwrap_or_else(|e| panic!("{}: {e}", o.op));
@@ -559,6 +838,24 @@ mod tests {
         // And each variant serializes to the op it is listed as.
         for (op, v) in wired() {
             assert_eq!(v["op"], op);
+        }
+    }
+
+    /// The camera media the reference adds last is media 12, after
+    /// target 10 and its one key 11, and the stitch ops' examples name it;
+    /// without one, the project's one media is 1.
+    #[test]
+    fn the_stitch_examples_name_the_reference_camera() {
+        let camera = reference::media(Path::new("/m/cam.insv"));
+        let (p, _) =
+            reference::project(reference::media(Path::new("/m/a.mp4")), Some(camera)).unwrap();
+        let ids: Vec<u64> = p.media().iter().map(|m| m.id.0).collect();
+        assert_eq!(ids, [1, 12]);
+        assert_eq!(project().media().len(), 1);
+        for o in reference::OPS {
+            if matches!(o.op, "set_source" | "set_stitch" | "set_caps") {
+                assert_eq!(reference::example(o)["media"], 12, "{}", o.op);
+            }
         }
     }
 
@@ -677,6 +974,31 @@ mod tests {
         let one = wire("e", json!({"op": "set_trim", "clip": 4, "end": "9"}), &p).unwrap();
         assert_eq!(default_label(std::slice::from_ref(&one)), "Set trim");
         assert_eq!(default_label(&[one.clone(), one]), "2 edits");
+        // The stitch ops', of the reference's camera media 12.
+        let camera = reference::media(Path::new("/m/cam.insv"));
+        let (mut p, mut history) =
+            reference::project(reference::media(Path::new("/m/a.mp4")), Some(camera)).unwrap();
+        let source = json!({"op": "set_source", "media": 12, "source": {"kind": "equirect"}});
+        let example = |op: &str| {
+            let o = reference::OPS.iter().find(|o| o.op == op).unwrap();
+            wire("e", reference::example(o), &p).unwrap()
+        };
+        for (e, words) in [
+            (wire("e", source, &p).unwrap(), "Set source"),
+            (example("set_stitch"), "Set stitch"),
+            (example("set_caps"), "Set caps"),
+        ] {
+            assert_eq!(default_label(std::slice::from_ref(&e)), words);
+        }
+        // An agent's step keeps its origin.
+        let caps = [example("set_caps")];
+        let origin = Origin::Agent {
+            name: "claude-code".into(),
+        };
+        let step = history
+            .record(&mut p, default_label(&caps), origin.clone(), &caps)
+            .unwrap();
+        assert_eq!((step.label.as_str(), &step.origin), ("Set caps", &origin));
     }
 
     #[test]

@@ -296,6 +296,21 @@ impl Tools for Spherecut {
     }
 
     fn call(&self, name: &str, args: Value, cx: &CallCx) -> Result<Output, ToolError> {
+        self.run(name, args, cx).map_err(fielded)
+    }
+
+    fn cancel_all(&self) {
+        self.jobs.cancel_all();
+    }
+
+    fn shutdown(&self, until: std::time::Instant) -> usize {
+        self.jobs.shutdown(until)
+    }
+}
+
+impl Spherecut {
+    /// Tool `name`'s op on `args`, its result checked.
+    fn run(&self, name: &str, args: Value, cx: &CallCx) -> Result<Output, ToolError> {
         let Some(p) = self.find(name) else {
             return Err(ToolError::internal(format!(
                 "no tool {}",
@@ -328,17 +343,28 @@ impl Tools for Spherecut {
             "compare" => ops::compare::run(ops::request(args)?, &cx)?,
             _ => return Err(ToolError::internal(format!("{name} has no op"))),
         };
+        // Every result has `warnings`, `[]` when nothing warned (F049), so
+        // that an agent reads one field the same way from every tool.
+        if let Value::Object(m) = &mut result {
+            m.entry("warnings")
+                .or_insert_with(|| Value::Array(Vec::new()));
+        }
         text::sanitize(&mut result);
         fits(&result)?;
         Ok(Output { result, images })
     }
+}
 
-    fn cancel_all(&self) {
-        self.jobs.cancel_all();
-    }
-
-    fn shutdown(&self, until: std::time::Instant) -> usize {
-        self.jobs.shutdown(until)
+/// `e` with its message, valid and next as text fields give them: the
+/// backstop for an error that took in a file's text (F051). An error
+/// names a project's media by id and quotes nothing read from a file, so
+/// this changes nothing an op words as it should.
+fn fielded(e: ToolError) -> ToolError {
+    ToolError {
+        message: text::field(&e.message),
+        valid: e.valid.as_deref().map(text::field),
+        next: e.next.as_deref().map(text::field),
+        ..e
     }
 }
 
@@ -372,6 +398,31 @@ mod tests {
                 "a schema's title is its tool's name"
             );
         }
+    }
+
+    /// F051's backstop: an error's message, valid and next reach the
+    /// agent as text fields, whatever an op put in them. Control: the
+    /// error as the op made it holds the ANSI and bidi characters.
+    #[test]
+    fn an_errors_text_is_fielded() {
+        let file = "a\u{1b}[2J\u{202e}4pm.mp4";
+        let made = ToolError::new(codes::NOT_FOUND, format!("{file} isn't there"))
+            .valid(file)
+            .next(file);
+        let holds = |e: &ToolError| {
+            [
+                &e.message,
+                e.valid.as_ref().unwrap(),
+                e.next.as_ref().unwrap(),
+            ]
+            .iter()
+            .any(|t| t.chars().any(crate::text::refused))
+        };
+        let e = fielded(made.clone());
+        assert!(!holds(&e), "{e:?}");
+        assert_eq!(e.message, "a\u{fffd}[2J\u{fffd}4pm.mp4 isn't there");
+        assert_eq!((e.code, e.argument), (made.code, made.argument.clone()));
+        spherecut_testkit::control::must_fail("the error as made", !holds(&made));
     }
 
     /// Spherecut with writing on, so that every tool is listed.

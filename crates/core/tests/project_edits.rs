@@ -8,7 +8,13 @@ mod common;
 use common::*;
 use spherecut_core::Time;
 use spherecut_core::project::*;
+use spherecut_sphere::fisheye::V6Reading;
 use spherecut_sphere::perspective::{LensShape, Projection};
+use spherecut_sphere::rig::{
+    Binding, CalibTerms, CanvasMap, EulerConv, Extrinsics, Generation, Geometry, LensCalib,
+    QuarterTurn, Status, Tune, TurnAxis, TzSign,
+};
+use spherecut_testkit::control::must_fail;
 
 /// Record `edits` as one step, check the revision went up by one, undo
 /// it and check the project is as it was, redo it and check it is as it
@@ -1091,6 +1097,20 @@ fn every_op_is_named_as_serde_writes_it() {
             id: 2,
             name: "x".into(),
         },
+        Edit::SetSource {
+            media: MediaId(1),
+            source: Source::default(),
+        },
+        Edit::SetStitch {
+            media: MediaId(1),
+            tune: Some(Tune::default()),
+            gains: Some(Gains::Off {}),
+            profile: None,
+        },
+        Edit::SetCaps {
+            media: MediaId(1),
+            caps: Caps::default(),
+        },
     ];
     assert_eq!(samples.len(), Edit::OPS.len());
     for (e, op) in samples.iter().zip(Edit::OPS) {
@@ -1177,4 +1197,515 @@ fn keys_too_close_for_seconds_are_refused() {
         0,
         Code::Exists,
     );
+}
+
+/// A camera file's two-lens source in the X5's shape (M3 plan 11.1),
+/// under the X5 row's conventions with a calibration of my own: synth's
+/// `x5_like_v6` numbers with their last digits changed and its distortion
+/// cut to the radial terms, never Pat's (F137). A tune, gains and caps
+/// edit only what it holds.
+fn x5_shaped() -> DualFisheye {
+    let block = |fx: f64, fy: f64, cx: f64, cy: f64, ypr_deg, t_m, d: [f64; 4]| LensCalib {
+        xi: 2.0,
+        fx,
+        fy,
+        cx,
+        cy,
+        ypr_deg,
+        t_m,
+        terms: CalibTerms::V6 {
+            d: std::array::from_fn(|i| d.get(i).copied().unwrap_or(0.0)),
+        },
+    };
+    let raw = RawStrings {
+        v1: None,
+        v2: None,
+        v3: None,
+        v6: Some("a V6 string of my own".into()),
+    };
+    DualFisheye {
+        camera: Camera {
+            make: Some("Insta360".into()),
+            model: Some("Insta360 X5".into()),
+            firmware: Some("v1.1.22_build1".into()),
+            serial: Some("SYNTH00001".into()),
+        },
+        tracks: [0, 1],
+        front_track: 0,
+        calibration: CalibSnapshot {
+            canvas: [10752, 5376],
+            window: [5312, 5312],
+            window_offset: [0, 0],
+            hash: raw.hash(),
+            raw,
+            v3: None,
+            v6: Some([
+                block(
+                    4277.56,
+                    4277.23,
+                    2704.7,
+                    2673.4,
+                    [0.31, -0.22, 90.47],
+                    [0.0; 3],
+                    [0.28032991, 0.89045402, 2.04927581, -8.05179784],
+                ),
+                block(
+                    4284.44,
+                    4284.72,
+                    2669.2,
+                    2703.3,
+                    [-0.26, 0.33, 89.32],
+                    [-0.00447, 0.000018, -0.0322],
+                    [0.27665338, 0.98522977, 1.83605261, -7.99374482],
+                ),
+            ]),
+        },
+        geometry: Geometry {
+            binding: Binding::Reversed,
+            canvas: CanvasMap::C,
+            extrinsics: Extrinsics::Stored(EulerConv::PLACEHOLDER),
+            turn: TurnAxis::Y,
+            tz: TzSign::AsStored,
+            upright: QuarterTurn::Zero,
+            generation: Generation::V6,
+            v6: V6Reading::RADIAL_ONLY,
+            status: Status::Provisional,
+            evidence: "placeholder until the fit".into(),
+        },
+        tune: Tune::default(),
+        gains: Gains::Off {},
+        profile: None,
+    }
+}
+
+/// A new project on a 10 s camera file of two 3840² lenses whose source
+/// is [`x5_shaped`].
+fn camera_project() -> Project {
+    let mut m = common::media("/clips/VID_20250101_120000_00_001.insv", 10);
+    m.video.width = 3840;
+    m.video.height = 3840;
+    m.source = Source::DualFisheye(Box::new(x5_shaped()));
+    Project::untitled(
+        m,
+        InitialView {
+            orientation: ypr(20.0, -5.0, 0.0),
+            fov_deg: 90.0,
+            projection: Projection::Rectilinear,
+        },
+    )
+    .unwrap()
+}
+
+/// The dual-fisheye source of media `id` in `p`.
+fn fisheye(p: &Project, id: MediaId) -> &DualFisheye {
+    match &p.media_by_id(id).unwrap().source {
+        Source::DualFisheye(d) => d,
+        other => panic!("media {id} is {other:?}"),
+    }
+}
+
+/// 11.5's tune: q = 1/1.5 m⁻¹, lens B yawed 0.3° and a 3° feather.
+fn fixture_tune() -> Tune {
+    let mut tune = Tune {
+        feather_deg: 3.0,
+        q_per_m: 1.0 / 1.5,
+        ..Tune::default()
+    };
+    tune.lenses[1].ypr_deg = [0.3, 0.0, 0.0];
+    tune
+}
+
+/// Fixed gains of `g` on lens B.
+fn lens_b_gains(g: f64) -> Gains {
+    Gains::Fixed {
+        rgb: [[1.0; 3], [g; 3]],
+    }
+}
+
+/// Whether `inverse`, applied to `after`, gives a project with `before`'s
+/// content: the check that an undo is exact.
+fn undoes(after: &Project, inverse: &[Edit], before: &Project) -> bool {
+    let mut p = after.clone();
+    p.apply(inverse).is_ok() && p.same_content(before)
+}
+
+/// `set_source`, `set_stitch` and `set_caps` on a dual-fisheye media
+/// (M3 plan 11.3): each change, undone to an equal project and redone to
+/// the edited one, an agent's step keeping its name. Control: an inverse
+/// made of the new value fails the undo.
+#[test]
+fn the_stitch_ops_apply_and_undo_exactly() {
+    let mut p = camera_project();
+    let m = p.the_clip().media;
+    let first = x5_shaped();
+
+    // set_source: the binding swapped by hand, as status User says, then
+    // the file tagged as equirect and stitched again.
+    let mut swapped = x5_shaped();
+    swapped.geometry.binding = Binding::Direct;
+    swapped.geometry.status = Status::User;
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetSource {
+            media: m,
+            source: Source::DualFisheye(Box::new(swapped.clone())),
+        }],
+    );
+    assert_eq!(fisheye(&after, m), &swapped);
+    assert_eq!(fisheye(&p, m), &swapped, "redo leaves the edit in place");
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetSource {
+            media: m,
+            source: Source::Equirect {},
+        }],
+    );
+    assert_eq!(after.media_by_id(m).unwrap().source, Source::Equirect {});
+    round_trip(
+        &mut p,
+        vec![Edit::SetSource {
+            media: m,
+            source: Source::DualFisheye(Box::new(first.clone())),
+        }],
+    );
+    assert_eq!(fisheye(&p, m), &first);
+
+    // set_stitch: a tune from a profile, then gains alone, which keep the
+    // tune and its profile, then a tune with no profile, which clears it,
+    // then both at once.
+    let profile = ProfileRef::of("tripod", br#"{"name": "tripod"}"#);
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetStitch {
+            media: m,
+            tune: Some(fixture_tune()),
+            gains: None,
+            profile: Some(profile.clone()),
+        }],
+    );
+    let d = fisheye(&after, m);
+    assert_eq!(
+        (&d.tune, &d.gains, &d.profile),
+        (&fixture_tune(), &Gains::Off {}, &Some(profile.clone()))
+    );
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetStitch {
+            media: m,
+            tune: None,
+            gains: Some(lens_b_gains(0.9)),
+            profile: None,
+        }],
+    );
+    let d = fisheye(&after, m);
+    assert_eq!(
+        (&d.tune, &d.gains, &d.profile),
+        (&fixture_tune(), &lens_b_gains(0.9), &Some(profile.clone()))
+    );
+    let mut wider = fixture_tune();
+    wider.feather_deg = 2.0;
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetStitch {
+            media: m,
+            tune: Some(wider),
+            gains: None,
+            profile: None,
+        }],
+    );
+    let d = fisheye(&after, m);
+    assert_eq!(
+        (&d.tune, &d.gains, &d.profile),
+        (&wider, &lens_b_gains(0.9), &None)
+    );
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetStitch {
+            media: m,
+            tune: Some(Tune::default()),
+            gains: Some(Gains::Off {}),
+            profile: Some(profile.clone()),
+        }],
+    );
+    let d = fisheye(&after, m);
+    assert_eq!(
+        (&d.tune, &d.gains, &d.profile),
+        (&Tune::default(), &Gains::Off {}, &Some(profile.clone()))
+    );
+    // Nothing but the stitch changed: the calibration and geometry are
+    // the source's.
+    assert_eq!(
+        (&d.calibration, &d.geometry, d.tracks),
+        (&first.calibration, &first.geometry, first.tracks)
+    );
+
+    // set_caps: a nadir fill, the zenith left bare.
+    let caps = Caps {
+        nadir: Some(Box::new(Cap {
+            mode: CapMode::Fill { ring_deg: 2.0 },
+            cap_deg: 20.0,
+            edge_deg: 2.5,
+            rotation_deg: 0.0,
+        })),
+        zenith: None,
+    };
+    let after = round_trip(
+        &mut p,
+        vec![Edit::SetCaps {
+            media: m,
+            caps: caps.clone(),
+        }],
+    );
+    assert_eq!(after.media_by_id(m).unwrap().caps, caps);
+
+    // An agent's step, by its name: undo gives the project before it,
+    // redo the one after, and the step keeps its label and origin.
+    let mut h = History::new();
+    let before = p.clone();
+    let agent = Origin::Agent {
+        name: "claude".into(),
+    };
+    let edit = Edit::SetStitch {
+        media: m,
+        tune: Some(fixture_tune()),
+        gains: Some(lens_b_gains(0.9)),
+        profile: None,
+    };
+    let step = h
+        .record(&mut p, "Stitch", agent.clone(), std::slice::from_ref(&edit))
+        .unwrap()
+        .clone();
+    assert_eq!((step.label.as_str(), &step.origin), ("Stitch", &agent));
+    let after = p.clone();
+    let inverse = step.inverse.clone();
+    assert!(undoes(&after, &inverse, &before));
+    let undone = h.undo(&mut p).unwrap().unwrap();
+    assert_eq!((undone.label.as_str(), &undone.origin), ("Stitch", &agent));
+    assert!(p.same_content(&before));
+    h.redo(&mut p).unwrap().unwrap();
+    assert!(p.same_content(&after));
+
+    // Control: an inverse made of the new value leaves the edit in place.
+    // Each edit changes what `before` holds: its caps are the nadir fill.
+    for (name, edit) in [
+        ("set_stitch", edit),
+        (
+            "set_source",
+            Edit::SetSource {
+                media: m,
+                source: Source::Equirect {},
+            },
+        ),
+        (
+            "set_caps",
+            Edit::SetCaps {
+                media: m,
+                caps: Caps::default(),
+            },
+        ),
+    ] {
+        let mut q = before.clone();
+        q.apply(std::slice::from_ref(&edit)).unwrap();
+        must_fail(
+            &format!("{name}'s inverse made of its new value undoes it"),
+            undoes(&q, &[edit], &before),
+        );
+    }
+}
+
+/// Whether `edits` are refused with `code` and leave `p` as it was: the
+/// check [`refused`] makes, as a value a control can hand to `must_fail`.
+fn refuses(p: &Project, edits: &[Edit], code: Code) -> Result<(), String> {
+    let mut q = p.clone();
+    match q.apply(edits) {
+        Ok(_) => Err(format!("{edits:?} applied")),
+        Err(e) if e.code() != code => Err(format!("{e}: {} for {code}", e.code())),
+        Err(_) if q != *p => Err("a refusal changed the project".into()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// `set_stitch` with neither a tune nor gains, a profile without a tune,
+/// on an equirect media, or on a media that isn't there is refused by its
+/// code, as is each stitch op on a media that isn't there. Control: gains
+/// alone apply.
+#[test]
+fn set_stitch_needs_a_tune_or_gains() {
+    let mut p = camera_project();
+    let m = p.the_clip().media;
+    let stitch = |media, tune, gains, profile| Edit::SetStitch {
+        media,
+        tune,
+        gains,
+        profile,
+    };
+    let tripod = || Some(ProfileRef::of("tripod", b"{}"));
+    for edit in [
+        stitch(m, None, None, None),
+        stitch(m, None, None, tripod()),
+        stitch(m, None, Some(lens_b_gains(0.9)), tripod()),
+    ] {
+        refuses(&p, &[edit], Code::Invalid).unwrap();
+    }
+    // An equirect media has no stitch, whatever the edit holds.
+    let mut plain = project();
+    let flat = plain.the_clip().media;
+    for edit in [
+        stitch(flat, Some(fixture_tune()), None, None),
+        stitch(flat, None, Some(lens_b_gains(0.9)), None),
+    ] {
+        refuses(&plain, &[edit], Code::Invalid).unwrap();
+    }
+    let gone = MediaId(999);
+    for edit in [
+        stitch(gone, Some(fixture_tune()), None, None),
+        Edit::SetSource {
+            media: gone,
+            source: Source::Equirect {},
+        },
+        Edit::SetCaps {
+            media: gone,
+            caps: Caps::default(),
+        },
+    ] {
+        refuses(&p, &[edit], Code::NotFound).unwrap();
+    }
+    // As a list: the refused edit is named, and nothing applies.
+    let e = refused(
+        &mut p,
+        vec![
+            stitch(m, Some(fixture_tune()), None, None),
+            stitch(m, None, None, None),
+        ],
+        1,
+        Code::Invalid,
+    );
+    assert_eq!(e.op, "set_stitch");
+    // Caps are any source's.
+    let caps = Caps {
+        nadir: None,
+        zenith: Some(Box::new(Cap {
+            mode: CapMode::Fill { ring_deg: 1.0 },
+            cap_deg: 10.0,
+            edge_deg: 0.0,
+            rotation_deg: 0.0,
+        })),
+    };
+    let after = round_trip(
+        &mut plain,
+        vec![Edit::SetCaps {
+            media: flat,
+            caps: caps.clone(),
+        }],
+    );
+    assert_eq!(after.media_by_id(flat).unwrap().caps, caps);
+
+    // Control: gains alone apply.
+    must_fail(
+        "set_stitch with gains alone is refused",
+        refuses(
+            &p,
+            &[stitch(m, None, Some(lens_b_gains(0.9)), None)],
+            Code::Invalid,
+        ),
+    );
+}
+
+/// `set_stitch` on a camera's EAC pair is refused by the media's kind, as
+/// on an equirect media: an EAC pair has no tune or gains (the M3.9
+/// review's N5). Control: the same edit on the same media as a fisheye
+/// pair applies.
+#[test]
+fn set_stitch_on_an_eac_pair_is_refused() {
+    let fisheyes = camera_project();
+    let m = fisheyes.the_clip().media;
+    let mut pair = fisheyes.clone();
+    pair.apply(&[Edit::SetSource {
+        media: m,
+        source: Source::EacPair(Box::new(EacPair {
+            camera: x5_shaped().camera,
+            tracks: [0, 1],
+            layout: EacLayout {
+                overlap: 64,
+                pre: 1152,
+                post: 1024,
+                size: [4096, 1344],
+            },
+        })),
+    }])
+    .unwrap();
+    let stitch = || Edit::SetStitch {
+        media: m,
+        tune: Some(fixture_tune()),
+        gains: Some(lens_b_gains(0.9)),
+        profile: None,
+    };
+    refuses(&pair, &[stitch()], Code::Invalid).unwrap();
+    let e = pair.clone().apply(&[stitch()]).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("is a camera's two EAC tracks, not a camera's two fisheye lenses"),
+        "{e}"
+    );
+
+    must_fail(
+        "set_stitch on the same media as a fisheye pair refused",
+        refuses(&fisheyes, &[stitch()], Code::Invalid),
+    );
+}
+
+/// Whether `History::record` refuses `edits` with `code` and leaves both
+/// `p` and `h` as they were, a step undone above the cursor included.
+fn record_refuses(p: &Project, h: &History, edits: &[Edit], code: Code) -> Result<(), String> {
+    let (mut q, mut g) = (p.clone(), h.clone());
+    let recorded = g.record(&mut q, "Stitch", Origin::User, edits).map(drop);
+    match recorded {
+        Ok(_) => Err(format!("{edits:?} recorded")),
+        Err(e) if e.code() != code => Err(format!("{e}: {} for {code}", e.code())),
+        Err(_) if q != *p => Err("a refusal changed the project".into()),
+        Err(_) if g != *h => Err("a refusal changed the history".into()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// A stitch op that `set_stitch`'s own checks pass and `validate`
+/// refuses, a tune past its bounds, leaves the project and the history
+/// as they were: no revision, no step, and the undone step above the
+/// cursor kept for redo (the M3.9 review's N5). Control: the same edit
+/// with its tune inside the bounds is recorded.
+#[test]
+fn a_stitch_validate_refuses_leaves_project_and_history() {
+    let mut p = camera_project();
+    let m = p.the_clip().media;
+    let stitch = |feather_deg| {
+        let mut tune = fixture_tune();
+        tune.feather_deg = feather_deg;
+        Edit::SetStitch {
+            media: m,
+            tune: Some(tune),
+            gains: None,
+            profile: None,
+        }
+    };
+    // Two steps, one undone, so a refusal that dropped the redo would show.
+    let mut h = History::new();
+    h.record(&mut p, "Stitch", Origin::User, &[stitch(2.0)])
+        .unwrap();
+    h.record(&mut p, "Stitch", Origin::User, &[stitch(4.0)])
+        .unwrap();
+    h.undo(&mut p).unwrap().unwrap();
+    assert_eq!((h.steps().len(), h.cursor()), (2, 1));
+
+    // Past the feather's 0° to 15° (validate's `FEATHER_DEG`).
+    let past = 16.0;
+    record_refuses(&p, &h, &[stitch(past)], Code::OutOfRange).unwrap();
+    let e = p.clone().apply(&[stitch(past)]).unwrap_err();
+    assert_eq!((e.index, e.op), (0, "set_stitch"), "{e}");
+    assert!(e.to_string().contains("source.tune.feather_deg"), "{e}");
+
+    let recorded = must_fail(
+        "the same stitch with its tune inside the bounds refused",
+        record_refuses(&p, &h, &[stitch(3.0)], Code::OutOfRange),
+    );
+    assert!(recorded.ends_with("recorded"), "{recorded}");
 }

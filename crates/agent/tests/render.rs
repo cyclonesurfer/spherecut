@@ -193,12 +193,17 @@ fn a_cancelled_render_stops_within_two_seconds_and_leaves_nothing() {
     let dir = TempDir::new("cancel");
     let tools = dir.tools();
     let before = dir.names();
-    let id = ok(&tools, "render", dir.render("out.mp4"))["job"].clone();
-    until(&tools, &id, Duration::from_secs(30), running);
+    let r = ok(&tools, "render", dir.render("out.mp4"));
+    let id = r["job"].clone();
+    let polled = until(&tools, &id, Duration::from_secs(30), running);
     let asked = Instant::now();
     let j = ok(&tools, "job", json!({"job": id, "cancel": true}));
     let took = asked.elapsed();
     assert_eq!(j["state"], "cancelled", "{j}");
+    // F049: each result has its warnings, [] when nothing warned.
+    for said in [&r, &polled, &j] {
+        assert_eq!(said["warnings"], json!([]), "{said}");
+    }
     assert!(took <= CANCEL_WAIT, "cancel took {took:?}");
     assert_eq!(dir.names(), before);
     // A cancelled job stays cancelled.

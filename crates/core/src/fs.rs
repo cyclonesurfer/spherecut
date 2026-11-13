@@ -89,6 +89,87 @@ pub fn follow_links(path: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("too many levels of symbolic links"))
 }
 
+/// The file at `path` where the kernel finds it, in its real folder: a
+/// project file's own place (the project review's F031). Links at the
+/// path's end are followed as [`follow_links`] follows them, but each
+/// from the real folder of the link, and the folder that holds the file
+/// is resolved physically (`realpath`), so a `..` in a link's target or
+/// in the path is taken where the kernel takes it, never lexically
+/// across a linked folder. A project's media paths are made relative to
+/// the folder this gives once each is named nearest it ([`name_near`],
+/// R8), and read back lexically from it (D47). The
+/// file itself need not exist, as when a project is saved for the first
+/// time, but its folder must.
+pub fn real_file(path: &Path) -> io::Result<PathBuf> {
+    may_block("resolving a file's folder");
+    let mut p = std::path::absolute(path)?;
+    // The kernel's own limit for one lookup, as in `follow_links`.
+    for _ in 0..40 {
+        let Some(name) = p.file_name() else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the path names no file",
+            ));
+        };
+        let folder = std::fs::canonicalize(p.parent().unwrap_or(Path::new("/")))?;
+        let here = folder.join(name);
+        match std::fs::symlink_metadata(&here) {
+            // A relative target is relative to the link's real folder;
+            // an absolute one replaces it.
+            Ok(m) if m.file_type().is_symlink() => p = folder.join(std::fs::read_link(&here)?),
+            Ok(_) => return Ok(here),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(here),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+/// `path` (absolute and lexical) named as near `folder` (a real folder,
+/// as [`real_file`] names a project's) as the kernel lets it be: of the
+/// names of it that one of its folders gives, named physically with the
+/// rest of `path` kept as it is, the one that shares the most of
+/// `folder`, and of those the one that resolves least, `path` itself
+/// first. Its own name is never resolved, so a linked clip keeps its
+/// name, and a folder that is missing (media offline) gives no name. So
+/// a media named through a linked ancestor of the project's folder is
+/// stored from the folder it is really in, not by a path that climbs to
+/// the root and back down (the M3.9 review's R8), and one in a linked
+/// folder within the project's (footage on another disk) keeps the
+/// link's name, so the folder moved with its link keeps its media (that
+/// fix's review). Each name is the same file, as `path` holds no `..`.
+pub fn name_near(path: &Path, folder: &Path) -> PathBuf {
+    may_block("resolving a file's folders");
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let shared = |p: &Path| {
+        p.components()
+            .zip(folder.components())
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    let mut best = (shared(path), path.to_path_buf());
+    // From the root down, so that a tie keeps the name resolved least.
+    let mut ancestors: Vec<&Path> = parent.ancestors().collect();
+    ancestors.reverse();
+    for a in ancestors {
+        // A folder that is missing has none below it either.
+        let Ok(real) = std::fs::canonicalize(a) else {
+            break;
+        };
+        let Ok(rest) = path.strip_prefix(a) else {
+            continue;
+        };
+        let named = real.join(rest);
+        let n = shared(&named);
+        if n > best.0 {
+            best = (n, named);
+        }
+    }
+    best.1
+}
+
 /// What is at `dest`, if it is a regular file that a rename may replace;
 /// `None` if nothing is. Anything else is refused: a rename over a
 /// directory fails, but only once all the work is done, and one over a
@@ -106,6 +187,40 @@ pub fn replaceable(dest: &Path) -> io::Result<Option<std::fs::Metadata>> {
         Ok(m) => Ok(Some(m)),
         // Missing; any other error shows when the file is created or renamed.
         Err(_) => Ok(None),
+    }
+}
+
+/// Why a publish ([`TempFile::publish_replace_with`],
+/// [`TempFile::publish_new_with`]) failed: before the file was in place,
+/// or after, when only the folder's flush failed. The public `persist_*`
+/// give either as their `io::Error`.
+#[derive(Debug)]
+pub(crate) enum PublishError {
+    /// Nothing was published: the output is as it was.
+    Failed(io::Error),
+    /// The file is in place under its name, with `meta`, but the folder
+    /// couldn't be flushed after (`EIO`, `ENOSPC`, `EDQUOT`), so a crash
+    /// before the disk catches up may lose the name (the M3.9 review's
+    /// R3). A caller that keeps what it wrote takes it as published.
+    /// (Boxed, as the metadata is large beside an `io::Error`.)
+    NotFlushed {
+        meta: Box<std::fs::Metadata>,
+        source: io::Error,
+    },
+}
+
+impl PublishError {
+    /// The error alone, as the public `persist_*` give it.
+    fn into_io(self) -> io::Error {
+        match self {
+            PublishError::Failed(e) | PublishError::NotFlushed { source: e, .. } => e,
+        }
+    }
+}
+
+impl From<io::Error> for PublishError {
+    fn from(e: io::Error) -> PublishError {
+        PublishError::Failed(e)
     }
 }
 
@@ -198,43 +313,100 @@ impl TempFile {
     }
 
     /// Flush to disk and rename onto `dest`, replacing the regular file
-    /// there, if any (D16).
-    pub fn persist_replace(mut self) -> io::Result<()> {
+    /// there, if any, then flush the folder (D16). A failed flush of the
+    /// folder is an error too, though the file is in place by then.
+    pub fn persist_replace(self) -> io::Result<()> {
+        self.persist_replace_with(sync_folder)
+    }
+
+    /// [`TempFile::persist_replace`], syncing the folder with `sync`,
+    /// which tests count.
+    pub(crate) fn persist_replace_with(
+        self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.publish_replace_with(sync)
+            .map(drop)
+            .map_err(PublishError::into_io)
+    }
+
+    /// [`TempFile::persist_replace`], giving the published file's metadata,
+    /// and telling a failed flush of the folder after the rename apart
+    /// ([`PublishError::NotFlushed`]). The metadata is taken before the
+    /// rename, which keeps the file (its device, inode, size and mtime),
+    /// so that nothing after it can fail as though nothing was published.
+    pub(crate) fn publish_replace_with(
+        mut self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
+        let meta = self.file.metadata()?;
         // Something may have turned up at `dest` while the file was written.
         replaceable(&self.dest)?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;
-        Ok(())
+        self.synced(sync, meta)
     }
 
     /// Flush to disk and publish as `dest` only if nothing is there, not
     /// even a dangling symlink: an error of kind
     /// [`AlreadyExists`](io::ErrorKind::AlreadyExists) otherwise, which
     /// leaves what is there alone, whenever it turned up. The temp file is
-    /// gone either way.
+    /// gone either way. Once published, the folder is flushed too (D16).
     pub fn persist_new(self) -> io::Result<()> {
-        self.persist_new_with(rename_new, |from, to| std::fs::hard_link(from, to))
+        self.publish_new().map(drop).map_err(PublishError::into_io)
     }
 
-    /// [`TempFile::persist_new`], publishing with `rename` or else `link`,
-    /// which tests make refuse as filesystems without them do.
-    fn persist_new_with(
+    /// [`TempFile::persist_new`], giving the published file's metadata:
+    /// the temporary file's own where it was renamed or linked in (taken
+    /// before, as the rename and the link keep the file), the copy's
+    /// where it was copied, which is another file (the project review's
+    /// F032); a failed flush of the folder after the publish is
+    /// [`PublishError::NotFlushed`], with it.
+    pub(crate) fn publish_new(self) -> Result<std::fs::Metadata, PublishError> {
+        self.publish_new_with(
+            rename_new,
+            |from, to| std::fs::hard_link(from, to),
+            sync_folder,
+        )
+    }
+
+    /// [`TempFile::publish_new`] as the public [`TempFile::persist_new`]
+    /// gives it, for tests.
+    #[cfg(test)]
+    pub(crate) fn persist_new_with(
+        self,
+        rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        link: impl FnOnce(&Path, &Path) -> io::Result<()>,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<std::fs::Metadata> {
+        self.publish_new_with(rename, link, sync)
+            .map_err(PublishError::into_io)
+    }
+
+    /// [`TempFile::publish_new`], publishing with `rename` or else `link`,
+    /// which tests make refuse as filesystems without them do, and
+    /// syncing the folder with `sync`, which tests count.
+    pub(crate) fn publish_new_with(
         mut self,
         rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
         link: impl FnOnce(&Path, &Path) -> io::Result<()>,
-    ) -> io::Result<()> {
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
+        // Before the publish, so that nothing after it can fail as though
+        // nothing was published: a rename or a link keeps the file.
+        let meta = self.file.metadata()?;
         // One step that leaves nothing at the temporary name and is never
         // a part of the file at the output, as the copy below can be.
         match rename(&self.path, &self.dest) {
             Ok(()) => {
                 self.persisted = true;
-                return Ok(());
+                return self.synced(sync, meta);
             }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e.into()),
             // The filesystem doesn't take the flag (EINVAL), or the kernel
             // is older than it (ENOSYS); any other refusal the link meets
             // too.
@@ -243,9 +415,9 @@ impl TempFile {
                 self.dest.display()
             ),
         }
-        match link(&self.path, &self.dest) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e),
+        let copy = match link(&self.path, &self.dest) {
+            Ok(()) => None,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e.into()),
             // No hard links here (EPERM on FAT, EOPNOTSUPP or ENOSYS on
             // some network filesystems), or another refusal, which the
             // exclusive create then meets too and reports.
@@ -254,24 +426,54 @@ impl TempFile {
                     "no hard link to {} ({e}); copying instead",
                     self.dest.display()
                 );
-                self.copy_to_new()?;
+                Some(self.copy_to_new()?)
             }
-        }
+        };
         // `dest` holds the file now, under its own name too; the temp
         // name goes, as on a drop.
         self.persisted = true;
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!("could not remove {}: {e}", self.path.display());
         }
-        Ok(())
+        self.synced(sync, copy.unwrap_or(meta))
+    }
+
+    /// After a publish of the file with `meta`, flush the folder `dest` is
+    /// in with `sync`, so that the name survives a crash as the bytes do
+    /// (the project review's F033). Best effort: what says the folder
+    /// can't be synced here ([`cannot_sync`]) passes, logged; a failed
+    /// sync is [`PublishError::NotFlushed`], the file in place.
+    fn synced(
+        &self,
+        sync: impl FnOnce(&Path) -> io::Result<()>,
+        meta: std::fs::Metadata,
+    ) -> Result<std::fs::Metadata, PublishError> {
+        if sync_left_out() {
+            return Ok(meta);
+        }
+        let folder = match self.dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        match sync(folder) {
+            Ok(()) => Ok(meta),
+            Err(e) if cannot_sync(&e) => {
+                tracing::debug!("{} can't be synced here: {e}", folder.display());
+                Ok(meta)
+            }
+            Err(source) => Err(PublishError::NotFlushed {
+                meta: Box::new(meta),
+                source,
+            }),
+        }
     }
 
     /// Create `dest` exclusively, copy the file into it and flush it,
     /// removing it again if the copy fails: what [`persist_new`]
-    /// does without hard links.
+    /// does without hard links. The copy's metadata, once flushed.
     ///
     /// [`persist_new`]: TempFile::persist_new
-    fn copy_to_new(&mut self) -> io::Result<()> {
+    fn copy_to_new(&mut self) -> io::Result<std::fs::Metadata> {
         let mode = self.file.metadata()?.permissions().mode() & 0o777;
         let mut out = OpenOptions::new()
             .write(true)
@@ -281,23 +483,75 @@ impl TempFile {
         let copied = (|| {
             self.file.seek(SeekFrom::Start(0))?;
             io::copy(&mut self.file, &mut out)?;
-            out.sync_all()
+            out.sync_all()?;
+            out.metadata()
         })();
-        if let Err(e) = copied {
+        if copied.is_err() {
             // The exclusive create made it ours, so it is ours to remove.
             drop(out);
             if let Err(r) = std::fs::remove_file(&self.dest) {
                 tracing::warn!("could not remove {}: {r}", self.dest.display());
             }
-            return Err(e);
         }
-        Ok(())
+        copied
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests' switch that leaves a publish's folder sync out, for the
+    /// control that shows the count of syncs sees one go missing.
+    static LEAVE_SYNC_OUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a test has left the folder sync out.
+fn sync_left_out() -> bool {
+    #[cfg(test)]
+    {
+        LEAVE_SYNC_OUT.get()
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Flush `folder` to disk: `fsync` on the folder, which makes the names
+/// in it durable as the file's own `fsync` makes its bytes (D16).
+pub(crate) fn sync_folder(folder: &Path) -> io::Result<()> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(OFlags::DIRECTORY.bits() as i32)
+        .open(folder)?
+        .sync_all()
+}
+
+/// Whether `e`, from [`sync_folder`], says this folder can't be synced
+/// here rather than that its sync failed, so that the publish stands:
+/// `EINVAL`, `EOPNOTSUPP` and `ENOSYS` (a filesystem without `fsync` on a
+/// folder, as some FUSE and network ones are), `EBADF` (one that won't
+/// sync a folder opened only for reading), and `EACCES` and `EPERM` (a
+/// folder that may be written but not opened, mode 0300 say). Anything
+/// else (`EIO`, `ENOSPC`, `EDQUOT`) says the name may not be on disk.
+fn cannot_sync(e: &io::Error) -> bool {
+    use rustix::io::Errno;
+    // EOPNOTSUPP is ENOTSUP on Linux.
+    matches!(
+        Errno::from_io_error(e),
+        Some(
+            Errno::INVAL
+                | Errno::OPNOTSUPP
+                | Errno::NOSYS
+                | Errno::BADF
+                | Errno::ACCESS
+                | Errno::PERM
+        )
+    )
 }
 
 /// Rename `from` to `to` unless something is at `to`, even a dangling
 /// link: `renameat2` with `RENAME_NOREPLACE`.
-fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+pub(crate) fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE).map_err(io::Error::from)
 }
@@ -583,15 +837,23 @@ mod tests {
 
         let out = dir.join("linked.png");
         let tmp = written(&out, b"linked");
-        tmp.persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
-            .unwrap();
+        tmp.persist_new_with(
+            no_flag,
+            |from, to| std::fs::hard_link(from, to),
+            sync_folder,
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
         // One name left: the temp name was removed after the link.
         assert_eq!(std::fs::metadata(&out).unwrap().nlink(), 1);
         assert_eq!(listing(&dir), ["linked.png", "out.png"]);
         let tmp = written(&out, b"again");
         let e = tmp
-            .persist_new_with(no_flag, |from, to| std::fs::hard_link(from, to))
+            .persist_new_with(
+                no_flag,
+                |from, to| std::fs::hard_link(from, to),
+                sync_folder,
+            )
             .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), b"linked");
@@ -661,14 +923,16 @@ mod tests {
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let tmp = written(&out, &big);
         let made = mode(tmp.path());
-        tmp.persist_new_with(no_flag, refuse).unwrap();
+        tmp.persist_new_with(no_flag, refuse, sync_folder).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(mode(&out), made);
         assert_eq!(listing(&dir), ["out.png"]);
 
         // The exclusive create still refuses an output that turned up.
         let tmp = written(&out, b"ours");
-        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
+        let e = tmp
+            .persist_new_with(no_flag, refuse, sync_folder)
+            .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&out).unwrap(), big);
         assert_eq!(listing(&dir), ["out.png"]);
@@ -676,7 +940,9 @@ mod tests {
         // And a refusal the create meets too is reported, leaving nothing.
         let nowhere = dir.join("no-such-dir").join("out.png");
         let tmp = written(&out, b"ours").aimed_at(&nowhere);
-        let e = tmp.persist_new_with(no_flag, refuse).unwrap_err();
+        let e = tmp
+            .persist_new_with(no_flag, refuse, sync_folder)
+            .unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert_eq!(listing(&dir), ["out.png"]);
     }
@@ -780,5 +1046,148 @@ mod tests {
         symlink("loop-a", dir.join("loop-b")).unwrap();
         let e = follow_links(&dir.join("loop-a")).unwrap_err();
         assert!(e.to_string().contains("symbolic links"), "{e}");
+    }
+
+    /// R8 and its review: `name_near` names a media path as near the
+    /// project's real folder (`real/trip`) as its folders' real paths let
+    /// it be. Through the linked ancestor `alias`, a clip in the folder is
+    /// named in it and one in a sibling folder from their shared parent;
+    /// a folder linked within the project's (`footage`) keeps its name,
+    /// as does a clip's own link (`clip.mp4`); a folder that is missing
+    /// has the folders that are there resolved and the rest kept.
+    ///
+    /// Controls: the R8 fix's first rule, the media's whole folder named
+    /// physically, names the footage by the link's target; `canonicalize`
+    /// follows the clip's own link.
+    #[test]
+    fn a_media_path_is_named_nearest_its_projects_folder() {
+        use std::os::unix::fs::symlink;
+
+        use spherecut_testkit::control::must_fail;
+        let tmp = tmpdir("name-near");
+        let dir = std::fs::canonicalize(&*tmp).unwrap();
+        for d in ["real/trip", "real/clips", "nas/footage"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("real/trip/take.mp4"), b"").unwrap();
+        symlink("real", dir.join("alias")).unwrap();
+        symlink("take.mp4", dir.join("real/trip/clip.mp4")).unwrap();
+        symlink(dir.join("nas/footage"), dir.join("real/trip/footage")).unwrap();
+        let folder = dir.join("real/trip");
+        let named = |p: &str| name_near(&dir.join(p), &folder);
+        for (given, near) in [
+            ("alias/trip/clip.mp4", "real/trip/clip.mp4"),
+            ("alias/trip/new.mp4", "real/trip/new.mp4"),
+            ("alias/clips/c.mp4", "real/clips/c.mp4"),
+            ("real/trip/footage/f.mp4", "real/trip/footage/f.mp4"),
+            ("alias/trip/footage/f.mp4", "real/trip/footage/f.mp4"),
+            ("alias/gone/deeper/clip.mp4", "real/gone/deeper/clip.mp4"),
+            ("nowhere/clip.mp4", "nowhere/clip.mp4"),
+            ("nas/footage/f.mp4", "nas/footage/f.mp4"),
+        ] {
+            assert_eq!(named(given), dir.join(near), "{given}");
+        }
+        let whole = |p: &str| {
+            let p = dir.join(p);
+            std::fs::canonicalize(p.parent().unwrap())
+                .unwrap()
+                .join(p.file_name().unwrap())
+        };
+        must_fail(
+            "the media's whole folder named physically",
+            whole("real/trip/footage/f.mp4") == dir.join("real/trip/footage/f.mp4"),
+        );
+        must_fail(
+            "the clip's own link followed",
+            std::fs::canonicalize(dir.join("alias/trip/clip.mp4")).unwrap()
+                == dir.join("real/trip/clip.mp4"),
+        );
+    }
+
+    /// F033: each atomic publish syncs its folder once, as best it can: a
+    /// folder that can't be synced (EINVAL) still publishes. Control: with the
+    /// sync left out the count is 0.
+    #[test]
+    fn publish_syncs_its_folder() {
+        use std::cell::RefCell;
+
+        use spherecut_testkit::control::must_fail;
+        let dir = tmpdir("sync");
+        let seen = &RefCell::new(Vec::<PathBuf>::new());
+        // A sync that notes the folder and answers with `errno`, if any.
+        let sync = |errno: Option<i32>| {
+            move |folder: &Path| -> io::Result<()> {
+                seen.borrow_mut().push(folder.to_path_buf());
+                errno.map_or(Ok(()), |e| Err(io::Error::from_raw_os_error(e)))
+            }
+        };
+        let link = |from: &Path, to: &Path| std::fs::hard_link(from, to);
+        let no_links = |_: &Path, _: &Path| Err(io::Error::from_raw_os_error(1));
+        let out = |name: &str| dir.join(name);
+
+        // Each way to publish: a rename over, a rename without replacing,
+        // a link, a copy. One sync each, of the output's folder.
+        written(&out("a.png"), b"a")
+            .persist_replace_with(sync(None))
+            .unwrap();
+        written(&out("b.png"), b"b")
+            .persist_new_with(rename_new, link, sync(None))
+            .unwrap();
+        written(&out("c.png"), b"c")
+            .persist_new_with(no_flag, link, sync(None))
+            .unwrap();
+        written(&out("d.png"), b"d")
+            .persist_new_with(no_flag, no_links, sync(None))
+            .unwrap();
+        assert_eq!(*seen.borrow(), vec![dir.to_path_buf(); 4]);
+
+        // A folder that can't be synced here: published all the same.
+        written(&out("a.png"), b"a2")
+            .persist_replace_with(sync(Some(22)))
+            .unwrap();
+        written(&out("e.png"), b"e")
+            .persist_new_with(rename_new, link, sync(Some(95)))
+            .unwrap();
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a2");
+        assert_eq!(std::fs::read(out("e.png")).unwrap(), b"e");
+        // A sync that failed (EIO) is the publish's error, with the file
+        // in place and no temporary file left.
+        let e = written(&out("a.png"), b"a3")
+            .persist_replace_with(sync(Some(5)))
+            .unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(5));
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a3");
+        assert_eq!(listing(&dir), ["a.png", "b.png", "c.png", "d.png", "e.png"]);
+        assert_eq!(seen.borrow().len(), 7);
+        // The real sync, on a real folder.
+        written(&out("a.png"), b"a4").persist_replace().unwrap();
+        sync_folder(&dir).unwrap();
+
+        seen.borrow_mut().clear();
+        LEAVE_SYNC_OUT.set(true);
+        let left_out = written(&out("a.png"), b"a5").persist_replace_with(sync(None));
+        LEAVE_SYNC_OUT.set(false);
+        left_out.unwrap();
+        must_fail(
+            "a publish with its folder's sync left out",
+            seen.borrow().len() == 1,
+        );
+
+        // Told apart for a caller that keeps what it wrote (R3): the
+        // published file's metadata comes with the failed sync.
+        match written(&out("a.png"), b"a6").publish_replace_with(sync(Some(5))) {
+            Err(PublishError::NotFlushed { meta, source }) => {
+                assert_eq!(source.raw_os_error(), Some(5));
+                assert_eq!(meta.ino(), std::fs::metadata(out("a.png")).unwrap().ino());
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(std::fs::read(out("a.png")).unwrap(), b"a6");
+        match written(&out("f.png"), b"f").publish_new_with(no_flag, no_links, sync(Some(5))) {
+            Err(PublishError::NotFlushed { meta, .. }) => {
+                assert_eq!(meta.ino(), std::fs::metadata(out("f.png")).unwrap().ino());
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

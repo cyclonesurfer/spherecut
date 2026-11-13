@@ -16,9 +16,9 @@ use std::time::Instant;
 use spherecut_core::FrameRate;
 use spherecut_core::project::file::{self, head_hash};
 use spherecut_core::project::{
-    Aspect, AudioChoice, Codec as ProjectCodec, Edit, EncoderChoice, ExportSettings, Fingerprint,
-    InitialView, Media, MediaId, MediaVideo, Orientation, Output as ProjectOutput, Project,
-    Quality,
+    Aspect, AudioChoice, Caps, Codec as ProjectCodec, Edit, EncoderChoice, ExportSettings,
+    Fingerprint, InitialView, Media, MediaId, MediaVideo, Orientation, Output as ProjectOutput,
+    Project, Quality, Source,
 };
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, VideoRequest};
 use spherecut_sphere::perspective::Projection;
@@ -307,6 +307,8 @@ fn project(dir: &Path, clip: &Path) -> PathBuf {
             rate: info.frame_rate().unwrap(),
             duration: info.duration.unwrap(),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     };
     let view = InitialView {
         orientation: Orientation::IDENTITY,

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::Projection;
 
-use super::{Fingerprint, InitialView, Media, MediaId, MediaVideo, Orientation};
+use super::{Caps, Fingerprint, InitialView, Media, MediaId, MediaVideo, Orientation, Source};
 use crate::time::{FrameRate, Time};
 
 /// A 3840×1920 30 fps media entry of `seconds` at `path`.
@@ -24,6 +24,8 @@ pub fn media(path: &str, seconds: i64) -> Media {
             rate: FrameRate::FPS_30,
             duration: Time::from_secs(seconds),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     }
 }
 

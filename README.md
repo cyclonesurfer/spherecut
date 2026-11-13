@@ -419,7 +419,9 @@ spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x
   sequence at `--time` or `--frame`, counted from the sequence's start,
   as `spherecut render` renders it before the encode: the keyed view,
   the output size and the motion blur are the project's, so the camera
-  flags, `--size` and `--filter` don't go with it (DECISIONS D51).
+  flags, `--size` and `--filter` don't go with it (DECISIONS D51). A
+  project of a camera's two lenses is refused (`not_yet`) until M3.11
+  renders projects stitched, as `spherecut render` refuses it.
 - **Ctrl+C** ends the run with exit 4 and no output. It stops a seek or
   a read at once; during probe, the GPU's set-up, the render or the
   PNG's encode it takes effect when that step ends, which at a large
@@ -484,6 +486,19 @@ statuses are frame's: 1 when the project, the output, the export or a
 check of the file is the problem, 2 for a command line that doesn't
 parse, 3 when a GPU, an adapter or an encoder it needs is missing or
 fails, and 4 when interrupted.
+
+A project of a camera's two lenses (an `.insv` an agent's `project
+create` made, which stores the file's calibration and the lens
+geometry it was made with: DECISIONS D68) isn't exported yet: until
+M3.11 stitches a project's export, `render` refuses it with exit 1
+(`not_yet`) and writes nothing, rather than export one lens as an
+equirect; `frame --reference` of the `.insv` itself shows it
+stitched, and an EAC pair has no stitched view yet. When the project's
+geometry was a provisional guess and Spherecut's table of cameras has
+it measured, or guesses differently (the table keeps no order, so the
+project's guess may be the later one), `render` warns
+(`provisional_geometry`), giving the table's evidence: the project
+keeps its own geometry, and renders the same, until it is changed.
 
 ### Agents
 
@@ -594,9 +609,11 @@ For development and the tests:
   (Development).
 - `SPHERECUT_UPDATE_GOLDENS=1` blesses the golden images (DECISIONS
   D32). `SPHERECUT_BLESS_PROJECT=1` rewrites the checked-in project
-  file `crates/core/tests/data/schema1.spherecut`, whose test fails
-  when the format changes: a new schema needs a migration, not a new
-  copy of that file (DECISIONS D47).
+  file `crates/core/tests/data/schema2.spherecut`, the current
+  schema's fixture, whose test fails when a save no longer writes it.
+  It never rewrites `schema1.spherecut`, which loads unchanged forever:
+  a new schema gets a migration and a fixture of its own (DECISIONS
+  D47).
 - `SPHERECUT_TIER2`, `SPHERECUT_SAMPLES`, `SPHERECUT_PERF_MEDIA` and
   `SPHERECUT_GUI_OUT`: what `cargo xtask hw-test` hands the Tier 2
   tests (run them, the samples folder, the perf clips' folder, where

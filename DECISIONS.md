@@ -79,6 +79,7 @@ Index:
 - D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
 - D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 - D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
+- D68. Schema 2: each media's source, with the calibration, geometry, tune and gains its render reads
 - D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
 - D78. An independent check on GitHub's runner
 
@@ -1279,6 +1280,41 @@ read whole during the last pass, is one), and a lock alone would take a
 file in the moment before its writer locks it. Why not a pid in the
 name: pids come round again, and a file from another machine on a
 shared folder has a pid that means nothing here.
+
+*Updated 2026-11-12 (M3.9's unit (a)):* after each publish
+(`persist_replace`, and `persist_new` by rename, link or copy) the
+output's folder is flushed too (`fsync` on the folder, opened
+`O_DIRECTORY`), so that a crash just after a save leaves the new name
+and not only the new bytes (the project review's F033). The file
+itself was already flushed before it was published. It is best effort:
+`EINVAL`, `EOPNOTSUPP` and `ENOSYS` pass (a filesystem without `fsync`
+on a folder, as some FUSE and network ones are), as do `EBADF` (one
+that won't sync a folder opened only for reading) and `EACCES` and
+`EPERM` (a folder that may be written but not opened, mode 0300 say),
+each at a debug line, since none says the name is lost, only that this
+folder can't be asked. Anything else (`EIO`, `ENOSPC`, `EDQUOT`) is the
+publish's error, though the file is in place by then; the writer says
+so and the temporary name is gone. The sync is a parameter of
+`persist_replace`'s and `persist_new`'s crate-private twins, which
+`fs::tests::publish_syncs_its_folder` counts. Also from M3.9: a
+`ProjectFolder::create` that published by the copy takes its identity
+from the copy (F032), so a save after it isn't refused as changed on
+disk.
+
+*Updated 2026-11-13 (M3.9's fix round):* `ProjectFolder::save` and
+`create`, the window's and agents' project saves, are the exception to
+the note above, where a failed folder sync is the publish's error (the
+M3.9 review's R3). The crate-private twins (`publish_replace_with`,
+`publish_new` and `publish_new_with`) tell such a failed sync
+(`PublishError::NotFlushed`, with the file's metadata, taken before the
+rename or link) from a publish that put nothing in place, and `save` and
+`create` take the file's identity and write its history all the same,
+returning the sync's error as `Saved::flush_error`, which the window
+shows as a warning and the agent's `project`, `edit` and `undo` as
+`not_flushed`; so the next save isn't refused as changed on disk, and an
+agent doesn't make its edit twice. `persist_replace` and `persist_new`,
+which exports, `frame` and `file::save` use, still return the sync's
+error as the publish's.
 
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
@@ -8036,6 +8072,47 @@ keep, which a project of a few MB doesn't need yet.
 Revisit if: Pat chooses otherwise, M5's timelines make files large
 enough for saves to be slow, or A2's saved history wants a database.
 
+*Updated 2026-11-13 (M3.9, D68):* schema 2. `SCHEMA` is 2, and the
+schema check takes 1 and 2: a schema 1 media has no `source`, which
+`#[serde(default)]` reads as equirect, all that a step that can't
+probe could give, so schema 1 needs no migration step of its own and
+`from_json` keeps its second parse of the text, with its line and
+column. A schema 2 media without `source` or `caps`, or with either
+null, is refused (`invalid`, naming the media's id and path) by a
+check on the `Value` beside `check_times`, so a file cut short or
+edited never reads as equirect or uncapped by default; a file marked
+schema 1 whose media hold either key is refused as edited or
+mislabelled, since schema 1 never wrote them (the M3.9 review's N1
+and N3). `schema1.spherecut` loads unchanged and is never rewritten
+(the review's F063); `schema2.spherecut`, an equirect media and a
+camera's pair with a nadir cap, is the current schema's fixture,
+which `SPHERECUT_BLESS_PROJECT=1` rewrites. The file is still JSON,
+this entry's working choice: the format's Open card is Pat's, and was
+checked before M3.9 began (the plan's risk 15); another answer now
+reworks schema 2's sources too. Also from M3.9, the file layer: a
+project file's own folder is the one the kernel finds it
+in (`fs::real_file`: links at the path's end followed, the folder
+that holds the file resolved physically), on save and load alike, so
+a project in a linked folder reads its `../clip.mp4` beside the real
+folder (F031, which `a_project_in_a_linked_folder_renders_its_media`
+holds through `spherecut render`). On save, each media path is first
+named as near that folder as its folders' real paths let it be
+(`fs::name_near`). Each existing folder of the path, resolved
+physically with the rest kept as named, gives a candidate name; the
+one that shares the most components with the project's folder wins,
+and on a tie the one resolved least, the path as given first. The
+clip's own name is never followed, and a missing folder gives no
+candidate. So a clip named through a linked ancestor of the project's
+folder is stored from where it is (`clip.mp4`, not a path that climbs
+to the root and back; the M3.9 review's R8), and one in a folder
+linked within the project's, footage on another disk, keeps the link's
+name (`footage/f.mp4`), so the folder moved with its media, or with
+its link, keeps working; `file::save` and the GUI's
+`ProjectFolder::of_file` save so, and media paths are read back
+lexically from the folder, as above. `file::load` opens without
+waiting, and refuses a path that isn't a regular file, and text that
+isn't UTF-8, as `not_project` (F034).
+
 ## D48. The project model and `Edit`
 
 *2026-10-31, M2.1. From `docs/design/m2-plan.md` sections 3 and 4 and
@@ -8119,6 +8196,26 @@ the same code.
 
 Revisit if: M5 needs edits that move many clips at once faster than a
 clone a step allows, or A2's saved history needs more in a step.
+
+*Updated 2026-11-13 (M3.9, D68):* a media holds a `source` and
+`caps` (D68), and the file holds sphere's rig types: `Geometry` and
+every type it holds, `LensCalib`, `CalibTerms`, `Tune` and `LensTune`
+derive serde in sphere, with snake_case names and unknown fields
+refused, and core reads them as they are; sphere still depends on no
+crate of ours. Two of their forms settle what the review asked of
+schema 2 before M3.6 merges (F021, and U13 with F041). The geometry's
+`tz` is `TzSign`, written `"as_stored"` or `"negated"`: M3.6 may
+replace it by a translation convention (as stored, or the camera
+centre −Rᵀt), and hadn't merged. The snapshot keeps field 27's offset
+as `window_offset` beside `window` ([0, 0] on the X5), stored and
+unread until M3.6 says whether U13's circle check needs it. A new form
+for either is schema 3, with a migration. `Edit` has 24 ops,
+`set_source`, `set_stitch` and `set_caps` after `rename`, each
+applied, undone, redone, refused and read back in
+`tests/project_edits.rs`; `stitch_edits_undo_and_save`
+(`tests/project_props.rs`) applies and undoes random tunes, sources
+and caps through them and saves and loads the result, at 100,000
+cases before a merge. `validate` holds D68's rules.
 
 ## D49. Rendering for export: the output frame, equirect output, the YUV pass and motion blur
 
@@ -9339,15 +9436,19 @@ and 6, has the detail; this is what was built and why.*
 
 **One folder handle for every project read and write.** A
 `ProjectFolder` is an `O_PATH | O_DIRECTORY` descriptor for the
-project's folder and that folder's path as named. An agent gets it from
-its roots (`Roots::project_folder`: beneath a read root or the write
-root to read, beneath the write root to write, by `openat2` as D45's
+project's folder and that folder's path. An agent gets it from its
+roots (`Roots::project_folder`: beneath a read root or the write root
+to read, beneath the write root to write, by `openat2` as D45's
 outputs are); the GUI opens the folder by its path. Files in it are
 opened with `openat(O_NOFOLLOW)`, so the project, its history and its
 lock are what is in that folder, and a link at the project's name is
-refused rather than replaced. Media paths are made relative to, and
-read against, the path as named (D47), so the GUI and an agent read a
-project's `../clips/a.mp4` as the same file.
+refused rather than replaced. The folder is the one the kernel finds,
+for the GUI, the CLI and agents alike (since M3.9: F031 and the M3.9
+review's R1), and media paths are made relative to, and read against,
+it (D47), so all three read a project's `../clips/a.mp4` as the same
+file. A media path is named as near that folder as the real paths of
+its folders let it be before it is made relative: by the GUI's saves
+(R8), and by an agent's tools, beneath the root, when they add one.
 
 **The lock**, `.<name>.lock` beside the project: `flock` on a file
 that is never removed or replaced, with one line saying who holds it
@@ -9456,6 +9557,83 @@ open (then the lock's holder changes, and `not_top` may become
 "ask the window"); M3's second clip makes `add_clip` and `remove_clip`
 apply; a client's limit makes the 12 KiB list too large; or a user
 wants an agent to undo the user's steps.
+
+*Updated 2026-11-13 (M3.9, D68):* projects of a camera's file. `Edit`
+has 24 ops, and the edit reference has an example of each new one
+against the fixture project, which gains a camera's media, 12 (the
+plan's 11, an id the target's key already holds), when D57's test
+passes one: the test writes a synthetic `.insv` into its folder and
+makes the entry as `create` does, so that `set_source`'s camera form,
+`set_stitch` (a tune and gains) and `set_caps` (a nadir fill) apply to
+it and undo exactly; other callers pass none. `create` of a camera's
+file, and `add_media`, make its dual-fisheye source on the server with
+media's `camera_source`, or warn `no_calibration` and keep it an
+equirect. `set_source` takes `{"kind": "equirect"}`; the camera form
+`{"kind": "camera", "binding": …}`, which the server makes whole by
+reading the media's file beneath the roots, as it probes `add_media`'s
+path (the binding the one given, its status `user`); or a whole
+`dual_fisheye` source, copied unchanged from the project file by a
+client that can read it, whose calibration must be the one the file
+holds (`calibration_mismatch` names the parts that differ). An agent
+never makes a calibration: the server reads it from the file, or
+checks the one sent against it, so this entry's rule holds. `wired()`,
+which reads no file, skips the camera form as it skips `add_media`.
+The summary gives each media's source (the camera without its serial,
+the calibration's hash, the geometry with `superseded`, the tune, the
+gains' mode, the profile), never the raw strings. From the review:
+every tool result has `warnings`, `[]` when nothing warned, set once
+in `tools.rs` (F049); and one rule for text from files in errors
+(F051): an error names a project's media by id ("the project's media
+1"), never by the path the project recorded or by text read from a
+file, and every error's message, `valid` and `next` pass the fields'
+filter as a backstop, which PLAN's A1 criterion now says too. `look`,
+`compare`, `check` and `render` refuse a project of a camera's pair
+`not_yet` until M3.11 (D68). `tools/list` is 12,235 of its 12,288
+bytes, `project` 986 of its 1,000 (`create.media` reads "A video."),
+and no other tool's description or schema changed. From the M3.9
+review (R1), an agent's project folder is the one the kernel finds, as
+the GUI's and the CLI's are since F031: `Roots::project_folder` reads
+the path of the descriptor `openat2` gave from `/proc/self/fd`,
+refuses one no longer beneath the root (`outside_roots`) or removed
+(`not_found`), and names the folder as its root was given joined with
+the real path below the root's. So a project reached through a folder
+link beneath a root reads its `../clip.mp4` beside the folder it is
+really in, as the window and `spherecut render` do, and one an agent
+makes there loads in them with its media. The root keeps the name it
+was given, so a root reached through a link still names its paths as
+the agent does. A folder removed meanwhile is known by its link count,
+not by the " (deleted)" the kernel adds to its name. From the fix
+round's review, a media an agent adds is named as the window's save
+names one (R8), beneath the root: `Roots::named_near` keeps, of the
+names its folders give it as the kernel finds them, the one that
+shares the most of the project's folder, so a project made in `link`
+(a link to `real/sub`) of `link/clip.mp4` stores `clip.mp4`, not
+`../../link/clip.mp4`, and moves with its clip. From R7, `create` and
+`add_media` make a camera's file a source only if `validate` takes it
+at the default tune: media's `camera_source` ends with the source's
+`check`, and a refusal (a frame under 95°, too narrow for the default
+feather; a lens's ξ at −1 or below) keeps the media an equirect with
+`not_equirect` and `no_calibration`, whose parentheses carry
+`validate`'s words, which name only fields and numbers. Before,
+`add_media` refused such a file `bad_argument` and `create` refused to
+make the project at all. `trailer_source` is the same source
+unchecked, which a whole `dual_fisheye` source in a `set_source` is
+compared with, so one with a tune that fits can still make such a file
+a source; but no tool gives a calibration whole, so only a client that
+reads the camera file's trailer itself can send one, and the camera
+form on such a file is refused `bad_edit` with `validate`'s words and
+a `next` to keep the media equirect. From R6, a whole source's lens
+`tracks` and its camera's model and firmware must be the file's too,
+refused `calibration_mismatch` at `edits[i].source.tracks` or
+`.camera` before core's rule on the first track is reached: a swapped
+pair or another stream would stitch the wrong pictures once M3.11
+renders, and the table's geometry is looked up by the camera the file
+names. The front track, geometry, tune, gains and profile stay the
+client's to change. From R5, each refusal's `next` names a way that
+works: the camera form, or the part exactly as the project file holds
+it; and for a file that holds no calibration a stitch reads, keeping
+it equirect or probing the file. No tool gives a calibration whole, so
+only a client that can read the project file sends one.
 
 ## D58. Render jobs: the job table, ids, the queue, cancel and the server's end, the output beneath the write root
 
@@ -11142,6 +11320,221 @@ no longer waits on the question (plan amendment 7). A mode that shows
 the slide (M3.10's stitched `gui_smoke`, a slower part) goes back to Pat
 with its numbers; a cap is a playback change.
 
+## D68. Schema 2: each media's source, with the calibration, geometry, tune and gains its render reads
+
+*2026-11-13, M3.9. From `docs/design/m3-plan.md` section 11, its D68
+(section 23) and amendments 5, 7 and 8. Updates D47, D48 and D57,
+whose notes of the same date say what changed in each.*
+
+What, as `crates/core/src/project/` has it:
+
+- **`Media.source`** (`project::source`), read with `#[serde(default)]`
+  so that a schema 1 media, which has none, reads as `{"kind":
+  "equirect"}`: `equirect`, `dual_fisheye` (a camera's two fisheye
+  lenses) or `eac_pair` (a camera's two EAC tracks, for M3.18), tagged
+  by `kind`. A dual-fisheye source holds the `camera` (make, model,
+  firmware, serial), its two `tracks` and `front_track`, the
+  calibration snapshot, the `geometry` (D64's conventions, with their
+  status and evidence), the `tune`, the `gains`, and the `profile` it
+  was tuned from (a name and the hash of its file, or null).
+  **`Media.caps`**, the nadir and zenith caps (M3.20), sits beside it.
+  The geometry, the parsed calibration sets and the tune are sphere's
+  own types (`Geometry`, `LensCalib`, `CalibTerms`, `Tune`,
+  `LensTune`, given serde); the gains and their analysis input are
+  core's, since sphere can't name core. sphere's `Calibration` isn't
+  stored, only the snapshot it is made from
+  (`CalibSnapshot::calibration`: `src` the canvas's height, `dst` the
+  window's side).
+- **The calibration snapshot**, raw and parsed: the canvas
+  (`[2 × src, src]`), field 27's window and its offset, the four
+  calibration strings as the file holds them (`raw`: V1, V2, V3 and V6,
+  each null when the file has none), their `hash`, and the V3 and V6
+  sets as a rig reads them. Every hash is 16 lowercase hex digits of
+  core's FNV-1a 64: the snapshot's over the raw strings in generation
+  order, each ended by a NUL byte (camera's `Calibrations::hash` reads
+  the same bytes, and `camera_source` checks the two agree); an Auto
+  track's `basis` over both lenses' `ypr_deg` and `q_per_m`
+  (`gains_basis`); a profile's over its file's bytes.
+- **Gains beside the tune**: `off`, `fixed` (an RGB gain a lens) or
+  `auto` (a rate, one log ratio a sample, the basis the track was
+  measured under, the file and frames it was measured on, and the
+  estimator's version), so every renderer reads the same numbers and
+  none measures them again.
+- **Every key is written, and every key is read.** An optional value
+  is written as null, and leaving a key out of a source is refused as a
+  misspelt one is (`deny_unknown_fields`, with each `Option` read
+  through `Option::deserialize`), so a hand edit that drops
+  `"profile"` or a V6 reading's `"prism"` is caught rather than read as
+  none. A media's own `source` and `caps` are held the same way: a
+  schema 2 media without either, or with either null, is refused, and
+  `#[serde(default)]` on them serves only schema 1, whose media never
+  wrote them; a schema 1 file holding either is refused as edited (the
+  M3.9 review's N1, N3 and N13). `set_stitch`'s optional keys, an
+  edit's and not the file's, are the exception.
+- **No proxy field**: the LRV is a viewer's convenience, found by name
+  and trailer each time (plan section 15), never in the project.
+- **One schema for all of M3**: the EAC pair and the caps are in it
+  before M3.18 and M3.20 build them, so M3 has one migration, and any
+  later change to this shape is schema 3, with a migration and a
+  fixture of its own.
+- **Three ops** (`Edit::OPS` from 21 to 24, each with its inverse, the
+  old value): `set_source {media, source}` replaces the whole source;
+  `set_stitch {media, tune?, gains?, profile?}` the whole tune, the
+  whole gains or both (at least one, only on a dual-fisheye source; a
+  profile only with a tune, which sets it, where a tune without one
+  clears it); `set_caps {media, caps}` both caps.
+- **Who builds a source**: never core, which reads no file.
+  `media::project::camera_source` reads a camera file's trailer again,
+  through camera's `stitching`: the geometry is the table's row with the
+  generation the file's field 136 names (never `known::lookup`'s row as
+  it stands, which reads V6), the tune `Tune::default()`, the gains off
+  and the front track 0. It ends with `DualFisheye::check` on the source
+  as the media it becomes (the M3.9 review's R7): a camera file whose
+  source `validate` refuses at the default tune (a θ_frame under the 95°
+  the default feather needs; a lens's ξ at −1 or below) stays an
+  equirect with `not_equirect` and `no_calibration`, carrying
+  `validate`'s words, as a file without a calibration a stitch reads
+  does. `trailer_source` is the same source unchecked, which a whole
+  source in an agent's `set_source` is compared with. Agents' `project
+  create` and `add_media` call `camera_source` now, and `set_source`'s
+  camera form reads `trailer_source` and checks it with
+  `DualFisheye::check`, refusing it `bad_edit` where the check fails
+  (D57's note); the app's open flow takes it in M3.10.
+- **Only an edit changes a stored geometry** (plan 11.4). When the
+  table's entry for the camera is settled, or provisional on other
+  evidence, and the stored geometry is provisional
+  (`media::project::superseded`: the table keeps no date, so "newer"
+  is read as "other", and the words name such an entry "a different
+  guess", never a newer one, since an older build reading a project
+  made under a later table finds its own guess different too: the M3.9
+  review's N4),
+  `spherecut render` and `frame --project` warn
+  `provisional_geometry` with the table's evidence, and agents'
+  `project` summary gives it as `superseded`; the project renders as
+  stored. `check` advises `provisional_geometry` whenever the stored
+  geometry is provisional, superseded or not, and names the table's
+  evidence when the table has superseded it; no call reaches that
+  advice before M3.11, since `not_yet` refuses the project first.
+  `an_old_project_renders_the_same_bytes` (render's `tests/project.rs`)
+  holds a project made under an older guess to the render of its
+  numbers written out by hand, bit for bit, while a fake newer table
+  entry of the other binding supersedes it, and that entry's render as
+  the control.
+- **Until M3.11** every project renderer outside the window
+  (`spherecut render`, `frame --project`, and agents' `look`,
+  `compare`, `check` and `render`) refuses a project whose clip's media
+  is a camera's pair with `not_yet`, rather than render one lens as an
+  equirect (plan 14), with advice for the pair's kind (the M3.9
+  review's R9): `frame --reference` shows two fisheye lenses
+  stitched, and nothing stitches an EAC pair yet, so its advice names
+  no flag of frame's; the window's export refuses such a file by its
+  streams (M3.0).
+
+**`validate`'s rules for a source** (plan 11.2, with what M3.9
+settled). No I/O. Each refusal names media N's field path, with
+`out_of_range` for a bound (NaN and infinity lie outside every bound)
+and `invalid` otherwise, and the first refusal is the one given. An
+equirect media gets the caps' rules alone, and an EAC pair its tracks'
+too. A dual-fisheye source, in this order: its tracks differ, and the
+first is the media's video stream (plan 11.1's rule, which the M3.9
+review's R6 holds every client to); its `front_track` is 0 or 1; the
+generation the geometry reads has its set in the snapshot; the
+snapshot's hash is its raw strings'; the canvas's height and the
+window's width above 0 (`Rig::build`'s own rule, named by field
+before the span below is read from them); each of that set's
+principal points within the span of its square the canvas map shows
+(0 to src, or the window under map B), as a lens whose axis is out of
+frame covers nothing of its slot (the M3.9 review's R2, which also
+gives such a lens θ_frame 0, so the tune's centre can't take an axis
+out unrefused); for each lens the tune's yaw, pitch and roll within ±15°,
+its centre within ±64 canvas px, the radius scale 0.9 to 1.1, θ_max
+85° to 110°, `xi_delta` within ±0.15 and ξ + `xi_delta` above −1; the
+feather 0° to 15° and q 0 to 3.34 m⁻¹ (D ≥ 0.3 m); fixed gains 0.25 to
+4, or an Auto track with a rate above 0, a sample at least and finite
+ratios; the caps (5° to 35°, an edge of 0° to 5°, their other numbers
+finite); then one `Rig::build` at the calibration's square, whose
+`PastLimit` is θ_max's `out_of_range` ("past its lens's limit") and
+whose other refusals are `invalid` ("makes no rig"); each lens's
+feather bound; and the coverage rule. Every bound comes before the
+rules that build the model, so a value out of its range is named as
+such, never as a rig that won't build. A call that builds the rig, as
+a camera project's edit does, takes 0.034 to 0.037 ms in a debug
+build.
+
+- **The feather's bound is floored at 0**: h ≤ max(0, min(θ_max,
+  θ_frame) − 90°) for each lens, θ_frame from the snapshot, geometry
+  and tune. Where θ_frame falls under 90° (on the schema 2 fixture's V6
+  set under map A, from a radius scale of 1.09507 on lens 0 and 1.09082
+  on lens 1; 89.60° and 89.25° at 1.1), or θ_max is under 90°, only a
+  feather of 0 validates: a hard switch at the lenses' equal θ, which
+  makes no hole of its own (plan amendment 5), and the coverage rule
+  still holds the masks to cover. 11.2's band of 85° to 110° for θ_max
+  stands.
+- **The coverage rule**: lens b holds every direction within
+  a_b = min(θ_max_b, θ_frame_b) − asin(min(1, q·|c_b|)) of its axis
+  (lens_from_rig_b⁻¹ · ẑ), since the parallax-corrected ray turns a
+  direction by at most that arcsine. The directions neither holds are
+  two caps of 180° − a_b about the axes' opposites, which are empty
+  together exactly when a_0 + a_1 ≥ 360° − γ, γ the angle between the
+  axes. The LOD's margin is left out. Against `Rig::weights` at LOD 0
+  on a grid of 29,160 directions: it agrees within 0.05° where θ_max
+  binds, and refuses about one radius-scale step of 0.0025 (0.2° to
+  0.4° of summed cap) that would render whole where θ_frame binds; the
+  other way, in three yawed sweeps it passed one 0.05° step before the
+  grid was whole, the holes narrower than LOD 0's margin. The tunes it
+  passes (the default, the fixture's, lens 0 at θ_max 85°, lens 1
+  yawed 5° at q 3.34) leave no hole; those it refuses leave them (both
+  lenses at 85°: 8,126 directions, a ring; both at 95° with lens 1
+  yawed 15° at q 3.34: 2,302). With the feather's floor it answers
+  PROGRESS's open list for 11.2 (M3.3's note: a θ_max of 85° to 90°,
+  θ_frame under 90°, a tilt that leaves directions unweighed, a
+  feather under the parallax angle at high q): each is a feather of 0,
+  which validates, or a hole neither mask covers, which this rule
+  refuses.
+- **`xi_delta` within ±0.15**, and ξ + `xi_delta` above −1 (the
+  review's F038, the rule `Rig::build` applies): the range reaches as
+  far as the radius scale's 0.9 to 1.1 moves θ_frame on X5-shaped sets
+  (−0.1428 to −0.1451 moves it as far as 1.1 does, and +0.0975 to
+  +0.1241 drives it to the model's limit, as 0.9 does), rounded
+  outward, so the sum rule binds only where ξ is within 0.15 of −1. On
+  X5-shaped sets the limit is 120.00° at `xi_delta` 0 and 117.72° at
+  +0.15, so it never binds inside θ_max's range.
+- **`front_track` is 0 or 1** (`out_of_range`, "is neither 0 nor 1"),
+  checked second, before anything builds a rig of it.
+
+**Where a stored tune sits.** Under stored extrinsics a lens's tune
+turns it in the view frame as `sphere::rig` composes it
+(lens_from_rig = E_b · F · Q_tuneᵀ · T_b · S, D33's note of
+2026-11-01), so for a twin whose E_b holds a quarter or half turn of
+roll the tune turns the lens that far off from the way it looks
+through the lens. Whether a tune should sit in each lens's own view
+frame, as it does under fitted extrinsics, is M3.6's question (M3.3's
+open list for 11.2): its fit settles the extrinsics. Schema 2 stores
+tunes in the frame as composed now, so moving the frame changes what
+every saved tune renders, and needs schema 3 with a migration that
+turns each stored tune into the new frame.
+
+Why: every render reads only the project, so the CLI and agents match
+the window with no trailer reader, a project still diffs (D47), and an
+agent never makes a calibration (D57). The raw strings and their hash
+let a later build parse them again and refuse a source whose
+calibration isn't its file's. One schema for M3 is one migration
+instead of three. The bounds come first so that a mistake is named by
+its field, and the coverage rule refuses what would render black (a
+hole is a seam no blend fixes) before it is saved.
+
+Considered: adding each media's source to schema 1's `Value` before
+the typed read, which would lose `from_json`'s line and column; storing
+only the hash and reading the trailer on load, which every renderer
+would then need; a feather bound with a floor tied to q, which
+amendment 5 found needless; the LOD's margin in the coverage rule,
+which depends on the render's size.
+
+Revisit if: M3.6 moves the tune's frame or replaces `TzSign` (D48's
+note), either of them schema 3; Pat chooses another format for D47;
+the coverage rule refuses a tune that renders whole and that Pat
+needs, or passes one that leaves a hole wider than a texel.
+
 ## D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
 
 *2026-11-11, M3 slice M3.8's fix round. Updates D25 and D31. What it
@@ -11474,6 +11867,11 @@ before a merge.
   JSON lock and history records, the undo budget, two of `cli-json.md`'s
   codes and M3.9's schema 2 (D47's update); RON could keep the
   sidecars, and SQLite would rework the folder's write-then-rename.
+
+  *Updated 2026-11-13 (M3.9):* still Pat's. M3.9 checked this card
+  before it launched (the M3 plan's risk 15) and built schema 2 (D68) on
+  JSON, the working choice; another answer reworks schema 2's file, its
+  migration from schema 1 and both checked-in fixtures with the rest.
 - **The interpolation default** (D50): Level, which interpolates yaw,
   pitch and roll each as an angle, or Free, which interpolates on
   SO(3) as `docs/PROMPT.md` asks. Pat was asked on 2026-10-31, with

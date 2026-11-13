@@ -1520,7 +1520,8 @@ fn rig_values_of_every_field_differ_in_texel() {
     );
 }
 
-/// Canvas maps A, B and C invert.
+/// Canvas maps A, B and C invert, and the span of its square each slot
+/// shows ends at the slot's edges.
 #[test]
 fn rig_canvas_maps_invert() {
     let _time = timed("rig_canvas_maps_invert");
@@ -1559,6 +1560,13 @@ fn rig_canvas_maps_invert() {
                 [side; 2],
             )
             .unwrap();
+            // The span of its square a slot shows ends at the slot's edges.
+            let (lo, hi) = map.slot_span(SRC, DST);
+            let ends = [lo, hi].map(|v| map.to_slot(DVec2::splat(v), SRC, DST, side));
+            assert!(
+                ends[0].length() <= 1e-9 * s && (ends[1] - DVec2::splat(s)).length() <= 1e-9 * s,
+                "{map:?} at {side}: {ends:?}"
+            );
             for b in 0..2 {
                 let block = cal.v6.unwrap()[b];
                 let c = DVec2::new(block.cx, block.cy) + DVec2::from(lens.centre_px);
@@ -1597,6 +1605,17 @@ fn rig_canvas_maps_invert() {
     must_fail(
         "B's inverse of A's output",
         at_most((back - p).length(), 1e-9 * f64::from(SRC)),
+    );
+    // Control: A's span through B's map, whose slot shows the window.
+    let (lo, _) = CanvasMap::A.slot_span(SRC, DST);
+    must_fail(
+        "A's span through B's map",
+        at_most(
+            CanvasMap::B
+                .to_slot(DVec2::splat(lo), SRC, DST, 768)
+                .length(),
+            1e-9 * 768.0,
+        ),
     );
 }
 
@@ -2442,8 +2461,10 @@ fn feather_bound(cal: &Calibration, geo: &Geometry, tune: &Tune) -> f64 {
 }
 
 /// `Tune::default()` lies inside every bound of `validate` (11.2) on
-/// Pat's V6 numbers, the feather against min(θ_max, θ_frame) − 90° among
-/// them.
+/// Pat's V6 numbers, the feather against max(0, min(θ_max, θ_frame) −
+/// 90°) among them, `xi_delta` within ±0.15 with ξ plus it above −1, and
+/// the coverage rule: the lenses' caps of min(θ_max, θ_frame) less their
+/// parallax at q summing to 360° less the angle between their axes.
 #[test]
 fn tune_default_lies_inside_validates_bounds() {
     let _time = timed("tune_default_lies_inside_validates_bounds");
@@ -2454,7 +2475,7 @@ fn tune_default_lies_inside_validates_bounds() {
         assert!(lens.centre_px.iter().all(|c| c.abs() <= 64.0));
         assert!((0.9..=1.1).contains(&lens.radius_scale));
         assert!((85.0..=110.0).contains(&lens.theta_max_deg));
-        assert_eq!(lens.xi_delta, 0.0);
+        assert!((-0.15..=0.15).contains(&lens.xi_delta));
     }
     assert!((0.0..=15.0).contains(&tune.feather_deg));
     assert!((0.0..=3.34).contains(&tune.q_per_m));
@@ -2464,14 +2485,33 @@ fn tune_default_lies_inside_validates_bounds() {
             .chain(V6Reading::all().map(|v| (Generation::V6, v)));
         for (generation, v6) in readings {
             let geo = placeholder(canvas, generation, v6);
+            let blocks = match generation {
+                Generation::V3 => cal.v3,
+                Generation::V6 => cal.v6,
+            }
+            .unwrap();
+            for (block, lens) in blocks.iter().zip(&tune.lenses) {
+                assert!(block.xi + lens.xi_delta > -1.0);
+            }
             // Below the limit, as `build` checks.
-            assert!(Rig::build(&cal, &geo, &tune, 0, [768; 2]).is_ok());
+            let rig = Rig::build(&cal, &geo, &tune, 0, [768; 2]).unwrap();
             let bound = feather_bound(&cal, &geo, &tune);
             assert!(
-                tune.feather_deg <= bound,
+                tune.feather_deg <= bound.max(0.0),
                 "{canvas:?} {generation:?} {v6:?}: {bound}°"
             );
             least = least.min(bound);
+            // The coverage rule.
+            let cap = rig.lenses.map(|lens| {
+                lens.theta_max.min(lens.theta_frame) - (rig.q * lens.centre_m.length()).asin()
+            });
+            let axes = rig
+                .lenses
+                .map(|lens| lens.lens_from_rig.inverse() * DVec3::Z);
+            assert!(
+                cap[0] + cap[1] >= 2.0 * PI - axes[0].angle_between(axes[1]),
+                "{canvas:?} {generation:?} {v6:?}: caps {cap:?}"
+            );
         }
     }
     eprintln!("on Pat's numbers the feather may reach {least:.3}° at least");
@@ -3487,6 +3527,56 @@ fn theta_frame_matches_an_edge_scan() {
     );
 }
 
+/// R2: a lens whose principal point lies outside its slot has θ_frame 0,
+/// as its axis is out of frame and no cap about it lies in the slot,
+/// so the feather's bound is 0 and the coverage rule refuses it: block 1
+/// of Pat's V6 under map C (the schema 2 fixture's set, near enough)
+/// with its principal point about 2000 px past the slot's right edge,
+/// where the circle at the limit still crosses the slot, 2000 px above
+/// it, and a million pixels out. Control: the edges alone, the rule
+/// without the principal point's test, give such a lens most of its θ.
+#[test]
+fn theta_frame_is_0_for_a_principal_point_outside_the_slot() {
+    let _time = timed("theta_frame_is_0_for_a_principal_point_outside_the_slot");
+    let geo = placeholder(CanvasMap::C, Generation::V6, V6Reading::RADIAL_ONLY);
+    let tune = Tune::default();
+    let inside = theta_frame(&pats(), &geo, &tune).unwrap();
+    assert!(inside.iter().all(|&t| t > 95.0 * DEG), "{inside:?}");
+    let moved = |cx: f64, cy: f64| {
+        let mut cal = pats();
+        let block = &mut cal.v6.as_mut().unwrap()[1];
+        (block.cx, block.cy) = (cx, cy);
+        cal
+    };
+    let (cx, cy) = {
+        let block = pats().v6.unwrap()[1];
+        (block.cx, block.cy)
+    };
+    let src = f64::from(SRC);
+    for (what, cal) in [
+        ("2000 px right of the slot", moved(src + 2000.0, cy)),
+        ("2000 px above the slot", moved(cx, -2000.0)),
+        ("a million pixels out", moved(1e6, cy)),
+    ] {
+        let frame = theta_frame(&cal, &geo, &tune).unwrap();
+        assert_eq!(frame, [inside[0], 0.0], "{what}");
+        let rig = Rig::build(&cal, &geo, &tune, 0, [3840; 2]).unwrap();
+        assert_eq!(rig.lenses[1].theta_frame, 0.0, "{what}");
+    }
+    // Control: just past the edge, the circle at the limit still crosses
+    // the slot, and the edges alone find a θ near the limit's.
+    let rig = Rig::build(&moved(src + 2000.0, cy), &geo, &tune, 0, [3840; 2]).unwrap();
+    let edges = scanned(&rig.lenses[1], &[0, 1, 2, 3]);
+    eprintln!(
+        "2000 px out, the edges alone give {:.3}°",
+        edges.to_degrees()
+    );
+    must_fail(
+        "the edges alone, 2000 px out",
+        at_most(edges, rig.lenses[1].theta_frame),
+    );
+}
+
 /// `s` with token `k`'s last digit one more, 9 going to 0.
 fn last_digit_changed(s: &str, k: usize) -> String {
     let mut tokens: Vec<String> = s.split('_').map(str::to_owned).collect();
@@ -3597,4 +3687,153 @@ fn pats_copies_match_testkit_pats() {
         e.starts_with("V3 block 1's cx is 2693, not 2693.001"),
         "{e}"
     );
+}
+
+/// The geometry and the tune as a project file writes them (plan 11.1,
+/// M3.9): the placeholder extrinsics are 11.1's worked JSON word for
+/// word, the small enums snake_case words, a quarter turn and a sign
+/// whole numbers, the tz sign as `TzSign` stands (F021: "as_stored", until
+/// M3.6's translation convention takes its place), and every field reads
+/// back as it was written, the fitted forms and a V6 reading with both
+/// parts included. V6's prism names its first term `first`, not `at`,
+/// which the agents' wire form reads as a time.
+///
+/// Controls: a sign of 2 and a roll offset of 45 are refused, as is a
+/// key the type doesn't have, and a V6 reading with its prism or its
+/// tangential pair left out rather than written null.
+#[test]
+fn the_placeholder_writes_the_plans_json() {
+    use serde_json::json;
+    let _time = timed("the_placeholder_writes_the_plans_json");
+    let plan = json!({"stored": {"axes": ["y", "x", "z"], "order": ["yaw", "pitch", "roll"],
+        "signs": [1, 1, 1], "roll_offset": -90}});
+    let placeholder = Extrinsics::Stored(EulerConv::PLACEHOLDER);
+    assert_eq!(serde_json::to_value(placeholder).unwrap(), plan);
+    assert_eq!(
+        serde_json::from_value::<Extrinsics>(plan.clone()).unwrap(),
+        placeholder
+    );
+    let mut two = plan.clone();
+    two["stored"]["signs"][1] = json!(2);
+    must_fail("a sign of 2", serde_json::from_value::<Extrinsics>(two));
+    let mut offset = plan.clone();
+    offset["stored"]["roll_offset"] = json!(45);
+    must_fail(
+        "a roll offset of 45",
+        serde_json::from_value::<Extrinsics>(offset),
+    );
+    let mut extra = plan.clone();
+    extra["stored"]["twist"] = json!(0);
+    must_fail(
+        "a key EulerConv doesn't have",
+        serde_json::from_value::<Extrinsics>(extra),
+    );
+
+    // The X5's row (5.3) as written, word for word.
+    let x5 = Geometry {
+        binding: Binding::Reversed,
+        canvas: CanvasMap::C,
+        extrinsics: placeholder,
+        turn: TurnAxis::Y,
+        tz: TzSign::AsStored,
+        upright: QuarterTurn::Zero,
+        generation: Generation::V6,
+        v6: V6Reading::RADIAL_ONLY,
+        status: Status::Provisional,
+        evidence: "placeholder until the fit".into(),
+    };
+    let written = json!({
+        "binding": "reversed", "canvas": "c", "extrinsics": plan, "turn": "y",
+        "tz": "as_stored", "upright": 0, "generation": "v6",
+        "v6": {"tangential": null, "prism": null}, "status": "provisional",
+        "evidence": "placeholder until the fit",
+    });
+    assert_eq!(serde_json::to_value(&x5).unwrap(), written);
+    // A part of the V6 reading left out is refused, not read as none: a
+    // reading without its prism would be a lens model of its own.
+    for key in ["tangential", "prism"] {
+        let mut left_out = written.clone();
+        left_out["v6"].as_object_mut().unwrap().remove(key);
+        must_fail(
+            &format!("the V6 reading without its {key}"),
+            serde_json::from_value::<Geometry>(left_out),
+        );
+    }
+    assert_eq!(serde_json::from_value::<Geometry>(written).unwrap(), x5);
+
+    // The other forms read back as written.
+    let fitted = Geometry {
+        binding: Binding::Direct,
+        canvas: CanvasMap::Fitted { scale: 1.0125 },
+        extrinsics: Extrinsics::Fitted {
+            relative: DQuat::from_rotation_y(PI) * DQuat::from_rotation_z(0.01),
+            translation_m: DVec3::new(-0.0045, 0.0006, -0.0315),
+        },
+        turn: TurnAxis::X,
+        tz: TzSign::Negated,
+        upright: QuarterTurn::Minus90,
+        generation: Generation::V6,
+        v6: V6Reading {
+            tangential: Some(Tangential {
+                pair: PairOrder::D6D5,
+                extension: true,
+            }),
+            prism: Some(Prism {
+                at: PrismAt::D9,
+                order: PrismOrder::Interleaved,
+            }),
+        },
+        status: Status::Fitted,
+        evidence: "a fit of the test's own".into(),
+    };
+    let v = serde_json::to_value(&fitted).unwrap();
+    assert_eq!(v["tz"], "negated");
+    assert_eq!(v["upright"], -90);
+    assert_eq!(v["canvas"], json!({"fitted": {"scale": 1.0125}}));
+    assert_eq!(
+        v["v6"],
+        json!({"tangential": {"pair": "d6_d5", "extension": true},
+            "prism": {"first": "d9", "order": "interleaved"}})
+    );
+    assert_eq!(serde_json::from_value::<Geometry>(v).unwrap(), fitted);
+    for turn in QuarterTurn::all() {
+        let v = serde_json::to_value(turn).unwrap();
+        assert_eq!(v, json!(turn.degrees() as i32));
+        assert_eq!(serde_json::from_value::<QuarterTurn>(v).unwrap(), turn);
+    }
+
+    // The tune, with q as 11.1 writes it, and a calibration block of each
+    // generation.
+    let tune = Tune::default();
+    let v = serde_json::to_value(tune).unwrap();
+    assert_eq!(v["q_per_m"], json!(0.5));
+    assert_eq!(
+        v["lenses"][1],
+        json!({"ypr_deg": [0.0, 0.0, 0.0], "centre_px": [0.0, 0.0], "radius_scale": 1.0,
+            "xi_delta": 0.0, "theta_max_deg": 100.0})
+    );
+    assert_eq!(serde_json::from_value::<Tune>(v).unwrap(), tune);
+    let block = |terms| LensCalib {
+        xi: 1.75,
+        fx: 2100.5,
+        fy: 2101.25,
+        cx: 2690.0,
+        cy: 2686.5,
+        ypr_deg: [0.25, -0.5, 90.125],
+        t_m: [-0.004, 0.0005, -0.0315],
+        terms,
+    };
+    for terms in [
+        CalibTerms::V3 {
+            k: [0.01, -0.002, 0.0003],
+            p: [0.0001, -0.0002],
+        },
+        CalibTerms::V6 {
+            d: std::array::from_fn(|i| i as f64 * 0.001 - 0.005),
+        },
+    ] {
+        let b = block(terms);
+        let v = serde_json::to_value(b).unwrap();
+        assert_eq!(serde_json::from_value::<LensCalib>(v).unwrap(), b);
+    }
 }

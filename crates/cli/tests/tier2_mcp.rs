@@ -204,7 +204,7 @@ fn mcp_render_vaapi() {
         "project",
         json!({"file": project, "create": {"media": clip}}),
     );
-    assert!(summary.get("warnings").is_none(), "{summary}");
+    assert_eq!(summary["warnings"], json!([]), "{summary}");
     call(
         &mut s,
         3,

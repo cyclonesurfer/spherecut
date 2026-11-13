@@ -8,7 +8,8 @@
 
 use serde_json::{Value, json};
 use spherecut_core::project::{
-    Edit, Fingerprint, History, INITIAL_VIEW, Media, MediaId, MediaVideo, Origin, Project,
+    Caps, Edit, Fingerprint, History, INITIAL_VIEW, Media, MediaId, MediaVideo, Origin, Project,
+    Source,
 };
 use spherecut_core::{FrameRate, Time};
 
@@ -22,7 +23,8 @@ pub struct Op {
 
 /// What the ids in the examples are.
 pub const IDS: &str = "The examples name media 1, sequence 2, track 3, clip 4, its fov key 6, \
-                       an orientation key 8 at 5 s, a marker 9 and a target 10.";
+                       an orientation key 8 at 5 s, a marker 9, a target 10 and a camera's \
+                       two-lens file, media 12.";
 
 /// How times are written, word for word everywhere a time is described.
 pub const TIMES: &str = "A time (at, start, end) is the clip's file time, as look's: \"12.5\", \
@@ -149,6 +151,26 @@ pub const OPS: &[Op] = &[
         does: "Rename the sequence, a marker or a target.",
         example: r#"{"op": "rename", "id": 2, "name": "Cliff jump"}"#,
     },
+    Op {
+        op: "set_source",
+        does: "What a video is: {\"kind\": \"equirect\"}, or {\"kind\": \"camera\"} to \
+               stitch a camera's two lenses with the calibration read from its file, with \
+               binding direct or reversed to say which lens each track holds.",
+        example: r#"{"op": "set_source", "media": 12, "source": {"kind": "camera", "binding": "direct"}}"#,
+    },
+    Op {
+        op: "set_stitch",
+        does: "A camera video's whole tune (each lens's ypr_deg, centre_px, radius_scale, \
+               xi_delta and theta_max_deg, then feather_deg and q_per_m, 1 over the stitch \
+               distance in metres), its whole gains (off, fixed rgb by lens, or auto), or both.",
+        example: r#"{"op": "set_stitch", "media": 12, "tune": {"lenses": [{"ypr_deg": [0, 0, 0], "centre_px": [0, 0], "radius_scale": 1, "xi_delta": 0, "theta_max_deg": 100}, {"ypr_deg": [0.5, 0, 0], "centre_px": [0, 0], "radius_scale": 1, "xi_delta": 0, "theta_max_deg": 100}], "feather_deg": 5, "q_per_m": 0.5}, "gains": {"mode": "fixed", "rgb": [[1, 1, 1], [0.9, 0.9, 0.9]]}}"#,
+    },
+    Op {
+        op: "set_caps",
+        does: "A video's nadir and zenith caps: filled from the ring around the pole, or a \
+               patch image.",
+        example: r#"{"op": "set_caps", "media": 12, "caps": {"nadir": {"mode": {"kind": "fill", "ring_deg": 2}, "cap_deg": 20, "edge_deg": 2, "rotation_deg": 0}, "zenith": null}}"#,
+    },
 ];
 
 /// `project`'s `edits` part.
@@ -182,12 +204,15 @@ pub fn example(o: &Op) -> Value {
 
 /// The project the examples' ids name: the untitled project of `media`
 /// (10 s at 30 fps, if it is the [`media`] here) with an orientation key
-/// at 5 s (8), a marker (9) and a target (10), made as the user would
-/// make them, and the history that made them.
-pub fn project(media: Media) -> Result<(Project, History), String> {
+/// at 5 s (8), a marker (9) and a target (10, its one key 11), made as
+/// the user would make them, then `camera` added last as media 12 when
+/// given (M3 plan 11.3: D57's test probes a camera file for it, so that
+/// the stitch ops' examples apply; other callers give none), and the
+/// history that made them.
+pub fn project(media: Media, camera: Option<Media>) -> Result<(Project, History), String> {
     let mut project = Project::untitled(media, INITIAL_VIEW).map_err(|p| p.to_string())?;
     let mut history = History::new();
-    let made: Vec<Edit> = serde_json::from_value(json!([
+    let mut made: Vec<Edit> = serde_json::from_value(json!([
         {"op": "add_key", "clip": 4, "key": {"orientation": {
             "at": {"exact": "5"}, "value": {"view": {"ypr_deg": [45, 0, 0]}}}}},
         {"op": "add_marker", "clip": 4, "marker": {"at": {"exact": "3"}, "name": "drop"}},
@@ -195,6 +220,7 @@ pub fn project(media: Media) -> Result<(Project, History), String> {
             {"at": {"exact": "0"}, "value": {"yaw_deg": 20, "pitch_deg": -5}}]}},
     ]))
     .map_err(|e| e.to_string())?;
+    made.extend(camera.map(|media| Edit::AddMedia { media }));
     history
         .record(&mut project, "Set up", Origin::User, &made)
         .map_err(|e| e.to_string())?;
@@ -218,5 +244,7 @@ pub fn media(path: &std::path::Path) -> Media {
             rate: FrameRate::FPS_30,
             duration: Time::from_secs(10),
         },
+        source: Source::default(),
+        caps: Caps::default(),
     }
 }
