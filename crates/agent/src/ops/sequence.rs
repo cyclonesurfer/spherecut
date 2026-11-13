@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use spherecut_core::project::{Media, MediaId, Output, Project, Range, file};
+use spherecut_core::project::{Media, MediaId, Output, Project, Range, Source, file};
 use spherecut_core::{FrameRate, Rounding, Time, TimeSpec};
 use spherecut_export::FramePlan;
 use spherecut_media::backend::SeekMode;
@@ -35,7 +35,9 @@ pub struct Loaded {
 }
 
 /// The project at `path`, the argument `arg`, beneath any root, and its
-/// clip's media beneath the read roots, the file it was made with.
+/// clip's media beneath the read roots, the file it was made with. A
+/// project whose clip's media is a camera's pair is refused
+/// ([`not_yet`]) before its file is opened.
 pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
     let (folder, name) = cx.roots.project_folder(arg, path, false)?;
     let project = folder
@@ -46,12 +48,34 @@ pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
         .media_by_id(project.the_clip().media)
         .ok_or_else(|| ToolError::internal("the clip's media isn't in the project"))?
         .clone();
+    not_yet(arg, &media)?;
     let opened = media_file(cx, arg, &media)?;
     Ok(Loaded {
         project,
         media,
         opened,
     })
+}
+
+/// `not_yet` for a project whose clip's media `m` is a camera's pair
+/// (M3 plan 14): until M3.11 stitches a project, every tool that renders
+/// one would read its first lens as an equirect, so look, compare, check
+/// and render refuse it at `arg` instead. An equirect media passes.
+fn not_yet(arg: &str, m: &Media) -> Result<(), ToolError> {
+    let pair = match m.source {
+        Source::Equirect {} => return Ok(()),
+        Source::DualFisheye(_) => "a camera's two fisheye lenses",
+        Source::EacPair(_) => "a camera's two EAC tracks",
+    };
+    Err(ToolError::new(
+        codes::NOT_YET,
+        format!(
+            "{} is {pair}: stitched rendering of projects arrives in M3.11",
+            media_named(m.id)
+        ),
+    )
+    .at(arg)
+    .next("look at or frame the .insv itself"))
 }
 
 /// The project's media file, opened beneath the roots and checked

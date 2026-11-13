@@ -89,6 +89,11 @@ pub mod codes {
     /// A project's media file isn't the one the project was made with:
     /// its size or its first MiB differ.
     pub const MEDIA_CHANGED: &str = "media_changed";
+    /// A project whose clip's media is a camera's pair, two fisheye
+    /// lenses or two EAC tracks: stitched rendering of projects arrives
+    /// in M3.11, and until then look, compare, check and render refuse
+    /// it rather than read one lens as an equirect.
+    pub const NOT_YET: &str = "not_yet";
     /// The output's disk hasn't room for the render: both numbers are in
     /// the message.
     pub const NO_SPACE: &str = "no_space";
@@ -149,6 +154,7 @@ pub mod codes {
         IO_ERROR,
         MEDIA_MISSING,
         MEDIA_CHANGED,
+        NOT_YET,
         NO_SPACE,
         JOB_LOST,
         CANNOT_EXPORT,

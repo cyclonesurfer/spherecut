@@ -375,10 +375,11 @@ when a call gives `output` and `project` when it gives `create`, as are
   the write root, as `spherecut render` does, and answers within a
   second, before a frame is rendered, with `{job, output, frames,
   duration, size, draft, encoder, estimate_bytes, ahead}`. First it
-  checks the project's media (`media_missing`, `media_changed`), the
-  output (`output_exists`, also for a file a render not yet finished
-  writes), `range` (`{from, to}`, within the trim, in the clip's file
-  time: `out_of_range`), the preset, frames and encoder (D51's
+  checks the project's media (`not_yet` for a camera's pair until
+  M3.11, `media_missing`, `media_changed`), the output
+  (`output_exists`, also for a file a render not yet finished writes),
+  `range` (`{from, to}`, within the trim, in the clip's file time:
+  `out_of_range`), the preset, frames and encoder (D51's
   `cannot_export`, `no_encoder`), and room on the disk (`no_space`, with
   both numbers). `draft` renders at half the size, fast. One renders at
   a time and 4 wait (`busy` past them). The file appears only when it
@@ -516,7 +517,10 @@ the geometry's binding the one given and its status `user` (`binding`
 may be left out); or a whole `dual_fisheye` source as the project file
 holds one, whose `calibration` must be the one its media's file holds
 (`calibration_mismatch` names the parts that differ). An agent never
-reads a calibration itself: the server does.
+reads a calibration itself: the server does. Until M3.11 renders a
+project stitched, `look`, `compare`, `check` and `render` refuse a
+project whose clip's media is a camera's pair (`not_yet`), rather than
+show its first lens as an equirect: `look` at the `.insv` itself.
 
 **The window's actions that aren't edits**, and what an agent does
 instead:
@@ -591,6 +595,7 @@ the agent as fields do, as a backstop. The codes:
 | `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved |
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
+| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; look at or frame the `.insv` itself |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
 | `job_lost` | A job of another server (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |

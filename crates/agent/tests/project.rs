@@ -1396,7 +1396,76 @@ fn errors_name_media_by_id_and_keep_file_text_out() {
 /// started. Control: none of the four is `not_yet` on an equirect
 /// project.
 #[test]
-#[ignore = "M3.9 unit (d)"]
 fn a_dual_fisheye_project_is_refused_not_yet() {
-    todo!()
+    let _t = timed("a_dual_fisheye_project_is_refused_not_yet");
+    let dir = TempDir::new("not-yet");
+    let cam = dir.camera("cam.insv");
+    let clip = dir.clip("clips", "a");
+    let tools = dir.tools();
+    let p = dir.path("cam.spherecut");
+    ok(
+        &tools,
+        "project",
+        json!({"file": p, "create": {"media": cam}}),
+    );
+    assert!(matches!(load(&p).media()[0].source, Source::DualFisheye(_)));
+    let equirect = dir.fixture("equirect.spherecut");
+
+    // Each tool with the project, as its argument names it, writing to
+    // an output where it takes one.
+    let calls = |project: &Path| {
+        [
+            (
+                "look",
+                "project",
+                json!({"project": project, "format": "png", "output": dir.path("look.png")}),
+            ),
+            (
+                "compare",
+                "against_project",
+                json!({"file": clip, "against_project": project}),
+            ),
+            ("check", "project", json!({"project": project})),
+            (
+                "render",
+                "project",
+                json!({"project": project, "output": dir.path("out.mp4")}),
+            ),
+        ]
+        .map(|(tool, at, args)| (tool, at, call(&tools, tool, args)))
+    };
+    // Every call refused `not_yet` at the project's argument, naming the
+    // media by id and M3.11, and pointing at the file itself.
+    let not_yet = |said: &[(&str, &str, Result<Value, ToolError>)]| -> Result<(), String> {
+        for (tool, at, r) in said {
+            match r {
+                Err(e) if e.code == "not_yet" && e.argument.as_deref() == Some(*at) => {
+                    let next = e.next.as_deref().unwrap_or("");
+                    if !(e.message.starts_with("the project's media 1 ")
+                        && e.message.contains("M3.11")
+                        && next.contains("look"))
+                    {
+                        return Err(format!("{tool}: {e:?}"));
+                    }
+                }
+                other => return Err(format!("{tool}: {other:?}")),
+            }
+        }
+        Ok(())
+    };
+    let names = || -> Vec<PathBuf> {
+        let mut n: Vec<PathBuf> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        n.sort();
+        n
+    };
+    let before = names();
+    not_yet(&calls(&p)).unwrap();
+    // Nothing written beside the project: no picture, no render and no
+    // render's temporary file; a refused render answers with no job.
+    assert_eq!(names(), before);
+
+    must_fail("the equirect project", not_yet(&calls(&equirect)));
 }
