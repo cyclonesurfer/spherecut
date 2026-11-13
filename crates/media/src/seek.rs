@@ -518,7 +518,7 @@ impl FfmpegVideo {
             On::Device { kind, .. } => Some(*kind),
             _ => None,
         };
-        dec.set_vaapi_drain(drain_on(req.vaapi_drain, device, drm_prime));
+        dec.set_vaapi_drain(drain_on(req.vaapi_drain, device));
         // A fault is injected where a device decodes, or stands in.
         #[cfg(feature = "fault-injection")]
         let mut injection = match (&decode_path, req.fault) {
@@ -2404,14 +2404,15 @@ impl StreamFacts {
 }
 
 /// The drain a decoder on `device` (`None` in software) runs when
-/// `mode` is asked for: only a VA-API device drains, and on path A
-/// (`exported`: its frames exported as DMA-BUFs, [`HwOutput::DrmPrime`])
-/// only [`VaapiDrain::Picture`] does, since an exported frame isn't
-/// downloaded.
-fn drain_on(mode: VaapiDrain, device: Option<HwKind>, exported: bool) -> VaapiDrain {
-    match (mode, device) {
-        (VaapiDrain::Download, Some(HwKind::VaApi)) if exported => VaapiDrain::Off,
-        (mode, Some(HwKind::VaApi)) => mode,
+/// `mode` is asked for: only a VA-API device drains. On path A (frames
+/// exported as DMA-BUFs, [`HwOutput::DrmPrime`]) it is the same mode, as
+/// a drain runs only where it says: [`VaapiDrain::Download`]'s before a
+/// download, which an exported frame never has, so only the frames path A
+/// fails to export, downloaded as the copy path's are, drain before it;
+/// [`VaapiDrain::Picture`]'s after each packet too.
+fn drain_on(mode: VaapiDrain, device: Option<HwKind>) -> VaapiDrain {
+    match device {
+        Some(HwKind::VaApi) => mode,
         _ => VaapiDrain::Off,
     }
 }
@@ -2841,20 +2842,25 @@ mod tests {
         assert_eq!(snap(r(5994, 100)), None);
     }
 
-    /// A drain runs only on a VA-API device, and on path A (frames
-    /// exported as DMA-BUFs) only per picture: an exported frame isn't
-    /// downloaded, so there is no download to drain before.
+    /// A drain runs only on a VA-API device, path A's (frames exported
+    /// as DMA-BUFs) included: a frame path A fails to export is
+    /// downloaded, and `Download` drains before that download as the copy
+    /// path's, while the frames it exports, never downloaded, don't
+    /// drain unless per picture.
     ///
-    /// Control: a rule that keeps `Download` on path A fails the table.
+    /// Control: the rule that turned `Download` off on path A, so that
+    /// its refused frames were downloaded undrained, fails the table.
     #[test]
-    fn a_drain_runs_only_on_vaapi_and_on_path_a_only_per_picture() {
+    fn a_drain_runs_only_on_vaapi_path_a_s_downloads_included() {
         use VaapiDrain::{Download, Off, Picture};
         let (va, vk) = (Some(HwKind::VaApi), Some(HwKind::Vulkan));
+        // The mode, the device, whether its frames are exported (path A),
+        // and the drain it runs.
         let table = [
             (Off, va, false, Off),
             (Off, va, true, Off),
             (Download, va, false, Download),
-            (Download, va, true, Off),
+            (Download, va, true, Download),
             (Picture, va, false, Picture),
             (Picture, va, true, Picture),
             (Download, vk, false, Off),
@@ -2862,16 +2868,17 @@ mod tests {
             (Download, None, false, Off),
             (Picture, None, false, Off),
         ];
-        let holds = |rule: fn(VaapiDrain, Option<HwKind>, bool) -> VaapiDrain| {
+        let holds = |rule: &dyn Fn(VaapiDrain, Option<HwKind>, bool) -> VaapiDrain| {
             table
                 .iter()
                 .all(|&(mode, device, exported, want)| rule(mode, device, exported) == want)
         };
-        assert!(holds(drain_on));
+        assert!(holds(&|mode, device, _| drain_on(mode, device)));
         must_fail(
-            "a rule that drains before downloads on path A",
-            holds(|mode, device, _| match device {
-                Some(HwKind::VaApi) => mode,
+            "a rule that downloads path A's refused frames undrained",
+            holds(&|mode, device, exported| match (mode, device) {
+                (Download, Some(HwKind::VaApi)) if exported => Off,
+                (mode, Some(HwKind::VaApi)) => mode,
                 _ => Off,
             }),
         );

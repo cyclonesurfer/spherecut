@@ -179,9 +179,9 @@ pub struct DrainReading {
 
 impl DrainReading {
     /// Whether it has a line: with the drain on, once a frame has been
-    /// drained or a drain has failed, so that software, Vulkan and
-    /// exported frames' decoders, which never drain on download, add
-    /// none.
+    /// drained or a drain has failed, so that software and Vulkan
+    /// decoders, which never drain, and VA-API's while every frame is
+    /// exported, never downloaded, add none.
     fn shown(&self) -> bool {
         self.mode != VaapiDrain::Off
             && (self.stage.recorded > 0

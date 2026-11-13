@@ -1233,10 +1233,14 @@ without waiting.
     stage `drain` times it. It waits for its own pictures only: another
     decoder on the device, as a locked pair's other lens, may still have
     pictures queued when this one downloads. Exported frames (path A)
-    aren't downloaded and don't drain; `picture`, a mode to compare
-    against, drains after every packet sent too, theirs included; `off`
-    or `0` runs none of it, not even libva's lookup. Software and Vulkan
-    decoders never drain. The window's exports drain as its player does
+    aren't downloaded and don't drain, but a frame path A fails to
+    export is downloaded by its decoder and drains as the copy path's
+    do; one the upload thread downloads after the GPU refused its import
+    doesn't, and the next opens download in the decoder and drain.
+    `picture`, a mode to compare against, drains after every packet sent
+    too, path A's decoders included; `off` or `0` runs none of it, not
+    even libva's lookup. Software and Vulkan decoders never drain. The
+    window's exports drain as its player does
     (`ExportJob::vaapi_drain`); `frame`, `render` and the agents' tools,
     with no window in their process, ask for none
     (`VideoRequest::default` for stills, `ExportJob::new` for renders).

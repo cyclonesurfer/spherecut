@@ -196,9 +196,10 @@ pub const VAAPI_DRAIN_ENV: &str = "SPHERECUT_VAAPI_DRAIN";
 /// decodes then queued, the window's frame among them; with the decoder's
 /// own pictures drained first, none of them is left to wait for. Another
 /// decoder on the device, as a locked pair's other lens, may still have
-/// pictures queued. Software and Vulkan decoders never drain, nor do
-/// VA-API decoders that export their frames unless asked for
-/// [`VaapiDrain::Picture`].
+/// pictures queued. Software and Vulkan decoders never drain, nor do the
+/// frames a VA-API decoder exports (path A), which aren't downloaded,
+/// unless it is asked for [`VaapiDrain::Picture`]; a frame it fails to
+/// export is downloaded, and drains as the copy path's do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VaapiDrain {
