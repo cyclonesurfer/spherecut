@@ -14,7 +14,9 @@
 //!    the work runs on a worker thread while this one waits for it, and
 //!    the first Ctrl+C stops it (exit 4, no output);
 //! 4. with `--project`, the project and its media, loaded as `render`
-//!    loads them (an offline clip is exit 1), and the sequence's frame at
+//!    loads them (a camera's pair is refused `not_yet` until M3.11,
+//!    before the offline check and after any `provisional_geometry`
+//!    warning; an offline clip is exit 1), and the sequence's frame at
 //!    the time asked for, in sequence time (`out_of_range` past its end):
 //!    the source frame it shows, the output's size, and its views, as
 //!    [`frame_views`] gives the export them; then probe, through the

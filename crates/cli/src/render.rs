@@ -8,7 +8,11 @@
 //!    is refused unless `--overwrite` is given, and a directory, pipe or
 //!    device either way;
 //! 3. the project, loaded (exit 1 with its error's code), and its media:
-//!    offline is exit 1, a file that changed is a warning;
+//!    a camera's pair is refused `not_yet` (exit 1) until M3.11 stitches
+//!    a project, before the media is looked for, after a
+//!    `provisional_geometry` warning when the table of cameras has
+//!    superseded its stored geometry; then offline is exit 1, and a file
+//!    that changed is a warning;
 //! 4. the flags' changes for this run, not saved: `--preset` and
 //!    `--range` (`out_of_range` outside the sequence, exit 1) through the
 //!    project's own edits, so its rules hold, and the export settings;
@@ -451,9 +455,14 @@ pub(crate) fn project_error(path: &Path, e: &FileError) -> Failure {
     about(failure(code, message), path)
 }
 
-/// Step 3's look at the clip's media: an offline clip fails, a changed
-/// file is a warning (M2 plan section 5.3) that says it is `doing`
-/// anyway: `exporting`, or `frame --project`'s `rendering`.
+/// Step 3's look at the clip's media. A camera's pair fails `not_yet`
+/// until M3.11 (M3 plan 14), with advice for its kind, before the file
+/// is looked for, so nothing renders one lens as an equirect; a pair of
+/// fisheye lenses whose stored geometry the table has superseded gets a
+/// `provisional_geometry` warning first (11.4), which the failure
+/// carries. Then an offline clip fails, and a changed file is a warning
+/// (M2 plan section 5.3) that says it is `doing` anyway: `exporting`, or
+/// `frame --project`'s `rendering`.
 pub(crate) fn media(
     project: &Project,
     doing: &str,
