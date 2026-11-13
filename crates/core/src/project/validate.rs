@@ -139,12 +139,12 @@ impl Project {
     /// names the media and the field: [`Code::OutOfRange`] for a bound,
     /// NaN and infinity past every one, and [`Code::Invalid`] otherwise.
     /// A dual-fisheye source's are checked in this order, the first
-    /// refusal returned: its tracks differ; its front track is 0 or 1; the
-    /// geometry's generation has its set in the snapshot; the hash is the
-    /// raw strings'; each of that set's principal points within the span
-    /// of its square the canvas map shows (0 to src, or the window under
-    /// map B); each lens's yaw, pitch and roll within ±15°, centre
-    /// within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to 110°,
+    /// refusal returned: its tracks differ, the first the media's video
+    /// stream; its front track is 0 or 1; the geometry's generation has
+    /// its set in the snapshot; the hash is the raw strings'; each of that
+    /// set's principal points within the span of its square the canvas
+    /// map shows (0 to src, or the window under map B); each lens's yaw,
+    /// pitch and roll within ±15°, centre within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to 110°,
     /// `xi_delta` within ±0.15 and ξ plus it above −1; the feather 0° to
     /// 15° and q 0 to 3.34 m⁻¹; the gains; the caps; then, from one
     /// [`Rig::build`] at the calibration's square, θ_max below the model's
@@ -544,7 +544,7 @@ fn check_tracks(m: &Media, tracks: [u32; 2]) -> Result<(), Problem> {
 }
 
 /// A dual-fisheye source's rules that build no model, in order: the
-/// tracks, the front track, the geometry's set, the hash, that set's
+/// tracks (two streams, the first the media's video), the front track, the geometry's set, the hash, that set's
 /// principal points, each lens's tune (yaw, pitch and roll, centre,
 /// radius scale, θ_max, ξ delta and the sum ξ + ξ delta), the feather's
 /// and q's ranges, and the gains.
@@ -552,6 +552,18 @@ fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), 
     use bounds::*;
     let id = m.id;
     check_tracks(m, df.tracks)?;
+    // Plan 11.1: a camera file's media is its first lens track, the
+    // stream the clip's timing follows and the file was probed on (the
+    // M3.9 review's R6), whichever client wrote the source.
+    if df.tracks[0] != m.video.stream {
+        return fail(
+            Code::Invalid,
+            format!(
+                "media {id}'s source.tracks[0] is stream {}, and the media's video is stream {}:                  the first lens track is the stream the clip's timing follows",
+                df.tracks[0], m.video.stream
+            ),
+        );
+    }
     // `Rig::build`'s own rule (RigError::FrontTrack), held here so that
     // no project reaches it.
     if df.front_track > 1 {

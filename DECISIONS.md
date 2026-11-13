@@ -11352,27 +11352,29 @@ settled). No I/O. Each refusal names media N's field path, with
 `out_of_range` for a bound (NaN and infinity lie outside every bound)
 and `invalid` otherwise, and the first refusal is the one given. An
 equirect media gets the caps' rules alone, and an EAC pair its tracks'
-too. A dual-fisheye source, in this order: its tracks differ; its
-`front_track` is 0 or 1; the generation the geometry reads has its set
-in the snapshot; the snapshot's hash is its raw strings'; each of that
-set's principal points within the span of its square the canvas map
-shows (0 to src, or the window under map B), as a lens whose axis is
-out of frame covers nothing of its slot (the M3.9 review's R2, which
-also gives such a lens θ_frame 0, so the tune's centre can't take an
-axis out unrefused); for each lens the tune's yaw, pitch and roll
-within ±15°, its centre within ±64 canvas px, the radius scale 0.9 to
-1.1, θ_max 85° to 110°, `xi_delta`
-within ±0.15 and ξ + `xi_delta` above −1; the feather 0° to 15° and q
-0 to 3.34 m⁻¹ (D ≥ 0.3 m); fixed gains 0.25 to 4, or an Auto track
-with a rate above 0, a sample at least and finite ratios; the caps (5°
-to 35°, an edge of 0° to 5°, their other numbers finite); then one
-`Rig::build` at the calibration's square, whose `PastLimit` is
-θ_max's `out_of_range` ("past its lens's limit") and whose other
-refusals are `invalid` ("makes no rig"); each lens's feather bound;
-and the coverage rule. Every bound comes before the rules that build
-the model, so a value out of its range is named as such, never as a
-rig that won't build. A call that builds the rig, as a camera
-project's edit does, takes 0.034 to 0.037 ms in a debug build.
+too. A dual-fisheye source, in this order: its tracks differ, and the
+first is the media's video stream (plan 11.1's rule, which the M3.9
+review's R6 holds every client to); its `front_track` is 0 or 1; the
+generation the geometry reads has its set in the snapshot; the
+snapshot's hash is its raw strings'; each of that set's principal
+points within the span of its square the canvas map shows (0 to src,
+or the window under map B), as a lens whose axis is out of frame
+covers nothing of its slot (the M3.9 review's R2, which also gives
+such a lens θ_frame 0, so the tune's centre can't take an axis out
+unrefused); for each lens the tune's yaw, pitch and roll within ±15°,
+its centre within ±64 canvas px, the radius scale 0.9 to 1.1, θ_max
+85° to 110°, `xi_delta` within ±0.15 and ξ + `xi_delta` above −1; the
+feather 0° to 15° and q 0 to 3.34 m⁻¹ (D ≥ 0.3 m); fixed gains 0.25 to
+4, or an Auto track with a rate above 0, a sample at least and finite
+ratios; the caps (5° to 35°, an edge of 0° to 5°, their other numbers
+finite); then one `Rig::build` at the calibration's square, whose
+`PastLimit` is θ_max's `out_of_range` ("past its lens's limit") and
+whose other refusals are `invalid` ("makes no rig"); each lens's
+feather bound; and the coverage rule. Every bound comes before the
+rules that build the model, so a value out of its range is named as
+such, never as a rig that won't build. A call that builds the rig, as
+a camera project's edit does, takes 0.034 to 0.037 ms in a debug
+build.
 
 - **The feather's bound is floored at 0**: h ≤ max(0, min(θ_max,
   θ_frame) − 90°) for each lens, θ_frame from the snapshot, geometry

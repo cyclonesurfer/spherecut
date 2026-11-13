@@ -165,6 +165,11 @@ fn rows() -> Vec<Row> {
         refused(Code::Invalid, "source.tracks", "twice"),
     );
     row(
+        "the tracks swapped, the first not the media's video stream".into(),
+        changed(|df| df.tracks = [1, 0]),
+        refused(Code::Invalid, "source.tracks[0]", "the media's video"),
+    );
+    row(
         "front track 1".into(),
         changed(|df| df.front_track = 1),
         Expect::Valid,
@@ -823,7 +828,7 @@ fn validate_at_each_bound_and_just_past() {
         spent_valid / f64::from(valid) * 1e3
     );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    assert_eq!(rows.len(), 181, "a row was added or dropped");
+    assert_eq!(rows.len(), 182, "a row was added or dropped");
 
     // What both lenses at 85° would have rendered: directions 90° off
     // lens 0's axis, which neither covers, weighed (0, 0).
