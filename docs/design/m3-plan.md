@@ -1202,16 +1202,17 @@ symbol); an amendment's are at its own date.*
      binding before its `set_stitch` (below). (8) `camera_source` sits beside an unchanged
      `project_media` (below). (9) Unit (a) fixed the file layer (F031 to F034, F036), with F031's
      CLI test in (d). (10) F051: text from files is kept out of MCP errors, media are named by id,
-     and `tools.rs` filters every message as a backstop, so PLAN's ticked A1 criterion stands as
-     written. (11) M3.6's and M3.7's briefs predate amendment 7 and are refreshed before either
-     launches: M3.6's carries schema 2's `tz` form, `window_offset` and
-     `the_placeholder_writes_the_plans_json`, and M3.7's F055's move of `schema2.spherecut`'s
-     blessing onto `testkit::bless`. (12) No tool's description or schema was to grow; one shrank
-     (below). (13) The 3 s was split among the units and measured, an overrun going to Pat, never to
-     a cut check (below). (14) No generic KB fallback (below). (15) The branches were made at main
-     as it stood at launch. (16) The launch's own checks. (17) 11.4's "newer evidence" is read as
-     other evidence (below). (18) The tune's frame under stored extrinsics stays as `sphere::rig`
-     composes it: M3.6 decides, and moving it is schema 3 with a migration (D68).
+     and `tools.rs` filters every message as a backstop, so PLAN's ticked A1 criterion stands, with
+     one sentence added that names a project's media by id (amendment 7's F051). (11) M3.6's and
+     M3.7's briefs predate amendment 7 and are refreshed before either launches: M3.6's carries
+     schema 2's `tz` form, `window_offset` and `the_placeholder_writes_the_plans_json`, and M3.7's
+     F055's move of `schema2.spherecut`'s blessing onto `testkit::bless`. (12) No tool's
+     description or schema was to grow; one shrank (below). (13) The 3 s was split among the units
+     and measured, an overrun going to Pat, never to a cut check (below). (14) No generic KB
+     fallback (below). (15) The branches were made at main as it stood at launch. (16) The launch's
+     own checks. (17) 11.4's "newer evidence" is read as other evidence (below). (18) The tune's
+     frame under stored extrinsics stays as `sphere::rig` composes it: M3.6 decides, and moving it
+     is schema 3 with a migration (D68).
    - **Shape and serde (11.1).** sphere's `Geometry` and every type it holds, `LensCalib`,
      `CalibTerms`, `Tune` and `LensTune` derive serde in sphere (snake_case, unknown fields
      refused), and core reads them as they are. `Source`, `Sampling` and `CapMode` are tagged by
@@ -1320,9 +1321,11 @@ symbol); an amendment's are at its own date.*
      `sequence::load`), and `render` and `frame --project` (exit 1), after `file::media_status` and
      any `provisional_geometry` warning and before the offline check, with advice for the pair's
      kind (R9). So **no tool shows `check`'s advice before M3.11**: it first shows when M3.11 lifts
-     `not_yet`, where M3.11's tests should look for it, and the window's notice is M3.10's. A schema
-     1 `.insv` project, whose media is equirect, still renders lens 0 outside the window until then
-     (PROGRESS, Known issues).
+     `not_yet`, where M3.11's tests should look for it, and the window's notice is M3.10's. Any
+     project whose camera file's media is equirect still renders lens 0 outside the window until
+     then: a schema 1 `.insv` project, and a schema 2 one that `project create` or `add_media` kept
+     equirect with `no_calibration`, R7's fallback for a source `validate` refuses at the default
+     tune among them (PROGRESS, Known issues).
    - **The same-bytes rule (11.4; 22.1's M3.9 row).** A project keeps its stored geometry under a
      newer table entry. `an_old_project_renders_the_same_bytes` renders a project made under an
      older guess to 30db18fc6d97db10 before and while a fake newer entry of the other binding

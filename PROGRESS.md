@@ -10,7 +10,7 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because huginn's Mesa is Fedora's build, without RPM Fusion's `mesa-vulkan-drivers-freeworld`, which leaves H.264 and HEVC out of Vulkan Video. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S (`hw-run-8.md`, sent 2026-11-01), Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12 at 5.7K30, a Studio export of take 16 (`docs/SAMPLES.md`), for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). D25 decided 2026-10-30: path B on odin by default; VA-API's import stays opt-in until huginn's numbers. How it got here: below, "M1: how it got here" |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn (`hw-run-8.md`, sent 2026-11-01). Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). So is M3.9: schema 2. A project records each media's camera, calibration, geometry, tune and gains, which `set_source`, `set_stitch` and `set_caps` change and undo exactly; agents make a project of a camera's file with its source and edit it; and every renderer outside the window refuses a camera pair's project `not_yet` until M3.11, after a fresh review's R1 to R9 and N1 to N13 were fixed (below, "M3.9"; D68, plan amendment 9). Next, the merge of the short slice that traces and fixes the `gui_decode_behind` stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12), then M3.7 and M3.6 (plan 22.2), then M3.10 once M3.7 is in beside M3.8. Waiting on Pat: that card, D47's project-format card (JSON is the working choice, and schema 2 is built on it), huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). So is M3.9: schema 2. A project records each media's camera, calibration, geometry, tune and gains, which `set_source`, `set_stitch` and `set_caps` change and undo exactly; agents make a project of a camera's file with its source and edit it; and every renderer outside the window refuses a camera pair's project `not_yet` until M3.11, after a fresh review's R1 to R9 and N1 to N13 were fixed (below, "M3.9"; D68, plan amendment 9). Next, the merge of the short slice that traces and fixes the `gui_decode_behind` stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12), then M3.7 and M3.6 (plan 22.2), then M3.10 once M3.7 is in beside M3.8. Waiting on Pat: that card, D47's project-format card (JSON is the working choice, and schema 2 is built on it), huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, M3.9's questions (whether 19.6's M3.9 row rises again, now 5.45 to 5.75 s against the 5 s Pat set on 2026-11-13; whether `xi_delta`'s ±0.15 is wide enough for own calibrations; whether `validate` adds LOD 0's margin; amendment 9), and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
 | M4–M9 | Not started |
 | Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,235 of its 12,288 bytes (M3.9, whose `project` takes a camera's file and whose `set_source` reads its calibration from it). How it got here: below, "Agent integration (track A): how it got here" |
 
@@ -274,8 +274,12 @@ second reader upheld 13, and they are fixed here.
   lenses show. `spherecut render` and the agents' `render` of such a
   project still export lens 0, as on main: since M3.9 an agent's
   project of a camera file holds its dual-fisheye source, which they
-  refuse `not_yet` until M3.11, but one made before, whose media is
-  equirect, still renders as lens 0 (Known issues).
+  refuse `not_yet` until M3.11, but any project whose camera file's
+  media is equirect still renders as lens 0: one made before M3.9, and
+  one that `project create` or `add_media` kept equirect with
+  `no_calibration`, a file without a calibration a stitch reads or
+  (since M3.9's R7) one whose source `validate` refuses at the default
+  tune (Known issues).
 
 New controls (4.1 rule 8), each run every time: `must_fail`'s own
 (a passing Result, bool or Comparison panics; NaN is not comparable);
@@ -3772,16 +3776,17 @@ gains (D68), and the projects agents make of a camera's file.
 the code first, and each fix shown failing first where it could be):
 - **(a) The file layer and `validate` (b3dc516 to a92f091).** R8 and its
   review: on save a media path is named as near the project's real
-  folder as its folders' real paths let it be (`fs::name_near`: of the
-  names that one of its folders, resolved physically with the rest kept
-  as named, gives, the one that shares the most of the folder, and of
-  those the one resolved least, the path as given first; the clip's own
-  name is never followed, and a missing folder gives no name). So a clip
-  named through a linked ancestor of the folder is stored as `clip.mp4`,
-  not a path that climbs to the root and back, and one in a folder
-  linked within the project's keeps the link's name (`footage/f.mp4`),
-  so the folder moved with its media or its link keeps working;
-  `file::save` and `ProjectFolder::of_file` (create and save) save so.
+  folder as its folders' real paths let it be (`fs::name_near`). Each
+  existing folder of the path, resolved physically with the rest kept as
+  named, gives a candidate name. The one that shares the most components
+  with the project's real folder wins; on a tie, the one resolved least,
+  the path as given first. The clip's own name is never followed, and a
+  missing folder gives no candidate. So a clip named through a linked
+  ancestor of the folder is stored as `clip.mp4`, not a path that climbs
+  to the root and back, and one in a folder linked within the project's
+  keeps the link's name (`footage/f.mp4`), so the folder moved with its
+  media or its link keeps working; `file::save` and
+  `ProjectFolder::of_file` (create and save) save so.
   R3: a folder flush that fails after the rename is a save. The
   crate-private publishes return `PublishError::NotFlushed` with the
   file's metadata (taken before the rename or link), and
@@ -3859,10 +3864,13 @@ the code first, and each fix shown failing first where it could be):
   No fixture was shrunk and no check cut.
 - A camera pair's project is refused `not_yet` outside the window until
   M3.11, so `check`'s `provisional_geometry` advice shows nowhere yet;
-  M3.11's tests should look for it. A schema 1 project of an `.insv`,
-  whose media is equirect (as M3.0 (b)'s agent-made projects are), is
-  still rendered as lens 0 by the CLI and agents; only the window's
-  export refuses it, by probing the file.
+  M3.11's tests should look for it. Any project whose camera file's
+  media is equirect is still rendered as lens 0 by the CLI and agents
+  until M3.11: a schema 1 project of an `.insv` (as M3.0 (b)'s
+  agent-made projects are), and a schema 2 one that `project create` or
+  `add_media` kept equirect with `no_calibration`, R7's fallback for a
+  source `validate` refuses at the default tune among them. Only the
+  window's export refuses it, by probing the file.
 - `not_equirect` for an Insta360 file of two lenses without a
   calibration a stitch reads still says "stitching arrives in M3" and
   names the file by its path (`still::INSTA360_UNSTITCHED` and
@@ -3939,7 +3947,11 @@ lavapipe), at d478083 unless named:
   `stitch_edits_undo_and_save` alone took 424.83 s at unit (d), and
   281.17 s on unit (b)'s branch, before the merge brought unit (a)'s
   `validate`, which every apply and load runs; the cause of the growth
-  isn't confirmed); sphere `tests/rig.rs` 15.91 s (16.1 s at M3.5).
+  isn't confirmed); sphere `tests/rig.rs` 15.91 s (16.1 s at M3.5); and,
+  after unit (d)'s review, core `tests/view_props.rs` at 98d2504, whose
+  save and load round trip runs `file::to_json` and `from_json`, which
+  the round changed: 819.59 s, 8 passed (819.49 s in the binary, 826.32
+  s at M2.9).
 - `cargo xtask check` passed at 80bfe47: 1703 tests passed, 0 failed and
   61 ignored on 143 result lines, against 1663, 0 and 60 on 140 at
   M3.5's 30ad23a. Unit (d)'s first run waited on the disk (10.76 GB free
@@ -6222,10 +6234,14 @@ each slice's merge sweeps the list.
   `frame --project` (exit 1), with advice for the pair's kind (D68). So
   `check`'s `provisional_geometry` advice, which plan 11.4 asks for,
   shows nowhere yet, and render's and frame's `provisional_geometry`
-  warning comes only beside the refusal. A schema 1 project of an
-  `.insv`, whose media is equirect as M3.0 (b)'s agent-made projects
-  are, is still rendered as lens 0 by the CLI and agents; only the
-  window's export refuses it, by probing the file. (as of 2026-11-13)
+  warning comes only beside the refusal. Any project whose camera file's
+  media is equirect is still rendered as lens 0 by the CLI and agents: a
+  schema 1 project of an `.insv` (as M3.0 (b)'s agent-made projects
+  are), and a schema 2 one that `project create` or `add_media` kept
+  equirect with `no_calibration` (a two-lens file without a calibration
+  a stitch reads, or since M3.9's R7 one whose source `validate` refuses
+  at the default tune). Only the window's export refuses it, by probing
+  the file. (as of 2026-11-13)
 - `validate` holds each lens's `xi_delta` within ±0.15 (D68), the reach
   of the radius scale's 0.9 to 1.1 on θ_frame on X5-shaped sets, rounded
   outward. It refuses handed-on's F038 row (ξ 0 with −0.5 accepted).
