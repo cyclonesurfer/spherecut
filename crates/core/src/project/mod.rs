@@ -148,8 +148,9 @@ pub struct Media {
     /// which reads as equirect; schema 2 always writes it.
     #[serde(default)]
     pub source: Source,
-    /// The caps over the poles (M3.20). Absent reads as none; always
-    /// written.
+    /// The caps over the poles (M3.20). A schema 1 media has none, which
+    /// reads as no caps; schema 2 always writes them, and a schema 2
+    /// media without them is refused, as one without `source` is.
     #[serde(default)]
     pub caps: Caps,
 }

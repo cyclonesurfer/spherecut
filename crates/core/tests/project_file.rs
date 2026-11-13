@@ -422,52 +422,109 @@ fn the_checked_in_schema_2_file_loads_and_saves_the_same() {
     );
 }
 
-/// A schema 2 media without a `source` is refused, naming its path, so a
-/// damaged file never defaults to equirect silently (11.2); a schema 1
-/// media without one reads as equirect.
-///
-/// Controls: the same text marked schema 1 loads, its media equirect, and
-/// the whole fixture loads.
-#[test]
-fn a_media_without_source_is_refused_by_path() {
+/// The schema 2 fixture's text and value.
+fn schema2_fixture() -> (String, serde_json::Value) {
     let on_disk = std::fs::read_to_string(data_dir().join("schema2.spherecut")).unwrap();
-    let fixture: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
-    // The fixture with media `i`'s source taken out, or set to `null`,
-    // marked `schema`.
-    let without = |i: usize, null: bool, schema: u64| {
-        let mut v = fixture.clone();
-        v["schema"] = schema.into();
-        let m = v["project"]["media"][i].as_object_mut().unwrap();
-        if null {
-            m.insert("source".into(), serde_json::Value::Null);
-        } else {
-            m.remove("source").unwrap();
-        }
-        serde_json::to_string_pretty(&v).unwrap()
-    };
-    for (i, path) in [(0, "../clips/VID_1.mp4"), (1, "../clips/VID_2.insv")] {
-        for null in [false, true] {
-            let text = without(i, null, 2);
-            let e = file::from_json(&text, &data_dir()).unwrap_err();
-            let FileError::Invalid(problem) = &e else {
-                panic!("media {i}, null {null}: {e}");
-            };
-            assert_eq!(problem.code, Code::Invalid, "{e}");
-            assert!(
-                problem.message.contains(path) && problem.message.contains("\"source\""),
-                "media {i}, null {null}: {e}"
-            );
-            assert_eq!(e.code(), "invalid");
+    let value = serde_json::from_str(&on_disk).unwrap();
+    (on_disk, value)
+}
 
-            // The same text as schema 1, which never wrote a source,
-            // reads as equirect.
-            if !null {
-                let loaded = file::from_json(&without(i, null, 1), &data_dir()).unwrap();
-                assert_eq!(loaded.media()[i].source, Source::Equirect {}, "media {i}");
+/// `v` marked schema 1, with every media's `source` and `caps` taken out,
+/// as schema 1 wrote it.
+fn as_schema_1(v: &serde_json::Value) -> serde_json::Value {
+    let mut v = v.clone();
+    v["schema"] = 1.into();
+    for m in v["project"]["media"].as_array_mut().unwrap() {
+        let m = m.as_object_mut().unwrap();
+        m.remove("source").unwrap();
+        m.remove("caps").unwrap();
+    }
+    v
+}
+
+/// The fixture's media paths, by index.
+const FIXTURE_PATHS: [(usize, &str); 2] = [(0, "../clips/VID_1.mp4"), (1, "../clips/VID_2.insv")];
+
+/// Whether loading `v` is refused as invalid, naming `path` and `key`.
+fn refused_naming(v: &serde_json::Value, path: &str, key: &str) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(v).unwrap();
+    match file::from_json(&text, &data_dir()) {
+        Err(FileError::Invalid(p))
+            if p.code == Code::Invalid
+                && p.message.contains(path)
+                && p.message.contains(&format!("\"{key}\"")) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("{other:?}")),
+    }
+}
+
+/// A schema 2 media without a `source`, or `caps` (N1), or with either
+/// null, is refused, naming its path and the key, so a damaged file never
+/// defaults to equirect or to no caps silently (11.2), and a save after
+/// never drops the caps it lost.
+///
+/// Controls: the whole fixture isn't refused, and the same text as schema
+/// 1, which wrote neither key, loads, its media equirect with no caps.
+#[test]
+fn a_media_without_source_or_caps_is_refused_by_path() {
+    let (on_disk, fixture) = schema2_fixture();
+    for (i, path) in FIXTURE_PATHS {
+        for key in ["source", "caps"] {
+            for null in [false, true] {
+                let mut v = fixture.clone();
+                let m = v["project"]["media"][i].as_object_mut().unwrap();
+                if null {
+                    m.insert(key.into(), serde_json::Value::Null);
+                } else {
+                    m.remove(key).unwrap();
+                }
+                let refused = refused_naming(&v, path, key);
+                assert!(
+                    refused.is_ok(),
+                    "media {i}'s {key}, null {null}: {refused:?}"
+                );
             }
         }
+        must_fail(
+            "the whole fixture refused for a key",
+            refused_naming(&fixture, path, "caps"),
+        );
+    }
+    let loaded = file::from_json(
+        &serde_json::to_string_pretty(&as_schema_1(&fixture)).unwrap(),
+        &data_dir(),
+    )
+    .unwrap();
+    for m in loaded.media() {
+        assert_eq!(m.source, Source::Equirect {});
+        assert_eq!(m.caps, Caps::default());
     }
     file::from_json(&on_disk, &data_dir()).unwrap();
+}
+
+/// N3: a file marked schema 1 whose media carries schema 2's `source` or
+/// `caps` is refused, naming the media's path and the key, rather than
+/// read by schema 2's rules: schema 1 never wrote either, and a schema 1
+/// build refused both as unknown. Control: the same file without them
+/// isn't refused.
+#[test]
+fn a_schema_1_file_with_schema_2_keys_is_refused() {
+    let (_, fixture) = schema2_fixture();
+    let one = as_schema_1(&fixture);
+    for (i, path) in FIXTURE_PATHS {
+        for key in ["source", "caps"] {
+            let mut v = one.clone();
+            v["project"]["media"][i][key] = fixture["project"]["media"][i][key].clone();
+            let refused = refused_naming(&v, path, key);
+            assert!(refused.is_ok(), "media {i}'s {key}: {refused:?}");
+        }
+        must_fail(
+            "schema 1 without schema 2's keys refused",
+            refused_naming(&one, path, "source"),
+        );
+    }
 }
 
 /// `deny_unknown_fields` still refuses a misspelt key in a source's

@@ -203,9 +203,9 @@ pub fn from_json(text: &str, folder: &Path) -> Result<Project, FileError> {
     };
     match schema {
         Some(s) if s > SCHEMA => return Err(FileError::NewerSchema { found: s }),
-        // Schema 1's media have no source, which reads as equirect (M3
-        // plan 11.2), so it needs no migration of its own; a later schema's
-        // migrations go here.
+        // Schema 1's media have no source or caps, which read as equirect
+        // and no caps (M3 plan 11.2), so it needs no migration of its own;
+        // a later schema's migrations go here.
         Some(1 | SCHEMA) => {}
         _ => {
             return Err(FileError::NotProject(
@@ -214,9 +214,7 @@ pub fn from_json(text: &str, folder: &Path) -> Result<Project, FileError> {
         }
     }
     if let Some(project) = top.get("project") {
-        if schema == Some(SCHEMA) {
-            check_sources(project)?;
-        }
+        check_sources(project, schema == Some(SCHEMA))?;
         check_times(project, "/project")?;
     }
     // Parsed again from the text, so an error says its line and column.
@@ -288,33 +286,48 @@ pub fn load(path: &Path) -> Result<Project, FileError> {
     from_json(&text, folder)
 }
 
-/// Each media of a schema 2 file has a `source`, and not null: a damaged
-/// file never reads as equirect by default, as a schema 1 media does
-/// (M3 plan 11.2). Read on the value, so that the typed read after it
-/// keeps its line and column; what isn't a list of objects is left to
-/// that read to refuse.
-fn check_sources(project: &Value) -> Result<(), FileError> {
+/// Each media's `source` and `caps` as its schema writes them (M3 plan
+/// 11.2): every media of a schema 2 file has both, and not null, so a
+/// damaged file never reads as equirect or as no caps by default (the
+/// M3.9 review's N1), as a schema 1 media does; and no media of a schema
+/// 1 file has either, so a file marked schema 1 that holds schema 2's
+/// keys isn't read by schema 2's rules (N3). Read on the value, so that
+/// the typed read after it keeps its line and column; what isn't a list
+/// of objects is left to that read to refuse.
+fn check_sources(project: &Value, schema_2: bool) -> Result<(), FileError> {
     let Some(Value::Array(media)) = project.get("media") else {
         return Ok(());
     };
     for m in media {
         let Value::Object(m) = m else { continue };
-        if !matches!(m.get("source"), None | Some(Value::Null)) {
-            continue;
-        }
         let path = m.get("path").and_then(Value::as_str).unwrap_or("");
         let which = match m.get("id").and_then(Value::as_u64) {
             Some(id) => format!("media {id} ({path:?})"),
             None => format!("the media at {path:?}"),
         };
-        return Err(FileError::Invalid(Problem::new(
-            Code::Invalid,
-            format!(
-                "{which} has no \"source\": a schema 2 file writes one for every media, so \
-                 this one was cut short or edited; give it its source ({{\"kind\": \
-                 \"equirect\"}} for a picture that is equirect already)"
+        let refuse =
+            |message: String| Err(FileError::Invalid(Problem::new(Code::Invalid, message)));
+        for (key, none) in [
+            (
+                "source",
+                "{\"kind\": \"equirect\"} for a picture that is equirect already",
             ),
-        )));
+            ("caps", "{\"nadir\": null, \"zenith\": null} for none"),
+        ] {
+            let absent = matches!(m.get(key), None | Some(Value::Null));
+            if schema_2 && absent {
+                return refuse(format!(
+                    "{which} has no \"{key}\": a schema 2 file writes it for every media, so \
+                     this one was cut short or edited; give it its {key} ({none})"
+                ));
+            }
+            if !schema_2 && m.contains_key(key) {
+                return refuse(format!(
+                    "{which} has a \"{key}\", which a schema 1 file never wrote: the file was \
+                     edited or its \"schema\" mislabelled; mark it schema 2 if it is one"
+                ));
+            }
+        }
     }
     Ok(())
 }

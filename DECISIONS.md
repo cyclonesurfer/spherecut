@@ -8070,17 +8070,20 @@ schema check takes 1 and 2: a schema 1 media has no `source`, which
 `#[serde(default)]` reads as equirect, all that a step that can't
 probe could give, so schema 1 needs no migration step of its own and
 `from_json` keeps its second parse of the text, with its line and
-column. A schema 2 media without `source`, or with a null one, is
-refused (`invalid`, naming the media's id and path) by a check on the
-`Value` beside `check_times`, so a file cut short or edited never
-reads as equirect by default. `schema1.spherecut` loads unchanged and
-is never rewritten (the review's F063); `schema2.spherecut`, an
-equirect media and a camera's pair with a nadir cap, is the current
-schema's fixture, which `SPHERECUT_BLESS_PROJECT=1` rewrites. The
-file is still JSON, this entry's working choice: the format's Open
-card is Pat's, and was checked before M3.9 began (the plan's risk 15);
-another answer now reworks schema 2's sources too. Also from M3.9, the
-file layer: a project file's own folder is the one the kernel finds it
+column. A schema 2 media without `source` or `caps`, or with either
+null, is refused (`invalid`, naming the media's id and path) by a
+check on the `Value` beside `check_times`, so a file cut short or
+edited never reads as equirect or uncapped by default; a file marked
+schema 1 whose media hold either key is refused as edited or
+mislabelled, since schema 1 never wrote them (the M3.9 review's N1
+and N3). `schema1.spherecut` loads unchanged and is never rewritten
+(the review's F063); `schema2.spherecut`, an equirect media and a
+camera's pair with a nadir cap, is the current schema's fixture,
+which `SPHERECUT_BLESS_PROJECT=1` rewrites. The file is still JSON,
+this entry's working choice: the format's Open card is Pat's, and was
+checked before M3.9 began (the plan's risk 15); another answer now
+reworks schema 2's sources too. Also from M3.9, the file layer: a
+project file's own folder is the one the kernel finds it
 in (`fs::real_file`: links at the path's end followed, the folder
 that holds the file resolved physically), on save and load alike, so
 a project in a linked folder reads its `../clip.mp4` beside the real
@@ -11302,8 +11305,12 @@ What, as `crates/core/src/project/` has it:
   misspelt one is (`deny_unknown_fields`, with each `Option` read
   through `Option::deserialize`), so a hand edit that drops
   `"profile"` or a V6 reading's `"prism"` is caught rather than read as
-  none. `set_stitch`'s optional keys, an edit's and not the file's, are
-  the exception.
+  none. A media's own `source` and `caps` are held the same way: a
+  schema 2 media without either, or with either null, is refused, and
+  `#[serde(default)]` on them serves only schema 1, whose media never
+  wrote them; a schema 1 file holding either is refused as edited (the
+  M3.9 review's N1, N3 and N13). `set_stitch`'s optional keys, an
+  edit's and not the file's, are the exception.
 - **No proxy field**: the LRV is a viewer's convenience, found by name
   and trailer each time (plan section 15), never in the project.
 - **One schema for all of M3**: the EAC pair and the caps are in it
