@@ -332,7 +332,11 @@ when a call gives `output` and `project` when it gives `create`, as are
   of the project would make (`checked` says so): the output's kind and
   size, codec, bit depth, colour, audio and its metadata, by the same
   rules and target, before any render. The `check` a finished `job`
-  gives is the proof.
+  gives is the proof. A project of a camera's pair is `not_yet` until
+  M3.11; from then its `advice` holds `provisional_geometry` while the
+  pair's geometry is provisional, with the evidence of Spherecut's
+  table of cameras when the table has since settled it or guessed
+  again.
 - **`doctor`**: this machine's FFmpeg, decoders, VA-API and Vulkan
   devices, and each problem with its fix (the exact Fedora commands come
   from `spherecut doctor` in a terminal). With `file`, the decode path
