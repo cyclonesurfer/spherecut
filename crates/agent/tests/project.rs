@@ -337,6 +337,12 @@ fn every_op_of_the_reference_applies_and_undoes_to_what_was_there() {
         }
         let r = ok(&tools, "edit", args);
         let after = load(&p);
+        if op.op == "set_source" {
+            // The camera form, read from cam.insv, with the binding asked.
+            let d = fisheye(&p, 12);
+            assert_eq!(d.geometry.binding, Binding::Direct, "{r}");
+            assert_eq!(d.geometry.status, Status::User, "{r}");
+        }
         assert_eq!(r["revision"], after.revision(), "{}: {r}", op.op);
         assert!(after.revision() > before.revision(), "{}", op.op);
         assert!(!after.same_content(&before), "{} changed nothing", op.op);
@@ -899,9 +905,9 @@ fn a_session_lists_the_project_tools_and_edits() {
 /// `set_source`'s camera form, `{"kind": "camera", "binding": …}`, is
 /// expanded by the server from the file beneath the roots (M3 plan 11.3):
 /// the file's hash, tracks and the table's geometry with the asked binding
-/// and status user, after the entry was tagged equirect; one undo step
-/// each. Control: of a plain MP4, the camera's tracks cut before their
-/// trailer, it is refused.
+/// (direct, where the X5 row says reversed) and status user, after the
+/// entry was tagged equirect; one undo step each. Control: of a plain
+/// MP4, the camera's tracks cut before their trailer, it is refused.
 #[test]
 fn set_source_reads_the_camera_form() {
     let _t = timed("set_source_reads_the_camera_form");
@@ -915,7 +921,9 @@ fn set_source_reads_the_camera_form() {
         json!({"file": p, "create": {"media": cam}}),
     );
     let made = fisheye(&p, 1);
-    let camera = json!({"kind": "camera", "binding": "reversed"});
+    // The X5 row's binding is reversed: the form asks for the other.
+    assert_eq!(made.geometry.binding, Binding::Reversed);
+    let camera = json!({"kind": "camera", "binding": "direct"});
     let flat = ok(
         &tools,
         "edit",
@@ -932,8 +940,10 @@ fn set_source_reads_the_camera_form() {
     assert_eq!(d.calibration, file.calibration);
     assert_eq!(d.calibration.hash, d.calibration.raw.hash());
     assert_eq!(d.tracks, file.tracks);
+    assert_eq!(d.geometry.binding, Binding::Direct);
+    assert_eq!(d.geometry.status, Status::User);
     let mut geometry = made.geometry.clone();
-    geometry.binding = Binding::Reversed;
+    geometry.binding = Binding::Direct;
     geometry.status = Status::User;
     assert_eq!(d.geometry, geometry);
     let rest = DualFisheye {
