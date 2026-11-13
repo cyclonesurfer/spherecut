@@ -141,12 +141,13 @@ impl Project {
     /// A dual-fisheye source's are checked in this order, the first
     /// refusal returned: its tracks differ, the first the media's video
     /// stream; its front track is 0 or 1; the geometry's generation has
-    /// its set in the snapshot; the hash is the raw strings'; each of that
-    /// set's principal points within the span of its square the canvas
-    /// map shows (0 to src, or the window under map B); each lens's yaw,
-    /// pitch and roll within ±15°, centre within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to 110°,
-    /// `xi_delta` within ±0.15 and ξ plus it above −1; the feather 0° to
-    /// 15° and q 0 to 3.34 m⁻¹; the gains; the caps; then, from one
+    /// its set in the snapshot; the hash is the raw strings'; the square
+    /// and the window have sides; each of that set's principal points
+    /// within the span of its square the canvas map shows (0 to src, or
+    /// the window under map B); each lens's yaw, pitch and roll within
+    /// ±15°, centre within ±64 px, radius scale 0.9 to 1.1, θ_max 85° to
+    /// 110°, `xi_delta` within ±0.15 and ξ plus it above −1; the feather
+    /// 0° to 15° and q 0 to 3.34 m⁻¹; the gains; the caps; then, from one
     /// [`Rig::build`] at the calibration's square, θ_max below the model's
     /// limit, the feather at most max(0, min(θ_max, θ_frame) − 90°) for
     /// each lens, and the coverage rule: no direction left that neither
@@ -544,10 +545,11 @@ fn check_tracks(m: &Media, tracks: [u32; 2]) -> Result<(), Problem> {
 }
 
 /// A dual-fisheye source's rules that build no model, in order: the
-/// tracks (two streams, the first the media's video), the front track, the geometry's set, the hash, that set's
-/// principal points, each lens's tune (yaw, pitch and roll, centre,
-/// radius scale, θ_max, ξ delta and the sum ξ + ξ delta), the feather's
-/// and q's ranges, and the gains.
+/// tracks (two streams, the first the media's video), the front track,
+/// the geometry's set, the hash, the square's and the window's sides,
+/// that set's principal points, each lens's tune (yaw, pitch and roll,
+/// centre, radius scale, θ_max, ξ delta and the sum ξ + ξ delta), the
+/// feather's and q's ranges, and the gains.
 fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), Problem> {
     use bounds::*;
     let id = m.id;
@@ -559,7 +561,8 @@ fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), 
         return fail(
             Code::Invalid,
             format!(
-                "media {id}'s source.tracks[0] is stream {}, and the media's video is stream {}:                  the first lens track is the stream the clip's timing follows",
+                "media {id}'s source.tracks[0] is stream {}, and the media's video is stream {}: \
+                 the first lens track is the stream the clip's timing follows",
                 df.tracks[0], m.video.stream
             ),
         );
@@ -606,6 +609,18 @@ fn check_fisheye(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), 
     // slip. The tune's centre may still take it out by 64 px, where
     // θ_frame is 0 and the feather's and coverage rules refuse it.
     let rig_cal = cal.calibration();
+    // `Rig::build`'s own rule (RigError::NotPositive), held here so that
+    // the span below is read from a square and a window that have sides.
+    for (field, side) in [("canvas[1]", rig_cal.src), ("window[0]", rig_cal.dst)] {
+        if side == 0 {
+            return fail(
+                Code::Invalid,
+                format!(
+                    "media {id}'s source.calibration.{field} is 0, and a side of 0 makes no rig"
+                ),
+            );
+        }
+    }
     let span = df.geometry.canvas.slot_span(rig_cal.src, rig_cal.dst);
     for (b, block) in set.iter().enumerate() {
         for (axis, v) in [("cx", block.cx), ("cy", block.cy)] {

@@ -167,7 +167,11 @@ fn rows() -> Vec<Row> {
     row(
         "the tracks swapped, the first not the media's video stream".into(),
         changed(|df| df.tracks = [1, 0]),
-        refused(Code::Invalid, "source.tracks[0]", "the media's video"),
+        refused(
+            Code::Invalid,
+            "source.tracks[0]",
+            "the media's video is stream 0: the first lens track",
+        ),
     );
     row(
         "front track 1".into(),
@@ -219,6 +223,21 @@ fn rows() -> Vec<Row> {
             "source.calibration.hash",
             "raw strings' hash",
         ),
+    );
+    // A square or window of no side, which `Rig::build` refuses, named
+    // before the principal points' span is read from it.
+    row(
+        "the canvas 0 px high, so each block's square has no side".into(),
+        changed(|df| df.calibration.canvas[1] = 0),
+        refused(Code::Invalid, "source.calibration.canvas[1]", NO_RIG),
+    );
+    row(
+        "under map B, the window 0 px wide".into(),
+        changed(|df| {
+            df.geometry.canvas = CanvasMap::B;
+            df.calibration.window[0] = 0;
+        }),
+        refused(Code::Invalid, "source.calibration.window[0]", NO_RIG),
     );
     // Each block's principal point (R2): within its square, [0, src],
     // under the fixture's map C. At an end the lens's axis meets its
@@ -828,7 +847,7 @@ fn validate_at_each_bound_and_just_past() {
         spent_valid / f64::from(valid) * 1e3
     );
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    assert_eq!(rows.len(), 182, "a row was added or dropped");
+    assert_eq!(rows.len(), 184, "a row was added or dropped");
 
     // What both lenses at 85° would have rendered: directions 90° off
     // lens 0's axis, which neither covers, weighed (0, 0).
@@ -892,7 +911,7 @@ fn a_source_is_checked_alone_as_validate_checks_it() {
         .map(|(name, ..)| name)
         .collect();
     assert!(differ.is_empty(), "{differ:?}");
-    assert_eq!(answers.len(), 179, "the dual-fisheye rows compared");
+    assert_eq!(answers.len(), 181, "the dual-fisheye rows compared");
     // Control: each row's `check` against the next row's `validate`.
     must_fail(
         "each row's check against the next row's validate",
