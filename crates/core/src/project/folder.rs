@@ -1260,11 +1260,11 @@ mod tests {
         assert_eq!(loaded.project, p);
         assert_eq!(loaded.history, Kept::Kept(h.clone()));
 
-        rename(&mut p, &mut h, "c");
-        let again = folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
-        assert_eq!(again.flush_error, None);
-        rename(&mut p, &mut h, "d");
-        let stale = folder.save(name, &p, &h, Some(&created.identity));
+        // Control, right after the save whose flush failed, so that only
+        // that save can have made the identity from before it stale.
+        let (mut q, mut g) = (p.clone(), h.clone());
+        rename(&mut q, &mut g, "d");
+        let stale = folder.save(name, &q, &g, Some(&created.identity));
         must_fail(
             "a save with the identity from before a save whose flush failed",
             stale.as_ref().map(drop),
@@ -1273,6 +1273,9 @@ mod tests {
             matches!(stale, Err(FolderError::Changed { .. })),
             "{stale:?}"
         );
+        rename(&mut p, &mut h, "c");
+        let again = folder.save(name, &p, &h, Some(&saved.identity)).unwrap();
+        assert_eq!(again.flush_error, None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

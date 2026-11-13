@@ -332,18 +332,20 @@ impl TempFile {
 
     /// [`TempFile::persist_replace`], giving the published file's metadata,
     /// and telling a failed flush of the folder after the rename apart
-    /// ([`PublishError::NotFlushed`]).
+    /// ([`PublishError::NotFlushed`]). The metadata is taken before the
+    /// rename, which keeps the file (its device, inode, size and mtime),
+    /// so that nothing after it can fail as though nothing was published.
     pub(crate) fn publish_replace_with(
         mut self,
         sync: impl FnOnce(&Path) -> io::Result<()>,
     ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
+        let meta = self.file.metadata()?;
         // Something may have turned up at `dest` while the file was written.
         replaceable(&self.dest)?;
         std::fs::rename(&self.path, &self.dest)?;
         self.persisted = true;
-        let meta = self.file.metadata()?;
         self.synced(sync, meta)
     }
 
@@ -357,9 +359,10 @@ impl TempFile {
     }
 
     /// [`TempFile::persist_new`], giving the published file's metadata:
-    /// the temporary file's own where it was renamed or linked in, the
-    /// copy's where it was copied, which is another file (the project
-    /// review's F032); a failed flush of the folder after the publish is
+    /// the temporary file's own where it was renamed or linked in (taken
+    /// before, as the rename and the link keep the file), the copy's
+    /// where it was copied, which is another file (the project review's
+    /// F032); a failed flush of the folder after the publish is
     /// [`PublishError::NotFlushed`], with it.
     pub(crate) fn publish_new(self) -> Result<std::fs::Metadata, PublishError> {
         self.publish_new_with(
@@ -393,12 +396,14 @@ impl TempFile {
     ) -> Result<std::fs::Metadata, PublishError> {
         may_block("writing a file to disk");
         self.file.sync_all()?;
+        // Before the publish, so that nothing after it can fail as though
+        // nothing was published: a rename or a link keeps the file.
+        let meta = self.file.metadata()?;
         // One step that leaves nothing at the temporary name and is never
         // a part of the file at the output, as the copy below can be.
         match rename(&self.path, &self.dest) {
             Ok(()) => {
                 self.persisted = true;
-                let meta = self.file.metadata()?;
                 return self.synced(sync, meta);
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(e.into()),
@@ -430,11 +435,7 @@ impl TempFile {
         if let Err(e) = std::fs::remove_file(&self.path) {
             tracing::warn!("could not remove {}: {e}", self.path.display());
         }
-        let meta = match copy {
-            Some(meta) => meta,
-            None => self.file.metadata()?,
-        };
-        self.synced(sync, meta)
+        self.synced(sync, copy.unwrap_or(meta))
     }
 
     /// After a publish of the file with `meta`, flush the folder `dest` is
