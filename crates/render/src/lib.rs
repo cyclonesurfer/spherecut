@@ -29,6 +29,7 @@ pub mod gpu;
 pub mod layouts;
 pub mod output;
 pub mod plane;
+pub mod probe;
 pub mod project;
 pub mod readback;
 pub mod reference;
@@ -48,6 +49,7 @@ pub use frame::GpuFrame;
 pub use gpu::{AdapterChoice, Gpu, GpuCaps, POLL_EVERY};
 pub use output::FrameViews;
 pub use plane::{LayoutKind, PlaneFormat, PlaneShape, SlotShape};
+pub use probe::{GateProbe, ProbeReport, ProbeSample};
 pub use project::{
     DebugMode, Filter, Framing, LinearTarget, OutKind, Projector, ViewParams, ViewUniform,
 };

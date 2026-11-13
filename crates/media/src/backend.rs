@@ -82,6 +82,14 @@ pub struct VideoRequest {
     pub extra_hw_frames: u8,
     /// What a device decoder hands frames out as (slice 5b).
     pub output: HwOutput,
+    /// Whether a VA-API decoder waits for the pictures queued on its
+    /// device before a download, or after every packet sent too
+    /// ([`VaapiDrain`]). Other decoders don't look at it. It is
+    /// [`VaapiDrain::Off`] here, not the drain's default: the CLI's render
+    /// and frame and the agents' tools share their GPU's memory with no
+    /// window, so a drain would only cost them speed. The player asks for
+    /// its `PlayerConfig`'s, and the window's exports for the player's.
+    pub vaapi_drain: VaapiDrain,
     /// Set at shutdown only: FFmpeg stops reading inside a read, and the
     /// stream ends for good (D13). Seeks stop through [`StopToken`]s.
     pub interrupt: Arc<AtomicBool>,
@@ -98,6 +106,7 @@ impl Default for VideoRequest {
             threads: None,
             extra_hw_frames: 2,
             output: HwOutput::Download,
+            vaapi_drain: VaapiDrain::Off,
             interrupt: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "fault-injection")]
             fault: None,
@@ -172,6 +181,90 @@ pub fn zero_copy_from_env(get: impl Fn(&str) -> Option<String>) -> ZeroCopy {
         Some("1") => ZeroCopy::All,
         Some("0") => ZeroCopy::Off,
         _ => ZeroCopy::default(),
+    }
+}
+
+/// `SPHERECUT_VAAPI_DRAIN` sets the [`VaapiDrain`] the player's VA-API
+/// decoders run with, and the window's exports: playback's
+/// `PlayerConfig::vaapi_drain`.
+pub const VAAPI_DRAIN_ENV: &str = "SPHERECUT_VAAPI_DRAIN";
+
+/// Whether a VA-API decoder waits for every picture it has queued on its
+/// device (`vaSyncSurface` on every surface it has handed out a frame of)
+/// before it copies a frame to memory. On AMD, freeing the copy's staging
+/// buffer makes every later GPU submission in the process wait for the
+/// decodes then queued, the window's frame among them; with the decoder's
+/// own pictures drained first, none of them is left to wait for. Another
+/// decoder on the device, as a locked pair's other lens, may still have
+/// pictures queued. Software and Vulkan decoders never drain, nor do the
+/// frames a VA-API decoder exports (path A), which aren't downloaded,
+/// unless it is asked for [`VaapiDrain::Picture`]; a frame it fails to
+/// export is downloaded, and drains as the copy path's do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VaapiDrain {
+    /// Nothing waits: `SPHERECUT_VAAPI_DRAIN=0` or `off`.
+    Off,
+    /// Before each download: `download`. The default.
+    #[default]
+    Download,
+    /// Before each download and after each packet sent, which keeps about
+    /// one picture queued at a time, exported frames' decoders too:
+    /// `picture`.
+    Picture,
+}
+
+impl VaapiDrain {
+    /// Its name in the variable and in the smoke run's JSON: `off`,
+    /// `download` or `picture`.
+    pub fn name(self) -> &'static str {
+        match self {
+            VaapiDrain::Off => "off",
+            VaapiDrain::Download => "download",
+            VaapiDrain::Picture => "picture",
+        }
+    }
+}
+
+/// What `get` (the environment, or a test's) asks for: `0` or `off`,
+/// `download` or `picture`, in any case and with spaces around it. Unset
+/// or empty is the default, [`VaapiDrain::Download`]; anything else is
+/// too, and is warned of, the first time only. A `VideoRequest` doesn't
+/// read it: its own default is [`VaapiDrain::Off`], since the CLI's
+/// render and frame and the agents' tools have no window sharing their
+/// GPU's memory.
+pub fn vaapi_drain_from_env(get: impl Fn(&str) -> Option<String>) -> VaapiDrain {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let value = get(VAAPI_DRAIN_ENV);
+    let (mode, warn) = drain_mode(value.as_deref(), &WARNED);
+    if warn {
+        tracing::warn!(
+            "ignoring {VAAPI_DRAIN_ENV}={:?}, which is none of 0, off, download and \
+             picture: the drain is {}",
+            value.unwrap_or_default(),
+            mode.name()
+        );
+    }
+    mode
+}
+
+/// The mode `value` names (see [`vaapi_drain_from_env`]), and whether to
+/// warn of it: a value it doesn't know is warned of only while `warned`
+/// is unset, which this sets.
+fn drain_mode(value: Option<&str>, warned: &AtomicBool) -> (VaapiDrain, bool) {
+    let value = value.map(str::trim).unwrap_or_default();
+    let mode = match value.to_ascii_lowercase().as_str() {
+        "0" | "off" => Some(VaapiDrain::Off),
+        "" | "download" => Some(VaapiDrain::Download),
+        "picture" => Some(VaapiDrain::Picture),
+        _ => None,
+    };
+    match mode {
+        Some(mode) => (mode, false),
+        None => (
+            VaapiDrain::default(),
+            !warned.swap(true, std::sync::atomic::Ordering::Relaxed),
+        ),
     }
 }
 
@@ -573,13 +666,39 @@ pub struct DecodeStats {
     pub frames_decoded: u64,
     pub frames_returned: u64,
     /// Milliseconds the last frame returned took to decode, and their
-    /// mean over every frame decoded.
+    /// mean over every frame decoded, without the waits of a VA-API
+    /// drain after a packet ([`last_drain_ms`](Self::last_drain_ms)).
     pub last_decode_ms: f64,
     pub mean_decode_ms: f64,
     /// Milliseconds the last frame took to download from the device (0
-    /// in software) and to convert (0 for a native layout).
+    /// in software) and to convert (0 for a native layout). The download
+    /// is the copy alone: a VA-API drain before it is
+    /// [`last_drain_ms`](Self::last_drain_ms).
     pub last_download_ms: f64,
     pub last_convert_ms: f64,
+    /// Milliseconds the last frame returned waited for the pictures
+    /// queued on its VA-API device ([`VaapiDrain`]): the drain before
+    /// its download, and with [`VaapiDrain::Picture`] the drains after
+    /// the packets sent since the frame before. 0 when nothing drained.
+    pub last_drain_ms: f64,
+    /// Surfaces those drains found not yet ready: a sync that took 0.5 ms
+    /// or more.
+    pub last_drain_waited: u64,
+    /// Drains run since opening: one before each download, and with
+    /// [`VaapiDrain::Picture`] one after each packet sent too.
+    pub drains: u64,
+    /// Surfaces found not yet ready, summed over every drain since
+    /// opening.
+    pub drain_waited: u64,
+    /// Syncs that failed since opening; the surface is then forgotten.
+    pub drain_errors: u64,
+    /// Surfaces forgotten since opening because the decoder had seen
+    /// more than it keeps (64), the oldest first.
+    pub drain_overflow: u64,
+    /// The drain was asked of a VA-API decoder, and libva's
+    /// `vaSyncSurface` wasn't there to call: nothing drains, for the
+    /// whole process.
+    pub drain_unavailable: bool,
     /// Buffers allocated so far to download frames into, for every
     /// format and size (0 in software). Once the decoder's pool holds the
     /// frames kept alive, a download allocates none (D30).
@@ -1304,7 +1423,83 @@ const _: () = {
 
 #[cfg(test)]
 mod tests {
+    use spherecut_testkit::control::must_fail;
+
     use super::*;
+
+    /// `SPHERECUT_VAAPI_DRAIN` names a mode in any case, with spaces
+    /// around it; unset or empty is download, the default, and so is any
+    /// other value, which is warned of the first time only. A request
+    /// built from `VideoRequest::default()` drains nothing.
+    ///
+    /// Controls: a misspelt mode isn't taken for the mode it was meant to
+    /// be; and a value it doesn't know, once one has been warned of,
+    /// isn't warned of again.
+    #[test]
+    fn the_drain_mode_comes_from_its_variable() {
+        let env = |value: Option<&'static str>| {
+            move |key: &str| {
+                assert_eq!(key, VAAPI_DRAIN_ENV);
+                value.map(str::to_owned)
+            }
+        };
+        for (value, mode) in [
+            ("0", VaapiDrain::Off),
+            ("off", VaapiDrain::Off),
+            (" OFF\n", VaapiDrain::Off),
+            ("download", VaapiDrain::Download),
+            ("\tDownload ", VaapiDrain::Download),
+            ("picture", VaapiDrain::Picture),
+            ("PICTURE", VaapiDrain::Picture),
+        ] {
+            assert_eq!(vaapi_drain_from_env(env(Some(value))), mode, "{value:?}");
+            assert!(
+                !drain_mode(Some(value), &AtomicBool::new(false)).1,
+                "{value:?}"
+            );
+        }
+        for value in [None, Some(""), Some("  "), Some(" \n")] {
+            assert_eq!(
+                vaapi_drain_from_env(env(value)),
+                VaapiDrain::Download,
+                "{value:?}"
+            );
+            assert_eq!(
+                drain_mode(value, &AtomicBool::new(false)),
+                (VaapiDrain::Download, false),
+                "{value:?}"
+            );
+        }
+        assert_eq!(vaapi_drain_from_env(env(Some("1"))), VaapiDrain::Download);
+        assert_eq!(VaapiDrain::default(), VaapiDrain::Download);
+        assert_eq!(
+            VideoRequest::default().vaapi_drain,
+            VaapiDrain::Off,
+            "a request drains nothing unless asked: the CLI's render and frame and the \
+             agents' tools share their GPU's VM with no UI, so a drain would only cost them \
+             throughput"
+        );
+        // Warned of once: the second value it doesn't know isn't.
+        let warned = AtomicBool::new(false);
+        assert_eq!(drain_mode(Some("1"), &warned), (VaapiDrain::Download, true));
+        assert_eq!(
+            drain_mode(Some("always"), &warned),
+            (VaapiDrain::Download, false)
+        );
+        assert_eq!(drain_mode(Some("off"), &warned), (VaapiDrain::Off, false));
+        // Each mode's name is the value that names it.
+        for mode in [VaapiDrain::Off, VaapiDrain::Download, VaapiDrain::Picture] {
+            assert_eq!(drain_mode(Some(mode.name()), &warned), (mode, false));
+        }
+        must_fail(
+            "a misspelt mode taken for picture",
+            drain_mode(Some("pictrue"), &AtomicBool::new(false)).0 == VaapiDrain::Picture,
+        );
+        must_fail(
+            "a value it doesn't know warned of after the first",
+            drain_mode(Some("2"), &warned).1,
+        );
+    }
 
     fn layout(fmt: ffmpeg_sys_next::AVPixelFormat) -> PixelLayout {
         ffi::pixel_layout(fmt as i32).expect("a layout")

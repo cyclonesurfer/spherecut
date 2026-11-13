@@ -1,6 +1,6 @@
 # Progress
 
-Updated 2026-11-13, after M3.9 (schema 2): where each milestone stands and what it waits on is the Status table below, and the update notes this line used to carry are under "History", at the end. Milestone criteria are in `PLAN.md`;
+Updated 2026-11-13, after the VA-API stall slice (D79): where each milestone stands and what it waits on is the Status table below, and the update notes this line used to carry are under "History", at the end. Milestone criteria are in `PLAN.md`;
 decisions and their reasons in `DECISIONS.md`.
 
 ## Status
@@ -10,7 +10,7 @@ decisions and their reasons in `DECISIONS.md`.
 | M0 Foundation | **Done** (2026-10-23). The huginn report at 4cd8a0f is clean: every Tier 2 test passes but one, which skips because huginn's Mesa is Fedora's build, without RPM Fusion's `mesa-vulkan-drivers-freeworld`, which leaves H.264 and HEVC out of Vulkan Video. Evidence below |
 | M1 Viewer | **Done pending hardware** (2026-10-30). Every criterion has its evidence (below, "M1 criteria ticked") but three that wait on machines: huginn's H1 and H2 for the real-time and zero-copy rows on its 8060S (`hw-run-8.md`, sent 2026-11-01), Hyprland for the HiDPI row (odin passed at 125 % on 2026-10-30), and clip 12 at 5.7K30, a Studio export of take 16 (`docs/SAMPLES.md`), for the real-time row. odin's H3 at 0d491ae and its reruns at 8d5c943 are the hardware evidence so far (D41, D42). D25 decided 2026-10-30: path B on odin by default; VA-API's import stays opt-in until huginn's numbers. How it got here: below, "M1: how it got here" |
 | M2 Clip reframer | Under way. The plan is `docs/design/m2-plan.md` (2026-10-31): nine slices, the toolkit check built early. M2.1 is in: the project model, `Edit` and `Project::apply`, undo history and the JSON project file (D47, D48). M2.2 is in: keyframe interpolation, look-at targets and their property tests (D50). M2.2b is in: the toolkit check's timeline prototype, which passed on odin at every scale (D53). M2.3 is in: rendering for export (equirect output, the output frame, the YUV pass, motion blur; D49), which passed on odin's RADV. M2.4 is in: the export, with the software encoders, audio copied to the sample or encoded, one last pass for the metadata and the moov, and the file checked before it appears (D52). M2.5 is in: the VA-API encoders and their fallback (odin passes the 4K30 gate; AV1 on VA-API only at sizes it needn't pad), `spherecut render` (D51) and `frame --project`. M2.6 is in: the reframer's first GUI part, an untitled project with every video, save and reopen, undo, the timeline strip, the keyed view with look-around, and play kept to the trim (D54). M2.7 is in: the curve editor, the sphere overview and the 360 preview, the Inspector and look-at targets, and the export window, the export paced while the UI is busy (D55). M2.8's code is in: the smoke run exports at a preset and with motion blur, item 22's measurement (amendment 9); odin's full hw-test with a 125 % pass ran at 0663e05, and huginn's runs wait for Pat. M2.9, the fresh review of M2, made 24 findings across four areas; all are fixed or listed below (amendment 10). M2.10 is in: the app's export renders on a device of its own and, as Pat chose, pauses while the viewer plays; odin passed item 22's measurement at both scales (D56, amendment 11). Open: the project format (Pat's card), and the 4K30 row and the toolkit check on huginn (`hw-run-8.md`, sent 2026-11-01). Below |
-| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (Known issues). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). So is M3.9: schema 2. A project records each media's camera, calibration, geometry, tune and gains, which `set_source`, `set_stitch` and `set_caps` change and undo exactly; agents make a project of a camera's file with its source and edit it; and every renderer outside the window refuses a camera pair's project `not_yet` until M3.11, after a fresh review's R1 to R9 and N1 to N13 were fixed (below, "M3.9"; D68, plan amendment 9). Next, the merge of the short slice that traces and fixes the `gui_decode_behind` stall on odin before huginn's run (the working default until Pat answers the card of 2026-11-12), then M3.7 and M3.6 (plan 22.2), then M3.10 once M3.7 is in beside M3.8. Waiting on Pat: that card, D47's project-format card (JSON is the working choice, and schema 2 is built on it), huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, M3.9's questions (whether 19.6's M3.9 row rises again, now 5.45 to 5.75 s against the 5 s Pat set on 2026-11-13; whether `xi_delta`'s ±0.15 is wide enough for own calibrations; whether `validate` adds LOD 0's margin; amendment 9), and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
+| M3 Raw ingest and stitching | Under way. The plan is `docs/design/m3-plan.md` (2026-11-01): the Insta360 X5 first (Pat's choice), then the GoPro MAX's EAC pair, DJI's Osmo 360 and nadir and zenith caps, in 22 slices. Written from an understanding pass over the code and Pat's 14 X5 files, three competing drafts and their judges; a fresh review's 58 findings and a check of their fixes (50 more) are folded in (its section 0 and Appendix C). M3.0 is in: the test gates every M3 suite uses (`must_fail`, Tier 2c), synth's lens types, the lens tracks' timing tables (P-TRK passed on every field: the lenses lock by clip time), an agent's `.insv` project that stays open, and the format notes corrected against the bytes (below, "M3.0"). M3.1 is in too: the pair decode, with K1 Redirect 2 on odin (M3.11b opens) and K3 Pass (below, "M3.1"). So is M3.3: the lens maths, `sphere::fisheye`'s unified model with V3's reading and the 21 V6 readings, `sphere::rig` and `synth::lens`, with rung 0 against synth (below, "M3.3"). So is M3.2: `spherecut-camera` reads the X5's trailer, finds and checks a clip's companions, and probe, the agent's probe and `doctor --file` use it; Tier 2c checks all seven of Pat's X5 pairs (below, "M3.2"). So is M3.4: the instrument, that is the CPU stitch reference (`render::reference::render_rig` with a prepared `LensPair`), weighted picture metrics, the seam signature (`render::seam`: strips, per-bin shifts with a noise floor, the harmonic fit) and rung 1 against synth on five scenes with its attribution matrix, after a fresh review's 13 findings were fixed (below, "M3.4"; D65). Work was paused and picked up again on 2026-11-10. So is M3.8: the frame lock, which shows a pair's two lenses as one frame (a group `until`, 6 slots with a floor of 2 a lens, P-LOCK passed on every X5 mode on odin), and D77's fix for odin's wrong luma blocks, RADV's DCC on the slots' 8-bit planes (below, "M3.8"; D67, D77, plan amendment 6). So is the review-fix slice: the project review's majors 5 to 11, what was left of majors 1 to 4 (F112 to F115), and the minors that fitted beside them (below; D78). odin's run at 0b3ab9b passed but for a skip (no clip 12) and `gui_decode_behind`'s run 1, which missed refresh with VA-API's frames copied (fixed by the VA-API stall slice). So is M3.5: the X5 file. synth writes a synthetic X5 master and LRV with the trailer's and the MP4's faults (`write_insv`); camera turns a trailer into sphere's calibration and looks the camera up in a built-in geometry table, whose X5 row is a provisional placeholder until M3.6; probe and doctor `--file` report the lenses' binding and the geometry; and `frame <insv> --reference` stitches a camera's pair on the CPU, rung 3 equal to rung 1 byte for byte and Pat's clip 8 stitched in Tier 2c, after a fresh review's R1 to R19 and FFmpeg 9's audio seek were fixed (below, "M3.5"; D64, plan amendment 8). So is M3.9: schema 2. A project records each media's camera, calibration, geometry, tune and gains, which `set_source`, `set_stitch` and `set_caps` change and undo exactly; agents make a project of a camera's file with its source and edit it; and every renderer outside the window refuses a camera pair's project `not_yet` until M3.11, after a fresh review's R1 to R9 and N1 to N13 were fixed (below, "M3.9"; D68, plan amendment 9). So is the VA-API stall slice: on AMD each VA-API download freed a staging buffer whose page-table clearing made the window's frames wait for VCN's queued decodes, and VA-API decoders now drain VCN before each download by default, so `gui_decode_behind`'s run 1 passes on odin (3 of 3), at a cost in frames shown while decode is behind (below, "VA-API stall"; D79). Next, M3.7 and M3.6 (plan 22.2), then M3.10 once M3.7 is in beside M3.8. Waiting on Pat: the card of 2026-11-13 on the drain's cost (`download` by default, which is the working default until Pat answers; `download` and a separate decode process later; or the drain opt-in), which replaced the withdrawn card of 2026-11-12, D47's project-format card (JSON is the working choice, and schema 2 is built on it), huginn's run (`hw-run-8.md`, sent 2026-11-01: K2 and K4, P-LOCK and D77's slots there), takes 14 to 17 (`docs/SAMPLES.md`), Studio stitched exports of take 14 and of take 16 at 5.7K30, M3.9's questions (whether `xi_delta`'s ±0.15 is wide enough for own calibrations; whether `validate` adds LOD 0's margin; amendment 9; Pat raised 19.6's M3.9 row to 6 s on 2026-11-13), and the plan's questions 3 and 4 (Pat answered question 2 on 2026-11-01: Insta360's own pictures for checks only, plan amendment 4) |
 | M4–M9 | Not started |
 | Agent integration (track A) | A1, `spherecut mcp` (D43 to D46), and A2, projects that agents make, edit, render and compare (D57 to D59), are built, and every PLAN box of theirs is ticked but A1's hardware box (`PLAN.md:516`): Pat's runs of the recipes with two agents (Claude Code, and Codex or Gemini CLI), A2's fourth recipe among them, recorded here. The Tier 2 MCP sessions passed on odin (PR #14; rendering, PR #26 at 0c0296b). `tools/list` is 12,235 of its 12,288 bytes (M3.9, whose `project` takes a camera's file and whose `set_source` reads its calibration from it). How it got here: below, "Agent integration (track A): how it got here" |
 
@@ -174,10 +174,10 @@ back clean, so M0 is done.
 
 The plan is `docs/design/m3-plan.md` (2026-11-01): slices M3.0 to
 M3.21, decisions D60 to D76 reserved (D77 added by M3.8, D78 by the
-review-fix slice), the X5 first (Pat's choice). Each slice
-is built by a workflow of agents, one per unit with its own reviewers
-(Pat turned that on for M3), then the full check. The slice notes below
-are in merge order, so M3.3's comes before M3.2's.
+review-fix slice, D79 by the VA-API stall slice), the X5 first (Pat's
+choice). Each slice is built by a workflow of agents, one per unit with
+its own reviewers (Pat turned that on for M3), then the full check. The
+slice notes below are in merge order, so M3.3's comes before M3.2's.
 
 ### M3.0, facts first (2026-11-01)
 
@@ -3125,7 +3125,9 @@ Pat's questions (new unless marked):
 - odin's run 1 missed refresh at 0b3ab9b (Known issues, asked
   2026-11-12): merge, then trace and fix it in a slice of its own
   (recommended, and the working default until Pat answers), hold the
-  merge until it is fixed, or keep it as a known issue only?
+  merge until it is fixed, or keep it as a known issue only? (Withdrawn
+  on 2026-11-13: the VA-API stall slice fixed it, and the card of
+  2026-11-13 asks about the fix's cost instead.)
 - Keep `MAX_SHOWN_BEHIND` 0.85 and `DECODE_FLOOR_MS` 50 now that odin's
   first run of `gui_decode_behind` is in? (At 0b3ab9b run 0, under the
   50 ms floor, showed 67 % of its frames, and run 1 showed 19 to 21 %.)
@@ -3862,10 +3864,11 @@ the code first, and each fix shown failing first where it could be):
   flake and then passed at 8088143 (below).
 
 **Open, and known limits:**
-- The slice's Tier 1 time is over the 5 s that Pat set for 19.6's M3.9
-  row on 2026-11-13 (from 3 s; measured 4.7 to 4.9 s then): 5.45 to 5.75
-  s serially after the fix round, 4.59 s on four threads (Known issues).
-  No fixture was shrunk and no check cut.
+- The slice's Tier 1 time, 5.45 to 5.75 s serially after the fix round
+  and 4.59 s on four threads, is within the 6 s Pat set for 19.6's M3.9
+  row at 17:54Z on 2026-11-13, raising it from the 5 s set earlier that
+  day (from 3 s, on 4.7 to 4.9 s then), with 0.25 s to spare at the
+  slowest run (Known issues). No fixture was shrunk and no check cut.
 - A camera pair's project is refused `not_yet` outside the window until
   M3.11, so `check`'s `provisional_geometry` advice shows nowhere yet;
   M3.11's tests should look for it. Any project whose camera file's
@@ -3910,19 +3913,20 @@ the code first, and each fix shown failing first where it could be):
   M3.11).
 - The orchestrator's 18 choices stand for Pat to overrule (amendment 9).
   Pat's questions: D47's format card is still open (JSON is the working
-  choice, and schema 2 is built on it); whether 19.6's M3.9 row rises
-  again, now that the fix round's tests take it past 5 s; whether
-  `xi_delta`'s range should be wider; and whether `validate` should add
-  LOD 0's margin at the media's track side, or 10.3's mask stop taking
-  it off where both lenses end.
+  choice, and schema 2 is built on it); whether `xi_delta`'s range
+  should be wider; and whether `validate` should add LOD 0's margin at
+  the media's track side, or 10.3's mask stop taking it off where both
+  lenses end. (Pat answered the budget question, whether 19.6's M3.9
+  row rises again, at 17:54Z on 2026-11-13: to 6 s, amendment 9.)
 
 **Measured**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
 lavapipe), at d478083 unless named:
-- Tier 1 against 19.6's M3.9 row, "schema, edits and agents" (5 s by
-  amendment 9, Pat's decision of 2026-11-13; 3 s before): the slice's 58
-  new Tier 1 tests, 18 of them new in the fix round, run one thread at a
-  time, suite by suite, three runs: 5.45, 5.75 and 5.73 s; 4.59 s on
-  four threads. By suite, in the three runs: agent `tests/project.rs`
+- Tier 1 against 19.6's M3.9 row, "schema, edits and agents" (6 s since
+  Pat's choice at 17:54Z on 2026-11-13, on these numbers; 5 s by
+  amendment 9, Pat's decision earlier that day; 3 s before): the
+  slice's 58 new Tier 1 tests, 18 of them new in the fix round, run one
+  thread at a time, suite by suite, three runs: 5.45, 5.75 and 5.73 s;
+  4.59 s on four threads. By suite, in the three runs: agent `tests/project.rs`
   (14 tests) 1.57 to 1.75 s; cli `tests/render.rs` (3) 1.32 to 1.40 s;
   core `tests/project_props.rs` (the stitch property at 256 cases and
   its corners) 1.11 to 1.17 s; synth `tests/project.rs` (4) 1.06 to 1.13
@@ -3975,6 +3979,190 @@ lavapipe), at d478083 unless named:
 - `the_list_fits`: `tools/list` 12,235 of 12,288 bytes in each protocol
   version, A1's tools 7,109 of 7,168; the fix round changed no tool's
   description or schema.
+
+### VA-API stall (2026-11-13)
+
+Branch `proto/vaapi-drain`, from f216316 (main after M3.5). The
+prototype, the drain off by default and a probe of the GPU's gate, is
+10 commits, cc82902 to 6675318 (21 files, 2,975 lines added and 55
+removed), built by two units with a reviewer and a fixer each. odin
+measured it in three runs, PRs #36 to #38, and b3a1720 merged main at
+7a06482 (M3.9) and the three PRs. Nine commits, 6aef1ce to a9a2f2b (18
+files, 695 lines added and 220 removed), then made `download` the
+default and answered a fresh review's five findings (F1 to F5), and this
+note's unit wrote D79 and the docs (90a95bc, 22cd128, this note's
+commit and bf532b3's corrections). Against main at 7a06482 the code and
+docs outside `hw-reports/` came to 27 files, 3,480 lines added and 85
+removed, at a9a2f2b. What Pat sees: with VA-API's frames copied, the
+window keeps refresh while decode is behind, and shows fewer frames
+than before; odin's default path (Vulkan Video on path B) is unchanged.
+
+- **The cause (D79).** On each download radeonsi frees a staging buffer
+  of the whole frame (47.46 MiB for the 5.7K P010 clip) inside
+  `vaGetImage`, and unmaps it without `AMDGPU_VM_DELAY_UPDATE`. The
+  kernel's clearing of the freed range waits for the fences the VM owns,
+  VCN's queued decodes among them, and every later submission in the VM
+  waits for the clearing. RADV and radeonsi share the process's VM
+  through one drm file, so the window's next frame waited for VCN, and
+  the compositor showed it late. D79 marks each link read (Mesa 26.2.5,
+  Linux 7.2.9, FFmpeg n6.1, n8.1.3 and n9.0.2), measured or recalled.
+- **The prototype (cc82902 to 6675318).** media: `VaapiDrain` (`off`,
+  `download`, `picture`) and `SPHERECUT_VAAPI_DRAIN`; a lookup of
+  `vaSyncSurface` that never loads libva; `SurfaceSet`, at most 64
+  surfaces, holding their frames context (74ce99f, its review's fix);
+  `drain` and `drain_vaapi`, run before the decoder's downloads (and
+  after each packet with `picture`). playback: `PlayerConfig::vaapi_drain`,
+  `Stage::Drain`, the counters `drain_waited`, `drain_errors`,
+  `drain_overflow` and `drain_unavailable`, and the `DrainWaits`
+  histogram. render: `GateProbe` (`SPHERECUT_GATE_PROBE`, 2 to 50 ms), a
+  256-byte clear on the viewer's queue every period, timed to wgpu's
+  work-done callback; its test's busy queue is sized to the host
+  (d2e52f4). app: the overlay's drain line and the smoke document's
+  `vaapi_drain`, `stages.drain`, `drain` and `probe` (the drain block
+  ends where the run did, ecbcc94). xtask: the GUI report's drain and
+  probe lines.
+- **odin's runs, measure only** (`docs/perf.md`, odin's results).
+  PR #36 at b0df927, no drain, 29 runs: run 1 presented 0.733 to 0.782
+  at a UI p99 of 100.0 to 116.5 ms (arms A); a second VA-API process
+  (L) presented 0.968 to 0.994 and software (S) 0.993 to 0.997; in A-1,
+  49 of the 50 gaps of 40 ms or more began −2 to +13 ms after the decode
+  thread's GPU wait right after the free. PR #37 at 6675318, 22 runs
+  interleaved in one session: `off` 0.760 to 0.795 at 92.9 to 114.9 ms;
+  `download` 0.996 to 0.997 at 18.0 to 18.4 ms, 109 to 113 frames shown
+  against `off`'s 119 to 130, the drain 76.4 to 92.3 ms at p50;
+  `picture` 0.993 to 0.996, 81 to 85 frames shown; the official test
+  failed run 1 with the drain off (0.75, 110.3 ms) and passed it with
+  `download` (0.995, 18.4 ms); the gate probe's p99 97.59 ms off and
+  4.09 ms with `download`; path A 0.82 to 0.85 either way; the headless
+  row 6.00, 5.00 and 4.00 frames shown a second. PR #38 at 6675318 with
+  `SPHERECUT_VAAPI_DRAIN=download` on every call: `gui_decode_behind`
+  passed 3 of 3 (run 1 at 0.994 to 0.995 and 18.1 to 18.5 ms, still
+  behind at 0.17 to 0.18 of the frames expected shown), and the whole
+  Tier 2 passed 59, failed 0 and skipped 1, against 56, 1 and 1 at
+  0b3ab9b.
+- **The default (6aef1ce to 06ac450).** `SPHERECUT_VAAPI_DRAIN` unset or
+  empty is `download`; `0` or `off` waits for nothing, as b0df927 did;
+  `picture` stays a mode to compare against; any other value is warned
+  of once and gives `download`. `PlayerConfig::default` takes it, so the
+  window, the smoke run and the headless benchmarks drain;
+  `VideoRequest::default` and `ExportJob::new` stay `off`, for `frame`,
+  `render` and the agents' tools, whose processes have no window. The
+  window's exports, which decode VA-API with downloads in its process,
+  take the player's mode (`ExportJob::vaapi_drain`, 3bb3ef4). The
+  overlay's drain line shows only once a frame has drained or a sync
+  has failed, and where nothing drained the GUI report says so in one
+  clause (6aef1ce, 03db84d). The docs say a decoder waits for its own
+  pictures only (06ac450).
+- **The review's fixes (110683c to a9a2f2b).** F5: the display is read
+  through ffmpeg-sys-next's `AVVAAPIDeviceContext`, not a struct of our
+  own. F1: a frame path A fails to export, which its decoder downloads,
+  drains (`drain_on` keeps the mode on any VA-API device). F4: the
+  engine test counts `drain_unavailable`. F2 and F3:
+  `bench_seek_latency` has a `VA-API drained` row beside each `VA-API`
+  row, opened with the drain set in the request, so a row's name says
+  what ran.
+- **The decision and its cost (D79).** `download` by default. VCN no
+  longer decodes while a frame is copied, so where VA-API's copied
+  decode is behind fewer frames are shown: 0.90 of `off`'s in the
+  window (PR #37) and 0.67 of the reference's in the headless VA-API
+  row of `bench_playback_realtime_5k7_10bit` (PR #38: 4.00 frames a
+  second against 6.00, the drain 103.89 / 127.68 ms at p50 / p95),
+  under the 0.8 the build brief set. PR #38's seek rows came within
+  −0.0 to +12.1 % of the reference, but they never drained, so the
+  drain's cost on a seek is not measured yet. The card of 2026-11-12
+  (merge, hold the merge, or keep a known issue) was withdrawn; the card
+  of 2026-11-13 asks Pat whether to accept the cost: `download` by
+  default; `download` now and a separate decode process later; or the
+  drain opt-in. `download` is the working default until Pat answers.
+- **Tests added**, 25 in Tier 1, each with a control that must fail:
+  media's `the_drain_mode_comes_from_its_variable`,
+  `a_surface_set_keeps_each_surface_once_in_order_up_to_64`,
+  `a_surface_set_holds_the_frames_context_of_what_it_keeps`,
+  `a_drain_syncs_each_surface_once_in_order`,
+  `looking_up_vasyncsurface_never_loads_libva`,
+  `the_vaapi_device_context_is_laid_out_as_ffmpeg_s`,
+  `a_vaapi_frame_s_surface_is_its_data_3` and
+  `a_drain_runs_only_on_vaapi_path_a_s_downloads_included`; synth's
+  `a_drain_asked_where_no_vaapi_device_decodes_does_nothing` and
+  `the_seek_bench_s_vaapi_rows_drain_as_they_are_named`; playback's
+  `drain_waits_are_counted_exactly_by_frame` and
+  `a_decoder_s_drains_reach_the_drain_stage_and_counters`; render's
+  `the_probe_times_a_tiny_job_every_period` and
+  `the_probe_waits_at_the_submit_gate`; app's
+  `the_gate_probe_period_comes_from_its_variable`,
+  `the_probe_block_lists_the_slow_jobs_of_the_run`,
+  `the_drain_block_counts_the_runs_waits`,
+  `the_drain_block_ends_where_the_run_did`,
+  `the_smoke_run_names_the_drain_and_reports_the_gate_probe`,
+  `the_drain_line_shows_with_the_drain_on`,
+  `the_drain_line_waits_for_the_drain_to_do_something` and
+  `the_windows_export_drains_as_the_player_does`; export's
+  `the_decode_asks_for_the_jobs_drain`; and xtask's
+  `the_drain_says_little_where_nothing_drained` and
+  `the_section_shows_the_drain_and_the_probe_when_on`. No Tier 1 test
+  reaches a VA-API device; odin's Tier 2 is the end-to-end evidence.
+- **Docs (90a95bc, 22cd128).** D79, with notes of 2026-11-13 on D25,
+  D34, D40 and D41; ARCHITECTURE's ffi list, the smoke document's drain
+  block where nothing drains, and the testing tiers' run 1; perf.md's
+  target row, the playback note's stages and the stall runs in odin's
+  results. README and cli-json changed with the code (1e10045,
+  06ac450).
+
+**Gates**, on the cloud box (4 cores, debug build, FFmpeg 6.1.1,
+lavapipe):
+- The docs tests after the docs commits, at 5392792: xtask
+  `tests/docs.rs` 6 passed (0.73 s), agent `tests/docs.rs` 6 passed
+  (0.01 s), cli `tests/contract.rs` 28 passed (15.34 s).
+- Property tests: none. The branch adds or changes none (`git diff
+  7a06482 HEAD -- crates` names no `proptest`), so none ran at
+  100,000 cases.
+- `cargo xtask check` passed at 5392792, after which only this file
+  changed (`check-stallfix.log`), in 854 s on a warm target dir: 1746
+  tests passed, 0 failed and 61 ignored on 144 result lines, against
+  1721, 0 and 61 on 143 at M3.9's 8088143, with clippy's, rustdoc's 4,
+  the MSRV build's and cargo-deny's controls failing as they must. An
+  earlier run at 400038c, cut off by a machine restart in playback's
+  tests with no failure, doesn't count. `cargo xtask compat` (FFmpeg
+  8.1.3 and 9.0.2) is run after this note.
+
+**Open, and known limits:**
+- Path A's gaps, which neither mode fixes (D25's note): RADV maps each
+  DMA-BUF import afresh and unmaps it without `DELAY_UPDATE`, a likely
+  cause. Path A stays opt-in.
+- huginn: VA-API copied is its default path, and nothing is measured
+  there: whether a download frees a staging buffer on its APU, whether
+  the gate shows, and what the drain costs. Its gated 5.7K real-time
+  benches run on VA-API copied, so they drain by default; if they
+  fail, `SPHERECUT_VAAPI_DRAIN=off` tells the drain's cost from a
+  decode regression. Its next run takes the probe with the drain off
+  and on, `gui_decode_behind` and the headless rows.
+- A locked pair's two VA-API decoders share one `VADisplay`, and each
+  drains only its own surfaces; not measured, since odin plays an X5
+  pair on path B.
+- That mutter (50.5) shows a buffer only once its fences signal is
+  still recalled; a surface added while the pool grows can leave one
+  gate in warm-up; unmaps outside our download (pb_cache's expiry, a
+  bitstream buffer resized in warm-up) aren't drained; a VCN hang
+  blocks `vaSyncSurface` as it blocks `vaGetImage`.
+- The drain's cost on a seek waits for the `VA-API drained` rows'
+  first run on odin.
+- The review's nits, left in code: `drain_vaapi`'s SAFETY comment says
+  Mesa locks the display for the call, where Mesa 26.2.5 takes
+  `drv->mutex` for the lookup and waits under the context's mutex (D79
+  says so); the 64-surface cap's test and `WAIT_BUCKETS`' doc; the GUI
+  report prints nothing for a run with the drain off; and no Tier 2
+  gate checks the drain itself (run 1 requires downloads, not drains,
+  and `gui_smoke` doesn't check that nothing drains on Vulkan).
+  `PlayerConfig::vaapi_drain`'s doc still says a decoder waits for
+  every picture queued on its device, where it waits for its own, and
+  that exported-frame decoders don't drain, where since F1 their
+  refused frames do. The same "pictures queued on its device" wording,
+  which reads as every picture on the device, is in `Stage::Drain`'s
+  doc (`playback/src/perf.rs`), `ExportJob::vaapi_drain`'s
+  (`export/src/job.rs`), `VideoRequest::vaapi_drain`'s and
+  `DecodeStats::last_drain_ms`'s (`media/src/backend.rs`) and the
+  decode worker's `OpenJob::vaapi_drain` (`playback/src/worker.rs`); a
+  later commit says "its own pictures" in each.
 
 ## Agent integration (track A): how it got here
 
@@ -5661,34 +5849,42 @@ Last reviewed 2026-11-13, in M3.9's fix round. Each entry's date is the
 day its text last changed, or the review's for the entries it rewrote;
 each slice's merge sweeps the list.
 
-- `gui_decode_behind`'s run 1 fails on odin. That run is VA-API with its
-  frames copied (`SPHERECUT_ZERO_COPY=0`) on a discrete GPU (the
-  RX 7600), on the noisy 5.7K 10-bit clip, with decode behind as the run
-  means it to be. In all three samples at 0b3ab9b it showed 19 to 21 %
-  of the frames, so it was judged. It presented 78, 75 and 74 % of the
-  UI frames (the gate is 90 %), at a UI p99 of 92.7, 122.3 and 111.6 ms
-  (the gate is 25.0 ms at 60 Hz). Each VA-API download took
-  152.0 to 154.9 ms at p50 (odin-0b3ab9b4d0.md:1753 and :1770-1772,
-  odin-0b3ab9b-behind-2.md:233 and :250-252, odin-0b3ab9b-125.md:233 and
-  :250-252). The late passes of the second and third samples
-  (`result.late` in odin-0b3ab9b-run/behind2-gui/gui-behind-1.json and
-  in 125-gui/; it keeps the first 64, to 11.6 s and 11.3 s of the 20 s)
-  show a gap of about 45 to 65 ms between UI passes about every 131 ms.
-  In some seconds (6 of the 10 from 2 to 11 s in the second sample, 5 in
-  the third), just after the second mark, the gap is 112 to 125 ms, with
-  one of 81 to 91 ms after it. In both, the UI's own work stays under
-  4 ms in every late pass (1.4 to 2.1 ms at p95 in all three samples).
-  No call marked as blocking ran on the UI thread:
-  `blocked_on_ui_thread` is 0 on run 1, against the control's 200.
-  Run 0, the default path (Vulkan Video, zero copy) with decode held to
-  20 fps, passed every time, at 100 % and a UI p99 of 17.0 to 17.3 ms.
-  VA-API copied is huginn's default path, which has never run in a
-  window there (Next, item 1), so huginn's run may show the same stall.
-  A short slice traces it on odin and fixes it before huginn's run,
-  beside M3.5. That is the working default until Pat answers the card of
-  2026-11-12 (merge, then fix in its own slice; hold the merge; or keep
-  it as a known issue only).
-  (as of 2026-11-12)
+- With the VA-API drain on by default (D79), VA-API's copied decode
+  shows fewer frames where it falls behind, since VCN no longer decodes
+  while a frame is copied. On odin the headless VA-API row of
+  `bench_playback_realtime_5k7_10bit` showed 4.00 frames a second in
+  real time against 6.00 at 0b3ab9b, 0.67 of it, under the 0.8 the
+  stall slice's brief set (PR #38), and the window's run 1 showed 0.90
+  of the frames it showed with the drain off (PR #37). The drain's cost
+  on a seek is not measured yet (the `VA-API drained` rows of
+  `bench_seek_latency` wait for odin's next run). Pat's card of
+  2026-11-13 asks whether to accept the cost; a separate decode process
+  would win it back, and `SPHERECUT_VAAPI_DRAIN=off` gives b0df927's
+  behaviour. (as of 2026-11-13)
+- VA-API zero copy (path A, opt-in) still misses refresh on odin with
+  decode behind, with the drain off or `picture`: it presented 0.82 to
+  0.85 of the UI frames at a UI p99 of 57 to 64 ms, with 1.86 and 1.25
+  passes of 40 to 95 ms a second (PR #37's B and Bp). RADV maps every
+  DMA-BUF import afresh and unmaps it without `DELAY_UPDATE`, a likely
+  cause, not measured (D25's note of 2026-11-13). A fix, an import
+  cache or another, is a slice of its own. (as of 2026-11-13)
+- A locked pair's two VA-API decoders share one `VADisplay` (D30), and
+  each drains only the surfaces it handed out, so one lens's download
+  can still find the other lens's pictures queued and hold the window's
+  frame. Not measured: odin plays an X5 pair on path B. (as of
+  2026-11-13)
+- huginn is unmeasured with the drain. VA-API copied is its default
+  path, and whether its downloads free a staging buffer at all on its
+  APU (radeonsi reads through staging only from VRAM or write-combined
+  GTT, and makes a texture linear after 10 transfers: `si_texture.c`,
+  Mesa 26.2.5), whether the gate shows there, and what the drain costs
+  are all open. There the drain runs in a gated row: `Auto` picks
+  VA-API copied, so the gated 5.7K real-time benches
+  (`bench_playback_realtime_5k7_8bit` and `_10bit`) drain by default,
+  and if they fail, a run with `SPHERECUT_VAAPI_DRAIN=off` tells the
+  drain's cost from a decode regression. Its next run takes the gate
+  probe with the drain off and on, `gui_decode_behind` and the headless
+  rows (D79). (as of 2026-11-13)
 - Vulkan Video's copy path (where the device can't be shared, or with
   `SPHERECUT_ZERO_COPY=0`) drops frames on odin in some runs and not in
   others. Its download buffers are huge-page mappings, and with THP
@@ -6279,14 +6475,15 @@ each slice's merge sweeps the list.
   every apply and load runs (the cause of the growth isn't confirmed);
   it also saves and loads the project at every new state. (as of
   2026-11-13)
-- Plan 19.6's M3.9 row ("schema, edits and agents"), 5 s since Pat's
-  decision of 2026-11-13 (amendment 9), isn't met on the 4-core cloud
-  box after the fix round: the slice's 58 new Tier 1 tests take 5.45 to
-  5.75 s run one thread at a time (4.59 s on four threads), from 4.7 to
-  4.9 s before the round. agent's `tests/project.rs` share grew from
-  about 1.0 s to 1.57 to 1.75 s with the round's linked-folder and R7
-  tests. The largest costs are fixtures (`cam.insv`, rung 3's file) and
-  the stitch property's 256 cases, and none was cut. (as of 2026-11-13)
+- Plan 19.6's M3.9 row ("schema, edits and agents") is met, with little to
+  spare: Pat raised it to 6 s at 17:54Z on 2026-11-13 (from the 5 s of
+  amendment 9, set earlier that day), so it is no longer over budget. On
+  the 4-core cloud box the slice's 58 new Tier 1 tests take 5.45 to 5.75 s
+  run one thread at a time (4.59 s on four threads), from 4.7 to 4.9 s
+  before the fix round; agent's `tests/project.rs` share grew from about
+  1.0 s to 1.57 to 1.75 s with the round's linked-folder and R7 tests. The
+  largest costs are fixtures (`cam.insv`, rung 3's file) and the stitch
+  property's 256 cases, and none was cut. (as of 2026-11-13)
 - `not_equirect` for an Insta360 file of two lenses without a
   calibration a stitch reads (look, compare, and the doubt of a
   project's media) still says "stitching arrives in M3", and names the
@@ -6319,13 +6516,15 @@ each slice's merge sweeps the list.
    whether VA-API's import becomes the default there (D25). On huginn
    the default path is VA-API copied, which has never run in a window,
    and `gui_decode_behind`'s run 1 may be inconclusive there if VA-API
-   keeps up. On odin that run fails (Known issues); under the working
-   default (item 2), huginn's run follows the slice that fixes it.
-2. **M3**: M3.0 to M3.5, M3.8, M3.9 and the review-fix slice are in.
-   Next, the merge of the short slice that traces `gui_decode_behind`'s
-   run 1 stall on odin and fixes it before huginn's run (Known issues;
-   the working default until Pat answers the card of 2026-11-12). Then
-   M3.7 (GPU stitch) and M3.6 (the fit), per `docs/design/m3-plan.md`
+   keeps up. On odin that run passes with the VA-API drain, the default
+   since the stall slice (D79); on huginn the drain is unmeasured, so
+   its run takes the gate probe with the drain off and on beside
+   `gui_decode_behind` and the headless rows (Known issues).
+2. **M3**: M3.0 to M3.5, M3.8, M3.9, the review-fix slice and the
+   VA-API stall slice are in; the drain's `download` default is the
+   working one until Pat answers the card of 2026-11-13 on its cost
+   (D79). Next, M3.7 (GPU stitch) and M3.6 (the fit), per
+   `docs/design/m3-plan.md`
    22.2, with what amendments 7 to 9 hand each of them; their briefs
    predate amendment 7 and M3.9, and are refreshed before either
    launches (M3.6's carries schema 2's `tz` form and `window_offset`,

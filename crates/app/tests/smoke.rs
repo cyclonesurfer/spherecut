@@ -2,6 +2,9 @@
 //! compositor: it waits for the clip's first frame, plays it, takes the
 //! screenshot, writes the JSON hw-test reads and asks the window to
 //! close; and a clip that can't open ends the run with its error's code.
+//! The VA-API drain runs as it does by default (download, which
+//! software decode never runs) and the gate probe, a diagnostic, is off,
+//! but where a test asks otherwise, whatever the environment says.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -18,6 +21,7 @@ use spherecut_core::project::Aspect;
 use spherecut_export::Preset;
 use spherecut_media::backend::FfmpegBackend;
 use spherecut_media::encode::{MuxedAs, mux_video_streams_as};
+use spherecut_playback::{VaapiDrain, vaapi_drain_from_env};
 use spherecut_synth::media::{self, Codec, Spec};
 use spherecut_testkit::control::must_fail;
 
@@ -46,15 +50,71 @@ fn smoke_app(
     rs: &egui_wgpu::RenderState,
     args: SmokeArgs,
 ) -> SpherecutApp {
+    // The drain as with `SPHERECUT_VAAPI_DRAIN` unset.
+    smoke_app_with(gpu, rs, args, vaapi_drain_from_env(|_| None), None)
+}
+
+/// [`smoke_app`] with the VA-API drain `drain` and the gate probe every
+/// `probe`.
+fn smoke_app_with(
+    gpu: &spherecut_render::Gpu,
+    rs: &egui_wgpu::RenderState,
+    args: SmokeArgs,
+    drain: VaapiDrain,
+    probe: Option<Duration>,
+) -> SpherecutApp {
     let mut parts = common::parts(gpu, Arc::new(FfmpegBackend::new()));
     parts.settings = Settings {
         overlay: true,
         ..Settings::default()
     };
+    parts.config.vaapi_drain = drain;
     parts.open = vec![args.clip.clone()];
     let mut app = SpherecutApp::new(parts);
-    app.smoke = Some(SmokeDriver::new(args, format!("{:?}", rs.target_format)));
+    let mut driver = SmokeDriver::new(args, format!("{:?}", rs.target_format));
+    driver.set_gate_probe(probe);
+    app.smoke = Some(driver);
     app
+}
+
+/// A document of a run as it is by default, on software decode: the
+/// drain named `download`, its block there with nothing drained, and no
+/// probe.
+fn the_default(r: &serde_json::Value) -> bool {
+    r["vaapi_drain"] == "download"
+        && r["drain"]
+            == serde_json::json!({
+                "waited_per_download": {"p50": null, "max": null},
+                "errors": 0, "overflow": 0, "unavailable": 0,
+            })
+        && r["stages"]["drain"]["samples"] == 0
+        && r.get("probe").is_none()
+}
+
+/// `docs/cli-json.md`'s section on the smoke run.
+#[expect(clippy::disallowed_methods, reason = "a test reads the docs")]
+fn smoke_docs() -> String {
+    let all = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/cli-json.md"),
+    )
+    .unwrap();
+    let from = all.find("## `spherecut --smoke").unwrap();
+    let rest = &all[from..];
+    let len = rest[1..].find("\n## ").map_or(rest.len(), |n| n + 1);
+    rest[..len].to_string()
+}
+
+/// The keys of `v`'s objects, and of the objects in them, that `docs`
+/// doesn't name in backquotes.
+fn undocumented(docs: &str, v: &serde_json::Value) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (k, inner) in v.as_object().into_iter().flatten() {
+        if !docs.contains(&format!("`{k}`")) {
+            missing.push(k.clone());
+        }
+        missing.extend(undocumented(docs, inner));
+    }
+    missing
 }
 
 /// Step as a display would until the run has written its document.
@@ -152,6 +212,25 @@ fn the_smoke_run_plays_measures_shoots_and_writes() {
             .starts_with("h264 1024×512")
     );
     assert_eq!(r["raw_view"], false);
+    // The drain as by default, which software decode never runs, and no
+    // gate probe; the drain's keys are named in `docs/cli-json.md`, which
+    // without the drain's row doesn't name them.
+    assert!(the_default(r), "{r}");
+    let docs = smoke_docs();
+    let drain = serde_json::json!({"vaapi_drain": r["vaapi_drain"], "drain": r["drain"]});
+    let missing = undocumented(&docs, &drain);
+    assert!(
+        missing.is_empty(),
+        "docs/cli-json.md doesn't name {missing:?}"
+    );
+    let without: Vec<&str> = docs
+        .lines()
+        .filter(|l| !l.starts_with("| `drain` |"))
+        .collect();
+    must_fail(
+        "the docs without the drain's row",
+        undocumented(&without.join("\n"), &drain).is_empty(),
+    );
     // Every stage's numbers over the run, none of them missed.
     let stages = r["stages"].as_object().unwrap();
     for name in [
@@ -300,6 +379,96 @@ fn the_smoke_run_exports_while_it_plays_then_stops_and_waits_for_the_export() {
     h.step();
     assert!(h.state_mut().state.close_requested());
     assert!(h.state().state.reframe.confirm.is_none());
+}
+
+/// With the VA-API drain off and the gate probe every 4 ms: the document
+/// names the drain, with nothing it did, and lists the probe's jobs
+/// submitted while the run played, timed from its start.
+///
+/// The probe's keys are named in `docs/cli-json.md`.
+///
+/// Controls: this document fails the check of a run as it is by default;
+/// and the docs without the probe's row fail the keys' check.
+#[test]
+fn the_smoke_run_names_the_drain_and_reports_the_gate_probe() {
+    let gpu = common::gpu();
+    let rs = common::render_state(&gpu);
+    let dir = common::tmp().join("smoke-probe");
+    std::fs::create_dir_all(&dir).unwrap();
+    let args = SmokeArgs {
+        clip: clip().to_path_buf(),
+        seconds: 2.0,
+        out: dir.join("smoke.json"),
+        screenshot: None,
+        export: None,
+        decoder: None,
+        decode_floor: None,
+        control_ui_waits: false,
+    };
+    let app = smoke_app_with(
+        &gpu,
+        &rs,
+        args.clone(),
+        VaapiDrain::Off,
+        Some(Duration::from_millis(4)),
+    );
+    let mut h = common::harness(app, &rs, [800.0, 600.0], 1.0);
+    run_to_end(&mut h);
+    assert_eq!(h.state().smoke.as_ref().unwrap().outcome(), Some(&Ok(())));
+    let doc = read_json(&args.out);
+    let r = &doc["result"];
+    eprintln!(
+        "{}\n{}",
+        r["probe"],
+        serde_json::to_string_pretty(&r["drain"]).unwrap()
+    );
+    // Off: named, and no block of what it did.
+    assert_eq!(r["vaapi_drain"], "off");
+    assert!(r.get("drain").is_none(), "{}", r["drain"]);
+    assert_eq!(r["stages"]["drain"]["samples"], 0);
+    let p = &r["probe"];
+    assert_eq!(p["period_ms"], 4.0);
+    let played = r["played_s"].as_f64().unwrap();
+    let n = p["n"].as_u64().unwrap();
+    // A job every 4 ms while it played, but for those the probe skipped
+    // while it waited: on lavapipe, which runs each submission on the
+    // thread that submits it, behind the UI's frames and the gate, so
+    // under this file's other tests as few as 79 in 2.1 s.
+    assert!(
+        n >= 20 && (n as f64) <= played * 250.0 + 1.0,
+        "{n} jobs in {played} s"
+    );
+    let ms = |k: &str| p[k].as_f64().unwrap();
+    assert!(ms("p50") <= ms("p99") && ms("p99") <= ms("max"), "{p}");
+    let over = p["over_8ms"].as_array().unwrap();
+    for job in over {
+        let (t, l) = (job[0].as_f64().unwrap(), job[1].as_f64().unwrap());
+        assert!((0.0..=played).contains(&t) && l > 8.0, "{job}");
+    }
+    assert!(
+        over.windows(2)
+            .all(|w| w[0][0].as_f64() <= w[1][0].as_f64()),
+        "in the order submitted"
+    );
+    assert_eq!(p["over_8ms_dropped"], 0);
+    assert_eq!(p["unfinished"], 0);
+    must_fail("a run with the drain off and the probe on", the_default(r));
+
+    let docs = smoke_docs();
+    let new = serde_json::json!({"vaapi_drain": r["vaapi_drain"], "probe": r["probe"]});
+    let missing = undocumented(&docs, &new);
+    assert!(
+        missing.is_empty(),
+        "docs/cli-json.md doesn't name {missing:?}"
+    );
+    let without: Vec<&str> = docs
+        .lines()
+        .filter(|l| !l.starts_with("| `probe` |"))
+        .collect();
+    must_fail(
+        "the docs without the probe's row",
+        undocumented(&without.join("\n"), &new).is_empty(),
+    );
 }
 
 #[test]

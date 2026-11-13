@@ -30,6 +30,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
 use ffmpeg_sys_next as sys;
@@ -1466,6 +1467,11 @@ impl HwDevice {
     /// `frame_format`.
     pub fn hw_pix_fmt(&self) -> c_int {
         self.pix_fmt as c_int
+    }
+
+    /// Whether it is a VA-API device.
+    pub(crate) fn is_vaapi(&self) -> bool {
+        self.device_type == sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI as c_int
     }
 
     /// The device context reference, still owned by `self`, for the
@@ -3401,6 +3407,294 @@ pub(crate) fn set_extra_hw_frames(ctx: &mut ff::codec::context::Context, n: u8) 
     unsafe { (*ctx.as_mut_ptr()).extra_hw_frames = c_int::from(n) };
 }
 
+/// libva's `VAStatus vaSyncSurface(VADisplay dpy, VASurfaceID
+/// render_target)`: a `void *`, an `unsigned int` and an `int` back
+/// (`va/va.h`), which waits until nothing is pending on the surface.
+pub(crate) type VaSyncSurface = unsafe extern "C" fn(*mut c_void, u32) -> c_int;
+
+/// libva's `vaSyncSurface`, from the libva this process has loaded
+/// already (FFmpeg's libavutil links it when built with VA-API), looked
+/// up once. It never loads a library: `libva.so.2` is asked for with
+/// `RTLD_NOLOAD`, and the symbol looked for in it, then in the global
+/// scope. `None` when neither has it, said once at "info": no drain runs
+/// in this process.
+pub(crate) fn va_sync_surface() -> Option<VaSyncSurface> {
+    static SYNC: OnceLock<Option<VaSyncSurface>> = OnceLock::new();
+    *SYNC.get_or_init(|| {
+        let Some(sym) = loaded_symbol(c"libva.so.2", c"vaSyncSurface") else {
+            tracing::info!(
+                "no libva is loaded in this process, so no VA-API decoder drains \
+                 (vaSyncSurface not found)"
+            );
+            return None;
+        };
+        // SAFETY: the address of libva's vaSyncSurface, whose C type
+        // `VaSyncSurface` spells, in a library that stays loaded: the
+        // handle `loaded_symbol` took is never closed, and libavutil links
+        // it besides.
+        Some(unsafe { std::mem::transmute::<*mut c_void, VaSyncSurface>(sym) })
+    })
+}
+
+/// The address of `symbol` in the library named `soname` when the
+/// process has it loaded, else in the global scope; `None` when neither
+/// has it. It never loads a library.
+fn loaded_symbol(soname: &CStr, symbol: &CStr) -> Option<*mut c_void> {
+    // SAFETY: both names are NUL-terminated. With RTLD_NOLOAD, dlopen
+    // returns a handle only to a library the process has loaded already,
+    // and loads or initialises nothing; the reference it takes is never
+    // given back, so an address found stays valid. dlsym only looks.
+    let sym = unsafe {
+        let lib = libc::dlopen(soname.as_ptr(), libc::RTLD_NOW | libc::RTLD_NOLOAD);
+        let in_lib = if lib.is_null() {
+            std::ptr::null_mut()
+        } else {
+            libc::dlsym(lib, symbol.as_ptr())
+        };
+        if in_lib.is_null() {
+            libc::dlsym(libc::RTLD_DEFAULT, symbol.as_ptr())
+        } else {
+            in_lib
+        }
+    };
+    (!sym.is_null()).then_some(sym)
+}
+
+/// A VA-API frame's surface, as [`vaapi_surface`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VaSurface {
+    /// The address of its frames context (`hw_frames_ctx->data`), used
+    /// only to tell one context's surfaces from another's.
+    pub ctx: usize,
+    /// The address of its device's `VADisplay`, made a pointer again only
+    /// to call libva ([`drain_vaapi`]).
+    pub display: usize,
+    /// Its `VASurfaceID`.
+    pub id: u32,
+}
+
+/// The surface of `frame`, when it is a VA-API frame (`AV_PIX_FMT_VAAPI`)
+/// whose frames context is on a VA-API device; `None` for any other.
+/// FFmpeg keeps the surface's id in `data[3]` (`hwcontext_vaapi.c`, read
+/// at n8.1.3: `(VASurfaceID)(uintptr_t)src->data[3]`). The display is
+/// read from the device's `AVVAAPIDeviceContext`, which ffmpeg-sys-next
+/// binds from `libavutil/hwcontext_vaapi.h` whenever the FFmpeg it builds
+/// against has that header, with its own stand-in `va/va.h` for libva's
+/// types, so its layout follows that FFmpeg as the Vulkan contexts' do
+/// (`ffi/vulkan.rs`). It is the same in n6.1, n8.1.3 and n9.0.2, and only
+/// `display` is read.
+pub(crate) fn vaapi_surface(frame: &ff::frame::Video) -> Option<VaSurface> {
+    // SAFETY: `frame` wraps a live AVFrame, whose format is an int. A
+    // VA-API frame's hw_frames_ctx holds its AVHWFramesContext, which
+    // holds its device context, whose type is read as an int; a VA-API
+    // device's hwctx is an AVVAAPIDeviceContext. The display and data[3]
+    // are kept as addresses, never read through.
+    unsafe {
+        let f = frame.as_ptr();
+        if (*f).format != sys::AVPixelFormat::AV_PIX_FMT_VAAPI as c_int {
+            return None;
+        }
+        let frames = (*f).hw_frames_ctx;
+        if frames.is_null() || (*frames).data.is_null() {
+            return None;
+        }
+        let fc = (*frames).data.cast::<sys::AVHWFramesContext>();
+        let device = (*fc).device_ctx;
+        if device.is_null()
+            || enum_int(&raw const (*device).type_)
+                != sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI as c_int
+            || (*device).hwctx.is_null()
+        {
+            return None;
+        }
+        let hwctx = (*device).hwctx.cast::<sys::AVVAAPIDeviceContext>();
+        Some(VaSurface {
+            ctx: fc.addr(),
+            display: (*hwctx).display.expose_provenance(),
+            id: (*f).data[3].addr() as u32,
+        })
+    }
+}
+
+/// A reference to a frames context. While it is held the context stays
+/// alive, and with it its device, which it holds a reference to, and
+/// every surface its pool has made: FFmpeg destroys a VA-API surface only
+/// when the pool frees it with the context (`vaapi_buffer_free`, the
+/// pool's free callback in `hwcontext_vaapi.c`, read at n8.1.3).
+pub(crate) struct FramesRef(crate::hwprobe::BufferRef);
+
+// SAFETY: AVBufferRef reference counting is thread-safe, and nothing is
+// read or written through the reference but its data's address; the
+// last reference given back frees the context on whichever thread that
+// is, as a decoded frame's does.
+unsafe impl Send for FramesRef {}
+
+impl std::fmt::Debug for FramesRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("FramesRef").field(&self.addr()).finish()
+    }
+}
+
+impl FramesRef {
+    /// A new reference to `frame`'s frames context; `None` when it has
+    /// none, or FFmpeg has no memory for one.
+    pub(crate) fn of(frame: &ff::frame::Video) -> Option<Self> {
+        // SAFETY: `frame` wraps a live AVFrame; its hw_frames_ctx, when
+        // set, is a live reference, from which av_buffer_ref takes a new
+        // one that we own, or gives NULL.
+        let r = unsafe {
+            let frames = (*frame.as_ptr()).hw_frames_ctx;
+            if frames.is_null() {
+                return None;
+            }
+            sys::av_buffer_ref(frames)
+        };
+        (!r.is_null()).then(|| Self(crate::hwprobe::BufferRef(r)))
+    }
+
+    /// The address of the frames context, as [`VaSurface::ctx`] has it.
+    fn addr(&self) -> usize {
+        // SAFETY: a live reference we own; its data is only addressed.
+        unsafe { (*self.0.0).data.addr() }
+    }
+}
+
+/// The most surfaces a [`SurfaceSet`] keeps: more than a VA-API decoder's
+/// pool holds, its pictures, `extra_hw_frames` and zero copy's 24 spare
+/// ones together.
+pub(crate) const MAX_SURFACES: usize = 64;
+
+/// The surfaces of the frames a VA-API decoder has handed out, in the
+/// order first seen, for a drain to sync. FFmpeg 8.1.3 and 9.0.2 decode
+/// into a pool that grows as needed, whose frames context lists no
+/// surfaces (`initial_pool_size` is 0, so `surface_ids` is NULL), so the
+/// decoder notes them as its frames come out; once the pool has grown,
+/// they are all of it. While it keeps any it holds their frames context,
+/// so each stays a live surface of its display until the set forgets it,
+/// even once FFmpeg has replaced the decoder's frames context (a stream
+/// whose parameters change) and dropped the frames of the old one.
+#[derive(Debug, Default)]
+pub(crate) struct SurfaceSet {
+    /// The frames context the ids are of, held.
+    frames: Option<FramesRef>,
+    /// Its device's display, by address.
+    display: usize,
+    ids: Vec<u32>,
+    /// Ids forgotten, the oldest first, to keep [`MAX_SURFACES`].
+    overflow: u64,
+}
+
+impl SurfaceSet {
+    /// Note `s`: a surface of another frames context than the ones kept
+    /// replaces them all, and is kept only with `hold`'s reference to its
+    /// context (as [`FramesRef::of`] takes its frame's); one already kept
+    /// is left where it is, and past [`MAX_SURFACES`] the oldest is
+    /// forgotten.
+    pub(crate) fn note(&mut self, s: &VaSurface, hold: impl FnOnce() -> Option<FramesRef>) {
+        // The context held can't be freed, so no other is at its address.
+        if self.frames.as_ref().map(FramesRef::addr) != Some(s.ctx) {
+            self.clear();
+            // Nothing else keeps a surface alive for a drain to sync.
+            let Some(frames) = hold().filter(|f| f.addr() == s.ctx) else {
+                return;
+            };
+            self.frames = Some(frames);
+            self.display = s.display;
+        }
+        if self.ids.contains(&s.id) {
+            return;
+        }
+        if self.ids.len() >= MAX_SURFACES {
+            self.ids.remove(0);
+            self.overflow += 1;
+        }
+        self.ids.push(s.id);
+    }
+
+    /// Forget every surface, and give their frames context back, as when
+    /// the decoder is opened afresh.
+    pub(crate) fn clear(&mut self) {
+        self.ids.clear();
+        self.frames = None;
+    }
+
+    /// The ids kept, in the order first seen.
+    #[cfg(test)]
+    pub(crate) fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    /// Ids forgotten so far to keep [`MAX_SURFACES`].
+    pub(crate) fn overflow(&self) -> u64 {
+        self.overflow
+    }
+}
+
+/// A sync that takes this long or more found its surface's picture still
+/// being decoded.
+pub(crate) const WAITED: Duration = Duration::from_micros(500);
+
+/// What one drain did.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct DrainOutcome {
+    /// Surfaces synced.
+    pub synced: u64,
+    /// Of those, the ones whose sync took [`WAITED`] or more.
+    pub waited: u64,
+    /// Syncs that failed; their surfaces are forgotten.
+    pub errors: u64,
+    /// Milliseconds the drain took, by `now`.
+    pub ms: f64,
+}
+
+/// Sync every surface `set` keeps with `sync`, once each, in order: a
+/// status other than 0 (`VA_STATUS_SUCCESS`) counts as an error and
+/// forgets the surface. Timed by `now`.
+pub(crate) fn drain(
+    set: &mut SurfaceSet,
+    mut sync: impl FnMut(u32) -> c_int,
+    now: impl Fn() -> Instant,
+) -> DrainOutcome {
+    let mut out = DrainOutcome::default();
+    if set.ids.is_empty() {
+        return out;
+    }
+    let started = now();
+    set.ids.retain(|&id| {
+        let before = now();
+        let status = sync(id);
+        out.synced += 1;
+        if now() - before >= WAITED {
+            out.waited += 1;
+        }
+        if status != 0 {
+            out.errors += 1;
+        }
+        status == 0
+    });
+    out.ms = (now() - started).as_secs_f64() * 1e3;
+    out
+}
+
+/// [`drain`] `set` with libva's `sync`, on the set's display, by the
+/// clock.
+pub(crate) fn drain_vaapi(set: &mut SurfaceSet, sync: VaSyncSurface) -> DrainOutcome {
+    let display = std::ptr::with_exposed_provenance_mut::<c_void>(set.display);
+    drain(
+        set,
+        // SAFETY: the set keeps ids only while it holds their frames
+        // context, so each id synced is a live surface of that context's
+        // pool, which destroys its surfaces only with the context; and
+        // `display` is the VADisplay of the device the context holds a
+        // reference to, so still open. Mesa 26.2.5 takes its driver's
+        // mutex to look the surface up and the context's for the wait
+        // (`va/surface.c`); how other VA-API drivers lock is not read
+        // (D79).
+        |id| unsafe { sync(display, id) },
+        Instant::now,
+    )
+}
+
 /// The `va_list` of FFmpeg's log callback, as bindgen spells the parameter:
 /// on x86-64 `va_list` is an array type, so it is passed as a pointer. It is
 /// only ever handed back to FFmpeg untouched.
@@ -3674,10 +3968,12 @@ unsafe fn context_tag(ctx: *mut c_void) -> String {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::collections::BTreeSet;
     use std::fmt::Debug;
     use std::path::PathBuf;
     use std::sync::{Mutex, PoisonError};
 
+    use spherecut_testkit::control::must_fail;
     use tracing::subscriber::Interest;
     use tracing::{Event, Level, Metadata, Subscriber, field, span};
 
@@ -4411,8 +4707,6 @@ mod tests {
 
     #[test]
     fn open_header_keeps_the_confinement() {
-        use spherecut_testkit::control::must_fail;
-
         crate::init();
         let dir = TempDir::new("header");
         let playlist = dir.write(
@@ -5280,5 +5574,373 @@ mod tests {
                 assert!(samples(&down) == window, "{what}, downloaded");
             }
         }
+    }
+
+    /// A stand-in for a frames context: a buffer of FFmpeg's, whose
+    /// references a surface set takes and drops as it would a frames
+    /// context's.
+    struct Pool(crate::hwprobe::BufferRef);
+
+    impl Pool {
+        fn new() -> Self {
+            // SAFETY: a new buffer, whose one reference the Pool owns.
+            let buf = unsafe { sys::av_buffer_alloc(1) };
+            assert!(!buf.is_null());
+            Pool(crate::hwprobe::BufferRef(buf))
+        }
+
+        /// Its address, as a [`VaSurface`] has its frames context's.
+        fn ctx(&self) -> usize {
+            // SAFETY: the Pool's live reference; its data is only addressed.
+            unsafe { (*self.0.0).data.addr() }
+        }
+
+        /// A new reference to it, as [`FramesRef::of`] takes a frame's.
+        fn hold(&self) -> Option<FramesRef> {
+            // SAFETY: the Pool's live reference; the new one, or NULL, is
+            // owned by the FramesRef.
+            let r = unsafe { sys::av_buffer_ref(self.0.0) };
+            (!r.is_null()).then(|| FramesRef(crate::hwprobe::BufferRef(r)))
+        }
+
+        /// References to it besides the Pool's own.
+        fn held(&self) -> c_int {
+            // SAFETY: the Pool's live reference.
+            unsafe { sys::av_buffer_get_ref_count(self.0.0) - 1 }
+        }
+
+        /// Its surface `id`, on one display.
+        fn surface(&self, id: u32) -> VaSurface {
+            VaSurface {
+                ctx: self.ctx(),
+                display: 0xd15,
+                id,
+            }
+        }
+
+        /// Note its surface `id` in `set`, as a decoder does a frame's.
+        fn note(&self, set: &mut SurfaceSet, id: u32) {
+            set.note(&self.surface(id), || self.hold());
+        }
+    }
+
+    /// Whether every surface `set` keeps is of `pool`, held once.
+    fn kept_alive(set: &SurfaceSet, pool: &Pool) -> bool {
+        set.ids().is_empty()
+            || pool.held() == 1 && set.frames.as_ref().map(FramesRef::addr) == Some(pool.ctx())
+    }
+
+    /// A surface set keeps each surface once, in the order first seen; one
+    /// of another frames context replaces them all; past 64 the oldest is
+    /// forgotten, and counted.
+    ///
+    /// Control: noting surfaces as they come, repeats and all, fails the
+    /// same check.
+    #[test]
+    fn a_surface_set_keeps_each_surface_once_in_order_up_to_64() {
+        let (a, b) = (Pool::new(), Pool::new());
+        let mut set = SurfaceSet::default();
+        let ids = [5, 3, 5, 9, 3];
+        for id in ids {
+            a.note(&mut set, id);
+        }
+        assert_eq!(set.ids(), [5, 3, 9]);
+        assert_eq!((set.display, set.overflow()), (0xd15, 0));
+        assert!(kept_alive(&set, &a));
+        // Another frames context's surfaces are another pool's.
+        b.note(&mut set, 7);
+        assert_eq!(set.ids(), [7]);
+        assert!(kept_alive(&set, &b));
+        let n = MAX_SURFACES as u32;
+        for id in 100..100 + n + 2 {
+            b.note(&mut set, id);
+        }
+        // 7, 100 and 101 forgotten, the oldest first.
+        assert_eq!(set.ids().len(), MAX_SURFACES);
+        assert_eq!(set.ids().first(), Some(&102));
+        assert_eq!(set.ids().last(), Some(&(100 + n + 1)));
+        assert!(set.ids().windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(set.overflow(), 3);
+        // One kept is noted again where it is, and forgets nothing.
+        b.note(&mut set, 150);
+        assert_eq!(set.ids().first(), Some(&102));
+        assert_eq!(set.overflow(), 3);
+        set.clear();
+        assert!(set.ids().is_empty());
+        assert_eq!(set.overflow(), 3, "what was forgotten stays counted");
+        b.note(&mut set, 8);
+        assert_eq!(set.ids(), [8]);
+        must_fail(
+            "surfaces noted as they come, repeats and all",
+            ids.to_vec() == [5, 3, 9],
+        );
+    }
+
+    /// A surface set holds one reference to the frames context of the
+    /// surfaces it keeps, which keeps them alive while it might sync them,
+    /// and gives it back once it keeps none of them: when another
+    /// context's surface replaces them, when cleared and when dropped. A
+    /// surface whose context it gets no reference to, or a reference to
+    /// another context, isn't kept.
+    ///
+    /// Control: a set that keeps surfaces by their context's address
+    /// alone, as the first version did, fails the same check.
+    #[test]
+    fn a_surface_set_holds_the_frames_context_of_what_it_keeps() {
+        let (a, b) = (Pool::new(), Pool::new());
+        let mut set = SurfaceSet::default();
+        for id in [5, 3, 5] {
+            a.note(&mut set, id);
+        }
+        assert_eq!(set.ids(), [5, 3]);
+        assert!(kept_alive(&set, &a));
+        assert_eq!(a.held(), 1, "one reference, whatever the surfaces");
+        b.note(&mut set, 7);
+        assert!(kept_alive(&set, &b));
+        assert_eq!(a.held(), 0, "the context replaced is given back");
+        set.clear();
+        assert_eq!((set.ids().len(), b.held()), (0, 0), "cleared");
+        b.note(&mut set, 8);
+        assert!(kept_alive(&set, &b));
+        drop(set);
+        assert_eq!(b.held(), 0, "dropped");
+        let mut set = SurfaceSet::default();
+        set.note(&a.surface(9), || None);
+        assert!(set.ids().is_empty(), "kept with no reference");
+        set.note(&a.surface(9), || b.hold());
+        assert!(set.ids().is_empty(), "kept with another context's");
+        assert_eq!((a.held(), b.held()), (0, 0));
+        let by_address = SurfaceSet {
+            frames: None,
+            display: 0xd15,
+            ids: vec![5],
+            overflow: 0,
+        };
+        must_fail(
+            "a set keeping surfaces by address alone",
+            kept_alive(&by_address, &a),
+        );
+    }
+
+    /// A drain syncs every surface once, in order, timed by its clock: a
+    /// sync of 0.5 ms or more waited, and one that fails is an error whose
+    /// surface is forgotten. An empty set syncs nothing.
+    ///
+    /// Control: a sync of 0.5 ms where one took 0.499 ms fails the count
+    /// of waits.
+    #[test]
+    fn a_drain_syncs_each_surface_once_in_order() {
+        use std::cell::{Cell, RefCell};
+        let clock = Cell::new(Instant::now());
+        let calls = RefCell::new(Vec::new());
+        // Each surface's sync: how long it takes in µs, and its status
+        // (6 is VA_STATUS_ERROR_INVALID_SURFACE).
+        let run = |set: &mut SurfaceSet, last: u64| {
+            calls.borrow_mut().clear();
+            let script = |id: u32| match id {
+                11 => (800, 0),
+                12 => (100, 0),
+                13 => (500, 6),
+                14 => (last, 0),
+                15 => (3000, 1),
+                _ => (0, 0),
+            };
+            let out = drain(
+                set,
+                |id| {
+                    calls.borrow_mut().push(id);
+                    let (us, status) = script(id);
+                    clock.set(clock.get() + Duration::from_micros(us));
+                    status
+                },
+                || clock.get(),
+            );
+            (out, calls.borrow().clone())
+        };
+        let pool = Pool::new();
+        let mut set = SurfaceSet::default();
+        for id in 11..=15 {
+            pool.note(&mut set, id);
+        }
+        let (out, synced) = run(&mut set, 499);
+        assert_eq!(synced, [11, 12, 13, 14, 15]);
+        assert_eq!((out.synced, out.waited, out.errors), (5, 3, 2));
+        assert!((out.ms - 4.899).abs() < 1e-9, "{}", out.ms);
+        assert_eq!(set.ids(), [11, 12, 14]);
+        // The surfaces that failed aren't synced again.
+        let (out, synced) = run(&mut set, 499);
+        assert_eq!(synced, [11, 12, 14]);
+        assert_eq!((out.synced, out.waited, out.errors), (3, 1, 0));
+        let mut empty = SurfaceSet::default();
+        let (out, synced) = run(&mut empty, 499);
+        assert!(synced.is_empty());
+        assert_eq!(out, DrainOutcome::default());
+        let mut set = SurfaceSet::default();
+        for id in 11..=15 {
+            pool.note(&mut set, id);
+        }
+        let (out, _) = run(&mut set, 500);
+        must_fail("a sync of 0.5 ms not counted as a wait", out.waited == 3);
+    }
+
+    /// The files mapped into this process whose path holds `name`.
+    fn mapped(name: &str) -> BTreeSet<String> {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(5))
+            .filter(|p| p.contains(name))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Looking `vaSyncSurface` up never loads libva: with libva loaded
+    /// (FFmpeg's libavutil links it when built with VA-API) it is found,
+    /// and without it isn't, and libva stays unloaded. So that the test
+    /// says something either way, the lookup is also made in a library of
+    /// glibc's that nothing here loads, which stays unloaded.
+    ///
+    /// Control: `dlopen` without `RTLD_NOLOAD` loads that library, which
+    /// the same check sees.
+    #[test]
+    fn looking_up_vasyncsurface_never_loads_libva() {
+        let before = mapped("/libva.so");
+        let sync = va_sync_surface();
+        assert_eq!(mapped("/libva.so"), before, "the lookup loaded libva");
+        eprintln!(
+            "libva was {} before the lookup, and vaSyncSurface {}found",
+            if before.is_empty() {
+                "not loaded"
+            } else {
+                "loaded"
+            },
+            if sync.is_some() { "" } else { "not " }
+        );
+        assert_eq!(sync.is_some(), !before.is_empty(), "{before:?}");
+        // glibc's, which a test of media never loads.
+        let unloaded = [
+            (c"libanl.so.1", "/libanl.so"),
+            (c"libBrokenLocale.so.1", "/libBrokenLocale.so"),
+        ];
+        let mut controlled = false;
+        for (soname, file) in unloaded {
+            if !mapped(file).is_empty() {
+                continue;
+            }
+            assert_eq!(loaded_symbol(soname, c"spherecut_no_such_symbol"), None);
+            assert!(mapped(file).is_empty(), "the lookup loaded {soname:?}");
+            // SAFETY: a NUL-terminated name; the handle, when there is
+            // one, is closed below and nothing of the library is used.
+            let handle = unsafe { libc::dlopen(soname.as_ptr(), libc::RTLD_NOW) };
+            if handle.is_null() {
+                continue;
+            }
+            must_fail(
+                "a dlopen without RTLD_NOLOAD left unloaded",
+                mapped(file).is_empty(),
+            );
+            // SAFETY: the handle dlopen just gave, closed once.
+            unsafe { libc::dlclose(handle) };
+            controlled = true;
+            break;
+        }
+        assert!(
+            controlled,
+            "none of {unloaded:?} could be loaded for the control"
+        );
+    }
+
+    /// FFmpeg's `AVVAAPIDeviceContext`, as ffmpeg-sys-next binds it from
+    /// the headers this build is against, is a pointer and an unsigned int
+    /// on x86-64: 16 bytes, the display first.
+    ///
+    /// Control: the same fields with the display second fail the check.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn the_vaapi_device_context_is_laid_out_as_ffmpeg_s() {
+        use std::mem::{offset_of, size_of};
+        let display_first = |size: usize, display: usize| size == 16 && display == 0;
+        assert!(display_first(
+            size_of::<sys::AVVAAPIDeviceContext>(),
+            offset_of!(sys::AVVAAPIDeviceContext, display)
+        ));
+        #[repr(C)]
+        struct DisplaySecond {
+            _driver_quirks: std::ffi::c_uint,
+            _display: *mut c_void,
+        }
+        must_fail(
+            "the display second",
+            display_first(
+                size_of::<DisplaySecond>(),
+                offset_of!(DisplaySecond, _display),
+            ),
+        );
+    }
+
+    /// A VA-API frame's surface is its frames context, its device's
+    /// display and its `data[3]`; a frame of another format, or on a
+    /// device of another type, has none. The contexts are allocated and
+    /// never set up, so no device is needed.
+    ///
+    /// Control: the same frame with its device's type changed has none.
+    #[test]
+    fn a_vaapi_frame_s_surface_is_its_data_3() {
+        assert_eq!(vaapi_surface(&ff::frame::Video::empty()), None);
+        let vaapi = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI as c_int;
+        // SAFETY: a device context allocated as VA-API's has an
+        // AVVAAPIDeviceContext for its hwctx, whose display is set to an
+        // address nothing reads through (its free callback, which would
+        // terminate it, is set only by av_hwdevice_ctx_create). The frames
+        // context takes its own reference to the device's; the frame
+        // takes the one to the frames context, and frees it with itself.
+        // data[3] holds a surface id, as FFmpeg's VA-API frames do.
+        let (mut frame, device, ctx) = unsafe {
+            let mut dev = c::av_hwdevice_ctx_alloc(vaapi);
+            assert!(!dev.is_null(), "this FFmpeg has no VA-API");
+            let device = (*dev).data.cast::<sys::AVHWDeviceContext>();
+            (*(*device).hwctx.cast::<sys::AVVAAPIDeviceContext>()).display =
+                std::ptr::without_provenance_mut(0xd15);
+            let frames = sys::av_hwframe_ctx_alloc(dev);
+            sys::av_buffer_unref(&mut dev);
+            assert!(!frames.is_null());
+            let mut frame = ff::frame::Video::empty();
+            let f = frame.as_mut_ptr();
+            (*f).format = sys::AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
+            (*f).hw_frames_ctx = frames;
+            (*f).data[3] = std::ptr::without_provenance_mut(0x2a);
+            (frame, device, (*frames).data.addr())
+        };
+        let want = Some(VaSurface {
+            ctx,
+            display: 0xd15,
+            id: 0x2a,
+        });
+        assert_eq!(vaapi_surface(&frame), want);
+        let frames = FramesRef::of(&frame).unwrap();
+        assert_eq!(
+            frames.addr(),
+            ctx,
+            "the reference is to the frame's context"
+        );
+        // SAFETY: the frame's live reference to its frames context.
+        let refs = || unsafe { sys::av_buffer_get_ref_count((*frame.as_ptr()).hw_frames_ctx) };
+        assert_eq!(refs(), 2);
+        drop(frames);
+        assert_eq!(refs(), 1);
+        assert!(FramesRef::of(&ff::frame::Video::empty()).is_none());
+        // SAFETY: the type field of the live device context the frame
+        // holds; FFmpeg frees it by the type it was allocated as.
+        unsafe { (*device).type_ = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM };
+        must_fail(
+            "a frame on a DRM device read as a VA-API one",
+            vaapi_surface(&frame) == want,
+        );
+        // SAFETY: as above, back to VA-API; then the frame's format.
+        unsafe {
+            (*device).type_ = sys::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI;
+            (*frame.as_mut_ptr()).format = sys::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as c_int;
+        }
+        assert_eq!(vaapi_surface(&frame), None);
     }
 }

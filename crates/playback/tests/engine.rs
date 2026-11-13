@@ -31,8 +31,8 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use spherecut_core::{Clock, FrameRate, ManualClock, Rational, StopToken, Time};
@@ -41,17 +41,17 @@ use spherecut_media::MediaError;
 use spherecut_media::backend::{
     AudioDecode, AudioRequest, DecodeMode, DecodePath, DecodeStats, DecoderEvent, Fallback,
     FallbackReason, Fault, FaultPlan, FfmpegBackend, HwKind, MediaBackend, NextFrame, SeekMode,
-    SeekOutcome, VideoDecode, VideoRequest, VideoStreamInfo,
+    SeekOutcome, VaapiDrain, VideoDecode, VideoRequest, VideoStreamInfo,
 };
 use spherecut_media::decode::open_hw_device;
 use spherecut_media::doctor::CheckResult;
 use spherecut_media::mp4::TrackTiming;
 use spherecut_media::probe::{ProbeError, ProbeReport};
 use spherecut_playback::{
-    AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, HwDecodeCheck,
-    HwPromise, HwSupport, LockSpec, LockStatus, PREROLL_FRAMES, PlaySpan, PlayState, Player,
-    PlayerConfig, PlayerError, PlayerEvent, PlayerParts, PlayerThreads, Presented, SlotState,
-    StreamStatus,
+    AudioOutput, AudioOutputFactory, CacheBudget, Counter, DecoderPreference, DrainWaits,
+    HwDecodeCheck, HwPromise, HwSupport, LockSpec, LockStatus, PREROLL_FRAMES, PerfStats, PlaySpan,
+    PlayState, Player, PlayerConfig, PlayerError, PlayerEvent, PlayerParts, PlayerThreads,
+    Presented, SlotState, Stage, StreamStatus, VAAPI_DRAIN_ENV, vaapi_drain_from_env,
 };
 use spherecut_render::readback::read_texture;
 use spherecut_synth::fake::{SyntheticBackend, SyntheticClip, frame_index};
@@ -997,6 +997,217 @@ impl MediaBackend for Slowed {
     fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
         self.inner.track_timing(path, stream)
     }
+}
+
+/// The synthetic clip, whose decoders' numbers say that each frame
+/// handed out waited 1.5 ms for the pictures queued on a VA-API device,
+/// finding 2 surfaces not yet ready, and that one sync failed and one
+/// surface was forgotten in all; and that the decoder found no
+/// `vaSyncSurface` to call, which no real decoder says beside drains,
+/// but the worker counts it apart, once an open. With the drain mode each
+/// open asked for.
+#[derive(Debug)]
+struct Draining {
+    inner: SyntheticBackend,
+    asked: Arc<Mutex<Vec<VaapiDrain>>>,
+}
+
+#[derive(Debug)]
+struct DrainingVideo(Box<dyn VideoDecode>);
+
+impl VideoDecode for DrainingVideo {
+    fn info(&self) -> &VideoStreamInfo {
+        self.0.info()
+    }
+
+    fn decode_path(&self) -> &DecodePath {
+        self.0.decode_path()
+    }
+
+    fn seek(
+        &mut self,
+        at: Time,
+        mode: SeekMode,
+        stop: &StopToken,
+    ) -> Result<SeekOutcome, MediaError> {
+        self.0.seek(at, mode, stop)
+    }
+
+    fn next_frame(&mut self, stop: &StopToken) -> Result<NextFrame, MediaError> {
+        self.0.next_frame(stop)
+    }
+
+    fn catch_up(&mut self, until: Option<Time>) {
+        self.0.catch_up(until);
+    }
+
+    fn take_events(&mut self) -> Vec<DecoderEvent> {
+        self.0.take_events()
+    }
+
+    fn stats(&self) -> DecodeStats {
+        let s = self.0.stats();
+        let n = s.frames_returned;
+        DecodeStats {
+            last_drain_ms: 1.5,
+            last_drain_waited: 2,
+            drains: n,
+            drain_waited: 2 * n,
+            drain_errors: n.min(1),
+            drain_overflow: n.min(1),
+            drain_unavailable: true,
+            ..s
+        }
+    }
+}
+
+impl MediaBackend for Draining {
+    fn name(&self) -> &'static str {
+        "draining"
+    }
+
+    fn probe(&self, path: &Path) -> Result<ProbeReport, ProbeError> {
+        self.inner.probe(path)
+    }
+
+    fn open_video(
+        &self,
+        path: &Path,
+        req: &VideoRequest,
+    ) -> Result<Box<dyn VideoDecode>, MediaError> {
+        self.asked.lock().unwrap().push(req.vaapi_drain);
+        Ok(Box::new(DrainingVideo(self.inner.open_video(path, req)?)))
+    }
+
+    fn open_audio(
+        &self,
+        path: &Path,
+        req: &AudioRequest,
+    ) -> Result<Box<dyn AudioDecode>, MediaError> {
+        self.inner.open_audio(path, req)
+    }
+
+    fn track_timing(&self, path: &Path, stream: usize) -> Result<Option<TrackTiming>, MediaError> {
+        self.inner.track_timing(path, stream)
+    }
+}
+
+/// Whether `perf` holds the drains of `decoders` of [`Draining`]'s
+/// decoders: for each frame handed out, a drain stage sample of 1.5 ms
+/// and 2 surfaces waited for; one failed sync, one forgotten surface and
+/// one open that found no `vaSyncSurface` a decoder.
+fn drained(perf: &PerfStats, decoders: u64) -> bool {
+    let frames = perf.summary(Stage::Decode).recorded;
+    let drain = perf.summary(Stage::Drain);
+    let waits = perf.drain_waits();
+    frames > 0
+        && drain.recorded == frames
+        && drain.max == Some(1.5)
+        && waits.frames() == frames
+        && waits.percentile(50.0) == Some(2)
+        && waits.max() == Some(2)
+        && perf.count(Counter::DrainWaited) == 2 * frames
+        && perf.count(Counter::DrainErrors) == decoders
+        && perf.count(Counter::DrainOverflow) == decoders
+        && perf.count(Counter::DrainUnavailable) == decoders
+}
+
+/// Whether `perf` holds nothing of a drain: no drain stage sample, no
+/// waits and no drain counter.
+fn no_drain(perf: &PerfStats) -> bool {
+    perf.summary(Stage::Drain).recorded == 0
+        && perf.drain_waits() == DrainWaits::default()
+        && [
+            Counter::DrainWaited,
+            Counter::DrainErrors,
+            Counter::DrainOverflow,
+            Counter::DrainUnavailable,
+        ]
+        .iter()
+        .all(|&c| perf.count(c) == 0)
+}
+
+/// A decoder whose numbers say it drained VA-API's queue puts each
+/// frame's drain in the drain stage, its waits in the histogram and its
+/// failures in the counters; the mode the config asks for reaches each
+/// stream's request. The default config asks for `download` with the
+/// variable unset, and `off` with `0`; under it a software decode, which
+/// never drains, records none of it.
+///
+/// Controls: the synthetic clip's own decoders, which drain nothing, fail
+/// the check of a decoder that drained, and its count of opens that found
+/// no `vaSyncSurface` on its own; and the draining decoders' numbers fail
+/// the check of one that didn't.
+#[test]
+fn a_decoder_s_drains_reach_the_drain_stage_and_counters() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let backend = Draining {
+        inner: clip(30),
+        asked: asked.clone(),
+    };
+    let clock = Arc::new(ManualClock::new(RATE.frame_duration()));
+    let draining = PlayerConfig {
+        vaapi_drain: VaapiDrain::Download,
+        ..config(64)
+    };
+    let player = player(backend, clock.clone(), draining);
+    player.open_streams("two.synthetic".into(), vec![Some(0), Some(1)]);
+    lands(&player, &[0, 0]);
+    player.seek(at(12), SeekMode::Exact);
+    lands(&player, &[12, 12]);
+    assert_eq!(*asked.lock().unwrap(), [VaapiDrain::Download; 2]);
+    let perf = player.perf().clone();
+    assert!(
+        drained(&perf, 2),
+        "{:?}, {:?}, {:?}",
+        perf.summary(Stage::Drain),
+        perf.drain_waits(),
+        perf.snapshot().counters
+    );
+    // Download by default: the config reads the variable, which unset
+    // (as the tests run, unless someone set it) asks for download, and
+    // `0` for none. The environment is only read here, never set.
+    assert_eq!(
+        PlayerConfig::default().vaapi_drain,
+        vaapi_drain_from_env(|k| std::env::var(k).ok())
+    );
+    if std::env::var_os(VAAPI_DRAIN_ENV).is_none() {
+        assert_eq!(PlayerConfig::default().vaapi_drain, VaapiDrain::Download);
+    }
+    let unset = vaapi_drain_from_env(|_| None);
+    assert_eq!(unset, VaapiDrain::Download);
+    assert_eq!(vaapi_drain_from_env(|_| Some("0".into())), VaapiDrain::Off);
+    // Under the default, a software decode drains nothing.
+    let default = PlayerConfig {
+        vaapi_drain: unset,
+        ..config(64)
+    };
+    let plain = opened(clip(30), clock, default);
+    plain.seek(at(12), SeekMode::Exact);
+    show(&plain, 12);
+    let none = plain.perf().clone();
+    assert!(none.summary(Stage::Decode).recorded > 0);
+    assert!(
+        no_drain(&none),
+        "{:?}, {:?}, {:?}",
+        none.summary(Stage::Drain),
+        none.drain_waits(),
+        none.snapshot().counters
+    );
+    must_fail(
+        "a decoder that drains nothing read as draining",
+        drained(&none, 2),
+    );
+    // The one open of the plain run, under the default drain, found
+    // `vaSyncSurface` as far as its decoder says.
+    must_fail(
+        "a decoder that had vaSyncSurface counted as finding none",
+        none.count(Counter::DrainUnavailable) == 1,
+    );
+    must_fail(
+        "the draining decoders read as draining nothing",
+        no_drain(&perf),
+    );
 }
 
 /// A 120-frame clip of 512x256 frames through a cache of about 42, its

@@ -206,6 +206,19 @@ and render's, which allows it in `dmabuf` and `vkshare` alone (slice
     the copy, exactly, as software decoding applies it (`as_downloaded`
     gives the fields the frame will have). It serves VA-API and Vulkan
     alike (D30).
+  * The VA-API drain (D79): `va_sync_surface` looks `vaSyncSurface` up
+    once in the libva the process has already loaded (`dlopen` with
+    `RTLD_NOLOAD`, then the global scope), so it never loads a library,
+    and gives `None` where there is none. `vaapi_surface` reads a
+    VA-API frame's surface (`data[3]`) and its frames context's display
+    (ffmpeg-sys-next's `AVVAAPIDeviceContext`). A `SurfaceSet` keeps, in
+    order, each surface a decoder has handed out a frame of, at most 64
+    (forgetting the oldest past that, counted as overflow), and holds
+    the frames context while it keeps any; a surface of another frames
+    context replaces them all. `drain` calls a sync on each surface
+    once, in order, and counts those it waited 0.5 ms or more for and
+    those that failed, forgetting a surface whose sync failed;
+    `drain_vaapi` runs it with libva's `vaSyncSurface`.
 * `hwprobe.rs` (private) holds doctor's one-frame hardware decode and
   encode probes, the Vulkan device listing through FFmpeg's
   `AVVulkanDeviceContext` with its own `#[repr(C)]` declarations of the
@@ -934,6 +947,9 @@ whether the viewer has two frames ready beyond the one it shows, and
 while a drag runs and it hasn't, the export's decode, render and encode
 stages each wait before a frame's work (`Pace::yield_to_viewer`, 100 ms
 at most), so the viewer's decodes go first on the GPU's video engine.
+Its decode on VA-API drains as the player's does
+(`ExportJob::vaapi_drain`, "The VA-API drain" below), since its
+downloads free their staging buffers in the window's process too.
 No thread but the UI's
 waits for the GPU through wgpu's `Device::poll` wait, which holds the
 lock a present takes: they use `Gpu::wait_for_submitted`, which polls
@@ -1048,16 +1064,17 @@ without waiting.
   the viewer's top-left corner, read once a UI frame from `PerfStats`,
   the snapshot and the audio output's stats, all without a lock that
   waits: where the first stream decodes and on which GPU; decode and
-  download; upload's CPU and GPU time; the projection's CPU time and
-  its GPU time from timestamps (`GpuTimers`, read back a frame late,
-  "n/a" without `TIMESTAMP_QUERY_INSIDE_ENCODERS`, "(CPU timing)" on
-  lavapipe); the viewer's size, scale and filter, and the share of the
-  last second's draws that only encoded; UI frame times and hitches;
-  frames shown, dropped and decode-dropped; the A/V offset's median and
-  p95 over the last second; audio; the cache and the slots; RSS, minor
-  faults a second and the GPU allocator's bytes, which the upload
-  thread reads once a second. Sparklines show the UI's and the stages'
-  last samples.
+  download, and under them, once a VA-API decoder has drained a frame
+  or failed to, the drain's mode, time and surfaces waited for;
+  upload's CPU and GPU time; the projection's CPU time and its GPU time
+  from timestamps (`GpuTimers`, read back a frame late, "n/a" without
+  `TIMESTAMP_QUERY_INSIDE_ENCODERS`, "(CPU timing)" on lavapipe); the
+  viewer's size, scale and filter, and the share of the last second's
+  draws that only encoded; UI frame times and hitches; frames shown,
+  dropped and decode-dropped; the A/V offset's median and p95 over the
+  last second; audio; the cache and the slots; RSS, minor faults a
+  second and the GPU allocator's bytes, which the upload thread reads
+  once a second. Sparklines show the UI's and the stages' last samples.
 * **Settings** (File ▸ Settings…, slice 8, D40) are kept in eframe's
   storage beside the tiles: the cache's MiB or automatic, the decoder
   (automatic, software, VA-API or Vulkan Video only), the GPU slots,
@@ -1101,7 +1118,21 @@ without waiting.
   frame (at most `CONTROL_WAIT`, 250 ms), breaking D34's rule on
   purpose and only under `--smoke`. The document's `asked` says which
   of them the run had; hw-test's Tier 2 `gui_decode_behind` runs them
-  (below, "Testing tiers").
+  (below, "Testing tiers"). The VA-API copy path's stall shows in the
+  document too: `vaapi_drain` names the drain the player ran with
+  (`SPHERECUT_VAAPI_DRAIN`, `download` by default, "The VA-API drain"
+  below), and unless it is off `drain` says what the drains waited for:
+  on paths that never drain (software and Vulkan decode, path A's
+  exported frames) it is there with no waits and zero counts, and
+  `unavailable` counts VA-API decoders that found no `vaSyncSurface` to
+  call. The `drain` stage has samples only where a decoder drained.
+  With the diagnostic `SPHERECUT_GATE_PROBE=<ms>`, off by default, the
+  run starts the gate probe (`render::GateProbe`) as it starts playing,
+  which every period waits at the submit gate (D41) as the uploader
+  does, submits a clear of a 256-byte buffer of its own on the viewer's
+  queue and times it to wgpu's work-done callback, and `probe` lists its
+  jobs slower than 8 ms while the run played, to set beside the late UI
+  passes.
 * **The timeline prototype** (`spherecut --timeline-proto`, hidden,
   M2.2b, D53) is the toolkit check's (D26): `proto::TimelineProto`, on
   the device the viewer would take, draws 500 seeded clips on 6 tracks
@@ -1132,7 +1163,11 @@ without waiting.
   which the UI reports, and at exit
   `run` joins them beside the player's threads, with 3 s. The smoke
   run's `smoke-watchdog` is the one thread never joined: it ends with
-  the process, or ends the process itself (above).
+  the process, or ends the process itself (above). The gate probe's
+  `gate-probe` (it submits) and `gate-probe-poll` (it polls the device
+  every millisecond) run only with `SPHERECUT_GATE_PROBE`: the smoke
+  run's `smoke-out` job stops and joins them; a run that fails drops
+  the probe, and they end by themselves.
 * *(planned, M2 on)* Background workers for thumbnails, waveforms,
   proxies and export, each with progress reporting and cancellation
   tokens.
@@ -1204,6 +1239,30 @@ without waiting.
     buffer until the GPU has read it. A refused import or copy is
     copied through the CPU, said once in the snapshot
     (`import_refused`), and the next opens ask for downloads.
+  * **The VA-API drain** (`PlayerConfig.vaapi_drain`, set by
+    `SPHERECUT_VAAPI_DRAIN`, `download` by default): on AMD, radeonsi
+    frees a download's staging buffer inside `vaGetImage`, and the
+    kernel's clearing of the freed range makes every later submission
+    in the process's GPU VM, the window's frame among them, wait for the
+    decodes then queued. So before each download a VA-API decoder on
+    the copy path calls `vaSyncSurface` on every surface it has handed
+    out a frame of, and the free finds none of its pictures queued; the
+    stage `drain` times it. It waits for its own pictures only: another
+    decoder on the device, as a locked pair's other lens, may still have
+    pictures queued when this one downloads. Exported frames (path A)
+    aren't downloaded and don't drain, but a frame path A fails to
+    export is downloaded by its decoder and drains as the copy path's
+    do; one the upload thread downloads after the GPU refused its import
+    doesn't, and the next opens download in the decoder and drain.
+    `picture`, a mode to compare against, drains after every packet sent
+    too, path A's decoders included; `off` or `0` runs none of it, not
+    even libva's lookup. Software and Vulkan decoders never drain. The
+    window's exports drain as its player does
+    (`ExportJob::vaapi_drain`); `frame`, `render` and the agents' tools,
+    with no window in their process, ask for none
+    (`VideoRequest::default` for stills, `ExportJob::new` for renders).
+    Download is the working choice until Pat answers the question asked
+    on 2026-11-13.
   * **The submit gate** (D41, `core::gate::SubmitGate`, one a device,
     `Gpu::submit_gate`): while the UI thread holds a swapchain image,
     no other thread submits to its device, since RADV makes every
@@ -1390,9 +1449,14 @@ without waiting.
   frames expected shown), runs 0 and 1 must hold the UI's gates above
   (90% presented, a p99 of at most 1.5 refresh periods) with no
   blocking call on the UI thread, and the control must block and fail
-  them; run 1 keeping up is inconclusive, not a failure. Its runs are
-  listed in `gui-decode-behind.json` and its screenshots copied beside
-  the report as `<report>-behind-<n>.png`. The
+  them; run 1 keeping up is inconclusive, not a failure. Run 1 drains
+  VCN before each download under the default `SPHERECUT_VAAPI_DRAIN`
+  (`download`, D79), and failed on odin without it. For each run the
+  report gives the drain's mode, its `drain` stage and block unless it
+  is off, and the probe's slow jobs when `SPHERECUT_GATE_PROBE` is set;
+  no gate checks the drain itself. Its runs are listed in
+  `gui-decode-behind.json` and its screenshots copied beside the report
+  as `<report>-behind-<n>.png`. The
   playback benchmarks (`crates/playback/tests/tier2_playback.rs`) play
   the perf clips and the X5's samples through a `Player` on the GPU at
   60 Hz deadlines into an offscreen 1920×1080 target, unthrottled and in

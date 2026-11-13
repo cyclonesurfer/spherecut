@@ -48,10 +48,16 @@ pub enum Stage {
     /// present while the clock runs and the pair is locked, and at no
     /// other (presenter, M3 plan section 9).
     PairWait,
+    /// Waiting for the pictures queued on a VA-API decoder's device: the
+    /// drain before a frame's download, and with `picture` the drains
+    /// after the packets sent for it (`VaapiDrain`, decode worker). Only
+    /// a frame whose drains took some time records one; with the drain
+    /// off, none does.
+    Drain,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 11] = [
+    pub const ALL: [Stage; 12] = [
         Stage::Decode,
         Stage::Download,
         Stage::Convert,
@@ -63,6 +69,7 @@ impl Stage {
         Stage::ShownInterval,
         Stage::AvOffset,
         Stage::PairWait,
+        Stage::Drain,
     ];
 
     /// Its name in the smoke run's JSON and the benchmark reports.
@@ -79,6 +86,7 @@ impl Stage {
             Stage::ShownInterval => "shown_interval",
             Stage::AvOffset => "av_offset",
             Stage::PairWait => "pair_wait",
+            Stage::Drain => "drain",
         }
     }
 }
@@ -138,10 +146,20 @@ pub enum Counter {
     /// newest frame because no time both held lay ahead (the backstop of
     /// section 9).
     PairResyncs,
+    /// Of the surfaces the VA-API drains synced, those not yet ready (a
+    /// sync of 0.5 ms or more), those whose sync failed, and those a
+    /// decoder forgot because it had seen more than it keeps (decode
+    /// worker, [`Stage::Drain`]).
+    DrainWaited,
+    DrainErrors,
+    DrainOverflow,
+    /// Decoders opened that were asked to drain on a VA-API device and
+    /// found no `vaSyncSurface` in the process to call, so drain nothing.
+    DrainUnavailable,
 }
 
 impl Counter {
-    pub const ALL: [Counter; 18] = [
+    pub const ALL: [Counter; 22] = [
         Counter::FramesDecoded,
         Counter::FramesUploaded,
         Counter::FramesShown,
@@ -160,6 +178,10 @@ impl Counter {
         Counter::EncodedOnly,
         Counter::UnpairedPresents,
         Counter::PairResyncs,
+        Counter::DrainWaited,
+        Counter::DrainErrors,
+        Counter::DrainOverflow,
+        Counter::DrainUnavailable,
     ];
 
     pub fn name(self) -> &'static str {
@@ -182,6 +204,10 @@ impl Counter {
             Counter::EncodedOnly => "encoded_only",
             Counter::UnpairedPresents => "unpaired_presents",
             Counter::PairResyncs => "pair_resyncs",
+            Counter::DrainWaited => "drain_waited",
+            Counter::DrainErrors => "drain_errors",
+            Counter::DrainOverflow => "drain_overflow",
+            Counter::DrainUnavailable => "drain_unavailable",
         }
     }
 }
@@ -251,6 +277,8 @@ impl Ring {
 pub struct PerfStats {
     rings: [Ring; Stage::ALL.len()],
     counters: [AtomicU64; Counter::ALL.len()],
+    /// [`DrainWaits::frames`], counted as they come.
+    drain_waits: [AtomicU64; WAIT_BUCKETS],
 }
 
 impl Default for PerfStats {
@@ -264,6 +292,7 @@ impl PerfStats {
         PerfStats {
             rings: std::array::from_fn(|_| Ring::new()),
             counters: std::array::from_fn(|_| AtomicU64::new(0)),
+            drain_waits: std::array::from_fn(|_| AtomicU64::new(0)),
         }
     }
 
@@ -312,6 +341,21 @@ impl PerfStats {
     pub fn summary(&self, stage: Stage) -> StageSummary {
         let (recorded, samples) = self.rings[stage as usize].samples();
         StageSummary::of(recorded, samples)
+    }
+
+    /// Count a frame whose VA-API drains found `waited` surfaces not yet
+    /// ready ([`DrainWaits`]).
+    pub fn record_drain_waits(&self, waited: u64) {
+        let bucket = usize::try_from(waited).map_or(WAIT_BUCKETS - 1, |w| w.min(WAIT_BUCKETS - 1));
+        self.drain_waits[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The frames counted by [`record_drain_waits`](Self::record_drain_waits)
+    /// so far.
+    pub fn drain_waits(&self) -> DrainWaits {
+        DrainWaits {
+            frames: std::array::from_fn(|i| self.drain_waits[i].load(Ordering::Relaxed)),
+        }
     }
 
     /// Every stage's summary and every count, read now.
@@ -380,6 +424,68 @@ impl PerfSnapshot {
     }
 }
 
+/// The buckets of [`DrainWaits`]: one for each count of surfaces from 0
+/// to 63, and one for 64 or more, which a decoder never keeps.
+pub const WAIT_BUCKETS: usize = 65;
+
+/// How many surfaces each frame's VA-API drains found not yet ready
+/// (`DecodeStats::last_drain_waited`), as a histogram with a bucket for
+/// each count, so that its percentiles are exact: with `download`, a
+/// frame's drain is the one before its download, and with `picture` the
+/// ones after the packets sent for it too. Only frames that record a
+/// [`Stage::Drain`] sample are counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainWaits {
+    /// Frames by the surfaces their drains waited for: `frames[n]` found
+    /// `n` not ready, and the last bucket 64 or more.
+    pub frames: [u64; WAIT_BUCKETS],
+}
+
+impl Default for DrainWaits {
+    fn default() -> Self {
+        DrainWaits {
+            frames: [0; WAIT_BUCKETS],
+        }
+    }
+}
+
+impl DrainWaits {
+    /// Frames counted.
+    pub fn frames(&self) -> u64 {
+        self.frames.iter().sum()
+    }
+
+    /// What was counted after `earlier`, a reading of the same stats
+    /// taken before this one.
+    pub fn since(&self, earlier: &DrainWaits) -> DrainWaits {
+        DrainWaits {
+            frames: std::array::from_fn(|i| self.frames[i].saturating_sub(earlier.frames[i])),
+        }
+    }
+
+    /// The `p`th percentile (0 to 100) of the frames' waits, by the
+    /// nearest rank as [`StageSummary`]'s; 64 stands for 64 or more.
+    /// `None` with no frames.
+    pub fn percentile(&self, p: f64) -> Option<u64> {
+        let n = self.frames();
+        if n == 0 {
+            return None;
+        }
+        let rank = ((p / 100.0 * n as f64).ceil() as u64).clamp(1, n);
+        let mut seen = 0;
+        self.frames.iter().enumerate().find_map(|(waited, &k)| {
+            seen += k;
+            (seen >= rank).then_some(waited as u64)
+        })
+    }
+
+    /// The most a frame waited for (64 for 64 or more); `None` with no
+    /// frames.
+    pub fn max(&self) -> Option<u64> {
+        self.frames.iter().rposition(|&k| k > 0).map(|w| w as u64)
+    }
+}
+
 /// The process's memory and the GPU's, read by the upload thread once a
 /// second (M1 plan section 10).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -416,6 +522,8 @@ pub fn minor_faults_of(stat: &str) -> Option<u64> {
 mod tests {
     use std::sync::Arc;
 
+    use spherecut_testkit::control::must_fail;
+
     use super::*;
 
     #[test]
@@ -430,6 +538,40 @@ mod tests {
         assert_eq!(names.len(), Stage::ALL.len());
         let names: std::collections::BTreeSet<_> = Counter::ALL.iter().map(|c| c.name()).collect();
         assert_eq!(names.len(), Counter::ALL.len());
+    }
+
+    /// Each frame's drain waits go in the bucket of their count, 64 or
+    /// more in the last, so that the percentiles are exact; a reading
+    /// less an earlier one is what came between.
+    ///
+    /// Control: the whole run's reading, taken for what came after the
+    /// earlier one, fails the same check.
+    #[test]
+    fn drain_waits_are_counted_exactly_by_frame() {
+        let p = PerfStats::new();
+        assert_eq!(p.drain_waits(), DrainWaits::default());
+        assert_eq!(p.drain_waits().percentile(50.0), None);
+        assert_eq!(p.drain_waits().max(), None);
+        for w in [0, 0, 0, 2, 5, 70] {
+            p.record_drain_waits(w);
+        }
+        let before = p.drain_waits();
+        assert_eq!(before.frames(), 6);
+        assert_eq!(before.frames[WAIT_BUCKETS - 1], 1, "70 is 64 or more");
+        assert_eq!(before.percentile(50.0), Some(0));
+        assert_eq!(before.percentile(80.0), Some(5));
+        assert_eq!(before.max(), Some(64));
+        for _ in 0..3 {
+            p.record_drain_waits(3);
+        }
+        let after = p.drain_waits();
+        // 0, 0, 0, 2, 3, 3, 3, 5 and 64.
+        assert_eq!((after.frames(), after.percentile(50.0)), (9, Some(3)));
+        let between =
+            |w: &DrainWaits| w.frames() == 3 && w.percentile(50.0) == Some(3) && w.max() == Some(3);
+        assert!(between(&after.since(&before)));
+        assert_eq!(before.since(&after), DrainWaits::default());
+        must_fail("the whole run taken for what came between", between(&after));
     }
 
     #[test]

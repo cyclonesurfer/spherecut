@@ -26,6 +26,7 @@ use spherecut_core::project::{AudioChoice, Codec, Edit, EncoderChoice, Output, P
 use spherecut_core::time::Time;
 use spherecut_export::{Export, ExportError, ExportJob, Pace, Progress, Report};
 use spherecut_media::doctor::{DoctorReport, Severity};
+use spherecut_playback::{PlayerConfig, VaapiDrain};
 use spherecut_render::Gpu;
 
 use crate::app::{AppState, DoctorState};
@@ -361,9 +362,7 @@ impl AppState {
         let media = project
             .media_by_id(project.the_clip().media)
             .map(|m| m.path.clone());
-        let mut job = ExportJob::new(project.clone(), &output, window.clone());
-        job.overwrite = overwrite;
-        job.pace = Some(self.export.pace.clone());
+        let mut job = self.export_job(project.clone(), &output, overwrite);
         let device = self.export.device;
         let pace = self.export.pace.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
@@ -398,6 +397,28 @@ impl AppState {
             state: Run::Starting(starting),
             cancelled,
         });
+    }
+
+    /// The job that exports `project` to `output`, replacing a file there
+    /// if `overwrite`: on the window's device until the job finds its own
+    /// (D56), at the window's pace, with the player's VA-API drain.
+    fn export_job(&self, project: Project, output: &Path, overwrite: bool) -> ExportJob {
+        let mut job = ExportJob::new(project, output, self.gpu.clone());
+        job.overwrite = overwrite;
+        job.pace = Some(self.export.pace.clone());
+        job.vaapi_drain = self.export_drain();
+        job
+    }
+
+    /// The VA-API drain the window's exports decode with: the player's,
+    /// since an export's downloads free their staging buffers in the
+    /// window's process as the player's do, or, with no player, the one
+    /// it would have had (`SPHERECUT_VAAPI_DRAIN`).
+    fn export_drain(&self) -> VaapiDrain {
+        self.player.as_ref().map_or_else(
+            || PlayerConfig::default().vaapi_drain,
+            |p| p.config().vaapi_drain,
+        )
     }
 }
 
@@ -963,6 +984,83 @@ fn replace_window(s: &mut AppState, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A project of a clip that needn't be there: the job only names it.
+    fn project() -> Project {
+        use spherecut_core::project::{Caps, Fingerprint, Media, MediaId, MediaVideo, Source};
+        use spherecut_core::time::FrameRate;
+
+        let media = Media {
+            id: MediaId::NEW,
+            path: "/clips/a.mp4".into(),
+            fingerprint: Fingerprint {
+                bytes: 1,
+                head: "0000000000000000".into(),
+            },
+            video: MediaVideo {
+                stream: 0,
+                width: 1024,
+                height: 512,
+                rate: FrameRate::FPS_30,
+                duration: Time::from_secs(10),
+            },
+            source: Source::default(),
+            caps: Caps::default(),
+        };
+        Project::untitled(media, crate::doc::INITIAL_VIEW).unwrap()
+    }
+
+    /// The window's export decodes with the player's VA-API drain, which
+    /// the job carries to the export's decoder: in this process a
+    /// download's freed staging buffer holds back the window's frames,
+    /// whichever decoder made it.
+    ///
+    /// Control: the job `ExportJob::new` makes, as the CLI's and the
+    /// agents' exports have it, carries no drain the player asks for.
+    #[test]
+    fn the_windows_export_drains_as_the_player_does() {
+        use spherecut_media::backend::FfmpegBackend;
+        use spherecut_testkit::control::must_fail;
+
+        use crate::app::{AppParts, DoctorRun, SpherecutApp};
+        use crate::settings::Settings;
+
+        let gpu = Gpu::headless(&spherecut_render::AdapterChoice::Cpu).expect("lavapipe");
+        let app = |vaapi_drain| {
+            SpherecutApp::new(AppParts {
+                gpu: gpu.clone(),
+                backend: Arc::new(FfmpegBackend::new()),
+                clock: Arc::new(spherecut_core::SystemClock::new()),
+                audio: None,
+                repaint: None,
+                config: PlayerConfig {
+                    vaapi_drain,
+                    ..PlayerConfig::default()
+                },
+                doctor: DoctorRun::Never,
+                list_dirs: false,
+                settings: Settings::default(),
+                cache_override: None,
+                tree: None,
+                open: Vec::new(),
+            })
+        };
+        let apps: Vec<(VaapiDrain, SpherecutApp)> =
+            [VaapiDrain::Download, VaapiDrain::Picture, VaapiDrain::Off]
+                .into_iter()
+                .map(|mode| (mode, app(mode)))
+                .collect();
+        let out = Path::new("/videos/a-export.mp4");
+        let carries = |rule: fn(&AppState, Project, &Path) -> ExportJob| {
+            apps.iter()
+                .all(|(mode, a)| rule(&a.state, project(), out).vaapi_drain == *mode)
+        };
+        assert!(carries(|s, p, o| s.export_job(p, o, false)));
+        must_fail(
+            "the job ExportJob::new makes",
+            carries(|s, p, o| ExportJob::new(p, o, s.gpu.clone())),
+        );
+    }
 
     #[test]
     fn the_viewer_has_its_lead_with_two_frames_ready_or_while_it_doesnt_play() {

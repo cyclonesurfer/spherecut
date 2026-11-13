@@ -231,11 +231,27 @@ pub struct PlayerConfig {
     /// imported (path A) too, when the device can import them.
     /// [`ZERO_COPY_ENV`] sets it.
     pub zero_copy: ZeroCopy,
+    /// Whether a VA-API decoder waits for the pictures it has queued on
+    /// its device before each download, or after each packet too: the
+    /// fix for the copy path's stall on AMD (D79). It waits for its own
+    /// pictures only, so another decoder on the device (a locked pair's
+    /// other lens) may still have pictures queued. Its default is what
+    /// [`VAAPI_DRAIN_ENV`] says, read when the config is made, so that the
+    /// window and the headless benchmarks both honour it; unset, it is
+    /// [`VaapiDrain::Download`], the working choice until Pat picks one.
+    /// Software and Vulkan decoders never drain. On path A a frame that
+    /// is exported is not drained unless it is [`VaapiDrain::Picture`],
+    /// but a frame path A fails to export, and so downloads, is.
+    pub vaapi_drain: VaapiDrain,
 }
 
 /// `SPHERECUT_ZERO_COPY` sets [`PlayerConfig::zero_copy`]; media has
 /// them, for doctor to say so too.
 pub use spherecut_media::backend::{ZERO_COPY_ENV, ZeroCopy, zero_copy_from_env};
+
+/// `SPHERECUT_VAAPI_DRAIN` sets [`PlayerConfig::vaapi_drain`]'s default;
+/// media has them, where the decoders drain.
+pub use spherecut_media::backend::{VAAPI_DRAIN_ENV, VaapiDrain, vaapi_drain_from_env};
 
 /// The frames exported from a VA-API decoder each stream's cache holds
 /// at most: its pool's spare surfaces less 8 for the frames on their way
@@ -251,6 +267,7 @@ impl Default for PlayerConfig {
             decoder: DecoderPreference::Auto,
             av_offset_ms: 0,
             zero_copy: ZeroCopy::default(),
+            vaapi_drain: vaapi_drain_from_env(|k| std::env::var(k).ok()),
         }
     }
 }
@@ -879,6 +896,7 @@ impl Player {
                 .shared_video
                 .clone()
                 .filter(|_| ui.config.zero_copy.vulkan()),
+            vaapi_drain: ui.config.vaapi_drain,
             lock,
         };
         if let Err(e) = spawn_into(&self.handles_tx, "open".into(), move || job.run()) {

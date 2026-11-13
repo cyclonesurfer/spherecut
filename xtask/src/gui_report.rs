@@ -241,6 +241,9 @@ pub fn section_of(dir: &Path, report: &Path, test: &str, kind: Kind) -> String {
                         ""
                     }
                 );
+                for line in [drain(res), probe(&res["probe"])].into_iter().flatten() {
+                    let _ = writeln!(r, "{line}\n");
+                }
                 if let Some(e) = export(&res["export"]) {
                     let _ = writeln!(r, "{e}\n");
                 }
@@ -573,6 +576,112 @@ fn gate(g: &Value) -> String {
         if waits == 1 { "" } else { "s" },
         ms(&g["longest_ms"])
     )
+}
+
+/// "The VA-API drain (`download`): 380 frames drained, p50 / p95 / max
+/// 0.4 / 2.1 / 9.1 ms each, waiting for p50 2 and at most 12 surfaces
+/// not yet ready; 0 failed syncs, 1 surface forgotten past the 64 a
+/// decoder keeps.": what the copy path's drain did over the run, or
+/// "The VA-API drain (`download`): no frame drained." where nothing
+/// drained or failed, as on software and Vulkan decode by default. None
+/// with the drain off, or for a document from before it.
+fn drain(res: &Value) -> Option<String> {
+    let mode = res["vaapi_drain"].as_str().filter(|m| *m != "off")?;
+    let st = &res["stages"]["drain"];
+    let d = &res["drain"];
+    let w = &d["waited_per_download"];
+    let count = |v: &Value| v.as_u64().map_or_else(|| "-".into(), |n| n.to_string());
+    let frames = st["samples"].as_u64().unwrap_or(0);
+    let [errors, overflow, unavailable] =
+        ["errors", "overflow", "unavailable"].map(|k| d[k].as_u64().unwrap_or(0));
+    if frames == 0 && errors == 0 && overflow == 0 && unavailable == 0 {
+        return Some(format!("The VA-API drain (`{mode}`): no frame drained."));
+    }
+    let drained = if frames > 0 {
+        format!(
+            "{frames} frame{} drained, p50 / p95 / max {} / {} / {} ms each, waiting for p50 {} \
+             and at most {} surfaces not yet ready",
+            plural(frames),
+            ms(&st["p50"]),
+            ms(&st["p95"]),
+            ms(&st["max"]),
+            count(&w["p50"]),
+            count(&w["max"])
+        )
+    } else {
+        "no frame drained".into()
+    };
+    let unavailable = if unavailable > 0 {
+        format!(
+            "; {unavailable} decoder{} found no vaSyncSurface to call, so drained nothing",
+            plural(unavailable)
+        )
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "The VA-API drain (`{mode}`): {drained}; {errors} failed sync{}, {overflow} surface{} \
+         forgotten past the 64 a decoder keeps{unavailable}.",
+        plural(errors),
+        plural(overflow)
+    ))
+}
+
+/// How many of the gate probe's slow jobs [`probe`] lists; the document
+/// has them all.
+const PROBE_LISTED: usize = 12;
+
+/// "The gate probe, a job on the viewer's queue every 4 ms: 4980 timed
+/// while it played, p50 / p99 / max 0.6 / 3.1 / 53.0 ms; 2 slower than
+/// 8 ms, at 1.00 s (40.0 ms), 2.00 s (41.0 ms).": the probe's jobs and
+/// when the slow ones were submitted, in seconds into the run as the
+/// late passes' are, the first [`PROBE_LISTED`]. None for a run without
+/// the probe.
+fn probe(p: &Value) -> Option<String> {
+    if !p.is_object() {
+        return None;
+    }
+    let over = p["over_8ms"].as_array().cloned().unwrap_or_default();
+    let slow = over.len() as u64 + p["over_8ms_dropped"].as_u64().unwrap_or(0);
+    let listed: Vec<String> = over
+        .iter()
+        .take(PROBE_LISTED)
+        .filter_map(|j| {
+            Some(format!(
+                "{:.2} s ({:.1} ms)",
+                j[0].as_f64()?,
+                j[1].as_f64()?
+            ))
+        })
+        .collect();
+    let slow = match slow {
+        0 => "none slower than 8 ms".to_string(),
+        n => format!(
+            "{n} slower than 8 ms, at {}{}",
+            listed.join(", "),
+            match n.saturating_sub(listed.len() as u64) {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            }
+        ),
+    };
+    let unfinished = match p["unfinished"].as_u64() {
+        Some(n) if n > 0 => format!("; {n} not done a second after it stopped"),
+        _ => String::new(),
+    };
+    Some(format!(
+        "The gate probe, a job on the viewer's queue every {} ms: {} timed while it played, p50 \
+         / p99 / max {} / {} / {} ms; {slow}{unfinished}.",
+        p["period_ms"].as_f64().unwrap_or(0.0),
+        p["n"].as_u64().unwrap_or(0),
+        ms(&p["p50"]),
+        ms(&p["p99"]),
+        ms(&p["max"])
+    ))
+}
+
+fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// The export a run made while it played (`--smoke-export`, M2.7): what
@@ -1053,5 +1162,147 @@ mod tests {
             proto_section(&s.0.join("nothing"), &report, "wasn't listed"),
             "No run: `gui_proto` wasn't listed.\n\n"
         );
+    }
+
+    /// Where nothing drained and nothing failed, as on software and
+    /// Vulkan decode under the default drain, the drain's paragraph is
+    /// one clause.
+    ///
+    /// Control: a drain that drained no frame because its decoders found
+    /// no `vaSyncSurface` to call isn't said as briefly.
+    #[test]
+    fn the_drain_says_little_where_nothing_drained() {
+        let res = |unavailable: u64| {
+            serde_json::json!({
+                "vaapi_drain": "download",
+                "stages": {"drain": {"samples": 0}},
+                "drain": {"waited_per_download": {"p50": null, "max": null},
+                          "errors": 0, "overflow": 0, "unavailable": unavailable},
+            })
+        };
+        let brief = |r: &Value| {
+            drain(r).as_deref() == Some("The VA-API drain (`download`): no frame drained.")
+        };
+        assert!(brief(&res(0)), "{:?}", drain(&res(0)));
+        must_fail("a drain that found nothing to call", brief(&res(2)));
+    }
+
+    /// With the VA-API drain and the gate probe on, a run's paragraphs
+    /// say what the drain waited for and list the probe's slow jobs, the
+    /// first 12 of them; with both off, or a document from before them,
+    /// nothing is added.
+    ///
+    /// Control: the run with both off fails the check that the section
+    /// shows them.
+    #[test]
+    fn the_section_shows_the_drain_and_the_probe_when_on() {
+        let s = Scratch(std::env::temp_dir().join(format!("xtask-drain-{}", std::process::id())));
+        let dir = s.0.join("hw-gui");
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = |extra: Value| {
+            let mut d = serde_json::json!({
+                "schema": "spherecut.smoke/1", "ok": true, "warnings": [],
+                "result": {
+                    "adapter": {"name": "AMD Radeon RX 7600 (RADV NAVI33)", "driver": "radv", "driver_info": "Mesa 26.2.5"},
+                    "surface_format": "Bgra8UnormSrgb", "scale": 1.0, "native_scale": 1.0,
+                    "window": [1280, 800], "viewer": [900, 600], "refresh_hz": 60.0,
+                    "played_s": 20.0, "ended": false,
+                    "ui": {"presented": 0.97, "p50": 16.7, "p99": 30.1, "frames": 1160, "passes": 1160},
+                    "streams": [{"decode": "VA-API, copied", "decoder": "vaapi"}],
+                    "stages": {"decode": {"samples": 400, "p50": 8.2, "p95": 11.0},
+                               "drain": {"samples": 0}},
+                    "submit_gate": {"waits": 30, "longest_ms": 4.5},
+                }
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                d["result"][k] = v.clone();
+            }
+            d
+        };
+        // Fourteen slow jobs listed and two dropped.
+        let over: Vec<Value> = (0..14)
+            .map(|k| serde_json::json!([1.0 + f64::from(k), 40.0 + f64::from(k)]))
+            .collect();
+        let on = doc(serde_json::json!({
+            "vaapi_drain": "download",
+            "stages": {"decode": {"samples": 400, "p50": 8.2, "p95": 11.0},
+                       "drain": {"samples": 380, "p50": 0.4, "p95": 2.06, "max": 9.12}},
+            "drain": {"waited_per_download": {"p50": 2, "max": 12},
+                      "errors": 0, "overflow": 1, "unavailable": 0},
+            "probe": {"period_ms": 4.0, "n": 4980, "p50": 0.61, "p99": 3.12, "max": 53.0,
+                      "over_8ms": over, "over_8ms_dropped": 2, "unfinished": 0},
+        }));
+        let off = doc(serde_json::json!({"vaapi_drain": "off"}));
+        let before = doc(serde_json::json!({}));
+        for (n, d) in [&on, &off, &before].into_iter().enumerate() {
+            std::fs::write(dir.join(format!("gui-behind-{n}.json")), d.to_string()).unwrap();
+        }
+        let run = |n: u64| {
+            serde_json::json!({
+                "n": n, "label": format!("run {n}"), "clip": "/m/a.mp4", "asked": [], "role": "run",
+                "behind": null, "document": dir.join(format!("gui-behind-{n}.json")),
+                "screenshot": null, "failed": [], "gates": [],
+            })
+        };
+        let summary = |runs: Vec<Value>| {
+            serde_json::json!({
+                "session": "Wayland socket discovered", "env": [], "locked": false,
+                "vaapi_hevc": ["HEVC Main 10"], "max_shown_behind": 0.85,
+                "runs": runs, "not_run": [],
+            })
+        };
+        let report = s.0.join("hw-reports").join("odin-abc.md");
+        let section_with = |runs: Vec<Value>| {
+            std::fs::write(dir.join(BEHIND_SUMMARY), summary(runs).to_string()).unwrap();
+            behind_section(&dir, &report, "passed")
+        };
+        let shows = |md: &str| md.contains("The VA-API drain") && md.contains("The gate probe");
+        let md = section_with(vec![run(0)]);
+        eprintln!("{md}");
+        assert!(shows(&md));
+        assert!(md.contains("p50 / p95: decode 8.2 / 11.0 ms, drain 0.4 / 2.1 ms;"));
+        assert!(md.contains(
+            "The VA-API drain (`download`): 380 frames drained, p50 / p95 / max 0.4 / 2.1 / 9.1 \
+             ms each, waiting for p50 2 and at most 12 surfaces not yet ready; 0 failed syncs, \
+             1 surface forgotten past the 64 a decoder keeps.\n"
+        ));
+        assert!(md.contains(
+            "The gate probe, a job on the viewer's queue every 4 ms: 4980 timed while it \
+             played, p50 / p99 / max 0.6 / 3.1 / 53.0 ms; 16 slower than 8 ms, at 1.00 s (40.0 \
+             ms), 2.00 s (41.0 ms), 3.00 s (42.0 ms), 4.00 s (43.0 ms), 5.00 s (44.0 ms), 6.00 \
+             s (45.0 ms), 7.00 s (46.0 ms), 8.00 s (47.0 ms), 9.00 s (48.0 ms), 10.00 s (49.0 \
+             ms), 11.00 s (50.0 ms), 12.00 s (51.0 ms) and 4 more.\n"
+        ));
+        // A drain that found nothing to call, and a probe with no slow job
+        // and some not done.
+        let mut lost = on.clone();
+        lost["result"]["stages"]["drain"] = serde_json::json!({"samples": 0});
+        lost["result"]["drain"] = serde_json::json!({
+            "waited_per_download": {"p50": null, "max": null},
+            "errors": 0, "overflow": 0, "unavailable": 2,
+        });
+        lost["result"]["probe"]["over_8ms"] = serde_json::json!([]);
+        lost["result"]["probe"]["over_8ms_dropped"] = serde_json::json!(0);
+        lost["result"]["probe"]["unfinished"] = serde_json::json!(3);
+        assert_eq!(
+            drain(&lost["result"]).unwrap(),
+            "The VA-API drain (`download`): no frame drained; 0 failed syncs, 0 surfaces \
+             forgotten past the 64 a decoder keeps; 2 decoders found no vaSyncSurface to call, \
+             so drained nothing."
+        );
+        assert_eq!(
+            probe(&lost["result"]["probe"]).unwrap(),
+            "The gate probe, a job on the viewer's queue every 4 ms: 4980 timed while it \
+             played, p50 / p99 / max 0.6 / 3.1 / 53.0 ms; none slower than 8 ms; 3 not done a \
+             second after it stopped."
+        );
+        // Off, and from before: neither.
+        let md = section_with(vec![run(1), run(2)]);
+        assert!(
+            !md.contains("The VA-API drain") && !md.contains("The gate probe"),
+            "{md}"
+        );
+        assert!(!md.contains("drain 0") && !md.contains(", drain"), "{md}");
+        must_fail("the runs with both off", shows(&md));
     }
 }
