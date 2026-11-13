@@ -982,6 +982,165 @@ fn a_project_made_through_a_linked_folder_loads_in_core() {
     );
 }
 
+/// The media paths the project file at `p` stores, as written.
+fn stored(p: &Path) -> Vec<String> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap();
+    v["project"]["media"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Whether every media of the project at `p` is there, as core's
+/// `file::load` reads it.
+fn all_there(p: &Path) -> Result<(), String> {
+    match load(p).media().iter().find(|m| !m.path.exists()) {
+        None => Ok(()),
+        Some(m) => Err(format!("{} isn't there", m.path.display())),
+    }
+}
+
+/// A media an agent names through a folder link beneath a root, from a
+/// project it makes there, is stored from the folder the clip is really
+/// in, as the GUI's save names it (R8): `link` → `real/sub`, the project
+/// `link/p.spherecut` and its media `link/clip.mp4`, by `create`, and
+/// `link/b.mp4`, by `add_media`, are "clip.mp4" and "b.mp4", so the
+/// folder moved with its clips keeps them (D47; the review of the M3.9
+/// review's R1 fix); and `link/footage/c.mp4`, through a link within the
+/// project's folder to `store`, keeps that link's name, "footage/c.mp4".
+/// Controls: the same media named as the agent gave it, lexically, from
+/// the same folder, is "../../link/clip.mp4", which the move loses; and
+/// the footage named by its real path is "../../store/c.mp4".
+#[test]
+fn media_named_through_a_linked_folder_is_stored_from_its_real_folder() {
+    let _t = timed("media_named_through_a_linked_folder_is_stored_from_its_real_folder");
+    let dir = TempDir::new("linked-media");
+    dir.clip("real/sub", "clip");
+    dir.clip("real/sub", "b");
+    let footage = dir.clip("store", "c");
+    std::os::unix::fs::symlink("real/sub", dir.path("link")).unwrap();
+    std::os::unix::fs::symlink("../../store", dir.path("real/sub/footage")).unwrap();
+    let tools = dir.tools();
+    ok(
+        &tools,
+        "project",
+        json!({"file": "link/p.spherecut", "create": {"media": "link/clip.mp4"}}),
+    );
+    let add = |path: &str| json!({"op": "add_media", "path": path});
+    ok(
+        &tools,
+        "edit",
+        json!({"file": "link/p.spherecut", "edits": [add("link/b.mp4"), add("link/footage/c.mp4")]}),
+    );
+    let p = dir.path("real/sub/p.spherecut");
+    assert_eq!(stored(&p), ["clip.mp4", "b.mp4", "footage/c.mp4"]);
+    must_fail(
+        "the footage named by its real path",
+        file::relative(
+            &std::fs::canonicalize(&footage).unwrap(),
+            &std::fs::canonicalize(dir.path("real/sub")).unwrap(),
+        ) == Path::new("footage/c.mp4"),
+    );
+    // Control: the media as the agent named it, lexically, saved from the
+    // same folder.
+    let roots = Roots::new(std::slice::from_ref(&dir.0), Some(&dir.0)).unwrap();
+    let (folder, _) = roots
+        .project_folder("file", Path::new("link/q.spherecut"), true)
+        .unwrap();
+    let named = roots.named("media", Path::new("link/clip.mp4")).unwrap();
+    let (project, history) = reference::project(reference::media(&named), None).unwrap();
+    folder
+        .create(OsStr::new("q.spherecut"), &project, &history)
+        .unwrap();
+    let q = dir.path("real/sub/q.spherecut");
+    must_fail("the media named lexically", stored(&q)[0] == "clip.mp4");
+    // The folder moved with its clips.
+    std::fs::create_dir_all(dir.path("moved")).unwrap();
+    std::fs::rename(dir.path("real/sub"), dir.path("moved/sub")).unwrap();
+    all_there(&dir.path("moved/sub/p.spherecut")).unwrap();
+    must_fail(
+        "the media named lexically, moved",
+        all_there(&dir.path("moved/sub/q.spherecut")),
+    );
+}
+
+/// A root given through a link names an agent's project folder and its
+/// media by the root's given name (R1): with `linkroot` → `realroot`
+/// both roots, a project `sub/p.spherecut` of `sub/clip.mp4` stores
+/// "clip.mp4", the media named through the link or by its canonical
+/// path alike. Control: the same media saved from the folder named by
+/// its real path, as `/proc/self/fd` gives it, is stored by a path that
+/// crosses from the link's tree into the real one.
+#[test]
+fn a_project_under_a_linked_root_stores_its_media_beside_it() {
+    let _t = timed("a_project_under_a_linked_root_stores_its_media_beside_it");
+    let dir = TempDir::new("linked-root");
+    let clip = dir.clip("realroot/sub", "clip");
+    std::os::unix::fs::symlink("realroot", dir.path("linkroot")).unwrap();
+    let root = dir.path("linkroot");
+    let tools = Spherecut::new(Roots::new(std::slice::from_ref(&root), Some(&root)).unwrap());
+    let canonical = std::fs::canonicalize(&clip).unwrap();
+    for (name, media) in [
+        ("p.spherecut", Path::new("sub/clip.mp4")),
+        ("q.spherecut", canonical.as_path()),
+    ] {
+        ok(
+            &tools,
+            "project",
+            json!({"file": format!("sub/{name}"), "create": {"media": media}}),
+        );
+        let p = dir.path("realroot/sub").join(name);
+        assert_eq!(stored(&p), ["clip.mp4"], "{}", media.display());
+        all_there(&p).unwrap();
+    }
+    // Control: the folder named by its real path.
+    let roots = Roots::new(std::slice::from_ref(&root), Some(&root)).unwrap();
+    let real = std::fs::canonicalize(dir.path("realroot/sub")).unwrap();
+    let fd = rustix::fs::open(
+        &real,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .unwrap();
+    let named = roots.named("media", Path::new("sub/clip.mp4")).unwrap();
+    let (project, history) = reference::project(reference::media(&named), None).unwrap();
+    ProjectFolder::from_fd(fd, &real)
+        .create(OsStr::new("r.spherecut"), &project, &history)
+        .unwrap();
+    must_fail(
+        "the folder named by its real path",
+        stored(&dir.path("realroot/sub/r.spherecut")) == ["clip.mp4"],
+    );
+}
+
+/// A folder whose name ends " (deleted)", as `/proc` marks a removed
+/// one, is a folder an agent's project may be made in. Control: a folder
+/// that isn't there is refused.
+#[test]
+fn a_folder_named_as_removed_is_a_folder() {
+    let _t = timed("a_folder_named_as_removed_is_a_folder");
+    let dir = TempDir::new("named-deleted");
+    let clip = dir.clip("", "clip");
+    std::fs::create_dir_all(dir.path("x (deleted)")).unwrap();
+    let tools = dir.tools();
+    let create = |file: &str| {
+        call(
+            &tools,
+            "project",
+            json!({"file": file, "create": {"media": clip}}),
+        )
+        .map(drop)
+    };
+    create("x (deleted)/p.spherecut").unwrap();
+    assert_eq!(
+        stored(&dir.path("x (deleted)/p.spherecut")),
+        ["../clip.mp4"]
+    );
+    must_fail("a folder that isn't there", create("y/p.spherecut"));
+}
+
 /// Through our own client over pipes: the list a session gets, and an
 /// edit's result.
 #[test]

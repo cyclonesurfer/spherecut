@@ -78,7 +78,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<Value, ToolError> {
         .edits
         .into_iter()
         .enumerate()
-        .map(|(i, v)| edit(i, v, &project, cx, &mut doubts))
+        .map(|(i, v)| edit(i, v, &project, folder.path(), cx, &mut doubts))
         .collect::<Result<Vec<_>, _>>()?;
     cx.call.check()?;
     let (mut history, reset) = history_of(loaded.history);
@@ -271,13 +271,15 @@ fn bad_edit(e: EditError) -> ToolError {
 }
 
 /// Edit `i` as the agent wrote it, as an `Edit`: `add_media` probed by
-/// its path, `set_source`'s camera form made whole from the media's file,
-/// and a whole `dual_fisheye` source checked against what that file
-/// holds; the rest through [`wire`].
+/// its path and named for the project's folder, named `near`;
+/// `set_source`'s camera form made whole from the media's file, and a
+/// whole `dual_fisheye` source checked against what that file holds;
+/// the rest through [`wire`].
 fn edit(
     i: usize,
     v: Value,
     project: &Project,
+    near: &Path,
     cx: &Ctx,
     doubts: &mut Vec<Warning>,
 ) -> Result<Edit, ToolError> {
@@ -295,7 +297,7 @@ fn edit(
             .at(arg)
             .valid(r#"{"op": "add_media", "path": "clips/b.mp4"}"#));
         };
-        let media = probe_media(&format!("{arg}.path"), Path::new(path), cx, doubts)?;
+        let media = probe_media(&format!("{arg}.path"), Path::new(path), near, cx, doubts)?;
         return Ok(Edit::AddMedia { media });
     }
     if v.get("op").and_then(Value::as_str) == Some("set_source") {

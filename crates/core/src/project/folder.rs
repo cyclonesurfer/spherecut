@@ -16,9 +16,11 @@
 //! it be before making it relative (R8), as `file::save` does. An
 //! agent's, from [`ProjectFolder::from_fd`], is named by its roots: the
 //! root as it was given joined with the folder's real path below the
-//! root's (the M3.9 review's R1), its media paths made relative as the
-//! agent names them. A folder opened by [`ProjectFolder::open`] is named
-//! as given, lexically.
+//! root's (the M3.9 review's R1). Its media paths are made relative as
+//! the agent's tools named them when they added them, as near the folder
+//! as the real paths of their folders beneath the root let them be (the
+//! review of R1's fix), since nothing outside the roots is resolved. A
+//! folder opened by [`ProjectFolder::open`] is named as given, lexically.
 //!
 //! ```text
 //! trip.spherecut            the project (D47)

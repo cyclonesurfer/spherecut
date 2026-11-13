@@ -9438,7 +9438,9 @@ refused rather than replaced. The folder is the one the kernel finds,
 for the GUI, the CLI and agents alike (since M3.9: F031 and the M3.9
 review's R1), and media paths are made relative to, and read against,
 it (D47), so all three read a project's `../clips/a.mp4` as the same
-file.
+file. A media path is named as near that folder as the real paths of
+its folders let it be before it is made relative: by the GUI's saves
+(R8), and by an agent's tools, beneath the root, when they add one.
 
 **The lock**, `.<name>.lock` beside the project: `flock` on a file
 that is never removed or replaced, with one line saying who holds it
@@ -9591,7 +9593,14 @@ reads its `../clip.mp4` beside the folder it is really in, as the
 window and `spherecut render` do, and one an agent makes there loads
 in them with its media. The root keeps the name it was given, so a
 root reached through a link still names its paths as the agent does.
-From R7, `create` and `add_media` make a camera's file a source only
+A folder removed meanwhile is known by its link count, not by the
+" (deleted)" the kernel adds to its name. From the fix round's review,
+a media an agent adds is named as the window's save names one (R8),
+beneath the root: `Roots::named_near` keeps, of the names its folders
+give it as the kernel finds them, the one that shares the most of the
+project's folder, so a project made in `link` (a link to `real/sub`)
+of `link/clip.mp4` stores `clip.mp4`, not `../../link/clip.mp4`, and
+moves with its clip. From R7, `create` and `add_media` make a camera's file a source only
 if `validate` takes it at the default tune: media's `camera_source`
 ends with the source's `check`, and a refusal (a frame under 95°, too
 narrow for the default feather; a lens's ξ at −1 or below) keeps the

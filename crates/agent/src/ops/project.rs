@@ -131,7 +131,7 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
         Err(e) => return Err(folder_error("file", e)),
     }
     let mut doubts = Vec::new();
-    let entry = probe_media("create.media", media, cx, &mut doubts)?;
+    let entry = probe_media("create.media", media, folder.path(), cx, &mut doubts)?;
     let project = Project::untitled(entry, INITIAL_VIEW).map_err(|p| {
         ToolError::new(
             codes::BAD_ARGUMENT,
@@ -160,10 +160,13 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
     Ok(s)
 }
 
-/// The media entry of the video at `path`, the argument `arg`: opened
-/// beneath the roots, probed through what was opened, its stream opened
-/// for its rate and length, and recorded as the agent names it. Like
-/// the GUI's, it takes footage whatever its metadata says, with a
+/// The media entry of the video at `path`, the argument `arg`, for a
+/// project in the folder named `near`: opened beneath the roots, probed
+/// through what was opened, its stream opened for its rate and length,
+/// and recorded as the agent names it, from the folder nearest the
+/// project's that its folders' real paths beneath the root give
+/// ([`Roots::named_near`](crate::roots::Roots::named_near)). Like the
+/// GUI's, it takes footage whatever its metadata says, with a
 /// `not_equirect` warning in `doubts` when it isn't tagged a stitched
 /// equirect: looking at the project shows what a render makes of it.
 ///
@@ -171,15 +174,18 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
 /// the calibration its trailer holds, with no such doubt, its `video` its
 /// first lens's stream. One with no calibration a stitch reads stays an
 /// equirect, with the doubt and a `no_calibration` warning: it shows as
-/// its lenses.
+/// its lenses. So does one whose calibration reads but whose source at
+/// the default tune `validate` refuses (the M3.9 review's R7), its
+/// warning giving `validate`'s words.
 pub(crate) fn probe_media(
     arg: &str,
     path: &Path,
+    near: &Path,
     cx: &Ctx,
     doubts: &mut Vec<Warning>,
 ) -> Result<Media, ToolError> {
     let opened = cx.roots.open_file(arg, path)?;
-    let named = cx.roots.named(arg, path)?;
+    let named = cx.roots.named_near(arg, path, near)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
     let mut opts = still::Options {
         decoder: Decoder::Software,

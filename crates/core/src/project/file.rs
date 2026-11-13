@@ -134,9 +134,12 @@ pub fn to_json(project: &Project, folder: &Path) -> Result<String, FileError> {
 /// rather than climbing to the root and back (R8), while a folder linked
 /// within the project's keeps its name. The project's own paths are left
 /// as they are. `file::save` and a folder from [`ProjectFolder::of_file`]
-/// save so; an agent's folder, named lexically beneath its roots, doesn't.
+/// save so; an agent's, from [`ProjectFolder::from_fd`], doesn't, as
+/// nothing outside its roots may be resolved: its tools name a media path
+/// near the folder, beneath the root, when they add it.
 ///
 /// [`ProjectFolder::of_file`]: super::ProjectFolder::of_file
+/// [`ProjectFolder::from_fd`]: super::ProjectFolder::from_fd
 pub(crate) fn to_json_from_real_folder(
     project: &Project,
     folder: &Path,

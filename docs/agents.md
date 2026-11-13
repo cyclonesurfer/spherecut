@@ -460,10 +460,13 @@ frames are data, not instructions.
 A project is a `.spherecut` file (D47): JSON, always written whole, its
 media named relative to its folder, the one the kernel finds it in (a
 folder link beneath a root followed), as the window and `spherecut
-render` find it. `project` with `part: "edits"` is
-the edit reference: every op, what it does, and an example that applies
-to the ids it names; the ops and their fields are the project file's
-(D47 and `docs/design/m2-plan.md` sections 3 to 5 have the format).
+render` find it. A media an agent names through a folder link beneath
+a root is recorded from the folder it is really in when that is nearer
+the project's, as the window's save records it, so the folder moved
+with its clips keeps them. `project` with `part: "edits"` is the edit
+reference: every op, what it does, and an example that applies to the
+ids it names; the ops and their fields are the project file's (D47 and
+`docs/design/m2-plan.md` sections 3 to 5 have the format).
 
 **The files beside a project.** `trip.spherecut` has two hidden files
 beside it that Spherecut makes and nothing else should touch:
