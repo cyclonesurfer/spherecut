@@ -261,7 +261,9 @@ fn bad_edit(e: EditError) -> ToolError {
 }
 
 /// Edit `i` as the agent wrote it, as an `Edit`: `add_media` probed by
-/// its path, the rest through [`wire`].
+/// its path, `set_source`'s camera form made whole from the media's file,
+/// and a whole `dual_fisheye` source checked against that file's
+/// calibration; the rest through [`wire`].
 fn edit(
     i: usize,
     v: Value,

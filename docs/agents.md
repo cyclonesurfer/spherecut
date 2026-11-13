@@ -342,17 +342,18 @@ when a call gives `output` and `project` when it gives `create`, as are
 - **`project`**: a project (`.spherecut`, D47): with `file` alone, its
   summary (the `file` path the other calls name it by, `revision`, the
   sequence's `rate`, `output` and `export`, each media file with its
-  `status` and `source` (Projects), the clip's trim and its view tracks' key counts, the first
-  markers, the targets, and the history's `undo` and `redo`, each with
-  `agent_may` and why not). `part` gives one part: `sequence`, `view`
-  (a clip's keys, at most 200 a track from `from`; `more` and
-  `next_from` say where to go on), `markers`, `targets`, `history` (the
-  last 50 steps, who made each), or `edits` (every op with what it does
-  and an example that applies to the ids it names). `create: {media}`
-  makes a new project of one video, an equirect or a camera's two
-  lenses (Projects), refused `output_exists` if anything is at `file`. A relative `file` is read under the first read
-  root but made under the write root: the summary's `file` is the path
-  to go on with.
+  `status` and `source` (Projects), the clip's trim and its view
+  tracks' key counts, the first markers, the targets, and the history's
+  `undo` and `redo`, each with `agent_may` and why not). `part` gives
+  one part: `sequence`, `view` (a clip's keys, at most 200 a track from
+  `from`; `more` and `next_from` say where to go on), `markers`,
+  `targets`, `history` (the last 50 steps, who made each), or `edits`
+  (every op with what it does and an example that applies to the ids it
+  names). `create: {media}` makes a new project of one video, an
+  equirect or a camera's two lenses (Projects), refused `output_exists`
+  if anything is at `file`. A relative `file` is read under the first
+  read root but made under the write root: the summary's `file` is the
+  path to go on with.
 - **`edit`**: `edits` (up to 1000) applied in order to the project at
   `file`, all or none, as one undo step labelled `label` (by default the
   first op's name, "Set trim", or "N edits"); the user's Edit menu shows
