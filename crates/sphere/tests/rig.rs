@@ -2550,12 +2550,12 @@ const PLAIN_FEATHER: f64 = 2.0 * DEG;
 
 /// The LOD up to which `rig`'s lenses keep h at `h` or more: margin(λ) =
 /// 2^(λ+1) texels, in angle at the band's least slope, leaves
-/// min(θ_max, θ_frame) − 90° − h, at most 4.
+/// min(θ_max, θ_frame) − c_b − h ([`centre_of`]), at most 4.
 fn lod_keeping(rig: &Rig, h: f64) -> f64 {
     (0..2)
         .map(|b| {
             let l = &rig.lenses[b];
-            let room = l.theta_max.min(l.theta_frame) - FRAC_PI_2 - h;
+            let room = l.theta_max.min(l.theta_frame) - centre_of(rig, b) - h;
             if room > 0.0 {
                 (room * l.band_texels_per_radian / rig.margin_texels).log2()
             } else {
@@ -2746,13 +2746,43 @@ fn normalised(w: [f64; 2]) -> [f64; 2] {
     }
 }
 
+/// Lens `b`'s band's centre, in radians off its axis, by the project
+/// review's F025 as the plan words it, written here apart from
+/// `Rig::band_centre`: 90° + δ_b, where δ_b = atan(q c_b·a_b) is the
+/// angle past 90° at which the lens sees the seam's plane at the stitch
+/// distance, c_b·a_b the lens's centre along its own axis.
+fn centre_of(rig: &Rig, b: usize) -> f64 {
+    let l = &rig.lenses[b];
+    let along = (l.lens_from_rig * l.centre_m).z;
+    FRAC_PI_2 + (rig.q * along).atan()
+}
+
+/// Lens `b`'s h at LOD `lod` by F025's rule, written here apart from
+/// `Rig::feather_at`: min(h, max(room_b, 0.5°)), not below 0, where
+/// room_b = min(θ_max, θ_frame) − margin(λ) / band texels per radian −
+/// c_b.
+fn h_of(rig: &Rig, b: usize, lod: f64) -> f64 {
+    let l = &rig.lenses[b];
+    let margin = rig.margin_texels * lod.max(0.0).exp2() / l.band_texels_per_radian;
+    let room = l.theta_max.min(l.theta_frame) - margin - centre_of(rig, b);
+    rig.feather.min(room.max(MIN_FEATHER)).max(0.0)
+}
+
+/// Lens `b`'s feathered weight at θ off its axis and LOD `lod`, by F025's
+/// rule: 1 − smoothstep(c_b − h_b, c_b + h_b, θ).
+fn feather_weight(rig: &Rig, b: usize, lod: f64, theta: f64) -> f64 {
+    let (c, h) = (centre_of(rig, b), h_of(rig, b, lod));
+    1.0 - ramp(c - h, c + h, theta)
+}
+
 /// The weights with h never shrunk (a control): the tune's feather at
-/// every LOD, the mask kept.
+/// every LOD about each band's centre, the mask kept.
 fn unshrunk(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
     let h = rig.feather;
     normalised([0, 1].map(|b| {
         if rig.covers(b, d, lod[b]) {
-            1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, d)))
+            let c = centre_of(rig, b);
+            1.0 - ramp(c - h, c + h, off_axis(rig.ray(b, d)))
         } else {
             0.0
         }
@@ -2770,9 +2800,10 @@ fn slope_at_theta_max(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
         }
         let l = &rig.lenses[b];
         let margin = rig.margin_texels * lod[b].max(0.0).exp2() / l.texels_per_radian;
-        let room = l.theta_max.min(l.theta_frame) - margin - FRAC_PI_2;
+        let c = centre_of(rig, b);
+        let room = l.theta_max.min(l.theta_frame) - margin - c;
         let h = rig.feather.min(room.max(MIN_FEATHER));
-        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, d)))
+        1.0 - ramp(c - h, c + h, off_axis(rig.ray(b, d)))
     }))
 }
 
@@ -2786,30 +2817,36 @@ fn frameless(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
         if theta > l.theta_max - margin {
             return 0.0;
         }
-        let h = rig
-            .feather
-            .min((l.theta_max - margin - FRAC_PI_2).max(MIN_FEATHER));
-        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, theta)
+        let c = centre_of(rig, b);
+        let h = rig.feather.min((l.theta_max - margin - c).max(MIN_FEATHER));
+        1.0 - ramp(c - h, c + h, theta)
     }))
 }
 
-/// 6.2's weights as they stood before a covering lens took what no
-/// feather weighs (a control, and what the weights are wherever a feather
-/// weighs): each covering lens's 1 − smoothstep at its own h, normalised,
-/// and both 0 where they sum to 0.
+/// 6.2's weights, each band about its centre as F025 places it, as they
+/// stood before a covering lens took what no feather weighs (a control,
+/// and what the weights are wherever a feather weighs): each covering
+/// lens's [`feather_weight`], normalised, and both 0 where they sum to 0.
 fn feathers_alone(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
     normalised([0, 1].map(|b| {
         if !rig.covers(b, d, lod[b]) {
             return 0.0;
         }
-        let h = rig.feather_at(b, lod[b]);
-        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, d)))
+        feather_weight(rig, b, lod[b], off_axis(rig.ray(b, d)))
     }))
 }
 
+/// How far past its band's centre lens `b` sees `d`, in radians: θ_b −
+/// c_b, by which the covering lens nearer its centre takes what no
+/// feather weighs.
+fn past_centre(rig: &Rig, b: usize, d: DVec3) -> f64 {
+    off_axis(rig.ray(b, d)) - centre_of(rig, b)
+}
+
 /// The weights with what no feather weighs and both lenses cover given
-/// to block 0 where `to_block_0` says so of the two θ, and to block 1
-/// elsewhere (the controls' rules).
+/// to block 0 where `to_block_0` says so of how far past their bands'
+/// centres the two lenses see it, and to block 1 elsewhere (the
+/// controls' rules).
 fn both_cover_by(
     rig: &Rig,
     d: DVec3,
@@ -2820,9 +2857,9 @@ fn both_cover_by(
     if w != [0.0; 2] {
         return w;
     }
-    let theta = |b: usize| off_axis(rig.ray(b, d));
+    let past = |b: usize| past_centre(rig, b, d);
     match [0, 1].map(|b| rig.covers(b, d, lod[b])) {
-        [true, true] if to_block_0(theta(0), theta(1)) => [1.0, 0.0],
+        [true, true] if to_block_0(past(0), past(1)) => [1.0, 0.0],
         [true, true] => [0.0, 1.0],
         [true, false] => [1.0, 0.0],
         [false, true] => [0.0, 1.0],
@@ -2831,35 +2868,38 @@ fn both_cover_by(
 }
 
 /// The weights with what no feather weighs given to the covering lens
-/// with the greater θ (a control).
+/// farther past its band's centre (a control).
 fn farther_lens_takes(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
-    both_cover_by(rig, d, lod, |theta_0, theta_1| theta_0 > theta_1)
+    both_cover_by(rig, d, lod, |past_0, past_1| past_0 > past_1)
 }
 
-/// The weights with the smaller θ taking what no feather weighs, and
-/// block 0 taking it whole where the two θ are equal (a control).
+/// The weights with the lens nearer its band's centre taking what no
+/// feather weighs, and block 0 taking it whole where the two are equally
+/// near (a control).
 fn tie_to_block_0(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
-    both_cover_by(rig, d, lod, |theta_0, theta_1| theta_0 <= theta_1)
+    both_cover_by(rig, d, lod, |past_0, past_1| past_0 <= past_1)
 }
 
 /// Two lenses that are one another's mirror image in the seam's plane to
 /// the last bit, for an exact tie: [`stereographic_rig`]'s model on both,
-/// lens 0 along +Z from 16 mm up it, lens 1 a half turn about Y from it
-/// and 16 mm down, stitched at 0.3 m with no feather. The half turn's
-/// quaternion, (0, 1, 0, 0), negates a vector's x and z and rounds
-/// nothing, so a direction in the plane z = 0 has one θ on both lenses,
-/// bit for bit: 3.06° past 90°, where both cover it and no feather weighs
-/// it.
+/// lens 0 along +Z from 16 mm up it and 10 mm along +X, lens 1 a half
+/// turn about Y from it at its mirror image, 16 mm down, stitched at
+/// 0.3 m with no feather. The half turn's quaternion, (0, 1, 0, 0),
+/// negates a vector's x and z and rounds nothing, so a direction in the
+/// plane z = 0 has one θ on both lenses, bit for bit, and both bands
+/// centre at one c_b, 3.06° past 90° (F025). The centres' step along +X
+/// puts the plane past both centres on the side it faces, by up to 0.1°
+/// at +X, where both lenses cover it and no feather weighs it; on axis,
+/// the plane would lie on the centres themselves, where the step's ½
+/// weighs it.
 fn mirror_pair() -> Rig {
     let model = stereographic_rig().lenses[0].model;
-    let centre = DVec3::new(0.0, 0.0, 0.016);
+    let centre = DVec3::new(0.01, 0.0, 0.016);
+    let image = DVec3::new(0.01, 0.0, -0.016);
     let half_turn = DQuat::from_xyzw(0.0, 1.0, 0.0, 0.0);
     let lens = |track, turn, centre| RigLens::new(track, model, turn, centre, 104.0 * DEG, 768);
     Rig {
-        lenses: [
-            lens(0, DQuat::IDENTITY, centre),
-            lens(1, half_turn, -centre),
-        ],
+        lenses: [lens(0, DQuat::IDENTITY, centre), lens(1, half_turn, image)],
         q: 3.34,
         feather: 0.0,
         margin_texels: 2.0,
@@ -2882,7 +2922,9 @@ enum Weighed {
 /// The check of `weights` at one direction, on any rig: each weight in
 /// [0, 1]; their sum 1 wherever a lens covers d, and 0 where none does;
 /// the feathers' own weights wherever a feather weighs d; and where none
-/// does, 1 for the covering lens with the smaller θ, ½ each at one θ.
+/// does, 1 for the covering lens nearer its band's centre (θ_b − c_b, the
+/// smaller θ where the two centres are equal), ½ each where equally
+/// near.
 fn weights_hold(
     rig: &Rig,
     weights: impl Fn(&Rig, DVec3, [f64; 2]) -> [f64; 2],
@@ -2916,22 +2958,22 @@ fn weights_hold(
             ))
         };
     }
-    let theta = [0, 1].map(|b| off_axis(rig.ray(b, d)));
+    let past = [0, 1].map(|b| past_centre(rig, b, d));
     let (want, weighed) = match covers {
         [true, false] => ([1.0, 0.0], Weighed::OneCovers),
         [false, true] => ([0.0, 1.0], Weighed::OneCovers),
-        _ if theta[0] < theta[1] => ([1.0, 0.0], Weighed::BothCover),
-        _ if theta[0] > theta[1] => ([0.0, 1.0], Weighed::BothCover),
+        _ if past[0] < past[1] => ([1.0, 0.0], Weighed::BothCover),
+        _ if past[0] > past[1] => ([0.0, 1.0], Weighed::BothCover),
         _ => ([0.5; 2], Weighed::BothCover),
     };
     if w == want {
         Ok(weighed)
     } else {
         Err(format!(
-            "{w:?} at {d}, LOD {lod:?}, where no feather weighs: the lenses cover {covers:?} at \
-             θ {:.4}° and {:.4}°",
-            theta[0].to_degrees(),
-            theta[1].to_degrees()
+            "{w:?} at {d}, LOD {lod:?}, where no feather weighs: the lenses cover {covers:?} \
+             {:.4}° and {:.4}° past their bands' centres",
+            past[0].to_degrees(),
+            past[1].to_degrees()
         ))
     }
 }
@@ -3243,9 +3285,9 @@ fn scan_cases() {
 ///
 /// On every rig in `validate`'s bounds, the plain ones or not: where no
 /// feather weighs a direction a lens covers, which a tune in the bounds
-/// can leave, the covering lens with the smaller θ takes it, so that the
-/// picture has no hole there, and two lenses at one θ take ½ each (the
-/// controls).
+/// can leave, the covering lens nearer its band's centre (θ_b − c_b,
+/// F025) takes it, so that the picture has no hole there, and two lenses
+/// equally near take ½ each (the controls).
 #[test]
 fn weights_lie_in_the_unit_interval_and_sum_to_one() {
     let _time = timed("weights_lie_in_the_unit_interval_and_sum_to_one");
@@ -3285,10 +3327,10 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
          weighs: {one_covers} that one lens alone covers and {both_cover} that both do"
     );
     assert!(one_covers > 1000 && both_cover > 1000 && rigs > 10);
-    // Control: on Pat's V6 at 0.3 m with h of 1°, both lenses see the
-    // seam 3° past 90°, and the feathers alone leave it covered and
-    // unweighed. Just off the seam's plane the lenses' θ differ, and the
-    // lens with the greater θ taking it fails too.
+    // On Pat's V6 at 0.3 m with h of 1°, both lenses see the seam 3°
+    // past 90°, where F025's bands now centre and weigh it, and where
+    // 7a06482's bands about 90° left it covered and unweighed (the
+    // control).
     let cal = pats();
     let geo = placeholder(CanvasMap::A, Generation::V6, V6Reading::RADIAL_ONLY);
     let near = Tune {
@@ -3300,20 +3342,54 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
     let lod = [0.0; 2];
     assert_eq!(
         weights_hold(&rig, Rig::weights, DVec3::X, lod),
-        Ok(Weighed::BothCover)
+        Ok(Weighed::Feathered)
     );
     must_fail(
-        "a 1° feather at 0.3 m, the feathers alone",
-        weights_hold(&rig, feathers_alone, DVec3::X, lod),
+        "7a06482's bands about 90° at 0.3 m",
+        weights_hold(&rig, weights_at_7a06482, DVec3::X, lod),
     );
-    let off_the_plane = DVec3::new(1.0, 0.0, 0.01);
-    assert_eq!(
-        weights_hold(&rig, Rig::weights, off_the_plane, lod),
-        Ok(Weighed::BothCover)
+    // Control: a tilt stands in for the ring 7a06482 left there. Each
+    // lens turned 3° away from the other at its yaw, by yaws of opposite
+    // sign in their own view frames, opens the seam to 6° on one side,
+    // where both lenses see it past their bands' centres plus 1° and
+    // cover it, and the feathers alone leave it unweighed. Off the
+    // tilt's middle the two lenses' distances past their centres differ,
+    // and the lens farther past taking it fails too.
+    let mut tilted = near;
+    tilted.lenses[0].ypr_deg[0] = 3.0;
+    tilted.lenses[1].ypr_deg[0] = -3.0;
+    let rig = Rig::build(&cal, &geo, &tilted, 0, [768; 2]).unwrap();
+    let ring: Vec<DVec3> = (0..3600)
+        .map(|j| on_sphere(0.0, f64::from(j) * 0.1 * DEG))
+        .filter(|&d| weights_hold(&rig, Rig::weights, d, lod) == Ok(Weighed::BothCover))
+        .collect();
+    assert!(ring.len() > 100, "{}", ring.len());
+    let unlike = ring
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            let gap = |d: DVec3| (past_centre(&rig, 0, d) - past_centre(&rig, 1, d)).abs();
+            gap(*a).total_cmp(&gap(*b))
+        })
+        .unwrap();
+    let gap = (past_centre(&rig, 0, unlike) - past_centre(&rig, 1, unlike)).abs();
+    eprintln!(
+        "Pat's V6 at 0.3 m, h of 1°, lenses 6° apart: {} of 3600 horizon directions covered by \
+         both and weighed by no feather, the lenses up to {:.3}° unlike past their centres",
+        ring.len(),
+        gap.to_degrees()
+    );
+    let holes = ring
+        .iter()
+        .filter(|&&d| weights_hold(&rig, feathers_alone, d, lod).is_err())
+        .count();
+    must_fail(
+        "a 1° feather at 0.3 m and a tilt, the feathers alone",
+        at_most(holes, 0),
     );
     must_fail(
-        "the lens with the greater θ taking what no feather weighs",
-        weights_hold(&rig, farther_lens_takes, off_the_plane, lod),
+        "the lens farther past its band's centre taking what no feather weighs",
+        weights_hold(&rig, farther_lens_takes, unlike, lod),
     );
     // Control: the lenses turned 15° each, 30° apart, by yaws of
     // opposite sign in their own view frames, and seam directions covered
@@ -3339,20 +3415,23 @@ fn weights_lie_in_the_unit_interval_and_sum_to_one() {
         "lenses 30° apart: the feathers alone leave {holes} of 3600 horizon directions unweighed"
     );
     // An exact tie: on the mirror pair every direction in the seam's
-    // plane is at one θ on both lenses, where both cover and no feather
-    // weighs, and each lens takes ½, whichever of them is block 0. A hair
-    // to either side of the plane the nearer lens takes the direction
-    // whole. Control: the tie given to block 0.
+    // plane is at one θ on both lenses, about one c_b, and within 60° of
+    // +X past it, where both cover and no feather weighs; each lens takes
+    // ½ there, whichever of them is block 0. A hair to either side of the
+    // plane the nearer lens takes the direction whole. Control: the tie
+    // given to block 0.
     let tied = mirror_pair();
     let swapped = Rig {
         lenses: [tied.lenses[1], tied.lenses[0]],
         ..tied
     };
     let hair = DVec3::new(0.0, 0.0, 1e-6);
-    for j in 0..360 {
+    assert_eq!(centre_of(&tied, 0), centre_of(&tied, 1));
+    for j in -60..=60 {
         let d = on_sphere(0.0, f64::from(j) * DEG);
         let theta = [0, 1].map(|b| off_axis(tied.ray(b, d)));
-        assert!(theta[0] == theta[1] && theta[0] > 93.0 * DEG, "{theta:?}");
+        let past = theta[0] - centre_of(&tied, 0);
+        assert!(theta[0] == theta[1] && past > 0.04 * DEG, "{theta:?}");
         for (rig, front) in [(&tied, [1.0, 0.0]), (&swapped, [0.0, 1.0])] {
             assert_eq!(
                 weights_hold(rig, Rig::weights, d, lod),
@@ -3396,21 +3475,23 @@ fn weights_are_continuous() {
     assert!(jump_at_the_edge(&p.rig, Rig::weights, 0, 0.7, [3.0; 2]) <= JUMP);
     // Control: on the stereographic rig, the margin's angle at θ_max's
     // slope leaves h too wide for the frame's cut, towards lens 0's left
-    // edge, its nearest, at LOD 3.9, where the band's slope keeps h at 2°.
+    // edge, its nearest, at LOD 3.8, where the band's slope keeps h at 2°
+    // or more about its centre 0.46° past 90° (F025).
     let p = pool()
         .iter()
         .find(|p| p.name == "the stereographic rig")
         .unwrap();
     let lens = &p.rig.lenses[0];
     assert!(lens.band_texels_per_radian < 0.8 * lens.texels_per_radian);
-    assert!(lens.theta_frame < lens.theta_max && p.lod_max >= 3.9);
-    let jump = jump_at_the_edge(&p.rig, slope_at_theta_max, 0, PI, [3.9; 2]);
+    assert!(lens.theta_frame < lens.theta_max && p.lod_max >= 3.8);
+    let jump = jump_at_the_edge(&p.rig, slope_at_theta_max, 0, PI, [3.8; 2]);
     let jump = must_fail("the margin at θ_max's slope", at_most(jump, JUMP));
     eprintln!(
         "on the stereographic rig, the margin at θ_max's slope makes the weights jump by \
-         {jump:.4} at the frame's cut, LOD 3.9"
+         {jump:.4} at the frame's cut, LOD 3.8 (h up to LOD {:.3})",
+        p.lod_max
     );
-    assert!(jump_at_the_edge(&p.rig, Rig::weights, 0, PI, [3.9; 2]) <= JUMP);
+    assert!(jump_at_the_edge(&p.rig, Rig::weights, 0, PI, [3.8; 2]) <= JUMP);
 }
 
 /// The weights are symmetric under a lens swap with a mirrored rig.
@@ -3428,12 +3509,184 @@ fn weights_are_symmetric_under_a_mirrored_swap() {
     );
 }
 
+/// synth's `x5_like` (`crates/synth/src/lens.rs`), rung 1's X5-like V3
+/// calibration, as sphere's calibration: the repo's own numbers in the
+/// X5's shape, with block 1's cx local to its square. sphere's tests
+/// don't reach synth (4.1 rule 2), so the numbers are written here.
+/// `level` sets both blocks' yaw and pitch to 0, which leaves the lenses'
+/// axes opposite, rolled as stored.
+fn x5_like(level: bool) -> Calibration {
+    let tilt = |ypr: [f64; 3]| if level { [0.0, 0.0, ypr[2]] } else { ypr };
+    let block = |xi, fx, fy, cx, cy, ypr_deg, t_m, k, p| LensCalib {
+        xi,
+        fx,
+        fy,
+        cx,
+        cy,
+        ypr_deg: tilt(ypr_deg),
+        t_m,
+        terms: CalibTerms::V3 { k, p },
+    };
+    Calibration {
+        src: SRC,
+        dst: DST,
+        v3: Some([
+            block(
+                2.0,
+                4284.62,
+                4284.28,
+                2704.8,
+                2673.3,
+                [0.3, -0.2, 90.5],
+                [0.0; 3],
+                [0.18632051, 2.04984355, -3.24446917],
+                [-0.00143576, -0.00339240],
+            ),
+            block(
+                2.0,
+                4291.03,
+                4291.03,
+                8045.1 - 5376.0,
+                2703.4,
+                [-0.25, 0.35, 89.3],
+                [-0.00446, 0.000017, -0.032],
+                [0.18940836, 2.07073069, -3.24103332],
+                [0.00013831, -0.00299873],
+            ),
+        ]),
+        v6: None,
+    }
+}
+
+/// `Rig::weights` as 7a06482 built it (a control): each lens's band
+/// centred on 90°, h shrunk where min(θ_max, θ_frame) less the margin
+/// leaves less than h past 90°, never below 0.5°, and what no feather
+/// weighs given to the covering lens with the smaller θ, ½ each at one θ.
+fn weights_at_7a06482(rig: &Rig, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
+    let lenses = [0, 1].map(|b| {
+        rig.covers(b, d, lod[b]).then(|| {
+            let l = &rig.lenses[b];
+            let theta = off_axis(rig.ray(b, d));
+            let margin = rig.margin_texels * lod[b].max(0.0).exp2() / l.band_texels_per_radian;
+            let room = l.theta_max.min(l.theta_frame) - margin - FRAC_PI_2;
+            let h = rig.feather.min(room.max(MIN_FEATHER)).max(0.0);
+            (theta, 1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, theta))
+        })
+    });
+    let w = lenses.map(|lens| lens.map_or(0.0, |(_, w)| w));
+    if w[0] + w[1] > 0.0 {
+        return normalised(w);
+    }
+    match lenses {
+        [Some((theta_0, _)), Some((theta_1, _))] if theta_0 < theta_1 => [1.0, 0.0],
+        [Some((theta_0, _)), Some((theta_1, _))] if theta_0 > theta_1 => [0.0, 1.0],
+        [Some(_), Some(_)] => [0.5; 2],
+        [Some(_), None] => [1.0, 0.0],
+        [None, Some(_)] => [0.0, 1.0],
+        [None, None] => [0.0; 2],
+    }
+}
+
+/// The widths, in degrees, of the band where both lenses weigh more than
+/// 0 under `weights` at LOD 0, across the seam at every 10° of azimuth
+/// about lens 0's axis: along the great circle from lens 0's axis through
+/// the seam at that azimuth, the angle from where lens 0's weight falls
+/// to 0 to where lens 1's does, each found by bisection to 1e-10 rad from
+/// the direction square to lens 0's axis, where both weigh.
+fn band_widths(rig: &Rig, weights: fn(&Rig, DVec3, [f64; 2]) -> [f64; 2]) -> Vec<f64> {
+    let to_rig = rig.lenses[0].lens_from_rig.inverse();
+    let axis = to_rig * DVec3::Z;
+    let both = |d: DVec3| {
+        let w = weights(rig, d, [0.0; 2]);
+        w[0] > 0.0 && w[1] > 0.0
+    };
+    (0..36)
+        .map(|j| {
+            let across = to_rig * dir(FRAC_PI_2, f64::from(j) * 10.0 * DEG);
+            // φ from the seam towards lens 0's axis.
+            let at = |phi: f64| phi.cos() * across + phi.sin() * axis;
+            assert!(both(at(0.0)), "both lenses weigh at {j}0°'s seam");
+            let end = |towards: f64| {
+                let (mut inside, mut outside) = (0.0, towards * 20.0 * DEG);
+                while (outside - inside).abs() > 1e-10 {
+                    let mid = 0.5 * (inside + outside);
+                    if both(at(mid)) {
+                        inside = mid;
+                    } else {
+                        outside = mid;
+                    }
+                }
+                inside
+            };
+            (end(1.0) - end(-1.0)) / DEG
+        })
+        .collect()
+}
+
 /// The band where both lenses carry weight is 2h wide at the closest
 /// stitch, q = 3.34 m⁻¹, not 2(h − δ) (the project review's F025).
+///
+/// Lens b sees the seam's plane δ_b = atan(q c_b·a_b) past 90°, 3.06° on
+/// the X5's 32 mm baseline at q = 3.34 m⁻¹, and each lens's band is
+/// centred there. On `x5_like` at h = 5°, the band's width across the
+/// seam averages 2h within 0.1° over the seam's azimuths, and differs
+/// from it at each by no more than 0.1° plus the angle by which the two
+/// lenses' axes miss being opposite (the stored yaws and pitches tilt
+/// them, and a tilt moves one lens's band against the other's around
+/// the seam); with those yaws and pitches at 0 it is 2h within 0.1° at
+/// every azimuth. Control: the weights as 7a06482 built them, each band
+/// centred on 90°, which leave about 3.9°.
 #[test]
-#[ignore = "M3.7 unit (a)"]
 fn the_blend_band_is_2h_wide_at_the_closest_stitch() {
-    todo!()
+    let _time = timed("the_blend_band_is_2h_wide_at_the_closest_stitch");
+    let geo = placeholder(CanvasMap::C, Generation::V3, V6Reading::RADIAL_ONLY);
+    let closest = Tune {
+        feather_deg: 5.0,
+        q_per_m: 3.34,
+        ..Tune::default()
+    };
+    let two_h = 2.0 * closest.feather_deg;
+    let mean = |widths: &[f64]| widths.iter().sum::<f64>() / widths.len() as f64;
+    let spread = |widths: &[f64]| widths.iter().map(|w| (w - two_h).abs()).fold(0.0, f64::max);
+    // The X5-like rig as stored.
+    let rig = Rig::build(&x5_like(false), &geo, &closest, 0, [768; 2]).unwrap();
+    let axes = [0, 1].map(|b| rig.lenses[b].lens_from_rig.inverse() * DVec3::Z);
+    let apart = angle_between(axes[0], -axes[1]) / DEG;
+    let widths = band_widths(&rig, Rig::weights);
+    eprintln!(
+        "x5_like at q = 3.34 m⁻¹, h = 5°: the band is {:.4}° wide on average across the seam, \
+         {:.4}° to {:.4}° by azimuth, with the axes {apart:.3}° from opposite",
+        mean(&widths),
+        widths.iter().copied().fold(f64::INFINITY, f64::min),
+        widths.iter().copied().fold(0.0, f64::max),
+    );
+    assert!((mean(&widths) - two_h).abs() <= 0.1, "{widths:?}");
+    assert!(spread(&widths) <= 0.1 + apart, "{widths:?}");
+    let old = band_widths(&rig, weights_at_7a06482);
+    let old_mean = must_fail(
+        "the weights as 7a06482 built them",
+        at_most((mean(&old) - two_h).abs(), 0.1),
+    );
+    eprintln!(
+        "as 7a06482 built the weights, the band is {:.4}° wide on average, {old_mean:.4}° short \
+         of 2h",
+        mean(&old)
+    );
+    // The same lenses with their axes opposite: 2h at every azimuth.
+    let level = Rig::build(&x5_like(true), &geo, &closest, 0, [768; 2]).unwrap();
+    let axes = [0, 1].map(|b| level.lenses[b].lens_from_rig.inverse() * DVec3::Z);
+    assert!(angle_between(axes[0], -axes[1]) < 1e-9);
+    let widths = band_widths(&level, Rig::weights);
+    eprintln!(
+        "with the yaws and pitches at 0, the band is {:.4}° to {:.4}° wide by azimuth",
+        widths.iter().copied().fold(f64::INFINITY, f64::min),
+        widths.iter().copied().fold(0.0, f64::max),
+    );
+    assert!(spread(&widths) <= 0.1, "{widths:?}");
+    must_fail(
+        "the weights as 7a06482 built them, the axes opposite",
+        at_most(spread(&band_widths(&level, weights_at_7a06482)), 0.1),
+    );
 }
 
 /// A point at R seen with q = 1/R puts both lenses' rays through it

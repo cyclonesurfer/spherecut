@@ -578,27 +578,40 @@ fn ramp(lo: f64, hi: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Where lens `b`'s band centres, by the test's own reading of F025: c_b
+/// = 90° + atan(q · c_b·a_b), with c_b·a_b the lens's centre along its
+/// axis, the z of the centre in the lens's frame.
+fn band_centre(rig: &Rig, b: usize) -> f64 {
+    let lens = &rig.lenses[b];
+    FRAC_PI_2 + (rig.q * (lens.lens_from_rig * lens.centre_m).z).atan()
+}
+
 /// 6.2's weights as they stood before a covering lens took what no
 /// feather weighs (a control, and the weights wherever a feather weighs):
-/// each covering lens's 1 − smoothstep over 90° ± its own h, normalised,
-/// and both 0 where they sum to 0.
+/// each covering lens's 1 − smoothstep over its band's centre ± its own
+/// h, normalised, and both 0 where they sum to 0.
 fn feathers_alone(rig: &Rig, p: &Probe) -> [f64; 2] {
     let w = [0, 1].map(|b| {
         if !rig.covers(b, p.d, p.lod[b]) {
             return 0.0;
         }
-        let h = rig.feather_at(b, p.lod[b]);
-        1.0 - ramp(FRAC_PI_2 - h, FRAC_PI_2 + h, off_axis(rig.ray(b, p.d)))
+        let lens = &rig.lenses[b];
+        let c = band_centre(rig, b);
+        let margin = rig.margin_texels * p.lod[b].max(0.0).exp2() / lens.band_texels_per_radian;
+        let room = lens.theta_max.min(lens.theta_frame) - margin - c;
+        let h = rig.feather.min(room.max(0.5f64.to_radians())).max(0.0);
+        1.0 - ramp(c - h, c + h, off_axis(rig.ray(b, p.d)))
     });
     let sum = w[0] + w[1];
     if sum > 0.0 { w.map(|w| w / sum) } else { w }
 }
 
 /// What 6.2 gives a pixel that no feather weighs, by the test's own
-/// reading of the rule: the covering lens nearer its own axis, whole
-/// (½ each were the two as near), and 0 only where no lens covers.
+/// reading of the rule: the covering lens nearer its band's centre
+/// (θ_b − c_b), whole (½ each were the two as near), and 0 only where no
+/// lens covers.
 fn taken_whole(rig: &Rig, p: &Probe) -> [f64; 2] {
-    let theta = [0, 1].map(|b| off_axis(rig.ray(b, p.d)));
+    let theta = [0, 1].map(|b| off_axis(rig.ray(b, p.d)) - band_centre(rig, b));
     match [0, 1].map(|b| rig.covers(b, p.d, p.lod[b])) {
         [true, true] if theta[0] < theta[1] => [1.0, 0.0],
         [true, true] if theta[1] < theta[0] => [0.0, 1.0],
@@ -2053,17 +2066,24 @@ fn masks_match_on_the_scenes_rigs(s: &Scene) {
 /// a ring unweighed. A lens that covers a pixel takes what no feather
 /// weighs there (6.2), so the stitch draws every pixel a lens covers, and
 /// the band from 0° to 90° is what it draws, on these too. One has a
-/// step for a feather and is stitched at 2 m, where the baseline puts
-/// both lenses' θ past 90° in a ring about the seam, which both cover.
-/// The other is stitched infinitely far with lens 1 ending at 91° under
-/// a feather of 1°: its mask, less the margin, ends short of where lens
-/// 0's feather does, and lens 0 alone covers the ring between. The
-/// feathers alone, as the weights stood, leave both rings black.
+/// step for a feather and is stitched at 2 m, where F025 centres each
+/// lens's step 0.46° past 90°, on the seam; each lens turned 3° away from
+/// the other at its yaw opens the seam past both steps in a ring on one
+/// side, which both cover (with the lenses as stored, the steps meet on
+/// the seam and leave no ring). The other is stitched infinitely far
+/// with lens 1 ending at 91° under a feather of 1°: its mask, less the
+/// margin, ends short of where lens 0's feather does, and lens 0 alone
+/// covers the ring between. The feathers alone, as the weights stood,
+/// leave both rings black.
 fn rings_no_feather_weighs_are_drawn(s: &Scene) {
+    let turned = |yaw: f64| LensTune {
+        ypr_deg: [yaw, 0.0, 0.0],
+        ..LensTune::default()
+    };
     let step = Tune {
+        lenses: [turned(3.0), turned(-3.0)],
         feather_deg: 0.0,
         q_per_m: 0.5,
-        ..Tune::default()
     };
     let short = Tune {
         lenses: [

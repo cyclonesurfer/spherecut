@@ -850,10 +850,12 @@ fn check_rig(m: &Media, df: &DualFisheye, test: ValidateTest) -> Result<(), Prob
         }
     };
     let tune = &df.tune;
-    // The feather's band, 90° ± h, ends inside each lens's picture: h at
-    // most min(θ_max, θ_frame) − 90°, and 0 where that is below 0, where
-    // a feather of 0 switches at the lenses' equal θ and makes no hole of
-    // its own (plan amendment 5).
+    // The feather's band ends inside each lens's picture: h at most
+    // min(θ_max, θ_frame) − 90°, and 0 where that is below 0, where a
+    // feather of 0 switches at the band's centre and makes no hole of its
+    // own (plan amendment 5). The band is centred 90° + δ_b out (F025,
+    // Rig::band_centre), and the bound has no δ in it: where the band
+    // would pass the mask, Rig::feather_at shrinks h.
     for (b, lens) in rig.lenses.iter().enumerate() {
         let theta_max = tune.lenses[b].theta_max_deg;
         let frame = lens.theta_frame.to_degrees();
