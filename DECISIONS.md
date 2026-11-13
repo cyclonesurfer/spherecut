@@ -1294,20 +1294,27 @@ that won't sync a folder opened only for reading) and `EACCES` and
 each at a debug line, since none says the name is lost, only that this
 folder can't be asked. Anything else (`EIO`, `ENOSPC`, `EDQUOT`) is the
 publish's error, though the file is in place by then; the writer says
-so and the temporary name is gone. A project's save and create are the
-exception (the M3.9 review's R3): the crate-private `publish_*` twins
-tell such a failed sync (`PublishError::NotFlushed`, with the file's
-metadata) from a publish that put nothing in place, and
-`ProjectFolder::save` and `create` take the file's identity and write
-its history all the same, returning the sync's error as
-`Saved::flush_error`, which the window shows as a warning and the
-agent's `project`, `edit` and `undo` as `not_flushed`; so the next save
-isn't refused as changed on disk, and an agent doesn't make its edit
-twice. The sync is a parameter of the twins, which
+so and the temporary name is gone. The sync is a parameter of
+`persist_replace`'s and `persist_new`'s crate-private twins, which
 `fs::tests::publish_syncs_its_folder` counts. Also from M3.9: a
 `ProjectFolder::create` that published by the copy takes its identity
 from the copy (F032), so a save after it isn't refused as changed on
 disk.
+
+*Updated 2026-11-13 (M3.9's fix round):* `ProjectFolder::save` and
+`create`, the window's and agents' project saves, are the exception to
+the note above, where a failed folder sync is the publish's error (the
+M3.9 review's R3). The crate-private twins (`publish_replace_with`,
+`publish_new` and `publish_new_with`) tell such a failed sync
+(`PublishError::NotFlushed`, with the file's metadata, taken before the
+rename or link) from a publish that put nothing in place, and `save` and
+`create` take the file's identity and write its history all the same,
+returning the sync's error as `Saved::flush_error`, which the window
+shows as a warning and the agent's `project`, `edit` and `undo` as
+`not_flushed`; so the next save isn't refused as changed on disk, and an
+agent doesn't make its edit twice. `persist_replace` and `persist_new`,
+which exports, `frame` and `file::save` use, still return the sync's
+error as the publish's.
 
 ## D17. First-order ambiX in AAC uses the 4.0 layout
 
@@ -8090,16 +8097,17 @@ a project in a linked folder reads its `../clip.mp4` beside the real
 folder (F031, which `a_project_in_a_linked_folder_renders_its_media`
 holds through `spherecut render`). On save, each media path is first
 named as near that folder as its folders' real paths let it be
-(`fs::name_near`: of the names that one of its folders named
-physically gives, with the rest kept as named, the one sharing the
-most of the folder, and of those the one that resolves least; its own
-name is never followed, and a missing folder gives no name), so a
-clip named through a linked ancestor of the project's folder is
-stored from where it is (`clip.mp4`, not a path that climbs to the
-root and back; the M3.9 review's R8), and one in a folder linked
-within the project's, footage on another disk, keeps the link's name
-(`footage/f.mp4`), so the folder moved with its media, or with its
-link, keeps working; `file::save` and the GUI's
+(`fs::name_near`). Each existing folder of the path, resolved
+physically with the rest kept as named, gives a candidate name; the
+one that shares the most components with the project's folder wins,
+and on a tie the one resolved least, the path as given first. The
+clip's own name is never followed, and a missing folder gives no
+candidate. So a clip named through a linked ancestor of the project's
+folder is stored from where it is (`clip.mp4`, not a path that climbs
+to the root and back; the M3.9 review's R8), and one in a folder
+linked within the project's, footage on another disk, keeps the link's
+name (`footage/f.mp4`), so the folder moved with its media, or with
+its link, keeps working; `file::save` and the GUI's
 `ProjectFolder::of_file` save so, and media paths are read back
 lexically from the folder, as above. `file::load` opens without
 waiting, and refuses a path that isn't a regular file, and text that
