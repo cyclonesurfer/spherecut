@@ -727,41 +727,59 @@ fn a_fifo_or_bad_utf8_at_the_path_is_not_a_project() {
     use std::time::Duration;
 
     use rustix::fs::{CWD, FileType, Mode, mknodat};
+    // Whether loading the file at `path` is refused as no project for the
+    // reason `why` names; what it was otherwise.
+    fn refused_for(path: &Path, why: &str) -> Result<(), String> {
+        match file::load(path) {
+            Err(e) if e.code() == "not_project" && e.to_string().contains(why) => Ok(()),
+            Err(e) => Err(format!("refused otherwise: {} {e}", e.code())),
+            Ok(_) => Err("loaded".into()),
+        }
+    }
     let dir = TempDir::new("fifo");
     let path = dir.0.join("p.spherecut");
     mknodat(CWD, &path, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
     let (tx, rx) = mpsc::channel();
     let fifo = path.clone();
     std::thread::spawn(move || {
-        tx.send(file::load(&fifo).map(drop)).ok();
+        tx.send(refused_for(&fifo, "not a regular file")).ok();
     });
-    let e = match rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(r) => r.unwrap_err(),
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(r) => r.unwrap(),
         Err(_) => {
             // Let the stuck open go before failing.
             std::fs::OpenOptions::new().write(true).open(&path).ok();
             panic!("loading a FIFO waited for a writer for 5 s");
         }
-    };
-    assert_eq!(e.code(), "not_project", "{e}");
-    assert!(e.to_string().contains("not a regular file"), "{e}");
+    }
     std::fs::remove_file(&path).unwrap();
-
-    std::fs::write(
-        &path,
-        b"{\"format\": \"spherecut.project\", \"name\": \"\xff\"}",
-    )
-    .unwrap();
-    let e = file::load(&path).unwrap_err();
-    assert_eq!(e.code(), "not_project", "{e}");
-    assert!(e.to_string().contains("UTF-8"), "{e}");
-
-    std::fs::write(&path, sample()).unwrap();
-    assert!(file::load(&path).is_ok());
-    must_fail(
-        "a regular UTF-8 project refused as not a project",
-        file::load(&path).is_err_and(|e| e.code() == "not_project"),
+    // A regular file that is no project either is refused as one, but
+    // not for being no regular file: the check reads the reason.
+    std::fs::write(&path, b"[]").unwrap();
+    let other = must_fail(
+        "a regular file that is no project refused as not a regular file",
+        refused_for(&path, "not a regular file"),
     );
+    assert!(
+        other.starts_with("refused otherwise: not_project"),
+        "{other}"
+    );
+
+    // A whole project but for one byte in its name that isn't UTF-8.
+    let text = sample();
+    let at = text.find("\"name\": \"").unwrap() + "\"name\": \"".len();
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.insert(at, 0xff);
+    std::fs::write(&path, &bytes).unwrap();
+    refused_for(&path, "UTF-8").unwrap();
+    // The same file read as a lossy reader would, the byte made U+FFFD,
+    // is a project: the byte alone is what the rule refuses.
+    std::fs::write(&path, String::from_utf8_lossy(&bytes).as_bytes()).unwrap();
+    let lossy = must_fail(
+        "the same project with its byte made valid refused as not UTF-8",
+        refused_for(&path, "UTF-8"),
+    );
+    assert_eq!(lossy, "loaded");
 }
 
 #[test]
