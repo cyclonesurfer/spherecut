@@ -1433,17 +1433,18 @@ symbol); an amendment's are at its own date.*
       compat --test` refuses to start while either variable is on, and its Tier 1 step runs with the
       blessing variables removed (R2).
     - **F025's bands (6.2, 10.3, 11.2; amendment 5's weights paragraph; amendment 7's F025
-      bullet).** Each lens's band is centred at c_b = 90° + δ_b, δ_b = atan(q c_b·a_b) (0.46° at q =
-      0.5 m⁻¹, 3.06° at 3.34), with a half width h_b = min(h, max(room_b, 0.5°)), where room_b is
-      min(θ_max, θ_frame) less the margin's angle less c_b. Where no feather weighs, a direction
-      goes whole to the covering lens nearer its band's centre by θ_b − c_b, half each at a tie, in
-      place of amendment 5's smaller θ. On the X5-like rig at 3.34 m⁻¹ and h = 5° the band where
-      both weigh widens from 3.8929° to 10.0522° on average, against 2(h − δ). `Rig::weights`,
-      `feather_at`, `render_rig` and `fs_rig` share the rule. Amendment 5's ring paragraph describes
-      the ring as it stood: with the stored X5-like axes only a sliver is left, from the axes' 0.57°
-      tilt (27 pixels at 192 × 96, q 0.5, feather 0). 11.2's feather bound, min(θ_max, θ_frame) −
-      90°, has no δ term; `validate` is unchanged, and `feather_at` shrinks h where the band would
-      pass the mask. M3.10's pane shows each lens's band as built. `instrument.json` didn't move.
+      bullet).** Each lens's band is centred at c_b = 90° + δ_b, δ_b = atan(q p_b·a_b) with p_b the
+      lens's centre in metres (0.46° at q = 0.5 m⁻¹, 3.06° at 3.34), with a half width h_b = min(h,
+      max(room_b, 0.5°)), where room_b is min(θ_max, θ_frame) less the margin's angle less c_b.
+      Where no feather weighs, a direction goes whole to the covering lens nearer its band's centre
+      by θ_b − c_b, half each at a tie, in place of amendment 5's smaller θ. On the X5-like rig at
+      3.34 m⁻¹ and h = 5° the band where both weigh widens from 3.8929° to 10.0522° on average,
+      against 2(h − δ). `Rig::weights`, `feather_at`, `render_rig` and `fs_rig` share the rule.
+      Amendment 5's ring paragraph describes the ring as it stood: with the stored X5-like axes only
+      a sliver is left, from the axes' 0.57° tilt (27 pixels at 192 × 96, q 0.5, feather 0). 11.2's
+      feather bound, min(θ_max, θ_frame) − 90°, has no δ term; `validate` is unchanged, and
+      `feather_at` shrinks h where the band would pass the mask. M3.10's pane shows each lens's band
+      as built. `instrument.json` didn't move.
     - **The rig, its uniform and the shader (10.1 to 10.4; amendment 5's "What M3.7's shader
       matches").** `RigUniform` is 416 bytes, the tracks inside it as padding the shader never
       reads, where 10.2 sketched 336. The mask is tested in angle against θ_max. `rig::pack` refuses
@@ -1483,7 +1484,15 @@ symbol); an amendment's are at its own date.*
       PSNR rule. `dfish_kb_rig`'s manifest records its KB lenses (`geometry.kb_truth`). Rung 2 holds
       mode 7 over 8 (times 8 the reference rule can't hold it: 33.46 dB on −X); a pixel whose f32
       mask test ties within 1/256 texel isn't held, in modes 4, 5 and 7 and in `rung2_on_radv`, with
-      a second control (lens 1 alone, yawed 0.5°) to show the exemption hides no turned lens. The
+      a second control (lens 1 alone, yawed 0.5°) to show the exemption hides no turned lens. On
+      hardware, `rung2_on_radv` holds each picture to rung 1 by the reference rule at the floors
+      lavapipe blessed, and to lavapipe's picture by D32's other-driver rule. The weights' floors
+      (mode 6), 97.74 to 108.25 dB, hold only where a GPU's f32 θ rounds to the same f16 as rung 1's
+      in almost every band sample, and D32 already says a driver's own atan2 and asin may miss
+      lavapipe's floors near the rim; so if a GPU misses them, D32's "revisit if" covers rung 2 too
+      (a hardware floor calibrated per driver, or the weights held by the other-driver rule against
+      lavapipe alone). odin met them (PR #40): 100.58 to 103.13 dB on the four views and the 45°
+      seam, against floors of 97.74 to 99.23 dB, and 110.48 dB on the equirect, against 108.25. The
       stored PNGs take 361 kB against about 300 kB guessed (about 267 kB at level 9).
     - **odin's two failures, fixed in the tests (10.5's pole rows, D32's other-driver rule; unit
       (e)).** The poles' control is the twin with each block keeping the track it read in the
@@ -1512,20 +1521,21 @@ symbol); an amendment's are at its own date.*
       overriding 22.1's row (d) and 10.4's callers, which had both import. frame runs `check_pair`
       before it opens the GPU, so a pair it can't stitch is `not_equirect` with `--lens`'s hint on a
       host without a GPU too, and `open_pair` and `check_pair` share `pair_parts`. look renders a
-      stitched tile narrower than 160 px at a whole multiple of 160 px or more and shrinks it by
-      area (amendment 5's first choice); capping the margin isn't built. `look.json` is unchanged.
-      look counts an uncalibrated pair's tiles as times × 2 lenses, at most 12, before the stills
-      open, and its refusal names the argument (N10). The GFX11 R8 signature is copied into cli's
-      tests, not lifted into testkit; the slot checks read slots through `StillPair::renderer`, and
-      `tier2_frame`'s verdict on a pair comes before its slot controls (N11). `streams_left_out`'s
-      wording is kept. Rung 3 decodes its lenses in software whatever the host has. `rung3.rs`'s
-      `BUDGET_S` is 2.3 s and `frame_insv.rs`'s 1.9 s, within amendment 8's 2.5 s and 2.0 s shares.
-      Departing from 14's hint row ("a camera file with a calibration is not doubted"): `project
-      create` takes a pair it makes a source of without a doubt, but `check`'s `spherical_metadata`
-      rule and compare, which has no pair path, flag a readable pair in `INSTA360_PAIR`'s words
-      (frame and look stitch it, project create makes a project of it, render renders it from
-      M3.11), and a file of which no source is made is doubted in `INSTA360_NO_CALIBRATION`'s words.
-      frame's `--stream` hint for a pair (N9) is Pat's.
+      stitched equirect tile narrower than 160 px at the smallest whole multiple of its width that
+      is 160 px or more (a 128 px tile at 256 px) and shrinks it by area (amendment 5's first
+      choice); a camera's or a face's tile renders at its own size; capping the margin isn't built.
+      `look.json` is unchanged. look counts an uncalibrated pair's tiles as times × 2 lenses, at
+      most 12, before the stills open, and its refusal names the argument (N10). The GFX11 R8
+      signature is copied into cli's tests, not lifted into testkit; the slot checks read slots
+      through `StillPair::renderer`, and `tier2_frame`'s verdict on a pair comes before its slot
+      controls (N11). `streams_left_out`'s wording is kept. Rung 3 decodes its lenses in software
+      whatever the host has. `rung3.rs`'s `BUDGET_S` is 2.3 s and `frame_insv.rs`'s 1.9 s, within
+      amendment 8's 2.5 s and 2.0 s shares. Departing from 14's hint row ("a camera file with a
+      calibration is not doubted"): `project create` takes a pair it makes a source of without a
+      doubt, but `check`'s `spherical_metadata` rule and compare, which has no pair path, flag a
+      readable pair in `INSTA360_PAIR`'s words (frame and look stitch it, project create makes a
+      project of it, render renders it from M3.11), and a file of which no source is made is doubted
+      in `INSTA360_NO_CALIBRATION`'s words. frame's `--stream` hint for a pair (N9) is Pat's.
     - **The LOD margin (11.2's coverage rule, 10.3's mask; amendment 9's Open).** Where a tune
       passes the coverage rule by less than the two lenses' margins, the directions no lens covers
       form a crescent over 65° to 100° of the seam, as wide at its widest as m0 + m1 less the rule's
@@ -1539,24 +1549,26 @@ symbol); an amendment's are at its own date.*
       (0.131° and 0.130°); at 95°, 100° and 105° it is 0.115°, 0.131° and 0.160°.
     - **P-SHADE and odin (4.3, 19.4, 22.1's M3.7 row).** On odin's RX 7600 under RADV (PR #40, at
       1a7a64e), P-SHADE passed: the stitch took 0.49 ms at 1080p against 0.8 ms, and 1.88 to 1.90 ms
-      at 4K against 2.0 ms (medians of three in two runs; `fs_project` 0.22 and 0.77 ms), so neither
-      redirect is needed. `zero_copy_pair_frame_matches_the_copy` and
-      `shared_vulkan_pair_frame_matches_the_copy` passed at 0 LSB on both views, with no slot
-      mismatch and no GFX11 R8 signature. `goldens_on_host_llvmpipe` passed. Two checks failed, the
-      poles' implicit-LOD control in `goldens_on_gpu_match_reference` and the seam difference's
-      count in `rung2_on_radv`, and unit (e) changed both (above); every other RADV row met its
-      checks. The rerun at aef3e69: ODIN RERUN PENDING.
+      at 4K against 2.0 ms (medians of three in two runs, against amendment 6's `fs_project`
+      baseline of 0.22 and 0.77 ms; the same runs' projection on the stitch's views read 0.20 to
+      0.21 and 0.76 to 0.77 ms), so neither redirect is needed.
+      `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` passed
+      at 0 LSB on both views, with no slot mismatch and no GFX11 R8 signature.
+      `goldens_on_host_llvmpipe` passed. Two checks failed, the poles' implicit-LOD control in
+      `goldens_on_gpu_match_reference` and the seam difference's count in `rung2_on_radv`, and unit
+      (e) changed both (above); every other RADV row met its checks. The rerun at aef3e69:
+      ODIN RERUN PENDING.
     - **The M3.7 row's budget (19.6; Pat's card).** The slice's new Tier 1 adds about 10.0 s on the
-      cloud's four cores by each test's own cost (the goldens binary's dfish modules about 7.8 s,
-      `rig_shader.rs` about 0.8 s, look's `.insv` tests about 0.56 s, `frame_insv.rs`'s GPU tests
-      about 0.31 s, `tier2_frame.rs`'s about 0.23 s, rung 3's GPU test about 0.17 s and
-      `upload.rs`'s about 0.16 s), and about 10.5 s with its five harness tests in the goldens
-      binary (about 0.5 s); the binary takes 18.27 to 19.69 s, from 10.38 to 11.23 s without M3.7's
-      tests. Pat's card recommends raising the row from 7 s to 10 s and isn't answered, so the row
-      stays at 7 s with the overrun named, and M3's budgets still sum to 137.5 s, about 138 s added
-      to `cargo xtask check` (amendment 9); at the measured 10.5 s they would sum to about 141 s. No
-      fixture was shrunk and no check cut; a cut that would fit, such as rung 2's own renders of
-      rung 1's pairs, is Pat's to choose.
+      cloud's four cores by each test's own cost, or its binary's growth where the test shares one
+      (the goldens binary's dfish modules about 7.8 s, `rig_shader.rs` about 0.8 s, look's `.insv`
+      tests about 0.56 s, `frame_insv.rs`'s GPU tests about 0.31 s, `tier2_frame.rs`'s about 0.23 s,
+      rung 3's GPU test about 0.17 s and `upload.rs`'s about 0.16 s), and about 10.5 s with its five
+      harness tests in the goldens binary (about 0.5 s); the binary takes 18.27 to 19.69 s, from
+      10.38 to 11.23 s without M3.7's tests. Pat's card recommends raising the row from 7 s to 10 s
+      and isn't answered, so the row stays at 7 s with the overrun named, and M3's budgets still sum
+      to 137.5 s, about 138 s added to `cargo xtask check` (amendment 9); at the measured 10.5 s
+      they would sum to about 141 s. No fixture was shrunk and no check cut; a cut that would fit,
+      such as rung 2's own renders of rung 1's pairs, is Pat's to choose.
     - **Handed on.** To M3.6: when the table refuses a camera model, `pair_reads` and
       `equirect_doubt` shouldn't call its pair stitchable; give that refusal words of its own (not
       `INSTA360_NO_CALIBRATION`'s "no calibration") and a test through a project and `check` with a
