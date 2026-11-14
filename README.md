@@ -380,7 +380,9 @@ spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x
   table of cameras gives the model, which for the X5 is a placeholder
   until M3.6 fits it, so seams may show; `--reference` stitches them on
   the CPU instead. Both lenses decode as any file's stream does
-  (`--decoder` and `--zero-copy`, below), under `--reference` too.
+  (`--decoder` and `--zero-copy`, below): `--decoder` works under
+  `--reference` too, and `--zero-copy`, which keeps both lenses on the
+  GPU, can't be given with `--reference` (exit 2).
   `--geometry binding=reversed,canvas=b,...` changes the table's
   geometry key by key (binding, canvas, turn, tz, upright,
   generation), `--stitch-distance 1.5m` (or `inf`; 2 m by default) sets
