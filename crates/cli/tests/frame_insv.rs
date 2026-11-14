@@ -698,10 +698,12 @@ fn refused_for_its_calibration(ran: &Ran, out: &Path) -> Result<(), String> {
 /// `--lens 0` within the rule of `--reference --lens 0`'s; and `--seam
 /// weights`, whose red and blue sum to 255. A pair whose calibration
 /// can't be read is `not_equirect`, "no calibration", with the hint that
-/// `--lens 0|1` shows each lens, and `--equirect` renders the first
-/// stream as M1 did. The controls: binding=reversed's picture is outside
-/// the rule, the stitch's own picture isn't a weights picture, and M3.5's
-/// refusal ("the GPU's stitch arrives in M3.7") isn't the refusal.
+/// `--lens 0|1` shows each lens, before the GPU is opened (so on an
+/// adapter no host has, which gave `adapter_not_found` until the M3.7
+/// review), and `--equirect` renders the first stream as M1 did. The
+/// controls: binding=reversed's picture is outside the rule, the
+/// stitch's own picture isn't a weights picture, and M3.5's refusal
+/// ("the GPU's stitch arrives in M3.7") isn't the refusal.
 #[test]
 fn frame_insv_stitches_on_the_gpu() {
     let _t = timed("frame_insv_stitches_on_the_gpu");
@@ -729,10 +731,12 @@ fn frame_insv_stitches_on_the_gpu() {
     ];
     type Other<'a> = (&'a str, fn() -> &'static Path, &'a [&'a str]);
     let others: [Other; 2] = [
+        // On an adapter no host has: the refusal comes before the GPU's
+        // failure, as a one-stream file's `not_equirect` does.
         (
             "no-calibration",
             || pair(Some(InsvFault::NoCalibration)),
-            &["--size", "64x32"],
+            &["--size", "64x32", "--adapter", "no-such-gpu"],
         ),
         ("equirect", pair_file, &["--size", "64x32", "--equirect"]),
     ];

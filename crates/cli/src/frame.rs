@@ -1266,7 +1266,7 @@ impl Job {
     /// calibration and the table's geometry, or `--geometry`'s over it,
     /// at `--stitch-distance`, through the view or `--seam`'s debug mode.
     /// A pair that can't be stitched is refused with the flags that
-    /// answer it ([`Self::flags`]).
+    /// answer it ([`Self::flags`]), before the GPU is opened.
     fn run_pair(
         &mut self,
         tmp: TempFile,
@@ -1275,6 +1275,10 @@ impl Job {
         report: &ProbeReport,
         stop: &still::Stop,
     ) -> Result<Done, Failure> {
+        // The pair's refusal comes before the GPU, as a one-stream file's
+        // not_equirect does: a file that can't be stitched is refused for
+        // that, with its flags, on a host with no GPU too.
+        still::check_pair(src, report).map_err(|e| self.flags(e, true))?;
         let pair_opts = self.pair_options(src)?;
         let (gpu, filter) = self.gpu(shot, &shot.opts)?;
         stop.go_on()?;

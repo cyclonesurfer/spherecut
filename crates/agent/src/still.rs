@@ -1409,6 +1409,66 @@ pub fn pair_stitching(src: Source<'_>) -> Result<Stitching, Failure> {
     }
 }
 
+/// Whether `src`, which `report` probed, is a camera's pair that
+/// [`Still::open_pair`] stitches: its refusal of the file if not, the
+/// same failure, which it gives before it opens a lens or uses a GPU. A
+/// caller that opens a GPU for the pair checks first, so that a file
+/// that can't be stitched is refused for that on a host with no GPU too,
+/// as a one-stream file's `not_equirect` comes before the GPU's failure.
+pub fn check_pair(src: Source<'_>, report: &ProbeReport) -> Result<(), Failure> {
+    pair_parts(src, report).map(|_| ())
+}
+
+/// The checks [`Still::open_pair`] makes before it opens the lenses:
+/// `report`'s two lens streams, by track, and the stitch `src`'s trailer
+/// gives ([`pair_stitching`]), which the table doesn't refuse.
+fn pair_parts<'r>(
+    src: Source<'_>,
+    report: &'r ProbeReport,
+) -> Result<([&'r StreamInfo; 2], Stitching), Failure> {
+    let file = src.name.display();
+    let refuse = |code, message: String| about(failure(code, message), src.name);
+    let Some(lenses) = &report.camera_file.lenses else {
+        // An Insta360 file whose trailer probe couldn't read for its
+        // tracks: the trailer's own failure, naming the part at fault.
+        let insta360 = report
+            .camera
+            .as_ref()
+            .is_some_and(|c| c.layout == Layout::Insta360DualFisheye);
+        if insta360 {
+            pair_stitching(src)?;
+        }
+        return Err(refuse(
+            codes::NOT_EQUIRECT,
+            format!(
+                "{file} isn't a camera's pair of lenses: probe finds no Insta360 dual fisheye's \
+                 two lens tracks in it"
+            ),
+        ));
+    };
+    let stream = |index: usize| {
+        report
+            .streams
+            .iter()
+            .find(|s| s.index == index)
+            .ok_or_else(|| {
+                refuse(
+                    codes::INTERNAL,
+                    format!("probe's report of {file} names lens stream {index} but has none"),
+                )
+            })
+    };
+    let streams = [stream(lenses.tracks[0])?, stream(lenses.tracks[1])?];
+    let stitched = pair_stitching(src)?;
+    if let Some(why) = stitched.known.refusal() {
+        return Err(refuse(
+            codes::NOT_EQUIRECT,
+            format!("{file} can't be stitched: {why}"),
+        ));
+    }
+    Ok((streams, stitched))
+}
+
 /// `e`, a lens's failure, saying which track it is about.
 fn on_track(track: usize, stream: usize, mut e: Failure) -> Failure {
     if e.code != codes::CANCELLED {
@@ -1437,9 +1497,11 @@ impl<'g> Still<'g> {
     /// probe couldn't read for its lens tracks),
     /// one whose camera the table says isn't stitchable, and a rig that
     /// can't be built ("build no rig", with sphere's `RigError`); and a
-    /// lens's own failure to open, naming its track. The tables' open
-    /// checks are the player's (M3.8's lock), not this one's: a pair whose
-    /// lenses don't show one time fails at [`StillPair::seek`].
+    /// lens's own failure to open, naming its track. [`check_pair`] gives
+    /// the refusals of the file, before any lens opens, without a GPU.
+    /// The tables' open checks are the player's (M3.8's lock), not this
+    /// one's: a pair whose lenses don't show one time fails at
+    /// [`StillPair::seek`].
     ///
     /// Once those checks pass, before the lenses open, `warnings` gains
     /// probe's damage ([`damage_warnings`], as [`probed`] gives it) and,
@@ -1456,43 +1518,7 @@ impl<'g> Still<'g> {
     ) -> Result<StillPair<'g>, Failure> {
         let file = src.name.display();
         let refuse = |code, message: String| about(failure(code, message), src.name);
-        let Some(lenses) = &report.camera_file.lenses else {
-            // An Insta360 file whose trailer probe couldn't read for its
-            // tracks: the trailer's own failure, naming the part at fault.
-            let insta360 = report
-                .camera
-                .as_ref()
-                .is_some_and(|c| c.layout == Layout::Insta360DualFisheye);
-            if insta360 {
-                pair_stitching(src)?;
-            }
-            return Err(refuse(
-                codes::NOT_EQUIRECT,
-                format!(
-                    "{file} isn't a camera's pair of lenses: probe finds no Insta360 dual \
-                     fisheye's two lens tracks in it"
-                ),
-            ));
-        };
-        let mut streams = Vec::with_capacity(2);
-        for index in lenses.tracks {
-            match report.streams.iter().find(|s| s.index == index) {
-                Some(s) => streams.push(s),
-                None => {
-                    return Err(refuse(
-                        codes::INTERNAL,
-                        format!("probe's report of {file} names lens stream {index} but has none"),
-                    ));
-                }
-            }
-        }
-        let stitched = pair_stitching(src)?;
-        if let Some(why) = stitched.known.refusal() {
-            return Err(refuse(
-                codes::NOT_EQUIRECT,
-                format!("{file} can't be stitched: {why}"),
-            ));
-        }
+        let (streams, stitched) = pair_parts(src, report)?;
         damage_warnings(report, warnings);
         if let Some(notice) = stitched.known.notice {
             warn(
