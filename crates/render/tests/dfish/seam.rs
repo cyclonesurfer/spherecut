@@ -27,7 +27,7 @@ use spherecut_core::video::{
     ChromaSiting, ColorInfo, Matrix, PixelLayout, PlaneData, Range, VideoPlanes,
 };
 use spherecut_render::reference::{ImageF64, RigDebug, srgb_oetf};
-use spherecut_render::seam::{BinShift, Strips, bin_shifts, signature};
+use spherecut_render::seam::{BinShift, Strips, bin_shifts, signature, strips_of};
 use spherecut_render::{DebugMode, Image, LensFrame, PlaneSource, StillOptions};
 use spherecut_sphere::rig::{Rig, Tune};
 use spherecut_synth::lens::{
@@ -41,12 +41,12 @@ use super::common::attribution::{
     Lands, MISREGISTRATION_PX, NCC, Plant, SPEC, Seam, TERM_DEG, apart_deg, attribute_to, gained,
     largest_term, line, reading, rendered_reading, scales,
 };
-use super::common::budget::{A0, A1, B1, C0, C1, D1, NAMES, terms};
+use super::common::budget::{A0, A1, B1, C0, C1, D1, NAMES, terms, worse};
 use super::common::predict::predict_bins;
 use super::common::rig::sphere_rig;
 use super::common::rung1::{
     NEAR_M, Pair, STRIPE, Scene, Shot, UNIT, VIEW_KEYS, VIEWS, both, equirect, ideal_view, lines,
-    near, near_lines, seam_runs_down, stitch, tuned, view, whole_view, x5,
+    near, near_lines, ready, seam_runs_down, stitch, tuned, view, whole_view, x5,
 };
 use super::common::{Frame, Kind, color, frame};
 use super::{
@@ -280,7 +280,9 @@ fn gpu_seams(
 /// `rig`, in `attribution::Seam`'s fields by `Seam::of`'s rules: what
 /// `rig` predicts for `truth` with no images (step 1), and what the
 /// strips measure (step 2). `Seam::of` measures the CPU reference's strips
-/// (`strips_of`), and takes no others.
+/// (`strips_of`), and takes no others, so this repeats its rules, and the
+/// registration row holds the two to the same seam, bit for bit, on
+/// `strips_of`'s strips ([`same_seam`]).
 fn seam_of(truth: &RigTruth, rig: &Rig, strips: &Strips) -> Seam {
     let predicted = predict_bins(truth, 0, rig, &SPEC);
     let measured = bin_shifts(strips, &SPEC);
@@ -322,6 +324,17 @@ fn seam_of(truth: &RigTruth, rig: &Rig, strips: &Strips) -> Seam {
     }
 }
 
+/// Whether two seams hold the same numbers: as `Debug` writes them, each
+/// float in the fewest digits that read back to its bits, and NaN equal
+/// to NaN.
+fn same_seam(a: &Seam, b: &Seam) -> bool {
+    let numbers = |s: &Seam| {
+        let fields = (&s.predicted, &s.measured, s.want, s.got, s.own);
+        format!("{:?}", (s.held, s.off_px, s.misregistration_px, fields))
+    };
+    numbers(a) == numbers(b)
+}
+
 /// Records each term the strips measured over the bins the prediction
 /// holds, in degrees, under `key`.
 fn measure_terms(run: &mut Run<'_>, key: &str, seam: &Seam) {
@@ -361,8 +374,7 @@ fn holds(run: &mut Run<'_>, what: &str, seam: &Seam) {
         seam.misregistration_px,
         MISREGISTRATION_PX,
     );
-    run.measure("largest_term_deg", largest_term(&seam.own));
-    run.threshold("largest_term_deg_under", num(TERM_DEG));
+    under(run, "largest_term_deg", largest_term(&seam.own), TERM_DEG);
     let nowhere = attributed(run, what, seam, Lands::Nowhere);
     held(run, "lands_nowhere", nowhere);
     run.at_least("median_ncc", seam.own.median_ncc, NCC);
@@ -380,8 +392,8 @@ enum Unmeasured {
 
 /// A planted error's seam, held as a control of the registration: every
 /// bin predicted (and measured, unless `unmeasured` says to record it),
-/// the strips misregistered past 0.1 px, and the field attributed by step
-/// 3 to the terms `named`.
+/// the strips misregistered past 0.1 px, a term past 0.03°, and the field
+/// attributed by step 3 to the terms `named`.
 fn control_seam(
     run: &mut Run<'_>,
     key: &str,
@@ -409,6 +421,8 @@ fn control_seam(
         seam.misregistration_px,
         MISREGISTRATION_PX,
     );
+    let largest = largest_term(&seam.own);
+    run.over(&format!("{key}largest_term_deg"), largest, TERM_DEG);
     measure_terms(run, &key, seam);
     let found = attributed(run, what, seam, Lands::On(named));
     held(run, &format!("{key}attributed"), found);
@@ -580,12 +594,17 @@ fn v6_source() -> PairSource<'static> {
 /// (b1), f × 1.012 by map A (a0), and lens 1's centre 2 px along x and
 /// the V6 camera under the wrong reading (both on the first harmonics,
 /// a1, b1, c1 and d1). The V6 camera read as rendered is held to land
-/// nowhere, the reading's own check. At 384² the strips leave some of the
-/// V6 camera's bins unmeasured (over a quarter of them under the wrong
-/// reading, where the field reaches 1.8°), which its seams record and step 3
-/// reads past, as it reads a field over the bins the estimator holds.
-/// The seven pairs' strips are drawn in turn and read side by side
-/// ([`gpu_seams`]).
+/// nowhere and to be misregistered at most 0.1 px rms, the reading's own
+/// checks. At 384² the strips leave some of the V6 camera's bins
+/// unmeasured (5 of 72 read as rendered, and over a quarter under the
+/// wrong reading, where the field reaches 1.8°), which its seams record
+/// and step 3 reads past, as it reads a field over the bins the estimator
+/// holds; at 768² the instrument's matrix holds every bin of both
+/// readings measured. The seven pairs' strips are drawn in turn and read
+/// side by side ([`gpu_seams`]). The GPU's seams are read by [`seam_of`],
+/// which repeats `Seam::of`'s rules, so the two are held to the same
+/// seam on `strips_of`'s strips of the true rig, and, the check's control,
+/// to another on the GPU's.
 fn dfish_seam_registration(run: &mut Run<'_>) {
     let x5 = x5();
     let pair = lines_source();
@@ -625,16 +644,26 @@ fn dfish_seam_registration(run: &mut Run<'_>) {
         .iter()
         .zip(terms(&cpu.got))
         .map(|(g, c)| (g - c).abs())
-        .fold(0.0, f64::max);
+        .fold(0.0, worse);
     run.measure("gpu_against_strips_of_largest_term_deg", apart);
+    match strips_of(&ready(both(lines())), &x5.rig, &SPEC) {
+        Ok(strips) => {
+            let copy = seam_of(&x5.truth, &x5.rig, &strips);
+            held(run, "seam_of_is_seam_of", same_seam(&copy, &cpu));
+        }
+        Err(e) => run.fail(format!("strips_of: {e} ({})", e.code())),
+    }
+    let differ = !same_seam(seam, &cpu);
+    held(run, "control_gpu_strips_not_seam_of", differ);
 
     for ((key, what, _, named), seam) in planted.into_iter().zip([roll, tilt, focal, centre]) {
         control_seam(run, key, what, seam, named, Unmeasured::Held);
     }
 
-    run.measure(
+    run.at_most(
         "v6_as_rendered_misregistration_px",
         as_rendered.misregistration_px,
+        MISREGISTRATION_PX,
     );
     run.measure(
         "v6_as_rendered_bins_unmeasured",
@@ -700,6 +729,8 @@ fn dfish_stitch_distance(run: &mut Run<'_>) {
         at_infinity.misregistration_px,
         MISREGISTRATION_PX,
     );
+    let largest = largest_term(&at_infinity.own);
+    run.over(&format!("{key}largest_term_deg"), largest, TERM_DEG);
     measure_terms(run, key, at_infinity);
     let (a0, d1) = (at_infinity.got.a0, at_infinity.got.d1);
     run.at_most(
@@ -801,7 +832,7 @@ fn dfish_exposure_match(run: &mut Run<'_>) {
         }
         sum.map(|s| s / kept.len() as f64 * 255.0)
     };
-    let worst = |by_channel: [f64; 3]| by_channel.iter().map(|s| s.abs()).fold(0.0, f64::max);
+    let worst = |by_channel: [f64; 3]| by_channel.iter().map(|s| s.abs()).fold(0.0, worse);
     let (matched_step, off_step) = (step(&lens_1), step(&lens_1_off));
     for (c, channel) in ["r", "g", "b"].iter().enumerate() {
         run.measure(&format!("step_{channel}_lsb"), matched_step[c]);
@@ -894,12 +925,12 @@ fn by_angle(a: &[f64], b: &[f64], k: usize) -> Vec<(f64, usize)> {
 }
 
 /// The largest change of the mean between bins `apart` bins from each
-/// other, in 8-bit steps: 1 for neighbours.
+/// other, in 8-bit steps: 1 for neighbours. NaN if one is.
 fn largest_step(bins: &[(f64, usize)], apart: usize) -> f64 {
     bins.iter()
         .zip(&bins[apart..])
         .map(|(a, b)| (b.0 - a.0).abs())
-        .fold(0.0, f64::max)
+        .fold(0.0, worse)
 }
 
 /// The feather's control, a hard switch: the true rig's tune with h = 0,
@@ -1112,17 +1143,26 @@ impl VideoPlanes for Tagged {
 }
 
 /// The X5's own coding (4.2, 7.1): 8-bit 4:2:0, full range, BT.709,
-/// chroma sited left, as synth codes rung 1's pairs, stitched through the
-/// right side seam's view and held to the CPU reference by the CPU rule.
-/// Control: the same planes tagged limited range, at least 10 dB further
+/// chroma sited left on both tracks, as synth codes rung 1's pairs,
+/// stitched through the right side seam's view and held to the CPU
+/// reference by the CPU rule. Control: the same planes tagged limited
+/// range, which the coding's flag tells apart, at least 10 dB further
 /// from the reference.
 fn dfish_fullrange_left(run: &mut Run<'_>) {
     let x5 = x5();
     let pair = lines_source();
-    let coded = lines()[0].color();
-    let x5_coding = (coded.range, coded.matrix, coded.siting);
-    let ok = x5_coding == (Range::Full, Matrix::Bt709, ChromaSiting::Left);
-    held(run, "coded_full_bt709_left", ok);
+    let x5_coded = |frames: [&dyn VideoPlanes; 2]| {
+        frames.iter().all(|frame| {
+            let coded = frame.color();
+            (coded.range, coded.matrix, coded.siting)
+                == (Range::Full, Matrix::Bt709, ChromaSiting::Left)
+        })
+    };
+    held(
+        run,
+        "coded_full_bt709_left",
+        x5_coded(planes(both(lines()))),
+    );
     let tagged = lines().each_ref().map(|frame| Tagged {
         frame,
         color: ColorInfo {
@@ -1130,6 +1170,8 @@ fn dfish_fullrange_left(run: &mut Run<'_>) {
             ..*frame.color()
         },
     });
+    let not_x5 = !x5_coded([&tagged[0], &tagged[1]]);
+    held(run, "control_limited_not_full_bt709_left", not_x5);
     let name = Scene::Lines.row();
     let limited = x5_source(name, [&tagged[0], &tagged[1]], &far(), f64::INFINITY, UNIT);
     let k = 0;
