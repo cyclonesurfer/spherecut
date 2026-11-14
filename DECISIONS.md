@@ -5064,12 +5064,15 @@ pictures by this entry's reference rule; a ledger of their own blesses
 their floors into `goldens/rung2.json`, which stores no PNG, as the
 instrument blesses its own. A blessing reads `SPHERECUT_UPDATE_GOLDENS`
 through `testkit::bless` (F055, D47's note of this date). The goldens'
-Tier 2 tests run both lists too, against lavapipe by the other-driver
-rule, and `rung2_on_radv` holds rung 2 on RADV against lavapipe and rung
-1. The 24 old rows' PNGs and manifest are untouched. On the cloud's four
-cores the binary takes 17.54 s, against 9.81 s with M3.7's tests left
-out (alone, `dfish_seam` takes 3.24 s, `dfish_views` 3.46 s and rung 2
-4.99 s).
+Tier 2 tests run both lists too: `goldens_on_gpu_match_reference` on
+each GPU (RADV on odin) against the rows' CPU and ideal references and
+their controls, never lavapipe's stored PNGs, and
+`goldens_on_host_llvmpipe` against those PNGs by the other-driver rule;
+`rung2_on_radv` holds rung 2 on RADV against lavapipe's pictures by the
+other-driver rule and against rung 1 by the reference rule. The 24 old
+rows' PNGs and manifest are untouched. On the cloud's four cores the
+binary takes 17.54 s, against 9.81 s with M3.7's tests left out (alone,
+`dfish_seam` takes 3.24 s, `dfish_views` 3.46 s and rung 2 4.99 s).
 
 ## D33. View conventions
 
@@ -11240,7 +11243,11 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
 - cli's `frame_insv_stitches_on_the_gpu` and agent's
   `look_stitches_an_insv` and `look_shows_an_uncalibrated_insv_as_lenses`.
 - Tier 2h, for odin: the goldens' Tier 2 tests run the `dfish_*` lists
-  too (RADV by the other-driver rule), `rung2_on_radv`, and
+  too (on a GPU, RADV among them, against each row's CPU and ideal
+  references and its controls, never lavapipe's stored PNGs; on the
+  host's llvmpipe against those PNGs by the other-driver rule),
+  `rung2_on_radv` (rung 2 on the GPU against lavapipe's pictures by the
+  other-driver rule and against rung 1 by the reference rule), and
   `zero_copy_pair_frame_matches_the_copy` and its Vulkan twin, an
   `.insv`'s `frame --zero-copy` under VA-API (DMA-BUF) and path B
   against a software decode, strict, with each lens's slot read back and

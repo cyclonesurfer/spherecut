@@ -279,7 +279,7 @@ frame's `warnings[].code`, which don't fail the run:
 | `pose_not_applied` | A non-zero Spherical Video V2 pose, which M1 doesn't apply (M2 does); the message gives it |
 | `anisotropy_unavailable` | `--filter aniso` on a device without anisotropic filtering: the render is isotropic, and `result.filter` is `iso` |
 | `bad_trailer` | probe's warning of an Insta360 trailer, record or calibration string that can't be read (above), naming the file: frame carries it on every run of such a file, whether the run renders or fails |
-| `geometry_assumed` | A camera's pair whose model has no entry in Spherecut's table of cameras, stitched with `--reference` by the X5's entry, provisional: the message names the file and gives the table's notice, `geometry assumed from the X5`, and its evidence, as probe's `geometry` and `stitch.geometry.notice` do |
+| `geometry_assumed` | A camera's pair whose model has no entry in Spherecut's table of cameras, stitched (on the GPU, or on the CPU with `--reference`) by the X5's entry, provisional: the message names the file and gives the table's notice, `geometry assumed from the X5`, and its evidence, as probe's `geometry` and `stitch.geometry.notice` do |
 
 `truncated` and `damaged` (and `io_error`, a read error the decoder
 meets) are warnings too, for damage probe finds before the seek and for
@@ -674,9 +674,10 @@ One frame of a stitched equirect, rendered through a virtual camera
 into a PNG (`spherecut frame --help` lists the options; the README shows
 them in use); or with `--project <P>` instead of the file, the frame of
 the project's sequence at a time, as `spherecut render` renders it
-before its encode (below, and D51); or, with `--reference`, a camera's
-pair of lenses stitched on the CPU (M3.5, below). Without `--json`, a run that wrote the frame prints one
-line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
+before its encode (below, and D51); or a camera's pair of lenses
+stitched, on the GPU or with `--reference` on the CPU (M3.5, on the GPU
+since M3.7; below). Without `--json`, a run that wrote the frame prints
+one line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
 (frame 12, pts 12012), decoded on VA-API, rendered on ...`), and its
 warnings and errors go to stderr, as log lines and an `error:` line.
 

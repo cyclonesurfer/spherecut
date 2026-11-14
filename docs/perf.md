@@ -1542,7 +1542,7 @@ no report has these rows yet.
 |---|---|---|
 | P-SHADE, pending odin | `bench_stitch_pass` | the stitched pass within 0.8 ms at 1080p and 2.0 ms at 4K on RADV (M3 plan 4.3); a miss names the redirect |
 | `frame <insv>` stitched still, wall time, pending odin | the `view N: frame … s` lines of `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` (synth's `InsvSpec::small()`, 2 × 384², each run a process of its own, under zero copy and in software) | recorded, no gate |
-| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | within the floors lavapipe's runs set, by the other-driver rule (D32) |
+| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | the rows against their CPU and ideal references and controls, within the floors lavapipe's runs set (D32's CPU rule; never lavapipe's stored PNGs, which `goldens_on_host_llvmpipe` holds by the other-driver rule); `rung2_on_radv` against lavapipe's pictures by the other-driver rule and against rung 1 by the reference rule |
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
