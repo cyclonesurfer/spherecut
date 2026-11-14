@@ -41,10 +41,11 @@ Ground rules:
    the server's first read root) or the files. Note
    each clip's `duration`, `fps` and `projection`. A camera's lens files
    and proxy come as one clip; work on its stitched file if there is one.
-   If the projection isn't `equirect` (an unstitched camera file), say
-   so: `look` with `mode: "raw"` shows its lenses, but directions need a
-   stitched file. A stitched file without metadata takes
-   `assume_equirect: true`.
+   An Insta360 `.insv` whose calibration probe reads, `look` stitches
+   as it is. If the projection of any other file isn't `equirect` (an
+   unstitched camera file), say so: `look` with `mode: "raw"` shows its
+   lenses, but directions need a stitched file. A stitched file without
+   metadata takes `assume_equirect: true`.
 2. `look` with `mode: "sheet"` and `count: 12` over the clip (or
    `times: [from, to]` with a `count` for part of it). Each tile is the
    whole equirect at one time, its label the time; `tiles[i].time` is
