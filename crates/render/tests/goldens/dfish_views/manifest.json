@@ -3,7 +3,7 @@
   "checks": {
     "dfish_kb_rig": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -37,6 +37,42 @@
             ]
           ],
           "geometry": {
+            "kb_truth": {
+              "lenses": {
+                "base": "equidistant",
+                "by_track": [
+                  {
+                    "centre_px": [
+                      128.8,
+                      127.3
+                    ],
+                    "focal_px": [
+                      68.9094,
+                      68.9094
+                    ]
+                  },
+                  {
+                    "centre_px": [
+                      127.1,
+                      128.7333
+                    ],
+                    "focal_px": [
+                      69.2363,
+                      69.2363
+                    ]
+                  }
+                ],
+                "k": [
+                  0.012,
+                  -0.0021,
+                  0.0003,
+                  0.0,
+                  0.0
+                ],
+                "model": "Kannala–Brandt"
+              },
+              "rig": "rig_of_truth over kb_like's truth: the X5-like camera's extrinsics, centres and planting (its calibration's hash), with these lenses"
+            },
             "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
             "r_m": "inf",
             "tune": {
@@ -113,6 +149,42 @@
             ]
           ],
           "geometry": {
+            "kb_truth": {
+              "lenses": {
+                "base": "equisolid",
+                "by_track": [
+                  {
+                    "centre_px": [
+                      128.8,
+                      127.3
+                    ],
+                    "focal_px": [
+                      80.5181,
+                      80.5181
+                    ]
+                  },
+                  {
+                    "centre_px": [
+                      127.1,
+                      128.7333
+                    ],
+                    "focal_px": [
+                      80.9,
+                      80.9
+                    ]
+                  }
+                ],
+                "k": [
+                  0.012,
+                  -0.0021,
+                  0.0003,
+                  0.0,
+                  0.0
+                ],
+                "model": "Kannala–Brandt"
+              },
+              "rig": "rig_of_truth over kb_like's truth: the X5-like camera's extrinsics, centres and planting (its calibration's hash), with these lenses"
+            },
             "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
             "r_m": "inf",
             "tune": {
@@ -189,6 +261,42 @@
             ]
           ],
           "geometry": {
+            "kb_truth": {
+              "lenses": {
+                "base": "stereographic",
+                "by_track": [
+                  {
+                    "centre_px": [
+                      128.8,
+                      127.3
+                    ],
+                    "focal_px": [
+                      46.7451,
+                      46.7451
+                    ]
+                  },
+                  {
+                    "centre_px": [
+                      127.1,
+                      128.7333
+                    ],
+                    "focal_px": [
+                      46.9668,
+                      46.9668
+                    ]
+                  }
+                ],
+                "k": [
+                  0.012,
+                  -0.0021,
+                  0.0003,
+                  0.0,
+                  0.0
+                ],
+                "model": "Kannala–Brandt"
+              },
+              "rig": "rig_of_truth over kb_like's truth: the X5-like camera's extrinsics, centres and planting (its calibration's hash), with these lenses"
+            },
             "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
             "r_m": "inf",
             "tune": {
@@ -265,6 +373,42 @@
             ]
           ],
           "geometry": {
+            "kb_truth": {
+              "lenses": {
+                "base": "orthographic",
+                "by_track": [
+                  {
+                    "centre_px": [
+                      128.8,
+                      127.3
+                    ],
+                    "focal_px": [
+                      131.1192,
+                      131.1192
+                    ]
+                  },
+                  {
+                    "centre_px": [
+                      127.1,
+                      128.7333
+                    ],
+                    "focal_px": [
+                      131.7411,
+                      131.7411
+                    ]
+                  }
+                ],
+                "k": [
+                  0.012,
+                  -0.0021,
+                  0.0003,
+                  0.0,
+                  0.0
+                ],
+                "model": "Kannala–Brandt"
+              },
+              "rig": "rig_of_truth over kb_like's truth: the X5-like camera's extrinsics, centres and planting (its calibration's hash), with these lenses"
+            },
             "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
             "r_m": "inf",
             "tune": {
@@ -378,7 +522,7 @@
     },
     "dfish_lens_only_0": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -387,6 +531,7 @@
         "control_cx_2px_ideal_psnr_db": 24.4678,
         "control_cx_2px_ideal_ssim": 0.7166,
         "control_cx_2px_under_floor_db": 0.7522,
+        "control_cx_2px_under_ssim_floor": 0.0888,
         "ideal_psnr_db": 26.2228,
         "ideal_ssim": 0.8104
       },
@@ -473,7 +618,9 @@
       ],
       "thresholds": {
         "control_cx_2px_under_floor_db_over": 0.0,
-        "ideal_psnr_db_min": 25.22
+        "control_cx_2px_under_ssim_floor_over": 0.0,
+        "ideal_psnr_db_min": 25.22,
+        "ideal_ssim_min": 0.8054
       },
       "view": {
         "filter": "isotropic",
@@ -497,7 +644,7 @@
     },
     "dfish_lens_only_1": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -506,6 +653,7 @@
         "control_cx_2px_ideal_psnr_db": 24.4724,
         "control_cx_2px_ideal_ssim": 0.7095,
         "control_cx_2px_under_floor_db": 0.7876,
+        "control_cx_2px_under_ssim_floor": 0.0918,
         "ideal_psnr_db": 26.2688,
         "ideal_ssim": 0.8064
       },
@@ -592,7 +740,9 @@
       ],
       "thresholds": {
         "control_cx_2px_under_floor_db_over": 0.0,
-        "ideal_psnr_db_min": 25.26
+        "control_cx_2px_under_ssim_floor_over": 0.0,
+        "ideal_psnr_db_min": 25.26,
+        "ideal_ssim_min": 0.8013
       },
       "view": {
         "filter": "isotropic",
@@ -616,7 +766,7 @@
     },
     "dfish_lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -734,7 +884,7 @@
     },
     "dfish_mask_margin": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -990,7 +1140,7 @@
     },
     "dfish_nadir": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -998,9 +1148,10 @@
       "measured": {
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 0.0,
-        "control_implicit_bad_pixels": 255.0,
-        "control_implicit_bad_pixels_max_lsb": 5.0,
-        "implicit_on_both_bad_pixels": 22.0
+        "control_implicit_against_analytic_bad_pixels": 255.0,
+        "control_implicit_against_analytic_bad_pixels_max_lsb": 5.0,
+        "control_implicit_bad_pixels": 22.0,
+        "control_implicit_bad_pixels_max_lsb": 3.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -1086,7 +1237,8 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_over": 100.0
+        "control_implicit_against_analytic_bad_pixels_over": 100.0,
+        "control_implicit_bad_pixels_over": 0.0
       },
       "view": {
         "filter": "isotropic",
@@ -1112,7 +1264,7 @@
     },
     "dfish_zenith": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1120,9 +1272,10 @@
       "measured": {
         "bad_pixels": 0.0,
         "bad_pixels_max_lsb": 0.0,
-        "control_implicit_bad_pixels": 690.0,
-        "control_implicit_bad_pixels_max_lsb": 5.0,
-        "implicit_on_both_bad_pixels": 59.0
+        "control_implicit_against_analytic_bad_pixels": 690.0,
+        "control_implicit_against_analytic_bad_pixels_max_lsb": 5.0,
+        "control_implicit_bad_pixels": 59.0,
+        "control_implicit_bad_pixels_max_lsb": 3.0
       },
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
@@ -1208,7 +1361,8 @@
       "thresholds": {
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
-        "control_implicit_bad_pixels_over": 100.0
+        "control_implicit_against_analytic_bad_pixels_over": 100.0,
+        "control_implicit_bad_pixels_over": 0.0
       },
       "view": {
         "filter": "isotropic",
@@ -1236,17 +1390,20 @@
   "images": {
     "dfish_equirect_identity": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
         "control_equidistant_ideal_off_seam_psnr_db": 21.8751,
+        "control_equidistant_ideal_off_seam_ssim": 0.6529,
+        "control_equidistant_under_ssim_floor": 0.2684,
         "control_equidistant_worse_db": 6.5363,
         "cpu_max_channel": 0.0137,
         "cpu_psnr_db": 52.5558,
-        "ideal_off_seam_psnr_db": 28.4114
+        "ideal_off_seam_psnr_db": 28.4114,
+        "ideal_off_seam_ssim": 0.9264
       },
       "png": "dfish_equirect_identity.png",
       "png_fnv64": "2f8e850c7b003355",
@@ -1332,10 +1489,12 @@
         "14a8feaff59bda8f"
       ],
       "thresholds": {
+        "control_equidistant_under_ssim_floor_over": 0.0,
         "control_equidistant_worse_db_min": 6.0,
         "cpu_max_channel_max": 0.1,
         "cpu_psnr_db_min": 49.55,
         "ideal_off_seam_psnr_db_min": 27.41,
+        "ideal_off_seam_ssim_min": 0.9213,
         "other_driver": {
           "max_lsb": 8.0,
           "pixels_past_4_lsb_max": 4.0,
@@ -1366,7 +1525,7 @@
     },
     "dfish_hifreq_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "fe433f2bc4",
+      "commit": "1eb05d6727",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",

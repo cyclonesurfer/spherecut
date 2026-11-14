@@ -47,7 +47,7 @@ use super::common::rung1::{
 };
 use super::{
     CONTROL_BAD_OVER, CPU_FLOOR_DB, CPU_MARGIN_DB, CPU_MAX_CHANNEL, IDEAL_MARGIN_DB, IDEAL_MIN_LOD,
-    IDEAL_N_CHECKER, Mode, PairSource, Row, Run, SQUARE, TWIN_THRESHOLD, UPDATE, bad, bless,
+    IDEAL_N_CHECKER, LOWER, Mode, PairSource, Row, Run, SQUARE, TWIN_THRESHOLD, UPDATE, bad, bless,
     diff_dir_beside, gpu, ideal_check, ideal_dir, ideal_dir_in, lens, max_diff, num, pair_geometry,
     psnr_of, rgb_unit, run_these, unit, view_about, ypr,
 };
@@ -177,6 +177,9 @@ const KB_SIDE: u32 = 256;
 struct KbPair {
     frames: [LensFrame; 2],
     rig: Rig,
+    /// The lenses the rig is built from, for the manifest: the base, the
+    /// polynomial and each track's focal and centre.
+    lenses: Value,
 }
 
 /// `kb_like`'s camera on `KB_BASES[k]`: each lens's focal set, as rung 0
@@ -200,18 +203,37 @@ fn kb_on(k: usize) -> &'static KbPair {
             KbBase::Stereographic => 2.0 * (theta_d / 2.0).tan(),
             KbBase::Orthographic => 1.0,
         };
+        let mut tracks = Vec::with_capacity(truth.lenses.len());
         for lens in &mut truth.lenses {
-            let TruthModel::Kb { base, fx, fy, .. } = &mut lens.model else {
+            let TruthModel::Kb {
+                base,
+                fx,
+                fy,
+                cx,
+                cy,
+                ..
+            } = &mut lens.model
+            else {
                 panic!("kb_like makes Kannala–Brandt lenses");
             };
             let reach = *fx * theta_d;
             *base = KB_BASES[k];
             *fx = reach / radius;
             *fy = reach / radius;
+            tracks.push(json!({
+                "focal_px": [num(*fx), num(*fy)],
+                "centre_px": [num(*cx), num(*cy)],
+            }));
         }
         KbPair {
             frames: pair_through(Pattern::SeamLines, &truth),
             rig: rig_of_truth(&truth, &far()),
+            lenses: json!({
+                "model": "Kannala–Brandt",
+                "base": format!("{:?}", KB_BASES[k]).to_lowercase(),
+                "k": c,
+                "by_track": tracks,
+            }),
         }
     })
 }
@@ -320,8 +342,56 @@ fn cpu_rule(run: &mut Run<'_>, key: &str, got: &Image, cpu: &ImageF64) -> (f64, 
     (p, m)
 }
 
-/// The floor `key` is held to this run, as [`Run::calibrated`] put it
-/// among the row's thresholds: blessed, or calibrated by this blessing.
+/// 4.2's "SSIM ≥ blessed − 0.005" against the ideal, more than 12° from
+/// the seam and for each lens alone, to 0.0001, and the most a blessing
+/// may lower it unasked, half its margin: `tests/instrument.rs`'s `SSIM`
+/// floor, whose numbers these are.
+const SSIM_MARGIN: f64 = 0.005;
+const SSIM_STEPS: f64 = 10_000.0;
+const SSIM_DROP: f64 = 0.0025;
+
+/// An SSIM against the ideal held as [`Run::calibrated`] holds a PSNR:
+/// a floor calibrated when blessing, [`SSIM_MARGIN`] under what it
+/// measured and rounded down to a [`SSIM_STEPS`]th, and read from the
+/// manifest otherwise. A blessing that would lower a blessed floor by
+/// more than [`SSIM_DROP`] fails, unless it was told it may.
+fn calibrated_ssim(run: &mut Run<'_>, key: &str, v: f64) -> bool {
+    let tkey = format!("{key}_min");
+    let min = if run.blessing() {
+        let new = ((v - SSIM_MARGIN) * SSIM_STEPS).floor() / SSIM_STEPS;
+        let old = run.blessed(&tkey).ok();
+        run.floors.push(format!(
+            "{} {tkey}: {} → {new}",
+            run.row,
+            old.map_or_else(|| "new".into(), |o| o.to_string())
+        ));
+        if let Some(old) = old
+            && new < old - SSIM_DROP
+            && !run.lower_floors
+        {
+            run.fail(format!(
+                "blessing would lower {tkey} from {old} to {new} (measured {v:.4}), by more than \
+                 {SSIM_DROP}: a render that got worse, or another driver build; to accept it, \
+                 bless with {UPDATE}={LOWER}"
+            ));
+        }
+        new
+    } else {
+        match run.blessed(&tkey) {
+            Ok(m) => m,
+            Err(e) => {
+                run.measure(key, v);
+                run.fail(e);
+                return false;
+            }
+        }
+    };
+    run.at_least(key, v, min)
+}
+
+/// The floor `key` is held to this run, as [`Run::calibrated`] or
+/// [`calibrated_ssim`] put it among the row's thresholds: blessed, or
+/// calibrated by this blessing.
 fn floor_of(run: &Run<'_>, key: &str) -> Option<f64> {
     run.thresholds
         .get(&format!("{key}_min"))
@@ -364,10 +434,12 @@ const EQUIDISTANT_WORSE_DB: f64 = 6.0;
 
 /// The far `Grid` pair through the 512 × 256 equirect, stored: against
 /// the CPU reference by the CPU rule, and against the ideal more than 12°
-/// from the seam (the true rig's mask, weighted by cos latitude), to a
-/// floor 1 dB under what it measured when blessed. Its control is 4.2's,
+/// from the seam (the true rig's mask, weighted by cos latitude, as rung
+/// 1 scores a stitch), its PSNR to a floor 1 dB under what it measured
+/// when blessed and its SSIM to one 0.005 under. Its control is 4.2's,
 /// equidistant lenses applied to the Mei pictures
-/// (`attribution::equidistant_for`), at least 6 dB worse there.
+/// (`attribution::equidistant_for`), at least 6 dB worse there; it also
+/// misses the SSIM's floor.
 fn dfish_equirect_identity(run: &mut Run<'_>) {
     let x5 = x5();
     let pair = x5_source(Scene::Grid.row(), planes(both(grid())), &far());
@@ -378,8 +450,9 @@ fn dfish_equirect_identity(run: &mut Run<'_>) {
     cpu_rule(run, "cpu", &got, cpu_grid_equirect());
     let mask = &Scene::Grid.masks().past_12;
     let ideal = ideal_equirect(Pattern::Grid);
-    let p = rung1::psnr(&f64_image(&got), ideal, mask);
-    run.calibrated("ideal_off_seam_psnr_db", p, IDEAL_MARGIN_DB, 0.0);
+    let s = rung1::score(&f64_image(&got), ideal, mask, mask);
+    run.calibrated("ideal_off_seam_psnr_db", s.psnr, IDEAL_MARGIN_DB, 0.0);
+    calibrated_ssim(run, "ideal_off_seam_ssim", s.ssim);
     let equidistant = Rig {
         lenses: x5.rig.lenses.map(|lens| equidistant_for(&lens)),
         ..x5.rig
@@ -387,9 +460,17 @@ fn dfish_equirect_identity(run: &mut Run<'_>) {
     let Some(equidistant) = render(run, &pair, &equidistant, &shot, DebugMode::Off) else {
         return;
     };
-    let c = rung1::psnr(&f64_image(&equidistant), ideal, mask);
-    run.measure("control_equidistant_ideal_off_seam_psnr_db", c);
-    run.at_least("control_equidistant_worse_db", p - c, EQUIDISTANT_WORSE_DB);
+    let c = rung1::score(&f64_image(&equidistant), ideal, mask, mask);
+    run.measure("control_equidistant_ideal_off_seam_psnr_db", c.psnr);
+    run.at_least(
+        "control_equidistant_worse_db",
+        s.psnr - c.psnr,
+        EQUIDISTANT_WORSE_DB,
+    );
+    run.measure("control_equidistant_ideal_off_seam_ssim", c.ssim);
+    if let Some(floor) = floor_of(run, "ideal_off_seam_ssim") {
+        run.over("control_equidistant_under_ssim_floor", floor - c.ssim, 0.0);
+    }
     run.stored_pair(
         "the X5-like camera's far Grid pair stitched through the 512 × 256 equirect",
         &got,
@@ -433,16 +514,23 @@ fn turned_180(rgb: &[f64]) -> Vec<f64> {
 /// 255 − j), from the same texels of the same track, and no pixel may be
 /// more than 2/255 apart.
 ///
-/// The control is the implicit LOD, over 100 bad pixels: the twin drawn
-/// with the hardware's derivatives against the camera drawn with the
-/// analytic LOD. Drawn that way on both, as M1's roll twins are, the two
-/// stay within 100 bad pixels, and that is measured: a fisheye's uv has
-/// no wrap, so there is no seam for a 2×2 quad's derivatives to cross,
-/// and the half turn about the view's centre takes quads to quads. A twin
-/// whose pair is rendered afresh through the turned camera can't hold
-/// 2/255 at all: synth samples the scene on other texels through each
-/// lens's own calibration, and on the 8-bit 4:2:0 frames that is tens of
-/// steps on the grid's lines.
+/// The control is 10.5's implicit LOD, drawn on both the camera and its
+/// twin as `twin_check` draws M1's roll twins: it must fail the row's own
+/// check, some pixel more than 2/255 apart. It does so by tens of pixels
+/// (59 at the zenith, 22 at the nadir when blessed), not by 10.5's more
+/// than 100: a fisheye's uv has no wrap, so there is no seam for a 2×2
+/// quad's derivatives to cross, as there is in M1's twins, and the half
+/// turn about the view's centre takes quads to quads. A second control
+/// shows the check's reach, the twin drawn with implicit LOD against the
+/// camera drawn with the analytic LOD, over 100 bad pixels; since the
+/// twin is the camera's picture to the byte, that is implicit LOD against
+/// analytic on one picture, which shows that 2/255 sees the implicit
+/// LOD's departures, not that the twin holds.
+///
+/// A twin whose pair is rendered afresh through the turned camera can't
+/// hold 2/255 at all: synth samples the scene on other texels through
+/// each lens's own calibration, and on the 8-bit 4:2:0 frames that is
+/// tens of steps on the grid's lines.
 fn pole_twin(run: &mut Run<'_>, k: usize) {
     let x5 = x5();
     let pair = x5_source(Scene::Grid.row(), planes(both(grid())), &far());
@@ -464,18 +552,22 @@ fn pole_twin(run: &mut Run<'_>, k: usize) {
     if !run.at_most("bad_pixels", d.count_over as f64, 0.0) {
         run.write_diffs("twin", shot.1, &camera, &seen);
     }
+    let camera_implicit = unit(&camera_implicit);
     let implicit = turned_180(&unit(&twin_implicit));
-    let c = bad(shot.1, &camera, &implicit, TWIN_THRESHOLD);
+    let c = bad(shot.1, &camera_implicit, &implicit, TWIN_THRESHOLD);
     run.measure("control_implicit_bad_pixels_max_lsb", c.max * 255.0);
-    run.over(
-        "control_implicit_bad_pixels",
-        c.count_over as f64,
-        CONTROL_BAD_OVER as f64,
-    );
-    let both_implicit = bad(shot.1, &unit(&camera_implicit), &implicit, TWIN_THRESHOLD);
+    if !run.over("control_implicit_bad_pixels", c.count_over as f64, 0.0) {
+        run.write_diffs("control_implicit", shot.1, &camera_implicit, &implicit);
+    }
+    let reach = bad(shot.1, &camera, &implicit, TWIN_THRESHOLD);
     run.measure(
-        "implicit_on_both_bad_pixels",
-        both_implicit.count_over as f64,
+        "control_implicit_against_analytic_bad_pixels_max_lsb",
+        reach.max * 255.0,
+    );
+    run.over(
+        "control_implicit_against_analytic_bad_pixels",
+        reach.count_over as f64,
+        CONTROL_BAD_OVER as f64,
     );
     run.threshold("bad_pixel_over", num(TWIN_THRESHOLD));
     let mut view = view_about(&shot.0, shot.1);
@@ -506,9 +598,9 @@ const CENTRE_2_PX: f64 = 14.0;
 /// the equirect, against the ideal over the true rig's coverage of it:
 /// the PSNR over every pixel of it, weighted by cos latitude, to a floor
 /// 1 dB under what it measured when blessed, and the SSIM over the
-/// windows that lie whole inside it, as rung 1 scores a lens alone. The
-/// control moves the lens's centre 2 px along x in the rig, and misses
-/// the floor.
+/// windows that lie whole inside it, to one 0.005 under, as rung 1 scores
+/// and holds a lens alone. The control moves the lens's centre 2 px along
+/// x in the rig, and misses both floors.
 fn lens_only(run: &mut Run<'_>, b: usize) {
     let x5 = x5();
     let pair = x5_source(Scene::Lines.row(), planes(both(lines())), &far());
@@ -529,7 +621,7 @@ fn lens_only(run: &mut Run<'_>, b: usize) {
     };
     let s = score(&got);
     run.calibrated("ideal_psnr_db", s.psnr, IDEAL_MARGIN_DB, 0.0);
-    run.measure("ideal_ssim", s.ssim);
+    calibrated_ssim(run, "ideal_ssim", s.ssim);
     let moved = tuned(|t| t.lenses[b].centre_px = [CENTRE_2_PX, 0.0]);
     let Some(control) = render(run, &pair, &moved, &shot, debug) else {
         return;
@@ -539,6 +631,9 @@ fn lens_only(run: &mut Run<'_>, b: usize) {
     run.measure("control_cx_2px_ideal_ssim", c.ssim);
     if let Some(floor) = floor_of(run, "ideal_psnr_db") {
         run.over("control_cx_2px_under_floor_db", floor - c.psnr, 0.0);
+    }
+    if let Some(floor) = floor_of(run, "ideal_ssim") {
+        run.over("control_cx_2px_under_ssim_floor", floor - c.ssim, 0.0);
     }
     run.end_pair_check(
         &format!("block {b} of the far SeamLines pair alone against the ideal over its coverage"),
@@ -777,11 +872,12 @@ fn frame_term_defeated(rig: &Rig) -> Rig {
 /// (100°), each block alone (debug modes 4 and 5) through a 40 × 20
 /// equirect, 9° a pixel, turned a quarter of a pixel at a time four times
 /// ([`ring_turns`]), which puts the lens's footprint at the mask's ring 4
-/// levels down or more (the least and greatest λ there are recorded): no pixel of the ring black, and the ring's mean luma within
-/// 4 LSB of the ideal's, the ring being what the mask keeps within 2° of
-/// its θ bound. Its control is the margin at 0, which lets the mips'
-/// bleed of the black past θ_max into the ring: a dip of more than 4 LSB
-/// there, in each lens's view.
+/// levels down or more (the least and greatest λ there are recorded): no
+/// pixel of the ring black, and the ring's mean luma within 4 LSB of the
+/// ideal's, the ring being what the mask keeps within 2° of its θ bound.
+/// Its control is the margin at 0, which lets the mips' bleed of the
+/// black past θ_max into the ring: a dip of more than 4 LSB there, in
+/// each lens's view.
 ///
 /// The frame term: on the pair whose truth carries content to 106°, past
 /// the slot's frame, lens 0 alone with θ_max at 104°, past where the
@@ -924,6 +1020,12 @@ const WIDE_DEG: f64 = 104.0;
 /// the equidistant camera's lenses as equisolid
 /// (`attribution::equisolid_for`), which fails the CPU rule against the
 /// CPU's picture by the true rig.
+///
+/// No pair's rig is built from a calibration: each is `rig_of_truth`'s
+/// over `kb_like`'s truth on its base ([`kb_on`]). Its source's
+/// calibration hash is the X5-like calibration's, whose extrinsics,
+/// centres and planting that truth keeps, and the lenses it replaces
+/// them with are its geometry's `kb_truth`.
 fn dfish_kb_rig(run: &mut Run<'_>) {
     let x5 = x5();
     let shot = equirect();
@@ -931,7 +1033,12 @@ fn dfish_kb_rig(run: &mut Run<'_>) {
     for (k, base) in KB_BASES.iter().enumerate() {
         let kb = kb_on(k);
         let name = format!("kb_{}_seamlines_256", format!("{base:?}").to_lowercase());
-        let geometry = pair_geometry(&x5.planted, &far(), f64::INFINITY);
+        let mut geometry = pair_geometry(&x5.planted, &far(), f64::INFINITY);
+        geometry["kb_truth"] = json!({
+            "rig": "rig_of_truth over kb_like's truth: the X5-like camera's extrinsics, centres \
+                    and planting (its calibration's hash), with these lenses",
+            "lenses": kb.lenses,
+        });
         let pair = PairSource::new(
             &name,
             [&kb.frames[0], &kb.frames[1]],
