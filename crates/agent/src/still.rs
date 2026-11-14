@@ -21,9 +21,11 @@
 //! [`probe_report`]'s report, not a [`Probed`], since [`probed`] picks
 //! one stream and refuses the layout unless [`Options::equirect`]. Its
 //! [`StillPair`] seeks both lenses to one time and stitches them through
-//! a view on the CPU reference (`render::reference::render_rig_of`),
-//! which M3.7 joins with the GPU. [`pair_stitching`] reads the stitch
-//! the file's trailer gives, for a caller that changes the geometry.
+//! the views on the GPU (`render_blurred` of a `SourceFrames::Pair`,
+//! M3.7), or with no GPU through one view on the CPU reference
+//! (`render::reference::render_rig_of`). [`pair_stitching`] reads the
+//! stitch the file's trailer gives, for a caller that changes the
+//! geometry.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -50,8 +52,9 @@ use spherecut_render::dmabuf::{self, Imported, Importer};
 use spherecut_render::reference::RigOptions;
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
-    AdapterChoice, Depth, Filter, Gpu, Image, Pixels, Placement, RenderError, SlotShape, Stereo,
-    StillOptions, StillRenderer, ViewParams, reference, upload, wgpu,
+    AdapterChoice, Depth, Filter, Gpu, Image, LensFrame, Pixels, Placement, PlaneSource,
+    RenderError, SlotShape, SourceFrames, Stereo, StillOptions, StillRenderer, ViewParams,
+    reference, upload, wgpu,
 };
 use spherecut_sphere::rig::{Geometry, Rig, Tune};
 
@@ -482,6 +485,21 @@ impl<'g> Still<'g> {
         stop: &Stop,
         warnings: &mut Vec<Warning>,
     ) -> Result<Self, Failure> {
+        Self::open_stream_on(src, stream, gpu, opts, None, stop, warnings)
+    }
+
+    /// [`Still::open_stream`], decoding on `device` when FFmpeg shares
+    /// the renderer's Vulkan device (path B): a pair's two lenses share
+    /// one, as playback's streams do. `None` makes the still its own.
+    fn open_stream_on(
+        src: Source<'_>,
+        stream: &StreamInfo,
+        gpu: Option<&'g Gpu>,
+        opts: &Options,
+        device: Option<Arc<HwDevice>>,
+        stop: &Stop,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Self, Failure> {
         let ids = gpu
             .filter(|g| !g.caps.is_cpu)
             .map(|g| gpu_ids(&g.caps.info));
@@ -489,9 +507,13 @@ impl<'g> Still<'g> {
         let (mut decode, skipped) = decode_mode(opts.decoder, &node);
         let shared = opts.shared();
         if let (true, Some(gpu)) = (shared, gpu) {
+            let device = match device {
+                Some(d) => d,
+                None => shared_device(gpu)?,
+            };
             decode = DecodeMode::Hardware {
                 kind: HwKind::Vulkan,
-                device: Some(shared_device(gpu)?),
+                device: Some(device),
                 fallback: Fallback::Fail,
             };
         }
@@ -1239,8 +1261,9 @@ pub struct PairOptions {
     pub geometry: Option<Geometry>,
     pub tune: Tune,
     /// How the stitch renders: its debug mode (`RigOptions::debug`,
-    /// `RigDebug`'s 4 to 7) and level 0 alone (`RigOptions::level0`).
-    /// M3.7 reaches the GPU's stitch through this field.
+    /// `RigDebug`'s 4 to 7) and level 0 alone (`RigOptions::level0`). The
+    /// GPU's stitch takes it through `RigOptions::mode`, which refuses
+    /// level 0 together with a debug mode; the CPU reference takes both.
     pub rig: RigOptions,
 }
 
@@ -1262,15 +1285,19 @@ pub struct DecodedPair {
 pub struct StillPair<'g> {
     /// The path messages name the file by.
     name: PathBuf,
-    /// By track: each a still of its own track, decoded in software, so
-    /// that a lens seeks, counts and fails as a one-stream file does.
+    /// By track: each a still of its own track, with the caller's GPU and
+    /// decoder as [`Still::open`] takes them, so that a lens decodes,
+    /// seeks, counts and fails as a one-stream file does.
     lenses: [Still<'g>; 2],
     /// What the rig was built of: `PairOptions`' geometry, or the file's.
     geometry: Geometry,
     rig: Rig,
     options: RigOptions,
-    /// The last pair of frames made ready to sample, which another view
-    /// of the same frames samples again.
+    /// The GPU's renderer, made at the first render on a GPU, so that
+    /// its pipelines are made once.
+    renderer: Option<StillRenderer>,
+    /// With no GPU, the last pair of frames made ready to sample, which
+    /// another view of the same frames samples again.
     ready: Option<([Arc<VideoFrame>; 2], reference::LensPair)>,
 }
 
@@ -1372,15 +1399,17 @@ fn on_track(track: usize, stream: usize, mut e: Failure) -> Failure {
 
 impl<'g> Still<'g> {
     /// Steps 4 and 6 for a file of two lenses: `report`'s two lens tracks
-    /// of `src` (`lenses.tracks`), each with its own decoder, in software,
-    /// and the rig `sphere::rig::Rig::build` makes of the file's
-    /// calibration ([`pair_stitching`]), `pair`'s geometry or the file's
-    /// own, and `pair`'s tune, with track 0 in front and each track's
-    /// coded side.
+    /// of `src` (`lenses.tracks`), each with its own decoder, opened on
+    /// `gpu` with `opts`' decoder, render node and zero copy as
+    /// [`Still::open`] opens one stream (on path B, `--zero-copy
+    /// --decoder vulkan`, both on one FFmpeg device sharing the
+    /// renderer's), and the rig `sphere::rig::Rig::build` makes of the
+    /// file's calibration ([`pair_stitching`]), `pair`'s geometry or the
+    /// file's own, and `pair`'s tune, with track 0 in front and each
+    /// track's coded side. With `gpu` `None` the pair renders on the CPU
+    /// reference.
     ///
-    /// Each fails with a code `docs/cli-json.md` lists: `internal` for a
-    /// GPU, since the stitch is the CPU reference's until M3.7, and for a
-    /// decoder or zero copy `opts` asks for that isn't software;
+    /// Each fails with a code `docs/cli-json.md` lists:
     /// `not_equirect` for a file that isn't a camera's pair of lenses,
     /// one with no calibration ("no calibration"), one whose trailer
     /// can't be read ("can't be stitched", as [`pair_stitching`] says,
@@ -1407,30 +1436,6 @@ impl<'g> Still<'g> {
     ) -> Result<StillPair<'g>, Failure> {
         let file = src.name.display();
         let refuse = |code, message: String| about(failure(code, message), src.name);
-        if gpu.is_some() {
-            return Err(refuse(
-                codes::INTERNAL,
-                format!(
-                    "{file} is a camera's pair of lenses, which the CPU reference stitches \
-                     until M3.7 brings the GPU's stitch: it opens with no GPU"
-                ),
-            ));
-        }
-        let hardware = match (opts.decoder, opts.zero_copy) {
-            (_, true) => Some("zero copy"),
-            (Decoder::Vaapi, _) => Some("VA-API"),
-            (Decoder::Vulkan, _) => Some("Vulkan Video"),
-            (Decoder::Auto | Decoder::Software, false) => None,
-        };
-        if let Some(hardware) = hardware {
-            return Err(refuse(
-                codes::INTERNAL,
-                format!(
-                    "{file} is a camera's pair of lenses, which decode in software until \
-                     M3.7: {hardware} isn't built for them"
-                ),
-            ));
-        }
         let Some(lenses) = &report.camera_file.lenses else {
             // An Insta360 file whose trailer probe couldn't read for its
             // tracks: the trailer's own failure, naming the part at fault.
@@ -1477,14 +1482,20 @@ impl<'g> Still<'g> {
             );
         }
         stop.go_on()?;
+        // Each lens decodes as a one-stream file does under `opts`; on
+        // path B both share one FFmpeg device on the renderer's.
         let lens_opts = Options {
-            decoder: Decoder::Software,
-            render_node: opts.render_node.clone(),
-            ..Options::default()
+            equirect: false,
+            stream: None,
+            ..opts.clone()
+        };
+        let device = match (opts.shared(), gpu) {
+            (true, Some(gpu)) => Some(shared_device(gpu)?),
+            _ => None,
         };
         let mut open = |track: usize| {
             let stream = streams[track];
-            Still::open_stream(src, stream, None, &lens_opts, stop, warnings)
+            Still::open_stream_on(src, stream, gpu, &lens_opts, device.clone(), stop, warnings)
                 .map_err(|e| on_track(track, stream.index, e))
         };
         let lenses = [open(0)?, open(1)?];
@@ -1508,6 +1519,7 @@ impl<'g> Still<'g> {
             geometry,
             rig,
             options: pair.rig,
+            renderer: None,
             ready: None,
         })
     }
@@ -1598,14 +1610,25 @@ impl<'g> StillPair<'g> {
         })
     }
 
-    /// Step 8: `decoded` stitched through the view, `size` pixels large,
-    /// on the CPU reference: the two frames made ready once
-    /// (`render::reference::LensPair`, kept for the next view of the same
-    /// frames), then `render_rig_of` with unit gains and the pair's
-    /// `RigOptions`, quantized as [`Still::render`] quantizes. As there,
-    /// the CPU reference draws only through one view: several, which
-    /// would be a frame's over the shutter, are `internal`, as is a draw
-    /// other than [`Draw::View`].
+    /// Step 8: `decoded` stitched through `views`, `size` pixels large,
+    /// with unit gains and the pair's `RigOptions` (its debug mode reaches
+    /// the GPU through [`RigOptions::mode`], which refuses level 0 with a
+    /// debug mode).
+    ///
+    /// On the GPU (the lenses' own, one [`StillRenderer`] a pair) it is
+    /// `render_blurred` of a [`SourceFrames::Pair`], the lenses by track,
+    /// each uploaded as [`Still::render`] uploads one frame: copied out of
+    /// FFmpeg's Vulkan images on path B, imported as DMA-BUFs with zero
+    /// copy (both held until the render is done), else from the frames'
+    /// bytes. Several views are a frame's over the shutter, averaged for
+    /// motion blur as for one frame.
+    ///
+    /// With no GPU it is the CPU reference: the two frames made ready
+    /// once (`render::reference::LensPair`, kept for the next view of the
+    /// same frames), then `render_rig_of`, quantized as [`Still::render`]
+    /// quantizes. The CPU reference draws only through one view: several
+    /// are `internal`. A draw other than [`Draw::View`] is `internal`
+    /// either way, since a pair has no flat form.
     pub fn render(
         &mut self,
         decoded: &DecodedPair,
@@ -1613,18 +1636,21 @@ impl<'g> StillPair<'g> {
         size: (u32, u32),
         look: Look,
     ) -> Result<Image, Failure> {
+        if look.draw != Draw::View {
+            return Err(failure(
+                codes::INTERNAL,
+                "a pair of lenses is stitched only through a view: it has no flat form",
+            ));
+        }
+        if let Some(gpu) = self.lenses[0].gpu {
+            return self.render_on(gpu, decoded, views, size, look);
+        }
         let [view] = views else {
             return Err(failure(
                 codes::INTERNAL,
                 "the CPU reference stitches a pair through one view, with no motion blur",
             ));
         };
-        if look.draw != Draw::View {
-            return Err(failure(
-                codes::INTERNAL,
-                "the CPU reference stitches a pair only through a view",
-            ));
-        }
         let same = |(frames, _): &([Arc<VideoFrame>; 2], reference::LensPair)| {
             Arc::ptr_eq(&frames[0], &decoded.frames[0])
                 && Arc::ptr_eq(&frames[1], &decoded.frames[1])
@@ -1643,12 +1669,65 @@ impl<'g> StillPair<'g> {
         let Some((_, pair)) = &self.ready else {
             return Err(failure(codes::INTERNAL, "no pair made ready"));
         };
-        let unit = [[1.0; 3]; 2];
-        let f64s = reference::render_rig_of(pair, &self.rig, unit, view, size, &self.options)
+        let f64s = reference::render_rig_of(pair, &self.rig, UNIT_GAINS, view, size, &self.options)
             .map_err(render_error)?;
         Ok(quantize(&f64s, look.depth))
     }
+
+    /// [`StillPair::render`] on `gpu`.
+    fn render_on(
+        &mut self,
+        gpu: &Gpu,
+        decoded: &DecodedPair,
+        views: &[ViewParams],
+        size: (u32, u32),
+        look: Look,
+    ) -> Result<Image, Failure> {
+        let opts = StillOptions {
+            filter: look.filter,
+            depth: look.depth,
+            debug: self.options.mode().map_err(render_error)?,
+            ..StillOptions::default()
+        };
+        let frames = &decoded.frames;
+        let lens_opts = &self.lenses[0].opts;
+        let renderer = self.renderer.get_or_insert_with(|| StillRenderer::new(gpu));
+        let mut render = |from: [PlaneSource<'_>; 2]| {
+            let lenses = [0, 1].map(|t| LensFrame {
+                frame: frames[t].as_ref(),
+                from: from[t],
+            });
+            let source = SourceFrames::Pair {
+                lenses,
+                rig: &self.rig,
+                gains: UNIT_GAINS,
+            };
+            renderer.render_blurred(gpu, source, views, size, &opts)
+        };
+        let image = if lens_opts.shared() {
+            // Each lens's own buffer, both live until the render is done.
+            let copied = [
+                copy_out(gpu, &frames[0], &Placement::FULL)?,
+                copy_out(gpu, &frames[1], &Placement::FULL)?,
+            ];
+            render(
+                copied
+                    .each_ref()
+                    .map(|c| PlaneSource::Buffer(&c.buffer, &c.planes)),
+            )
+        } else if lens_opts.zero_copy {
+            let imported = [import(gpu, &frames[0])?, import(gpu, &frames[1])?];
+            render(imported.each_ref().map(|i| PlaneSource::Imported(i)))
+        } else {
+            render([PlaneSource::Bytes; 2])
+        };
+        image.map_err(render_error)
+    }
 }
+
+/// The gains a still stitches a pair with: unity in each block, until a
+/// project's `Gains::at` reaches it (M3.11).
+const UNIT_GAINS: [[f64; 3]; 2] = [[1.0; 3]; 2];
 
 /// The ids hardware decoding finds the adapter's render node by.
 fn gpu_ids(info: &wgpu::AdapterInfo) -> GpuIds {
