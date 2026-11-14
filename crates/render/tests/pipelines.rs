@@ -1,6 +1,8 @@
-//! Tier 1, on lavapipe: every pipeline builds, the uniforms match their
-//! WGSL structs, readback handles any size, and sizes past the device's
-//! textures are refused (M1 plan section 4.5).
+//! Tier 1, on lavapipe: every pipeline builds, a lens pair's among them,
+//! the uniforms match their WGSL structs, the equirect pass reads none of
+//! a pair's bindings, readback handles any size, and sizes past the
+//! device's textures are refused (M1 plan section 4.5, M3 plan 10.1 and
+//! 10.4).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,18 +11,20 @@ mod common;
 use std::mem::{offset_of, size_of};
 
 use common::gpu;
+use spherecut_render::blur::SumUniform;
 use spherecut_render::layouts::{
-    ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, MIPS8_WGSL, PROJECT_WGSL, YUV_WGSL,
+    BLUR_WGSL, ENCODE_WGSL, INGEST_WGSL, MIPS_WGSL, MIPS8_WGSL, PROJECT_WGSL, YUV_WGSL,
 };
 use spherecut_render::readback::{read_region, read_region_in_bands, read_texture};
 use spherecut_render::upload::EightBitMips;
 use spherecut_render::yuv::YuvUniform;
 use spherecut_render::{
-    DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LinearTarget, PlaceUniform, Projector,
-    RenderError, SlotShape, SourceUniform, StillOptions, UploadPath, Uploader, ViewParams,
-    ViewUniform, render_still,
+    Blur, CapsUniform, DebugMode, Encoder, Filter, GpuFrame, IngestUniform, LensUniform,
+    LinearTarget, PlaceUniform, Projector, RenderError, RigUniform, SlotShape, SourceUniform,
+    StillOptions, UploadPath, Uploader, ViewParams, ViewUniform, render_still,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
+use spherecut_testkit::control::must_fail;
 
 /// Runs `f` inside a validation error scope and fails on any error, so
 /// that a bad shader or pipeline is this test's failure with wgpu's
@@ -44,6 +48,12 @@ fn every_pipeline_builds() {
             for debug in DebugMode::ALL {
                 p.prepare(filter, debug);
             }
+            // A lens pair's stitch in each of its modes, and its strips
+            // (M3 plan 10.1).
+            for debug in DebugMode::RIG {
+                p.prepare_rig(filter, debug);
+            }
+            p.prepare_strip(filter);
         }
     });
     // Ingest for both deep formats, the mip render pass for them and the
@@ -64,9 +74,12 @@ fn every_pipeline_builds() {
         validated("encode", || Encoder::new(gpu, format));
     }
     validated("yuv", || spherecut_render::YuvConverter::new(gpu));
+    // The blur's compute pass and its resolve (the project review's F066).
+    validated("blur", || Blur::new(gpu));
     // And each shader on its own through naga, for its messages.
     for (name, src) in [
         ("project", PROJECT_WGSL),
+        ("blur", BLUR_WGSL),
         ("mips", MIPS_WGSL),
         ("mips8", MIPS8_WGSL),
         ("ingest", INGEST_WGSL),
@@ -101,17 +114,39 @@ fn wgsl_struct(src: &str, name: &str) -> (Vec<(String, u32)>, u32) {
     panic!("no struct {name}");
 }
 
+/// Each WGSL member against the Rust field at the same position: how
+/// they differ, if they do.
+fn layout_matches(
+    src: &str,
+    name: &str,
+    rust: &[(&str, usize)],
+    size: usize,
+) -> Result<(), String> {
+    let (wgsl, span) = wgsl_struct(src, name);
+    if span as usize != size {
+        return Err(format!("{name}'s size: {span} in WGSL, {size} in Rust"));
+    }
+    if wgsl.len() != rust.len() {
+        return Err(format!("{name}'s members: {wgsl:?} against {rust:?}"));
+    }
+    for ((w, off), (r, roff)) in wgsl.iter().zip(rust) {
+        if *off as usize != *roff {
+            return Err(format!("{name}.{w} at {off} against {r} at {roff}"));
+        }
+        // Padding is named differently on each side; the rest match.
+        if !w.starts_with('_') && w != r {
+            return Err(format!(
+                "{name}'s members are in another order: {w} against {r}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Checks each WGSL member against the Rust field at the same position.
 fn same_layout(src: &str, name: &str, rust: &[(&str, usize)], size: usize) {
-    let (wgsl, span) = wgsl_struct(src, name);
-    assert_eq!(span as usize, size, "{name}'s size");
-    assert_eq!(wgsl.len(), rust.len(), "{name}'s members: {wgsl:?}");
-    for ((w, off), (r, roff)) in wgsl.iter().zip(rust) {
-        assert_eq!(*off as usize, *roff, "{name}.{w} against {r}");
-        // Padding is named differently on each side; the rest match.
-        if !w.starts_with('_') {
-            assert_eq!(w, r, "{name}'s members are in another order");
-        }
+    if let Err(e) = layout_matches(src, name, rust, size) {
+        panic!("{e}");
     }
 }
 
@@ -150,6 +185,129 @@ fn uniforms_match_their_wgsl_structs() {
         fields!(YuvUniform: offsets, strides, size, bits, planar, shift).to_vec();
     yuv.extend((0..3).map(|i| ("_pad", offset_of!(YuvUniform, _pad) + 4 * i)));
     same_layout(YUV_WGSL, "Yuv", &yuv, size_of::<YuvUniform>());
+    // The blur's (F066).
+    same_layout(
+        BLUR_WGSL,
+        "Sum",
+        fields!(SumUniform: size, n, _pad),
+        size_of::<SumUniform>(),
+    );
+    // A lens pair's (M3 plan 10.4).
+    same_layout(
+        PROJECT_WGSL,
+        "Lens",
+        fields!(LensUniform: rot, centre, focal, radial, tan, ext, prism, frame, slot, gain),
+        size_of::<LensUniform>(),
+    );
+    same_layout(
+        PROJECT_WGSL,
+        "Rig",
+        fields!(RigUniform: lens, q, feather, margin, model, tracks, _pad),
+        size_of::<RigUniform>(),
+    );
+    same_layout(
+        PROJECT_WGSL,
+        "Caps",
+        fields!(CapsUniform: caps),
+        size_of::<CapsUniform>(),
+    );
+    // Control: the same fields with two swapped, so that the shader would
+    // read its count where Rust put the size's second half.
+    #[repr(C)]
+    struct Swapped {
+        n: f32,
+        size: [u32; 2],
+        _pad: f32,
+    }
+    must_fail(
+        "Sum's size and n swapped",
+        layout_matches(
+            BLUR_WGSL,
+            "Sum",
+            fields!(Swapped: n, size, _pad),
+            size_of::<Swapped>(),
+        ),
+    );
+    // And the rig as 10.2 sketched it, without the tracks the shader's
+    // struct holds.
+    #[repr(C)]
+    struct Sketch {
+        lens: [LensUniform; 2],
+        q: f32,
+        feather: f32,
+        margin: f32,
+        model: u32,
+    }
+    let e = must_fail(
+        "the rig without its tracks",
+        layout_matches(
+            PROJECT_WGSL,
+            "Rig",
+            fields!(Sketch: lens, q, feather, margin, model),
+            size_of::<Sketch>(),
+        ),
+    );
+    assert_eq!(e, "Rig's size: 416 in WGSL, 400 in Rust");
+}
+
+/// The `(group, binding)` of each global that `entry`, an entry point of
+/// the projection's module, uses, by naga's analysis.
+fn globals_of(entry: &str) -> Vec<(u32, u32)> {
+    let module = naga::front::wgsl::parse_str(PROJECT_WGSL).unwrap();
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .unwrap();
+    let i = module
+        .entry_points
+        .iter()
+        .position(|e| e.name == entry)
+        .unwrap_or_else(|| panic!("no entry point {entry}"));
+    let uses = info.get_entry_point(i);
+    module
+        .global_variables
+        .iter()
+        .filter(|(h, _)| !uses[*h].is_empty())
+        .filter_map(|(_, g)| g.binding.as_ref().map(|b| (b.group, b.binding)))
+        .collect()
+}
+
+/// Refuses `used` if it holds a lens pair's own bindings: the rig at
+/// group 0, binding 1, the caps at group 2, bindings 1 and 2, and lens
+/// B's slot, group 3.
+fn no_pair_bindings(used: &[(u32, u32)]) -> Result<(), String> {
+    let pair: Vec<_> = used
+        .iter()
+        .filter(|&&(g, b)| (g, b) == (0, 1) || (g == 2 && (b == 1 || b == 2)) || g == 3)
+        .collect();
+    match pair.as_slice() {
+        [] => Ok(()),
+        _ => Err(format!("uses a lens pair's bindings {pair:?}")),
+    }
+}
+
+/// `fs_project`, and `fs_flat` beside it, use none of a lens pair's
+/// bindings (M3 plan 10.1): their pipelines' layout is the view, the
+/// source and the sampler, which a pair's extends.
+///
+/// Control: `fs_rig`'s entry point uses them.
+#[test]
+fn fs_project_holds_no_rig_global() {
+    for entry in ["fs_project", "fs_flat"] {
+        let used = globals_of(entry);
+        assert!(
+            used.contains(&(0, 0)) && used.contains(&(1, 0)),
+            "{entry}: {used:?}"
+        );
+        no_pair_bindings(&used).unwrap_or_else(|e| panic!("{entry}: {e}"));
+    }
+    let e = must_fail("fs_rig's globals", no_pair_bindings(&globals_of("fs_rig")));
+    assert_eq!(
+        e,
+        "uses a lens pair's bindings [(0, 1), (2, 1), (2, 2), (3, 0), (3, 1), (3, 2), (3, 3)]"
+    );
 }
 
 /// Writes `w`×`h` texels of `format` with a pattern, and reads them back.

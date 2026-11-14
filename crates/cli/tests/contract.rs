@@ -1384,8 +1384,10 @@ fn frame_documents_have_the_envelope_too() {
 /// `VK_DRIVER_FILES` pointing at no ICD, and no VA-API device. The
 /// usage errors M3.5 adds are held to the exit table's status 2 too:
 /// `--fov` and `--morph-to` under `--projection equirect`, `--morph-to
-/// equirect`, a pair's flag on a file that isn't a pair, and a hardware
-/// decoder on a pair stitched with `--reference`, which is 2, not 3.
+/// equirect`, and a pair's flag on a file that isn't a pair. A camera's
+/// pair decodes as a one-stream file does (M3.7): a hardware decoder
+/// that isn't there is exit 3, `hw_unavailable`, stitched on the GPU or
+/// under `--reference`.
 #[test]
 fn frame_exits_0_to_3_with_one_document_each() {
     let dir = tmp("frame-exits");
@@ -1467,23 +1469,31 @@ fn frame_exits_0_to_3_with_one_document_each() {
     );
     let m = v["error"]["message"].as_str().unwrap();
     assert!(m.contains("spherecut doctor"), "{m}");
-    // A camera's pair stitched with --reference decodes in software
-    // until M3.7: a hardware decoder named is a usage error, exit 2, not
-    // the exit 3 of a decoder that is missing. The control: --decoder
-    // software renders.
+    // A camera's pair decodes as a one-stream file does: VA-API on a
+    // render node that isn't there is exit 3, hw_unavailable, as the
+    // clip's row above, on the GPU and under --reference. The control:
+    // --decoder software renders.
     let pair = insv::master(&dir, insv::MASTER, None).path;
-    for (decoder, status, code) in [
-        ("vaapi", 2, "usage"),
-        ("vulkan", 2, "usage"),
-        ("software", 0, ""),
+    let missing = ["--decoder", "vaapi", "--render-node", "/nonexistent"];
+    let software = ["--decoder", "software"];
+    for (renderer, decoder, status, code) in [
+        ("--adapter", &missing[..], 3, "hw_unavailable"),
+        ("--reference", &missing[..], 3, "hw_unavailable"),
+        ("--reference", &software[..], 0, ""),
     ] {
         std::fs::remove_file(&out).ok();
-        let args = ["--reference", "--size", "64x32", "--decoder", decoder];
+        let mut args = match renderer {
+            "--adapter" => vec!["--adapter", "cpu"],
+            _ => vec!["--reference"],
+        };
+        args.extend(["--size", "64x32"]);
+        args.extend_from_slice(decoder);
         let (got, v, stderr) = frame_json(&pair, &out, &args, &[]);
-        assert_eq!(got, Some(status), "{decoder}: {v} {stderr}");
+        assert_eq!(got, Some(status), "{args:?}: {v} {stderr}");
+        assert_eq!(out.exists(), status == 0, "{args:?}");
         if status != 0 {
-            assert_eq!(v["error"]["code"], code, "{decoder}: {v}");
-            assert_eq!(contract::frame_exit(code) as i32, status, "{decoder}");
+            assert_eq!(v["error"]["code"], code, "{args:?}: {v}");
+            assert_eq!(contract::frame_exit(code) as i32, status, "{args:?}");
         }
     }
     std::fs::remove_dir_all(&dir).ok();

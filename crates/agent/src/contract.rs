@@ -362,10 +362,10 @@ pub struct FrameResult {
     pub source: SourceInfo,
     /// With `--project`, the sequence's frame rendered; null otherwise.
     pub sequence: Option<SequenceFrame>,
-    /// A camera's pair stitched (`--reference` on an Insta360 file, or
-    /// its `--seam`): the geometry, calibration and distance it was
-    /// stitched with, and each lens's frame. Null for any other source,
-    /// and under `--lens`.
+    /// A camera's pair stitched (an Insta360 file, on the GPU or with
+    /// `--reference`, or its `--seam`): the geometry, calibration and
+    /// distance it was stitched with, and each lens's frame. Null for any
+    /// other source, and under `--lens`.
     pub stitch: Option<StitchInfo>,
 }
 

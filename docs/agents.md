@@ -305,14 +305,23 @@ when a call gives `output` and `project` when it gives `create`, as are
   stream side by side, for footage not yet stitched). `times` up to 24,
   `size` 64 to 4096 (768 by default, 1568 at most inline), `format`
   `jpeg` or `png`, `seek` `exact` or `keyframe`, `output`,
-  `assume_equirect`. With `project` in place of `file`, the tiles are
-  the project's render: its frames at the times, which are the
-  render's (0 is its first frame, `"12f"` its frame 12), rendered as
-  the export renders them (`frame --project`), in `mode` `view` or
-  `sheet` (12 over the render by default). Each tile gives `time`, the
-  render's, and `source`, the media's. `view`, `views`, `seek` and
-  `assume_equirect` are refused there: a view of the source is a look
-  at the project's media file.
+  `assume_equirect`. A camera's two-lens file (an Insta360 `.insv`
+  whose calibration reads, as probe's `camera_file` says) is stitched
+  on the GPU (M3.7): `view`, `sphere`, `cube` and `sheet` draw the
+  stitch, one view a tile, its `decode` lens 0's; `raw` shows each
+  lens's track as coded, and `assume_equirect` reads the file as one
+  equirect (its first lens). One with no calibration is shown as its
+  lenses, raw, in every mode, with the `no_calibration` warning: a tile
+  for each lens at each time, so 12 `times` or `count` at most.
+  `seek` `keyframe` lands lens 0 on its keyframe and decodes lens 1
+  exactly to that time, so the two always show one time. With `project`
+  in place of `file`, the tiles are the project's render: its frames at
+  the times, which are the render's (0 is its first frame, `"12f"` its
+  frame 12), rendered as the export renders them (`frame --project`), in
+  `mode` `view` or `sheet` (12 over the render by default). Each tile
+  gives `time`, the render's, and `source`, the media's. `view`,
+  `views`, `seek` and `assume_equirect` are refused there: a view of the
+  source is a look at the project's media file.
 - **`analyze`**: a measure over time in `buckets` (50 by default, up to
   200), between `from` and `to`. `kind`: `timing` (packets only: frame
   durations, `vfr`, duplicate timestamps, gaps and frames missing,
@@ -542,9 +551,9 @@ the client's to change. An agent never makes a calibration: the server
 reads it from the file, or checks the one sent against it. Until M3.11
 renders a project stitched, `look`, `compare`, `check` and `render`
 refuse a project whose clip's media is a camera's pair (`not_yet`),
-rather than show its first lens as an equirect: `look` at the file
-itself with `mode` `raw`, or, for two fisheye lenses,
-`frame --reference` it in a terminal.
+rather than show its first lens as an equirect: for two fisheye
+lenses `look` at the file itself, which stitches it, or `frame` it in
+a terminal; an EAC pair's file with `mode` `raw`.
 
 **The window's actions that aren't edits**, and what an agent does
 instead:
@@ -619,7 +628,7 @@ the agent as fields do, as a backstop. The codes:
 | `io_error` | Reading or writing a project or a render's file failed partway (the disk, a permission); nothing was saved (a save that put the file in place but couldn't flush its folder succeeds, with `not_flushed`) |
 | `media_missing` | A project's media file isn't there, or isn't beneath the roots |
 | `media_changed` | A project's media file isn't the one it was made with: its size or first MiB differ |
-| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; `next` says to `look` at the file itself with `mode` `raw`, and for `dual_fisheye` to `frame` it with `--reference` in a terminal, which an `eac_pair` has no stitched view in yet |
+| `not_yet` | `look`, `compare`, `check` or `render` of a project whose clip's media is a camera's pair (`dual_fisheye` or `eac_pair`): stitched rendering of projects arrives in M3.11; `next` says, for `dual_fisheye`, to `look` at the file itself or `frame` it in a terminal, both of which stitch it, and for an `eac_pair`, which has no stitched view yet, to `look` at the file with `mode` `raw` |
 | `no_space` | The output's disk hasn't room for the render, with both numbers |
 | `job_lost` | A job of another server (one that has ended, or another running); render again |
 | `cannot_export` | A render the project can't make: its output isn't a preset, or its trim has no frames |
@@ -669,6 +678,7 @@ and says what it left out or doubts. The tools' own codes:
 | `entries_left_out` | `probe` | The folder has more entries than the 10,000 probe reads (`FOLDER_ENTRIES`); move clips to subfolders to see them all |
 | `report_cut` | `probe` | Reports marked `report_cut` were shortened to fit the result (lists, tags and strings cut, ending in `…`; a null report didn't fit at all); probe fewer files for more |
 | `streams_left_out` | `look` | `raw` shows the first 4 of the file's video streams (`RAW_STREAMS`) |
+| `no_calibration` | `look` | A camera's two-lens file whose calibration doesn't read, in any mode but `raw` and without `assume_equirect`: "no calibration: shown as its lenses", each lens's track as coded, as `raw` shows them (the result's `mode` is `raw`) |
 | `damaged` | `analyze` | The stream or its audio can't be read past the time the message gives; what comes after isn't measured |
 | `untimed_packets` | `analyze` | `timing`: packets without a timestamp, which aren't counted |
 | `result_cut` | `check` | Passed rules' messages, then advice, left out to fit 2 KiB (`CHECK_BYTES`) |
@@ -732,7 +742,7 @@ test; a test checks that each is listed here.
 | `ERROR_CHARS` | 500 | an error's JSON |
 | `CHECK_BYTES` | 2 KiB | a `check` result; passed rules' messages, then advice, give way |
 | `SPEED_TIME` | 5 s | doctor's `speed` decodes for at most this |
-| `MAX_TILES` | 24 | tiles in one `look`: times × views |
+| `MAX_TILES` | 24 | tiles in one `look`: times × views, × 6 for cube, × streams for raw (a camera's pair with no calibration: × its 2 lenses, in every mode) |
 | `IMAGE_DEFAULT_EDGE` | 768 px | `look`'s long edge by default |
 | `IMAGE_MAX_EDGE` | 1568 px | the longest edge inline |
 | `IMAGE_LIMIT_EDGE` | 4096 px | the longest edge at all, to a file |

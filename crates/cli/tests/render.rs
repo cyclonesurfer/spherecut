@@ -1262,12 +1262,14 @@ const SHORT: &[&str] = &["--json", "--draft", "--range", "..1f"];
 /// or of an EAC pair's, fail `not_yet` until M3.11, writing nothing: the
 /// refusal comes before a render starts, so nothing is ever rendered from
 /// lens 0 alone. Each names the media file by `path`, and its advice is
-/// the pair's (the M3.9 review's R9 and N11): `frame --reference` shows
-/// two fisheye lenses stitched, and nothing stitches an EAC pair yet, so
-/// its advice names no flag of frame's (`--equirect` would show one track
-/// alone as an equirect). Controls: an equirect project renders; frame's
-/// refusal held to another file's path; and each pair's advice held to
-/// the other's rule.
+/// the pair's (the M3.9 review's R9 and N11): frame shows two fisheye
+/// lenses stitched, on the GPU from M3.7, so the advice names no flag of
+/// frame's (M3.9's `--reference` is gone from it), and nothing stitches an
+/// EAC pair yet, whose advice names none either (`--equirect` would show
+/// one track alone as an equirect). Controls: an equirect project
+/// renders; frame's refusal held to another file's path; the EAC pair's
+/// advice held to the fisheye pair's; and M3.9's words for the fisheye
+/// pair held to no flag.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
     let began = Instant::now();
@@ -1332,16 +1334,21 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         |(ran, still): &(Ran, (Option<i32>, Value)), media: &Path| -> Result<[String; 2], String> {
             Ok([render_refused(ran, media)?, frame_refused(still, media)?])
         };
-    // The pairs' advice: frame's flag that stitches two fisheye lenses,
-    // or neither of frame's flags for a pair.
-    let reference = |said: &[String; 2]| said.iter().all(|m| m.contains("--reference"));
+    // The pairs' advice: frame stitches two fisheye lenses as it is, and
+    // neither pair's advice names a flag of frame's.
+    let stitched = |said: &[String; 2]| {
+        said.iter()
+            .all(|m| m.contains("frame the file itself to see it stitched"))
+    };
     let no_flag = |said: &[String; 2]| {
         said.iter()
             .all(|m| !m.contains("--reference") && !m.contains("--equirect"))
     };
     let fisheye = refused(&both(&cam), &master).unwrap();
     assert!(
-        fisheye.iter().all(|m| m.contains("two fisheye lenses")) && reference(&fisheye),
+        fisheye.iter().all(|m| m.contains("two fisheye lenses"))
+            && stitched(&fisheye)
+            && no_flag(&fisheye),
         "{fisheye:?}"
     );
     let eac_ran = both(&eac);
@@ -1361,12 +1368,14 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
         frame_refused(&eac_ran.1, &master),
     );
     must_fail(
-        "the EAC pair's advice held to --reference",
-        reference(&pair),
+        "the EAC pair's advice held to the fisheye pair's",
+        stitched(&pair),
     );
+    // M3.9's advice for a fisheye pair, which `--reference` stitched.
+    let m39 = "frame the file itself with --reference to see it stitched".to_string();
     must_fail(
-        "the fisheye pair's advice held to no flag",
-        no_flag(&fisheye),
+        "M3.9's fisheye advice held to no flag",
+        no_flag(&[m39.clone(), m39]),
     );
     let flat = project(&dir, &src);
     must_fail("the equirect project", refused(&both(&flat), &src));

@@ -6,6 +6,11 @@
 //! Each time is decoded once, in the order the file plays (the times
 //! sorted), with frame's decoder and the copy path ([`still`]), and all of
 //! its tiles are rendered from that frame on the one GPU a process keeps.
+//! A camera's pair of lenses whose calibration reads (probe's
+//! `camera_file`, [`still::pair_reads`]) is opened as frame opens it,
+//! [`Still::open_pair`], and each tile but raw's is its stitch through
+//! one view (M3.7); one with no calibration is shown as its lenses, raw,
+//! with a `no_calibration` warning.
 //! `crate::image` lays the tiles out and labels them; the whole is
 //! encoded in memory, then returned inline within the image budget or
 //! written to `output` under the write root.
@@ -24,8 +29,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use spherecut_core::{FrameTime, Rational, Rounding, Time, TimeSpec};
 use spherecut_media::backend::{SeekMode, Timing, VideoStreamInfo};
+use spherecut_media::detect::Layout as CameraLayout;
 use spherecut_media::probe::{StreamInfo, StreamKind};
-use spherecut_render::{AdapterChoice, Depth, Filter, Gpu, Image, ViewParams};
+use spherecut_render::{AdapterChoice, Depth, Filter, Gpu, Image, OutKind, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection as LensProjection};
 
@@ -36,7 +42,7 @@ use crate::image::{self as picture, Canvas, Layout};
 use crate::limits::{
     IMAGE_DEFAULT_EDGE, IMAGE_MAX_EDGE, JPEG_QSCALE, JPEG_QSCALE_MAX, MAX_TILES, RAW_STREAMS,
 };
-use crate::still::{self, Decoded, Draw, Failure, Still, number, seconds};
+use crate::still::{self, Decoded, DecodedPair, Draw, Failure, Still, StillPair, number, seconds};
 use crate::{rpc, schema, text, tools};
 
 /// What each tile shows.
@@ -435,6 +441,50 @@ struct Plan {
     tiles_arg: &'static str,
 }
 
+/// What a file is open as for its tiles.
+enum Opened<'g> {
+    /// A still a stream: the file's one for the modes that render it as
+    /// an equirect, each video stream's for raw.
+    Streams(Vec<Still<'g>>),
+    /// A camera's pair of lenses whose calibration reads, stitched on the
+    /// GPU (M3.7).
+    Pair(Box<StillPair<'g>>),
+}
+
+impl Opened<'_> {
+    /// The stream whose times the request's are: the first still's, or
+    /// the pair's track 0.
+    fn info(&self) -> &VideoStreamInfo {
+        match self {
+            Opened::Streams(stills) => stills[0].info(),
+            Opened::Pair(pair) => pair.lens(0).info(),
+        }
+    }
+
+    /// The streams raw shows a tile each of.
+    fn streams(&self) -> usize {
+        match self {
+            Opened::Streams(stills) => stills.len(),
+            Opened::Pair(_) => 0,
+        }
+    }
+}
+
+/// The frames of one time: one a still, or the pair's two.
+enum Frames {
+    Streams(Vec<Decoded>),
+    Pair(DecodedPair),
+}
+
+/// The narrowest a stitched equirect tile is rendered before it is
+/// scaled down (amendment 5): from 160 pixels across, about 2.25° a
+/// pixel, the seam leaves no pixel that no lens covers.
+const STITCH_MIN_WIDTH: u32 = 160;
+
+/// look's own warnings, whose words are Spherecut's alone.
+const STREAMS_LEFT_OUT: &str = "streams_left_out";
+const NO_CALIBRATION: &str = "no_calibration";
+
 fn bad(arg: impl Into<String>, message: impl Into<String>) -> ToolError {
     ToolError::new(codes::BAD_ARGUMENT, message).at(arg)
 }
@@ -586,10 +636,10 @@ fn plan(req: &Request, cx: &Ctx) -> Result<Plan, ToolError> {
         // raw's streams are known once the file is open.
         Mode::Sphere | Mode::Sheet | Mode::Raw => 1,
     };
-    let tiles_arg = if req.views.is_some() {
-        "views"
-    } else {
-        "times"
+    let tiles_arg = match (&req.views, &times) {
+        (Some(_), _) => "views",
+        (None, Times::Spread { arg, .. }) => *arg,
+        (None, Times::Given(_)) => "times",
     };
     if n * per_time > MAX_TILES {
         return Err(too_many(n * per_time, tiles_arg));
@@ -634,6 +684,24 @@ fn too_many(n: usize, arg: &str) -> ToolError {
     .at(arg)
     .valid(format!(
         "{MAX_TILES} tiles at most: times × views, × 6 for cube, × streams for raw"
+    ))
+}
+
+/// More tiles than an image holds because a camera's pair whose
+/// calibration doesn't read is shown as its `lenses`, raw, in the mode
+/// asked for, which the plan counted as a tile a time.
+fn lenses_too_many(n: usize, lenses: usize, arg: &str) -> ToolError {
+    ToolError::new(
+        codes::OUT_OF_RANGE,
+        format!(
+            "{n} tiles, past the {MAX_TILES} an image holds: with no calibration the file is \
+             shown as its {lenses} lenses, {lenses} tiles a time"
+        ),
+    )
+    .at(arg)
+    .valid(format!(
+        "{} times at most for this file",
+        MAX_TILES / lenses.max(1)
     ))
 }
 
@@ -945,7 +1013,9 @@ pub(crate) fn warnings_json(warnings: &[Warning]) -> Vec<Value> {
 }
 
 fn warning(w: &Warning) -> (&'static str, String) {
-    if contract::codes::warnings::ALL.contains(&w.code) {
+    if contract::codes::warnings::ALL.contains(&w.code)
+        || [STREAMS_LEFT_OUT, NO_CALIBRATION].contains(&w.code)
+    {
         return (w.code, w.message.clone());
     }
     let message = match w.code {
@@ -1073,59 +1143,99 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
     cx.call.check()?;
     let opened = cx.roots.open_file("file", &file)?;
     let stop = still::Stop::new(cx.call.token(), cx.call.interrupt());
-    let opts = still::Options {
-        // The equirect check is mode's: raw renders anything.
-        equirect: req.assume_equirect || req.mode == Mode::Raw,
-        ..still::Options::default()
-    };
     let mut warnings: Vec<Warning> = Vec::new();
     let stopped = |f: &Failure| f.code == codes::CANCELLED;
-    let probed = still::probe(opened.source(), &opts, &stop, &mut warnings).map_err(|f| {
+    let failed = |f: Failure| {
         if stopped(&f) {
             halted(cx, 0, 0)
         } else {
             file_failed(&f)
         }
-    })?;
+    };
+    let report = still::probe_report(opened.source(), &stop).map_err(failed)?;
+    // A camera's pair of lenses (M3.7): stitched when its calibration
+    // reads, else shown as its lenses, raw. raw and assume_equirect read
+    // it as any file.
+    let pair = !req.assume_equirect
+        && req.mode != Mode::Raw
+        && report
+            .camera
+            .as_ref()
+            .is_some_and(|c| c.layout == CameraLayout::Insta360DualFisheye);
+    let stitched = pair && still::pair_reads(&report);
+    let mode = if pair && !stitched {
+        warnings.push(Warning::new(
+            NO_CALIBRATION,
+            format!("the file is {}", still::INSTA360_NO_CALIBRATION),
+        ));
+        Mode::Raw
+    } else {
+        req.mode
+    };
+    let opts = still::Options {
+        // The equirect check is mode's: raw renders anything.
+        equirect: req.assume_equirect || mode == Mode::Raw,
+        ..still::Options::default()
+    };
     let gpu = gpu()?;
-    let streams = match req.mode {
-        Mode::Raw => {
-            let all = videos(&probed);
-            if all.len() > RAW_STREAMS {
-                warnings.push(Warning::new(
-                    "streams_left_out",
-                    format!(
-                        "the file has {} video streams: raw shows the first {RAW_STREAMS}",
-                        all.len()
-                    ),
-                ));
+    let mut source = if stitched {
+        let pair = Still::open_pair(
+            opened.source(),
+            &report,
+            Some(&gpu),
+            &opts,
+            &still::PairOptions::default(),
+            &stop,
+            &mut warnings,
+        )
+        .map_err(failed)?;
+        Opened::Pair(Box::new(pair))
+    } else {
+        let probed = still::probed(report, &opts, &stop, &mut warnings).map_err(failed)?;
+        let streams = match mode {
+            Mode::Raw => {
+                let all = videos(&probed);
+                if all.len() > RAW_STREAMS {
+                    warnings.push(Warning::new(
+                        STREAMS_LEFT_OUT,
+                        format!(
+                            "the file has {} video streams: raw shows the first {RAW_STREAMS}",
+                            all.len()
+                        ),
+                    ));
+                }
+                all.into_iter().take(RAW_STREAMS).collect()
             }
-            all.into_iter().take(RAW_STREAMS).collect()
-        }
-        _ => vec![probed.stream.clone()],
-    };
-    let mut stills = Vec::with_capacity(streams.len());
-    for s in streams {
-        let p = still::Probed {
-            report: probed.report.clone(),
-            stream: s,
+            _ => vec![probed.stream.clone()],
         };
-        let opened_still =
-            Still::open(opened.source(), &p, Some(&gpu), &opts, &stop, &mut warnings).map_err(
-                |f| {
-                    if stopped(&f) {
-                        halted(cx, 0, 0)
-                    } else {
-                        file_failed(&f)
-                    }
-                },
-            )?;
-        stills.push(opened_still);
-    }
-    let Some(first) = stills.first() else {
-        return Err(ToolError::new(codes::NO_VIDEO, "has no video stream").at("file"));
+        // The tiles the mode draws, a time each stream's, counted before
+        // the stills open: a pair with no calibration draws its lenses
+        // for each time, more than the plan counted for its mode.
+        let tiles = plan.times.len() * streams.len();
+        if tiles > MAX_TILES {
+            return Err(if mode == req.mode {
+                too_many(tiles, plan.tiles_arg)
+            } else {
+                lenses_too_many(tiles, streams.len(), plan.tiles_arg)
+            });
+        }
+        let mut stills = Vec::with_capacity(streams.len());
+        for s in streams {
+            let p = still::Probed {
+                report: probed.report.clone(),
+                stream: s,
+            };
+            let opened_still =
+                Still::open(opened.source(), &p, Some(&gpu), &opts, &stop, &mut warnings)
+                    .map_err(failed)?;
+            stills.push(opened_still);
+        }
+        if stills.is_empty() {
+            return Err(ToolError::new(codes::NO_VIDEO, "has no video stream").at("file"));
+        }
+        Opened::Streams(stills)
     };
-    let info = first.info().clone();
+    let info = source.info().clone();
     let whens = match &plan.times {
         Times::Given(w) => w.clone(),
         Times::Spread { arg, count, ends } => match ends {
@@ -1140,7 +1250,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
     // The tiles, in the order the request lists them.
     let mut tiles = Vec::new();
     for t in 0..whens.len() {
-        match req.mode {
+        match mode {
             Mode::View => tiles.extend(plan.cameras.iter().map(|&c| Tile {
                 time: t,
                 shows: Shows::Camera(c),
@@ -1160,7 +1270,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
                     None => Shows::Equirect { labelled: false },
                 },
             }),
-            Mode::Raw => tiles.extend((0..stills.len()).map(|s| Tile {
+            Mode::Raw => tiles.extend((0..source.streams()).map(|s| Tile {
                 time: t,
                 shows: Shows::Stream(s),
             })),
@@ -1169,7 +1279,7 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
     if tiles.len() > MAX_TILES {
         return Err(too_many(tiles.len(), plan.tiles_arg));
     }
-    let (aspect, target) = match (req.mode, plan.cameras.is_empty()) {
+    let (aspect, target) = match (mode, plan.cameras.is_empty()) {
         (Mode::Cube, _) => (1.0, SCREEN),
         (Mode::Sphere, _) => (2.0, 2.0),
         (Mode::Sheet, true) => (2.0, SCREEN),
@@ -1205,33 +1315,45 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
     let mut done = 0;
     let mut order_of: Vec<usize> = (0..whens.len()).collect();
     order_of.sort_by(|&a, &b| order(whens[a].spec, &info).total_cmp(&order(whens[b].spec, &info)));
-    // The frames of the last time decoded, one a still, for a repeat.
-    let mut last: Option<(TimeSpec, Vec<Decoded>)> = None;
+    // The frames of the last time decoded, for a repeat.
+    let mut last: Option<(TimeSpec, Frames)> = None;
     for t in order_of {
         let w = &whens[t];
+        let at_time = |f: Failure, info: &VideoStreamInfo| {
+            if stopped(&f) {
+                halted(cx, done, total)
+            } else {
+                time_failed(&f, &w.arg, info)
+            }
+        };
         let decoded = match last.take() {
             Some((spec, d)) if spec == w.spec => d,
-            _ => {
-                let mut d = Vec::with_capacity(stills.len());
-                for s in stills.iter_mut() {
-                    cx.call.check().map_err(|_| halted(cx, done, total))?;
-                    let frame = s
-                        .seek(w.spec, req.seek.mode(), &mut warnings)
-                        .map_err(|f| {
-                            if stopped(&f) {
-                                halted(cx, done, total)
-                            } else {
-                                time_failed(&f, &w.arg, s.info())
-                            }
-                        })?;
-                    d.push(frame);
+            _ => match &mut source {
+                Opened::Streams(stills) => {
+                    let mut d = Vec::with_capacity(stills.len());
+                    for s in stills.iter_mut() {
+                        cx.call.check().map_err(|_| halted(cx, done, total))?;
+                        let frame = s
+                            .seek(w.spec, req.seek.mode(), &mut warnings)
+                            .map_err(|f| at_time(f, s.info()))?;
+                        d.push(frame);
+                    }
+                    Frames::Streams(d)
                 }
-                d
-            }
+                // Both lenses at one time; with seek "keyframe", track 0's
+                // keyframe and track 1's frame at its time.
+                Opened::Pair(pair) => {
+                    cx.call.check().map_err(|_| halted(cx, done, total))?;
+                    let d = pair
+                        .seek(w.spec, req.seek.mode(), &mut warnings)
+                        .map_err(|f| at_time(f, pair.lens(0).info()))?;
+                    Frames::Pair(d)
+                }
+            },
         };
         for (i, tile) in tiles.iter().enumerate().filter(|(_, tile)| tile.time == t) {
             cx.call.check().map_err(|_| halted(cx, done, total))?;
-            let entry = draw(&mut canvas, &layout, i, tile, &mut stills, &decoded)
+            let entry = draw(&mut canvas, &layout, i, tile, &mut source, &decoded)
                 .inspect_err(|_| forget_if_lost(&gpu))?;
             entries[i] = Some(entry);
             done += 1;
@@ -1239,13 +1361,13 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
         }
         last = Some((w.spec, decoded));
     }
-    drop(stills);
+    drop(source);
 
     let (image, images) = deliver(canvas, req.format, req.output.as_deref(), cx)?;
     let warnings = warnings_json(&warnings);
     let mut result = json!({
         "file": text::field(&file.to_string_lossy()),
-        "mode": req.mode.name(),
+        "mode": mode.name(),
         "seek": req.seek.name(),
         "tiles": entries.into_iter().flatten().collect::<Vec<_>>(),
         "image": image,
@@ -1465,26 +1587,68 @@ pub(crate) fn deliver(
 }
 
 /// Draw tile `i` of `layout`, its label and its picture, from `decoded`
-/// (one frame a still); its entry in the response.
+/// (one frame a still, or the pair's two); its entry in the response.
 fn draw(
     canvas: &mut Canvas,
     layout: &Layout,
     i: usize,
     tile: &Tile,
-    stills: &mut [Still<'_>],
-    decoded: &[Decoded],
+    source: &mut Opened<'_>,
+    decoded: &Frames,
 ) -> Result<Value, ToolError> {
     let (row, column) = layout.cell(i);
     let (x, y) = layout.origin(i);
     let at = (x, y + layout.band);
     let size = layout.tile;
-    let look = |draw| still::Look {
+    let mut entry = json!({
+        "index": i,
+        "row": row,
+        "column": column,
+        // The tile's picture in the image, below its label.
+        "rect": [at.0, at.1, size.0, size.1],
+    });
+    let (shown, line2) = match (source, decoded) {
+        (Opened::Streams(stills), Frames::Streams(d)) => {
+            still_tile(canvas, at, size, tile, stills, d, &mut entry)?
+        }
+        (Opened::Pair(pair), Frames::Pair(d)) => {
+            pair_tile(canvas, at, size, tile, pair, d, &mut entry)?
+        }
+        _ => return Err(ToolError::internal("a tile's frames aren't its file's")),
+    };
+    picture::caption(
+        canvas,
+        (x, y),
+        size.0,
+        layout.scale,
+        [&when_label(&shown), &line2],
+    );
+    Ok(entry)
+}
+
+/// How look renders a tile's picture as `draw` asks.
+fn look_as(draw: Draw) -> still::Look {
+    still::Look {
         draw,
         filter: Filter::Isotropic,
         depth: Depth::Eight,
-    };
+    }
+}
+
+/// [`draw`]'s picture of a file opened a still a stream, at `at` and
+/// `size`, with its entry's fields; the time it shows and its label's
+/// second line.
+fn still_tile(
+    canvas: &mut Canvas,
+    at: (u32, u32),
+    size: (u32, u32),
+    tile: &Tile,
+    stills: &mut [Still<'_>],
+    decoded: &[Decoded],
+    entry: &mut Value,
+) -> Result<(FrameTime, String), ToolError> {
     let render = |s: &mut Still<'_>, d: &Decoded, cam: &Camera, size, draw| {
-        s.render(d, &[cam.params()], size, look(draw))
+        s.render(d, &[cam.params()], size, look_as(draw))
             .map_err(|f| render_failed(&f))
     };
     let stream = match tile.shows {
@@ -1494,15 +1658,8 @@ fn draw(
     let (Some(s), Some(d)) = (stills.get_mut(stream), decoded.get(stream)) else {
         return Err(ToolError::internal("a tile without its stream"));
     };
-    let mut entry = json!({
-        "index": i,
-        "row": row,
-        "column": column,
-        // The tile's picture in the image, below its label.
-        "rect": [at.0, at.1, size.0, size.1],
-        "time": d.shown,
-        "requested": d.requested,
-    });
+    entry["time"] = json!(d.shown);
+    entry["requested"] = json!(d.requested);
     let line2 = match tile.shows {
         Shows::Camera(cam) => {
             let img = render(s, d, &cam, size, Draw::View)?;
@@ -1547,14 +1704,65 @@ fn draw(
     };
     entry["decode"] = serde_json::to_value(s.decode_info(d))
         .map_err(|e| ToolError::internal(format!("decode info: {e}")))?;
-    picture::caption(
-        canvas,
-        (x, y),
-        size.0,
-        layout.scale,
-        [&when_label(&d.shown), &line2],
-    );
-    Ok(entry)
+    Ok((d.shown, line2))
+}
+
+/// [`draw`]'s picture of a camera's pair, stitched on the GPU through
+/// [`StillPair::render`], one view a tile: a view's or a cube face's
+/// camera, or the whole sphere as equirect, yaw 0 at the centre, which
+/// under [`STITCH_MIN_WIDTH`] pixels wide is rendered a whole number of
+/// times larger, at that width or more, and scaled down by area
+/// ([`picture::shrink`]): the margin the seam leaves grows with the
+/// footprint's LOD, so that an equirect coarser than about 2.5° a pixel
+/// has pixels at the seam that no lens covers (amendment 5). The entry's
+/// `decode` is track 0's, as frame's is.
+fn pair_tile(
+    canvas: &mut Canvas,
+    at: (u32, u32),
+    size: (u32, u32),
+    tile: &Tile,
+    pair: &mut StillPair<'_>,
+    d: &DecodedPair,
+    entry: &mut Value,
+) -> Result<(FrameTime, String), ToolError> {
+    let mut render = |view: ViewParams, size| {
+        pair.render(d, &[view], size, look_as(Draw::View))
+            .map_err(|f| render_failed(&f))
+    };
+    entry["time"] = json!(d.shown);
+    entry["requested"] = json!(d.requested);
+    let line2 = match tile.shows {
+        Shows::Camera(cam) => {
+            canvas.put(at.0, at.1, &render(cam.params(), size)?);
+            entry["view"] = cam.json();
+            cam.label()
+        }
+        Shows::Face(f) => {
+            let (name, yaw, pitch) = FACES[f];
+            let cam = Camera::face(yaw, pitch);
+            canvas.put(at.0, at.1, &render(cam.params(), size)?);
+            entry["face"] = json!(name);
+            entry["view"] = cam.json();
+            name.to_owned()
+        }
+        Shows::Equirect { labelled } => {
+            let k = STITCH_MIN_WIDTH.div_ceil(size.0.max(1)).max(1);
+            let whole = ViewParams {
+                out: OutKind::Equirect,
+                ..Camera::face(0.0, 0.0).params()
+            };
+            let img = render(whole, (size.0 * k, size.1 * k))?;
+            canvas.put(at.0, at.1, &picture::shrink(img, k));
+            let alpha = if labelled { 0.5 } else { 0.25 };
+            picture::grid(canvas, at, size, alpha, labelled);
+            "equirect".to_owned()
+        }
+        Shows::Stream(_) => return Err(ToolError::internal("a pair's tile as coded")),
+    };
+    let first = pair.lens(0);
+    entry["decode"] = serde_json::to_value(first.frame_decode_info(&d.frames[0]))
+        .map_err(|e| ToolError::internal(format!("decode info: {e}")))?;
+    Ok((d.shown, line2))
 }
 
 #[cfg(test)]

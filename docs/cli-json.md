@@ -151,8 +151,8 @@ its `time_base`.
 |---:|---|---|---|---|---|
 | 0 | The run did what was asked | Every file is ok (warnings don't count) | No problem of severity error; with `--file`, the file probes too, whether or not it can be stitched | The PNG is written (warnings don't count) | The MP4 is written and passed its checks (warnings don't count) |
 | 1 | An input or a check failed, or Spherecut itself did (`internal`) | At least one file failed | At least one problem is an error: no H.264, HEVC, ProRes or AAC decoder, or nothing that decodes AV1 (D18); or, with `--file`, the file can't be probed (probe's code for it, in place of `doctor_errors`) | No frame: the output is in the way, the file is missing, damaged before the frame or not an equirect, the frame is past the end, the GPU failed, ... (Codes) | No file: the output is in the way, the project doesn't load or its clip is offline, `--range` is outside the sequence, a stage of the export or a check of the file failed, the disk hasn't room, ... (Codes) |
-| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software`; `--fov` or `--morph-to` (and so `--morph`) with `--projection equirect`, and `--morph-to equirect` on any projection; and, once probe has seen the file, `--lens`, `--seam`, `--geometry` or `--stitch-distance` on a file that isn't a camera's pair, and `--decoder vaapi` or `vulkan` on a camera's pair stitched with `--reference`, which decodes in software until M3.7 | An unknown preset, codec or choice, or a `--range` that doesn't parse |
-| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware (on a camera's pair stitched with `--reference`, those two are a usage error instead, exit 2, until M3.7), and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
+| 2 | Usage error: the command line doesn't parse | yes | yes | Also a value clap can't check alone: a `--fov` past the projection's limit, a `--size` past the GPU's, a `--stream` that isn't a video stream, `--reference` with `--filter aniso`, `--zero-copy` with `--decoder software`; `--fov` or `--morph-to` (and so `--morph`) with `--projection equirect`, and `--morph-to equirect` on any projection; and, once probe has seen the file, `--lens`, `--seam`, `--geometry` or `--stitch-distance` on a file that isn't a camera's pair | An unknown preset, codec or choice, or a `--range` that doesn't parse |
+| 3 | A codec or device the command itself needs is missing | never | never | `no_gpu`, `adapter_not_found`, `no_decoder`, `hw_unavailable`, `hw_unsupported` or `hw_failed` when `--decoder vaapi` or `vulkan` named the hardware (on a camera's pair as on any file, since M3.7, with or without `--reference`), and `import_failed` with `--zero-copy` | `no_gpu`, `adapter_not_found`, `no_encoder` (no encoder for the codec that the run can use), and `hw_unavailable`, `hw_unsupported` or `hw_failed` when the hardware failed to open or in its first second and either `--encoder vaapi` named it or, with `auto`, there was no other encoder to go on in (VA-API the only one for the codec, as for H.264 with stock Fedora's ffmpeg-free, which has no libx264) |
 | 4 | Interrupted (SIGINT), leaving no output file; the document's code is `cancelled` | never | never | The first Ctrl+C | The first Ctrl+C |
 
 The GUI (`spherecut` with no command) exits 3 too: without a display
@@ -172,12 +172,12 @@ The run's `error.code`:
 
 | Code | Exit | Meaning |
 |---|---:|---|
-| `usage` | 2 | The command line doesn't parse, or frame's own check of the flags fails (the exit table's status 2); the message is clap's, or names the flag, with the usage line. frame's checks made once probe has seen the file (a pair's flag on a file that isn't a pair, a hardware decoder on a pair stitched with `--reference`) name the flag and the file, with no usage line |
+| `usage` | 2 | The command line doesn't parse, or frame's own check of the flags fails (the exit table's status 2); the message is clap's, or names the flag, with the usage line. frame's checks made once probe has seen the file (a pair's flag on a file that isn't a pair) name the flag and the file, with no usage line |
 | `files_failed` | 1 | probe: at least one file failed; each file's `error` says why. The message names the first |
 | `doctor_errors` | 1 | doctor: at least one problem is of severity error; the message lists them, and `result.issues` has them in full |
 | `internal` | 1 | A failure of Spherecut's own, such as a panic or a document that can't be made; the message says where, and there is no `result`. Please report it |
 | `output_exists` | 1 | frame: something is at the output (a file, or a link, even a dangling one) and `--overwrite` wasn't given; or something appeared there while the frame was rendered, which is left alone |
-| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway. A camera's pair of lenses (an Insta360 file) without `--reference` is refused so too, the message saying that `--reference` stitches it on the CPU until M3.7; with it, a pair that can't be stitched (no calibration, a trailer, record or calibration string that can't be read, a camera the table says isn't stitchable, a rig that can't be built) is `not_equirect`, the message naming the part at fault |
+| `not_equirect` | 1 | frame: the file isn't tagged as a stitched equirect (dual fisheye, a cubemap, an LRV proxy, a 2:1 picture without spherical metadata); the message says what it is. `--equirect` renders it as one anyway. A camera's pair of lenses (an Insta360 file) is stitched, on the GPU or under `--reference` on the CPU (M3.7); a pair that can't be stitched (no calibration, a trailer, record or calibration string that can't be read, a camera the table says isn't stitchable, a rig that can't be built) is `not_equirect`, the message naming the part at fault and saying that `--lens 0|1` shows each lens as coded; all but the rig are refused before the GPU is opened, so on a host with no GPU too |
 | `out_of_range` | 1 | frame: no frame at the time or number asked for: it is past the end, or so far past it that the stream's timestamps can't hold it. The message gives the clip's range, or its frame count |
 | `cancelled` | 4 | frame: interrupted by the first Ctrl+C (SIGINT); no output file is written, and the temporary file is removed |
 
@@ -279,7 +279,7 @@ frame's `warnings[].code`, which don't fail the run:
 | `pose_not_applied` | A non-zero Spherical Video V2 pose, which M1 doesn't apply (M2 does); the message gives it |
 | `anisotropy_unavailable` | `--filter aniso` on a device without anisotropic filtering: the render is isotropic, and `result.filter` is `iso` |
 | `bad_trailer` | probe's warning of an Insta360 trailer, record or calibration string that can't be read (above), naming the file: frame carries it on every run of such a file, whether the run renders or fails |
-| `geometry_assumed` | A camera's pair whose model has no entry in Spherecut's table of cameras, stitched with `--reference` by the X5's entry, provisional: the message names the file and gives the table's notice, `geometry assumed from the X5`, and its evidence, as probe's `geometry` and `stitch.geometry.notice` do |
+| `geometry_assumed` | A camera's pair whose model has no entry in Spherecut's table of cameras, stitched (on the GPU, or on the CPU with `--reference`) by the X5's entry, provisional: the message names the file and gives the table's notice, `geometry assumed from the X5`, and its evidence, as probe's `geometry` and `stitch.geometry.notice` do |
 
 `truncated` and `damaged` (and `io_error`, a read error the decoder
 meets) are warnings too, for damage probe finds before the seek and for
@@ -311,7 +311,7 @@ and `decode_failed` as above:
 | `malformed_project` | 1 | The project file doesn't read as one: a field of the wrong kind, or a time whose `seconds` and `exact` disagree; the message gives the JSON pointer |
 | `invalid_project` | 1 | The project breaks one of its rules, as loaded or with the flags' changes, or its sequence's size isn't a preset (`--preset` gives one) |
 | `media_offline` | 1 | The clip's media file isn't where the project says (relinking a moved file is M5's); `path` is where it was looked for |
-| `not_yet` | 1 | The clip's media is a camera's pair, two fisheye lenses (`dual_fisheye`) or two EAC tracks: stitched rendering of projects arrives in M3.11, and until then nothing is rendered, so no lens is ever shown alone as an equirect. `path` is the media file. For `dual_fisheye` the message says to frame it with `--reference`, which stitches the file on the CPU until M3.7; an EAC pair has no stitched view yet, and its message names no flag of `frame`'s (`--equirect` would show one track alone). Checked before `media_offline`, and `frame --project` refuses it so too, with the same `path` and message |
+| `not_yet` | 1 | The clip's media is a camera's pair, two fisheye lenses (`dual_fisheye`) or two EAC tracks: stitched rendering of projects arrives in M3.11, and until then nothing is rendered, so no lens is ever shown alone as an equirect. `path` is the media file. For `dual_fisheye` the message says to frame the file itself, which `frame` stitches on the GPU from M3.7 (M3.9's message named `--reference`); an EAC pair has no stitched view yet, and neither message names a flag of `frame`'s (`--equirect` would show one track alone). Checked before `media_offline`, and `frame --project` refuses it so too, with the same `path` and message |
 | `cannot_export` | 1 | The project can't be exported as it is: an empty trim, a trim of more frames than an export holds, PCM ambiX copied into a 360 MP4 (YouTube takes it only in a MOV: ask for `--audio aac`) |
 | `no_encoder` | 3 | No encoder the run can use for the codec: `--encoder vaapi` without a render node or without the codec's VA-API encoder in this FFmpeg, or no software encoder for it |
 | `hw_unavailable`, `hw_unsupported`, `hw_failed` | 3 | `--encoder vaapi`: the device can't be opened, its encoder refused the job (or AV1 at a size VA-API would pad: not a multiple of 64 wide and 16 high), or it failed on a frame in its first second. With `auto` they are `fallback`'s code instead, and the export goes on in software, unless VA-API is the only encoder for the codec (as for H.264 with stock Fedora's ffmpeg-free, which has no libx264): then they fail the run with exit 3 as with `vaapi` |
@@ -674,9 +674,10 @@ One frame of a stitched equirect, rendered through a virtual camera
 into a PNG (`spherecut frame --help` lists the options; the README shows
 them in use); or with `--project <P>` instead of the file, the frame of
 the project's sequence at a time, as `spherecut render` renders it
-before its encode (below, and D51); or, with `--reference`, a camera's
-pair of lenses stitched on the CPU (M3.5, below). Without `--json`, a run that wrote the frame prints one
-line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
+before its encode (below, and D51); or a camera's pair of lenses
+stitched, on the GPU or with `--reference` on the CPU (M3.5, on the GPU
+since M3.7; below). Without `--json`, a run that wrote the frame prints
+one line on stdout (`wrote out.png: 1920×1080 rectilinear 100° at 0.4 s
 (frame 12, pts 12012), decoded on VA-API, rendered on ...`), and its
 warnings and errors go to stderr, as log lines and an `error:` line.
 
@@ -712,20 +713,20 @@ errors with it, and `--morph-to equirect` is one on any projection.
 `view` then says `projection` `equirect`, `fov` 360, `morph_to` null
 and `morph` 0.
 
-**A camera's pair of lenses (M3.5).** A file probe calls Insta360 dual
-fisheye (`camera.layout` `insta360_dual_fisheye`), given without
-`--equirect`, `--stream` or `--project`, is a pair. Without
-`--reference` it is refused with `not_equirect`, whose message says
-that `--reference` stitches it on the CPU, that the GPU's stitch
-arrives in M3.7, and that `--equirect` renders its first stream as an
-equirect anyway. With `--reference`, both lens tracks (probe's
-`lenses.tracks`) are decoded in software until M3.7 (`--decoder
-vaapi` or `vulkan` is a usage error), each seeks exactly to the time
+**A camera's pair of lenses (M3.5; on the GPU since M3.7).** A file
+probe calls Insta360 dual fisheye (`camera.layout`
+`insta360_dual_fisheye`), given without `--equirect`, `--stream` or
+`--project`, is a pair. Both lens tracks (probe's `lenses.tracks`) are
+decoded as any stream is, `--decoder` choosing how (a hardware decoder
+that isn't there is `hw_unavailable`, exit 3), and with `--zero-copy`
+each lens's frame stays on the GPU; each seeks exactly to the time
 asked for, the two frames must show one time (else `damaged`), and the
-CPU reference stitches them through the view by the trailer's
-calibration and the geometry of the camera's entry in Spherecut's
-table, at a stitch distance of 2 m, with track 0 in front;
-`result.stitch` says how. A trailer that can't be read or holds no
+pair is stitched through the view by the trailer's calibration and the
+geometry of the camera's entry in Spherecut's table, at a stitch
+distance of 2 m, with track 0 in front: on the GPU (`renderer` `gpu`,
+`gpu` naming the adapter), or on the CPU reference with `--reference`
+(`renderer` `reference`). `result.stitch` says how, and `decode` is
+lens 0's. A trailer that can't be read or holds no
 calibration fails the run with `not_equirect`, naming the record or
 field at fault, and probe's `bad_trailer` warnings are the run's too,
 as its damage is (`truncated`, `damaged`), as on any file. A pair whose
@@ -1164,9 +1165,7 @@ a `--stream` that isn't a video stream, `--reference` with `--filter
 aniso`, `--zero-copy` with `--decoder software`, `--fov` or
 `--morph-to` with `--projection equirect`, `--morph-to equirect`, and,
 once probe has seen the file, `--lens`, `--seam`, `--geometry` or
-`--stitch-distance` on a file that isn't a camera's pair and `--decoder
-vaapi` or `vulkan` on a camera's pair stitched with `--reference` (until
-M3.7).
+`--stitch-distance` on a file that isn't a camera's pair.
 `--json` counts only before a `--`: in `spherecut probe -- --json`,
 `--json` is a file name. Without `--json`, a usage error is clap's text
 on stderr, with exit 2.

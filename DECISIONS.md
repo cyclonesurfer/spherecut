@@ -7,7 +7,7 @@ questions last. M1's plan reserved D27 to D37 (`docs/design/m1-plan.md`,
 section 0), so each of those lands in its place with its slice, and D38
 came before some of them. M3's plan reserves D60 to D76 for M3's slices
 (`docs/design/m3-plan.md`, section 23), so a number there with no
-heading belongs to a slice not yet built (D66 is M3.7's);
+heading belongs to a slice not yet built (D69 to D76);
 D77 came from M3.8, D78 from the review-fix slice and D79 from the
 VA-API stall slice. Superseded
 entries stay and say so.
@@ -79,6 +79,7 @@ Index:
 - D63. The lens model: one canonical distortion under every reading, an inverse that repeats to 1e-12
 - D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
 - D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
+- D66. Stitching in the projection pass: an entry point per source kind, the rig in its own bind group, no intermediate equirect
 - D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
 - D68. Schema 2: each media's source, with the calibration, geometry, tune and gains its render reads
 - D77. A slot's 8-bit planes can't be rendered to: RADV's DCC and odin's wrong luma blocks
@@ -1654,6 +1655,12 @@ zerocopy-derive (ahash's and half's). Neither can be unified from here:
 each side is a dependency's own pin. It costs compile time only, as the
 others above do.
 
+*Updated 2026-11-14 (M3.7, D66):* the stitch adds no crate and changes
+no manifest. `fs_project_holds_no_rig_global` reads the projection's
+module through the dev-dependency on naga that the uniform test above
+already has, and render's tests reach synth's rung 1 and the boundary
+crate as M3.4 and M3.5 left them.
+
 ## D23. Agent integration: an MCP server and the JSON CLI
 
 *2026-10-24, before M1's code. Pat asked for agent integration so that
@@ -2172,6 +2179,28 @@ adds `extra_hw_frames` only to a fixed pool); n6.1's pool is fixed
 matter only on 6.1; on 8.1.3 and 9.0.2 the pool has no cap, and nothing
 is lost.
 
+*Updated 2026-11-14 (M3.7, D66):* zero copy reaches a still of a
+camera's pair. `frame --zero-copy` on an Insta360 pair imports each
+lens's VA-API frame by itself and holds both imports until the render is
+done; on Vulkan Video (`--zero-copy --decoder vulkan`) both lenses
+decode on one FFmpeg device that shares the renderer's, and each is
+copied out of FFmpeg's image by itself (path B). Either way
+`StillRenderer` draws the pair from each lens's own `PlaneSource`.
+`look` stitches a pair on the GPU too, but decodes both lenses by the
+copy path, as it decodes any file: it has no zero-copy option.
+`a_pair_renders_alike_on_every_upload_path` holds the bytes, the
+buffers, the imports and every mixed pair of them to one picture bit for
+bit on lavapipe (control: the buffers swapped between the tracks).
+`zero_copy_pair_frame_matches_the_copy` and
+`shared_vulkan_pair_frame_matches_the_copy` hold an `.insv`'s `frame
+--zero-copy` to a software decode on odin, strictly, and read each
+lens's slot back to label one that holds other bytes than its frame's
+against D77's signature; they are pending odin. The player's locked
+pairs kept their zero copy from M3.8 (D67, D77). *Updated 2026-11-14
+(M3.7's last unit):* both passed on odin's RX 7600 at 1a7a64e (PR #40):
+each view 0 LSB from the software decode, the reversed binding 92 LSB
+off, no slot mismatch and no GFX11 R8 signature.
+
 Revisit if: path B fails or is refused on a GPU that doctor said could
 share its device (the copy path takes over, said once a file); huginn's
 numbers favour VA-API imported over the copy there (then path A becomes
@@ -2615,6 +2644,12 @@ stage's new crate, `boundary` (Pat's calibration as synth's truths and
 synth's lens truth as sphere's types, the project review's F137), is
 test support beside synth and testkit: only ever a dev-dependency,
 with `#![forbid(unsafe_code)]`, so nothing that ships links it.
+
+*Updated 2026-11-14 (M3.7, D66):* the stitch went where D61 put it:
+the shader, `rig::pack` and the pair's draws in render, the rig's maths
+in sphere, and a pair's open and render for `frame` and `look` in
+agent's `still`. M3.7 adds no crate and no `unsafe`: a pair's imports
+and copies go through the FFI modules that one stream's use.
 
 ## D29. MediaBackend and frame-exact seek
 
@@ -4193,6 +4228,22 @@ feature or limit beyond the adapter's. Path B's devices are
 well. The stored goldens came out identical, and every measurement the
 same, in three runs on lavapipe after the change.
 
+*Updated 2026-11-14 (M3.7, D66):* the projection has two more fragment
+stages, `fs_rig` for a lens pair and `fs_rig_strip` for the seam's
+strips, in `shaders/rig.wgsl`, appended to the projection's module, and
+the pipeline key gains the pass and the source kind. A pair binds the
+rig beside the view at group 0 (`layouts::view_rig`, each
+`LinearTarget`'s `rig_group`), block 0's slot at group 1, the sampler
+with the caps uniform and the cap texture at group 2
+(`layouts::sampler_caps`; the projector's caps-off groups until M3.20),
+and block 1's slot at group 3. `fs_project`'s layout and bind groups
+don't change. `StillRenderer`'s `render_blurred` and `render_yuv` take
+`SourceFrames`, one frame or a pair with each lens's planes from its own
+`PlaneSource`, and `render`, `render_imported` and `render_copied` stay
+one-frame wrappers. A pair's lenses go into a slot each, by track, with
+D77's mips, so nothing renders into a slot's 8-bit planes. D66 has the
+rest.
+
 ## D32. Golden images
 
 *2026-10-24, M1 slice 3b. The M1 plan's D30 (section 6), adjusted to
@@ -5003,6 +5054,48 @@ SSIM floor, by more than 0.0025) only under
 `SPHERECUT_UPDATE_GOLDENS=lower`. `goldens` neither reads that file nor
 rewrites it (a blessing removes stale PNGs alone), so it stays true
 that no Tier 1 test reads what `goldens` rewrites.
+
+*Updated 2026-11-14 (M3.7, D66):* the goldens binary holds a lens
+pair's stitch too. `dfish_seam`'s 8 rows (`tests/dfish/seam.rs`) and
+`dfish_views`' 9 (`tests/dfish/views.rs`) are plan 10.5's tables, each
+list with its own manifest and stored PNGs (two each) under
+`goldens/dfish_seam/` and `goldens/dfish_views/`, the rest held by
+measured floors, and every control measured and held each run. A pair's
+row records its pair's source, so a pair whose calibration, geometry, R
+or gains changed fails as changed rather than being compared as a
+render (`a_changed_pair_is_not_compared_as_a_render`). A stored row
+keeps only the picture of the rig its source builds
+(`a_pair_drawn_by_another_rig_isnt_stored`, the M3.7 review's N8), each
+row's pictures are held to its blessing on the driver build that
+blessed it (`pictures_fnv64`, N6), and blessing one list leaves the
+others byte for byte. Rung 2's 5 tests (`tests/dfish/rung2.rs`)
+hold rung 1's shots drawn by the shader from rung 1's pairs to rung 1's
+pictures by this entry's reference rule; a ledger of their own blesses
+their floors into `goldens/rung2.json`, which stores no PNG, as the
+instrument blesses its own. A blessing reads `SPHERECUT_UPDATE_GOLDENS`
+through `testkit::bless` (F055, D47's note of this date). The goldens'
+Tier 2 tests run both lists too: `goldens_on_gpu_match_reference` on
+each GPU (RADV on odin) against the rows' CPU and ideal references and
+their controls, never lavapipe's stored PNGs, and
+`goldens_on_host_llvmpipe` against those PNGs by the other-driver rule;
+`rung2_on_radv` holds rung 2 on RADV against lavapipe's pictures by the
+other-driver rule, the seam difference with the rule's two LSB
+thresholds scaled to the linear light it is held in (D66), and against
+rung 1 by the reference rule. The 24 old rows' PNGs and manifest are
+untouched. On the cloud's four cores the binary takes 17.54 s, against
+9.81 s with M3.7's tests left out (alone, `dfish_seam` takes 3.24 s,
+`dfish_views` 3.46 s and rung 2 4.99 s).
+
+*Updated 2026-11-14 (M3.7's last unit):* those times moved with the
+slice's fix round and unit (e), which changed the poles' control and
+the seam difference's rule on another driver (D66). At aef3e69, on the
+same four cores, the binary takes 18.27 to 19.69 s in six runs (18.95 s
+on average), against 10.38 to 11.23 s (10.65 s) with M3.7's tests left
+out, and 10.90 to 11.47 s with only the three dfish modules left out.
+Alone, by libtest's clock in three runs each, `dfish_seam` takes 3.66
+to 3.93 s, `dfish_views` 3.67 to 3.86 s, and rung 2's module 5.57 to
+5.64 s, its five renders now beside four tests of its rule and its
+ledger.
 
 ## D33. View conventions
 
@@ -8186,6 +8279,17 @@ lexically from the folder, as above. `file::load` opens without
 waiting, and refuses a path that isn't a regular file, and text that
 isn't UTF-8, as `not_project` (F034).
 
+*Updated 2026-11-14 (M3.7's first commits, F055):*
+`SPHERECUT_BLESS_PROJECT` is read by `testkit::bless`'s one rule for
+every variable that blesses: unset, empty and "0" are off, and any
+other value is on. So `SPHERECUT_BLESS_PROJECT=0` no longer rewrites
+`schema2.spherecut`, as it did while the fixture's test read the
+variable by its presence. `cargo xtask check`, `hw-test` past
+`--list`, and `compat` with `--test` (which runs the Tier 1 suite;
+the M3.7 review's R2), refuse to start while it or
+`SPHERECUT_UPDATE_GOLDENS` is on, naming it, and compat's Tier 1 tests
+run with both removed.
+
 ## D48. The project model and `Edit`
 
 *2026-10-31, M2.1. From `docs/design/m2-plan.md` sections 3 and 4 and
@@ -10280,6 +10384,20 @@ score both V3 orders.
 is the rig's, not the lens model's, and D64 now holds it; the note stays
 here for its measurements and controls.
 
+*Updated 2026-11-14 (M3.7, D66):* the shader evaluates this form only,
+as **One canonical form** said it would. `fs_rig` (`shaders/rig.wgsl`)
+takes a Mei lens through `Unified`'s projection and then
+`Canonical::rest`'s tangential terms with their r² extensions and the
+thin prism, and a Kannala–Brandt lens through `KbLens`'s polynomial and
+the same rest; `rig::pack` refuses a pair with one lens of each.
+`tests/rig_shader.rs` and the dfish rows hold it to `render_rig_of` by
+D32's reference rule, V6 readings and `dfish_kb_rig` among them. The
+note of 2026-11-10 said 10.3's WGSL must copy the weights rule; it does,
+as F025 rebuilt the rule about each lens's own band centre (D64's note
+of this date), and `fs_rig_weights_light_the_ring_no_feather_weighs`
+holds it, with 10.3's normalised weights, black where both are 0, as
+its control.
+
 ## D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
 
 *2026-11-12, M3 slice M3.5. A draft: M3.6 completes it with what its
@@ -10363,7 +10481,8 @@ What:
   measurements (3304 of a 512 × 256 equirect's 131,072 pixels black
   under the old rule at a feather of 0 and q = 0.5 m⁻¹), the controls,
   and what was considered: refusing such a tune in `Rig::build`, and
-  leaving the ring black and saying so.
+  leaving the ring black and saying so. F025 moved each band's centre
+  off 90° and judges the rule by θ − c_b (the note of 2026-11-14).
 
 What later slices add:
 
@@ -10397,6 +10516,29 @@ ranked them (a user would choose among 1152 values by eye).
 Revisit if: a camera composes its angles outside the Euler space (it
 lands as `Extrinsics::Fitted`, 8.7); clips 8 and 10 fail the gross
 rule; or takes 14 and 15 contradict what clips 8 to 10 showed.
+
+*Updated 2026-11-14 (M3.7, F025):* each lens's band is centred where it
+sees the seam, not at 90°. At q > 0 lens b, its centre at p_b, sees the
+seam's plane δ_b = atan(q p_b·a_b) past 90° (0.46° on the X5's baseline
+at 0.5 m⁻¹, 3.06° at 3.34), so 6.2's feather about 90° left a band where
+both lenses weigh only 2(h − δ) wide, 3.89° of a 10° band on x5_like at
+3.34 m⁻¹, and at a feather of 0 a ring that both covered and neither
+weighed. `Rig::band_centre` gives c_b = 90° + δ_b, and `Rig::weights`
+blends over c_b ± h_b, with `Rig::feather_at`'s h_b = min(h, max(room_b,
+0.5°)), not below 0, and room_b = min(θ_max, θ_frame) less the margin's
+angle at the footprint's LOD less c_b. Where no feather weighs a
+direction a lens covers, the covering lens nearer its band's centre, by
+θ_b − c_b, takes it whole, ½ each at a tie: where the δ_b are equal that
+is the lens of the smaller θ, as the bullet above has it.
+`Tune::feather_deg`'s bound keeps no δ, since `feather_at` shrinks h
+where the band would pass the mask. On the same rig the band is now
+10.052° on average across the seam (sphere's
+`the_blend_band_is_2h_wide_at_the_closest_stitch`, 10.0518° to 10.0523°
+by azimuth, with 7a06482's weights at 3.89° its control), and render's
+`reference_rig.rs` holds the stitch apart from 7a06482's weights (116
+pixels, 909 f16 steps, in the ring's step case; infinitely far they
+agree exactly, which is held too). `fs_rig` copies the rule as built
+(D66).
 
 ## D65. The seam signature and the attribution matrix: the instrument measures what the geometry predicts
 
@@ -10858,7 +11000,35 @@ here that 10.3 to 10.5 and 13.4 don't say.
   with a test (`tests/rung_copy.rs`) that held the copy to its own
   literals rather than to `instrument.rs`'s; `instrument.rs` now takes
   them from `synth::rung`, with its 132 measurements and its manifest
-  unchanged, and that test is gone.
+  unchanged, and that test is gone. *Updated 2026-11-13 (M3.7):* M3.7
+  lifted them, moved and not copied: `Scene`, `Masks`, the stitches, the
+  ideals and the scores, with the near scene's rigs and the
+  Kannala–Brandt camera, are in render's `tests/common/rung1.rs`, and
+  the attribution in `tests/common/attribution.rs`, pub modules of
+  `tests/common` beside `rig.rs`. `instrument.rs` takes them from there
+  and keeps its tests, its blessing and what its tests alone use, with
+  its numbers and its manifest unchanged; `synth::rung` still holds the
+  camera, the far tune, the frames and the views. *Updated 2026-11-14
+  (M3.7):* rung 2 renders its own pairs in the goldens binary, as above:
+  its 5 tests take 4.99 s alone on the cloud's four cores, and M3.7's
+  tests together add 7.73 s to the binary (17.54 s, against 9.81 s
+  without them), past the 7 s that 19.6 gives M3.7 before its other
+  suites (D66). The rest of this list is built as D66 says: the weights
+  rule and the mask in angle in `fs_rig`, with a case where the margin
+  passes θ_max (`fs_rig_tests_the_mask_in_angle`); the strip pass on
+  `StripSpec::dir`'s grid with `strip_coverage`'s validity
+  (`StillRenderer::strips`, held to `strips_of`); and a rig's LOD map
+  (`reference::rig_lod_map`). 13.4's target size is still Measure seam's
+  to settle (M3.13). *Updated 2026-11-14 (M3.7's last unit):* what this
+  list left to M3.7 is built: the map for a lens is
+  `reference::rig_lod_map`, debug mode 3 for a pair, which
+  `rig_shader.rs` holds the GPU's map to, and rung 2 took what it needed
+  of rung 1 from `tests/common` as the note of 2026-11-13 says. The
+  times in the note above moved: at aef3e69 rung 2's module, nine tests
+  with unit (e)'s, takes 5.57 to 5.64 s alone, and M3.7's tests take
+  the goldens binary from 10.38 to 11.23 s to 18.27 to 19.69 s, about
+  8.3 s; with the slice's tests outside the binary, about 10.5 s against
+  19.6's 7 s (D32's and D66's notes, plan amendment 10).
 
 **For the fit** (M3.6): what it must not take on trust.
 
@@ -10961,6 +11131,281 @@ the feather passes ±5°, so that the band leaves its 48 columns (the test
 fails and says so); the ideal's sampling changes, which moves `Grid`'s
 floors by a dB or more; footage shows a floor of the estimator wrong
 either way; or M3.6's fit needs a term the eight don't hold.
+
+## D66. Stitching in the projection pass: an entry point per source kind, the rig in its own bind group, no intermediate equirect
+
+*2026-11-14, M3 slice M3.7. The M3 plan, `docs/design/m3-plan.md`
+sections 10.1 to 10.5 and D66 in its section 23, has the detail;
+amendment 5 corrected 10.3 before the slice began. This is the stitch
+as its five units built it. Updates D31 and D32.*
+
+What:
+
+- **Entry points, not an override.** `shaders/rig.wgsl`, appended to
+  `project.wgsl` in one module (`layouts::PROJECT_WGSL`), adds `fs_rig`,
+  a lens pair through the view, and `fs_rig_strip`, one lens unwrapped
+  about the seam on `StripSpec::dir`'s grid (`ViewUniform::strip`,
+  `out_kind` 2), beside `fs_project` and `fs_flat`. The projector's
+  pipelines are keyed by filter, debug mode, pass (`Project`, `Flat`,
+  `Strip`) and source kind (`SourceKind::Equirect` or `Rig`); `prepare_rig`
+  and `prepare_strip` build a pair's ahead of a draw, and
+  `Projector::pipeline` builds outside its map's lock, so threads
+  preparing different pipelines build them side by side. `SourceRef`
+  says what a draw reads: one equirect slot, or two slots by track with
+  the packed rig, which `record` refuses where it was packed for slots
+  of other sizes than those bound (the M3.7 review's N1 and N3).
+  `fs_eac` (M3.18) and `fs_project_caps` (M3.20) aren't built.
+- **Bind groups.** Group 0 is the view at binding 0 and, for a pair, the
+  rig at binding 1 (`layouts::view_rig`), a bind group each
+  `LinearTarget` holds as `rig_group` beside `view_group`. Group 1 is
+  block 0's slot, as an equirect's slot is bound. Group 2 is the sampler
+  with the caps uniform and the cap texture (`layouts::sampler_caps`):
+  until M3.20 the projector's four `caps_off` groups, one for each of
+  the sampler's wrap and filter, with the caps off and a 1×1
+  transparent cap. Group 3 is block 1's slot. `fs_project`'s layout
+  and bind groups are unchanged, and so are the 24 old golden rows'
+  PNGs and manifest.
+- **The uniform.** `render::rig::pack(rig, slots, gains)` is the one
+  place a `Rig`'s f64 numbers become the shader's f32: `RigUniform`, 416
+  bytes, two `LensUniform`s by calibration block (`lens_from_rig`'s rows,
+  `centre_m` with θ_max, Mei's or Kannala–Brandt's numbers with the
+  base, texels a radian at θ_max and in the band, θ_frame, the rig's
+  side, which the frame term reads (never the slot's), the band's centre
+  c_b, the slot's luma size and the frame's gain), then q, h, the margin
+  at LOD 0, the model and each block's track, which only the draw reads,
+  to bind the slots. It refuses a Mei lens beside a Kannala–Brandt one
+  (one model a rig; such a rig renders on the CPU alone, and no file's
+  calibration makes one), a gain that isn't finite and 0 or more, and
+  blocks that don't read tracks 0 and 1, one each, as `render_rig` does.
+- **`fs_rig` copies `reference::render_rig` as built.** For each lens:
+  the ray through the parallax at the stitch distance, `normalize(d −
+  q (c_b − o))`; the model's projection (`Unified::images`, and
+  `KbLens::project` by atan2, never acos); the footprint from the
+  pixel's five rays (`Footprint::of`); the mask tested in angle, θ ≤
+  θ_max − margin(λ) / texels a radian, with margin(λ) = margin_texels ·
+  2^λ and λ clamped at 0, and the frame term against the rig's side;
+  the taps as `fs_project` takes them; the lens's gain in linear light.
+  Then the weights, F025's feather about each band's centre c_b with h_b
+  shrunk where the mask leaves less room (D64's note of this date), h ≤
+  0 a step; where no feather weighs a covered direction, the covering
+  lens nearer its band's centre takes it whole, ½ each at a tie; and the
+  blend before the f16 store. θ takes one Newton step on the driver's
+  atan2, whose polynomial on lavapipe misses by up to 3e-6 rad where
+  the weights need f32's own precision. A fisheye view past θ = π is
+  black. Debug modes 1 to 7 are 10.3's and `render_rig`'s: 4 and 5 a
+  block alone (in the strip pass, the strip's block), 6 the weights, 7
+  the seam difference × 8 with the frame's gains, and 3 the LOD of the
+  lens that weighs more (`reference::rig_lod_map`, black where no lens
+  covers).
+- **`StillRenderer`'s pair.** `render_blurred` and `render_yuv` take
+  `SourceFrames`: `One(LensFrame)`, or `Pair { lenses, rig, gains }`
+  with each lens's frame and where its planes are (`PlaneSource::Bytes`,
+  `Imported` or `Buffer`). A pair is packed before any upload; each lens
+  goes whole into its track's slot by its own path, a slot reused when
+  it fits; the blur loop averages the views in linear light, as for one
+  frame. `render`, `render_imported` and `render_copied` stay one-frame
+  wrappers. `StillRenderer::strips` draws both blocks' strips through
+  the strip pass, with `seam::strip_coverage`'s validity. `slots()`,
+  doc-hidden, gives both slots by track for the Tier 2 check of a
+  pair's slots.
+- **The CLI and agents.** `agent::still`'s `Still::open_pair` takes a GPU
+  and the caller's decoder, render node and zero copy, as `Still::open`
+  does: both lenses on one shared FFmpeg device under path B, two
+  imports held until the render is done under `--zero-copy`, the bytes
+  otherwise; `StillPair::render` stitches through `render_blurred` with
+  the lenses by track and unit gains, and with no GPU on the CPU
+  reference as before. `spherecut frame` on an Insta360 pair whose
+  calibration reads stitches on the run's GPU unless `--reference`
+  (renderer `gpu`, the adapter named); `--decoder vaapi|vulkan` decodes
+  each lens as on any file, under `--reference` too, and a decoder that
+  isn't there is `hw_unavailable`, exit 3. The weights and the seam
+  difference are read back linear and coded with no OETF, as the CPU
+  reference writes them. `look` at such a file draws the GPU's stitch in
+  view, sphere, cube and sheet, both lenses decoded by the copy path, as
+  look decodes any file (it has no zero copy); a stitched equirect tile
+  under 160 px wide is rendered a whole number of times larger, at 160
+  or more, and scaled down by area (`image::shrink`), amendment 5's
+  first choice: the margin grows with λ, so an equirect coarser than
+  about 2.5° a pixel has a gap at the seam that no lens covers (2.7 % of
+  the X5-like rig's picture at 128 px wide, none from 160). A pair
+  without a calibration is shown as its lenses with `no_calibration`.
+  The hints follow (`INSTA360_PAIR`, `INSTA360_NO_CALIBRATION`;
+  `INSTA360_UNSTITCHED` is gone), and `not_yet`'s advice for a camera's
+  project drops `--reference`.
+
+Departures from the plan's row:
+
+- The band's centre (F025). 10.3 and 6.2 centred each lens's feather on
+  90°, but at q > 0 a lens, its centre at p_b, sees the seam's plane
+  δ_b = atan(q p_b·a_b) further out (0.46° on the X5's baseline at 0.5
+  m⁻¹, 3.06° at 3.34), so the band both lenses weighed was 2(h − δ)
+  wide: 3.89° of a 10° band on x5_like at 3.34 m⁻¹. It is now centred at
+  c_b = 90° + δ_b, with h_b = min(h, max(room_b, 0.5°)), room_b =
+  min(θ_max, θ_frame) less the margin's angle less c_b, and the same rig
+  gives a band of 10.052° on average. The row's "at most min(θ_max,
+  θ_frame) − 90°" is that room, from c_b instead of 90°.
+- `fs_eac` and `fs_project_caps` wait for M3.18 and M3.20; group 2's
+  layout and its caps-off groups are built now, so an equirect with caps
+  later changes no layout.
+- The media's own four caps groups wait for M3.20 with the caps; every
+  draw takes the projector's caps-off groups.
+
+Why: PROMPT.md:65 asks for a stitch in the projection, and one pass reads
+each lens once at the footprint the view needs. An 8K RGBA16F
+intermediate equirect is 225 MiB a frame and filters the picture twice.
+wgpu-core 30.0.1 builds an entry point's interface before overrides
+exist (10.1), so an override would make every equirect pipeline bind the
+rig; `fs_project_holds_no_rig_global` holds that it doesn't. A bind
+group fits only pipelines whose layout matches it, and a cap belongs to
+the media, not to the targets that draw it. The X5's square frame cuts
+its image circle at 99° to 103° on Pat's numbers [C], inside the reach
+of a wide feather, hence the frame term and h_b. q is stored, linear in
+disparity with 0 for ∞, and metres are shown. Gains apply in linear
+light, where the lenses' exposures differ by a factor.
+
+Tested (Tier 1 on lavapipe; every check with a control that must fail):
+
+- `tests/pipelines.rs`: every pipeline builds, each uniform matches its
+  WGSL struct offset by offset (control: `Rig` at 400 bytes for 416),
+  and `fs_project_holds_no_rig_global` by naga's analysis.
+- `tests/rig_shader.rs`, 15 tests against `render_rig_of` by D32's
+  reference rule: the stitch, modes 4 to 7, the ring no feather weighs,
+  the mirror pair's tie, the mask in angle at an LOD where the margin
+  passes θ_max (control: the unguarded cosine form), level 0, a lens
+  with no image, blur in linear light, `render_yuv`, the refusals of
+  `render_from` and `pack`, a side unlike its slot, a rig packed for
+  other slots than those bound (`record` refuses it), the GPU's strips
+  against `strips_of`, and `rig_lod_map` against mode 3. It takes 0.72
+  to 0.80 s by its own clock at aef3e69, against a 0.8 s share it prints
+  and doesn't assert.
+- `tests/upload.rs`: `a_pair_renders_alike_on_every_upload_path`, bytes,
+  buffers, imports and each mixed pair bit for bit (control: the
+  buffers swapped between tracks, 23418 of 24576 values differ).
+- `tests/reference_rig.rs` holds the stitch apart from 7a06482's weights
+  about 90° (116 pixels, 909 f16 steps, in the ring's step case).
+- The goldens binary: `dfish_seam`'s 8 rows and `dfish_views`' 9 (plan
+  10.5) with their controls, measured and held each run, three runs
+  identical; and rung 2's 5 tests, rung 1's shots drawn by
+  `StillRenderer` from rung 1's pairs against rung 1's pictures, floors
+  in `goldens/rung2.json` (D32's note of this date). The 24 old rows
+  pass against their untouched PNGs and manifest. "Identical" is held,
+  not only measured (the M3.7 review's N6): each dfish row's entry
+  records `pictures_fnv64`, an FNV-64 of every picture the row drew of
+  a pair and every GPU strip it read, its controls' among them, and a
+  run on the driver build that blessed it (adapter and driver info),
+  from the same source, fails if the hash moved; on another driver, or
+  in Tier 2's modes, the row's thresholds alone hold it, as before. A
+  stored pair row keeps only the picture of the rig its recorded
+  calibration and geometry build (N8), and `dfish_hifreq_tinyplanet` is
+  held to the CPU reference over its whole picture as well as to the
+  ideal over its minified disc (N5). The poles' rows, `dfish_zenith` and
+  `dfish_nadir`, hold the far `Grid` pair's picture to its twin's (the
+  rig turned 180° about +Y with its blocks swapped) within 2/255 at
+  every pixel. Their control fails by geometry on any driver: it is the
+  twin with each block keeping the track it read in the camera, as a
+  stitch that bound each block to the slot of its own index would draw
+  it, and it put 65 411 and 65 311 of the 65 536 pixels past 2/255 on
+  lavapipe, most by more than 32 LSB, where D32's other-driver rule
+  lets a driver move each picture by 8 LSB at most. 10.5's implicit-LOD
+  control is measured there and not held: a fisheye's uv has no wrap
+  for a quad's derivatives to cross, and on odin's RX 7600 under RADV
+  (1a7a64e) it put no pixel past 2/255.
+- agent's `rung3_gpu_render_equals_rung2`: the rung 3 file through
+  `open_pair` on lavapipe equals rung 2's render of synth's planes byte
+  for byte (control: the stored reversed binding).
+- cli's `frame_insv_stitches_on_the_gpu` and agent's
+  `look_stitches_an_insv` and `look_shows_an_uncalibrated_insv_as_lenses`.
+- Tier 2h, for odin: the goldens' Tier 2 tests run the `dfish_*` lists
+  too (on a GPU, RADV among them, against each row's CPU and ideal
+  references and its controls, never lavapipe's stored PNGs; on the
+  host's llvmpipe against those PNGs by the other-driver rule),
+  `rung2_on_radv` (rung 2 on the GPU against lavapipe's pictures by the
+  other-driver rule and against rung 1 by the reference rule), and
+  `zero_copy_pair_frame_matches_the_copy` and its Vulkan twin, an
+  `.insv`'s `frame --zero-copy` under VA-API (DMA-BUF) and path B
+  against a software decode, strict, with each lens's slot read back and
+  labelled against odin's GFX11 R8 signature (D77) where a slot holds
+  other bytes than its frame's. On the seam difference, which rung 2
+  holds in the lenses' linear light, `rung2_on_radv` scales the
+  other-driver rule's two LSB thresholds by what a driver's steps in
+  each lens's display values come to there: each block's largest gain
+  times the sRGB EOTF's slope at 1 (2.4/1.055), summed, and one f16
+  step more, which makes 18.32 and 36.52 LSB at unit gains. That takes
+  D32's steps as how far each lens's display value itself may move,
+  leaving out its 8-bit rounding (with it, 22.87 and 41.07 LSB), and the
+  count, the PSNR and the SSIM stay, so the rule errs strict in three
+  places and is wider than its arithmetic in none. Odin's RX 7600 under
+  RADV at 1a7a64e had put 6 and 7 pixels of the equirect's and the −X
+  stripe's seam difference past D32's 4 LSB, at most 6 and 5, and failed
+  on the count alone. Most of that distance was lavapipe's own: against
+  rung 1, the RX 7600's seam difference on the −X stripe measured 71.74
+  dB with no channel more than 0.0016 off, and lavapipe's 51.52 dB with
+  a channel 0.0172 off; on the equirect, 80.45 dB against lavapipe's
+  60.71 dB. On each GPU the seam difference's control is lens 1's
+  centre moved 2 px (4.2's plant), which must fail the scaled rule by
+  each clause the scaling widened. It does so on every driver the rule
+  admits by construction: such a driver draws it within the rule of
+  lavapipe's drawing, and on lavapipe 1677 of its pixels are more than
+  twice 18.32 LSB off, where it takes more than 8, and 14 more than
+  twice 36.52, where it takes one. The test checks that on its own
+  lavapipe before any GPU. Lens 1's centre moved 1 px fails the scaled
+  rule on lavapipe in Tier 1 (2202 pixels past 18.32 LSB, 61.66 LSB at
+  most) but has no pixel more than 73.04 LSB off, so a driver the rule
+  admits could pass it on the most: it is that check's control, not the
+  GPU's. Each failure names its picture's worst pixels.
+
+P-SHADE, the pass's cost on odin (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K;
+`bench_stitch_pass`), passed on odin's RX 7600 under RADV at 1a7a64e (PR
+#40, `hw-reports/m37-1a7a64e/`): the stitch took 0.49 ms at 1080p and
+1.90 and 1.88 ms at 4K, the medians of three in each of two runs (0.48
+to 0.50 ms and 1.84 to 1.94 ms across their samples), against amendment
+6's `fs_project` baseline of 0.22 and 0.77 ms (`bench_upload_5k7`'s
+project rows; the same runs' projection on the stitch's views read 0.20
+to 0.21 and 0.76 to 0.77 ms), so 0.10 to 0.12 ms to spare at 4K and
+neither redirect needed. On a miss the redirect would have been an
+analytic Jacobian for the LOD in place of the five rays, then a cheaper
+mask. The same run passed the zero-copy pair tests at 0 LSB on both
+views (the reversed binding 92 LSB off, no slot mismatch) and
+`goldens_on_host_llvmpipe`, and failed the two checks unit (e) then
+changed in the tests, the poles' implicit-LOD control and the seam
+difference's count (above). odin's rerun of the three goldens tests at
+aef3e69 (PR #41) passed all three twice, every line the same, and is
+recorded in PROGRESS's M3.7 note.
+
+Cost, against 19.6's M3.7 line (what it adds to the goldens binary, rung
+1's pairs rendered afresh included, at most 7 s), on the cloud's four
+cores in the debug build at aef3e69: the goldens binary takes 18.27 to
+19.69 s (18.95 s on average over six runs), and 10.38 to 11.23 s (10.65
+s) with M3.7's tests left out, so about 8.3 s more. The three dfish
+modules are about 7.8 s of that (the binary takes 10.90 to 11.47 s
+without them, 11.19 s on average), and the slice's five harness tests
+about 0.5 s (0.70 to 0.72 s alone). Outside the binary, by each test's
+own cost, or its binary's growth where the test shares one:
+`rig_shader.rs` about 0.8 s (0.72 to 0.80 s by its clock), `upload.rs`'s
+pair test and bench smoke 0.16 s, `rung3_gpu_render_equals_rung2` about
+0.17 s of `rung3.rs`'s 2.20 to 2.25 s (its `BUDGET_S` raised from 2.0 to
+2.3), `frame_insv.rs`'s GPU tests about 0.31 s, `look`'s three `.insv`
+tests about 0.56 s, and `tier2_frame.rs`'s two lavapipe checks 0.21 to
+0.23 s; `pipelines.rs` and `reference_rig.rs` changed tests rather than
+adding binaries. So M3.7 adds about 10.0 s with the modules alone
+counted in the binary and about 10.5 s with its harness tests, past its
+7 s by 3.0 to 3.5 s. Unit (d) had counted 9.66 s at 93dc284, without
+`frame_insv.rs`'s GPU tests and against the binary's older 9.81 s base.
+Pat's card on the row recommends raising it to 10 s; until Pat answers,
+the plan keeps 7 s with the overrun named (plan amendment 10). No
+fixture was shrunk and no check cut.
+
+Considered and not done: an override constant for the stitch, and an
+intermediate equirect (both above); capping the margin for `look`'s
+small equirect tiles, amendment 5's other choice, which would change the
+mask from the one every test holds the stitch to.
+
+Revisit if: P-SHADE misses on odin or another GPU, its 4K margin of
+0.10 to 0.12 ms being small (the analytic Jacobian, then the mask);
+Pat's card on 19.6's M3.7 row is answered with a cut rather than a
+raise; a camera pairs unlike models, which would need a model a lens; a
+driver's atan2 misses by more than one Newton step takes back; or
+M3.20's caps want more than group 2 holds.
 
 ## D67. Frame-locked pairs: a camera's two lenses show only as pairs of one clip time
 
@@ -12229,6 +12674,36 @@ misses refresh; path A becomes a default anywhere; a Mesa caches
 multi-plane staging or unmaps it with `DELAY_UPDATE`; a kernel stops
 making later submissions wait for a freed range's clearing; or
 FFmpeg's VA-API decode returns to a pool that lists its surfaces.
+
+*Updated 2026-11-14 (M3.7's last unit, PR #39):* the drained seek rows
+have run. odin's `bench_seek_latency` at acd9d6f (PR #39,
+`hw-reports/stall-confirm-acd9d6f/`, 4 of 4 passed in 1302 s) put each
+VA-API row beside its drained twin, the median and p95 of three runs
+each. Drained keyframe seeks came out 14 to 30 % slower at the median
+and 13 to 18 % at p95: 4.98 against 4.36 ms on the X5's LRV (1664 × 832
+H.264; 1.14, and 5.41 against 4.78 ms at p95, 1.13), 28.07 against 21.61
+ms on the X5's 3840² HEVC stream (1.30; 41.91 against 35.61 ms, 1.18)
+and 58.63 against 49.20 ms on the noisy 5760 × 2880 HEVC clip (1.19;
+64.83 against 55.94 ms, 1.16). Exact seeks came within 2 to 8 % (1.05,
+1.03 and 1.08 at the median). A drain costs a seek about 0.6 to 9.5 ms,
+which weighs most on the short keyframe seeks; Vulkan Video's keyframe
+seeks took 3.61, 16.43 and 44.46 ms at the median on the same files. So
+this entry's 15 % line is crossed, by the keyframe rows on the X5's
+stream and the 5.7K clip at the median and at p95. The same run passed
+`gui_decode_behind` (its VA-API run presented every UI frame expected,
+rounded, at a UI p99 of 18.6 ms, with 101 frames drained at 108.0 /
+141.0 ms p50 / p95), which passed twice more on its own, 3 of 3 (99 % of
+the UI frames expected at a UI p99 of 18.9 and 18.5 ms, with 108 and 106
+frames drained), and `gui_smoke`'s five runs on Vulkan with no frame
+drained, and the realtime 10-bit VA-API row showed 4.00 frames a second
+in real time (3 to 9 a second), with the drain at 110.52 / 132.27 ms and
+the download at 66.49 / 67.97 ms at p50 / p95. `download` stays the
+default: the gate it clears falls on every frame the window shows while
+decode is behind, and the seek's cost falls on a wait the window already
+shows. A follow-up could skip the drain on a seek's landing download,
+which would leave that one download to the gate; it is neither built nor
+measured. The choice is Pat's, with the card of 2026-11-13, which asks
+whether to accept the cost.
 
 ## Open
 

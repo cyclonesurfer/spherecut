@@ -100,7 +100,9 @@ fn weight(holds: bool) -> f64 {
 /// from the strip pixel's own four ±½ px rays, the mask at its LOD, the
 /// taps, the matrix and the EOTF. Nothing after them: no gain, no dim,
 /// and no rounding to f16, so the shifts are measured on what the lens
-/// shows and not on a target's steps. An invalid sample's `rgb` is 0.
+/// shows and not on a target's steps (the shader's strips,
+/// [`crate::StillRenderer::strips`], are the nearest f16 of the same
+/// light). An invalid sample's `rgb` is 0.
 ///
 /// This builds both pictures' mip chains and unwraps once: a caller with
 /// more than one rig to try on one pair of frames, as the fit has (8.4),
@@ -150,9 +152,11 @@ pub fn strips_of(pair: &LensPair, rig: &Rig, spec: &StripSpec) -> Result<Strips,
 /// Which samples of each lens's strip are valid, by calibration block:
 /// [`Strip::valid`] as [`strips()`] gives it for `rig` and `spec`, row
 /// after row, with no picture sampled. A strip drawn another way on
-/// [`StripSpec::dir`]'s grid, as the shader will draw Measure seam's
-/// (10.5, 13.4), takes its samples' validity from here: the mask at each
-/// sample's own footprint's LOD, as it is nowhere else worked out.
+/// [`StripSpec::dir`]'s grid, as the shader's strip pass draws them
+/// ([`crate::StillRenderer::strips`]: 10.5's goldens read them, and
+/// M3.13's Measure seam will), takes its samples' validity from here: the
+/// mask at each sample's own footprint's LOD, as it is nowhere else
+/// worked out.
 ///
 /// Refuses what [`strips()`] refuses of the spec.
 pub fn strip_coverage(rig: &Rig, spec: &StripSpec) -> Result<[Vec<bool>; 2], RenderError> {

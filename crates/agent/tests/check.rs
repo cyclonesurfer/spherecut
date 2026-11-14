@@ -14,11 +14,15 @@ use serde_json::{Value, json};
 use spherecut_agent::error::codes;
 use spherecut_agent::limits::CHECK_BYTES;
 use spherecut_agent::rpc::{CallCx, Tools};
+use spherecut_agent::still;
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError};
+use spherecut_core::cancel::StopSource;
 use spherecut_media::inject::{self, EntryEdit, TrackKind};
 use spherecut_media::spherical::{Projection, StereoMode, write};
+use spherecut_synth::insv::{InsvFault, InsvSpec, write_insv};
 use spherecut_synth::media::{self, Audio, Codec, Spec};
+use spherecut_testkit::control::must_fail;
 
 /// The test's own directory, removed with what it holds when dropped.
 struct TempDir(PathBuf);
@@ -420,6 +424,118 @@ fn an_insv_without_its_trailer_fails_archive() {
     assert_eq!(cam["ok"], false, "{r}");
     assert!(cam["message"].as_str().unwrap().contains("trailer"));
     assert_eq!(r["pass"], false);
+}
+
+/// What `check` (YouTube 360's `spherical_metadata` rule, its message
+/// and fix) and `still::equirect_doubt` say of the camera's file at
+/// `file`: the doubt's words are those `frame --stream N` refuses a
+/// calibrated file with (`still::INSTA360_PAIR`'s doc says which callers
+/// give them).
+fn said_of(tools: &Spherecut, file: &Path) -> String {
+    let r = check(tools, file, Some("youtube_360"));
+    let rule = rule(&r, "spherical_metadata");
+    assert_eq!(rule["ok"], false, "{r}");
+    let stop = still::Stop::of(&StopSource::new());
+    let src = spherecut_media::Source::path(file);
+    let report = still::probe_report(src, &stop).unwrap();
+    let opts = still::Options {
+        equirect: true,
+        ..still::Options::default()
+    };
+    let probed = still::probed(report, &opts, &stop, &mut Vec::new()).unwrap();
+    let doubt = still::equirect_doubt(&probed).expect("a doubt");
+    format!("{} | {} | {doubt}", rule["message"], rule["fix"])
+}
+
+/// Whether `said` points to frame and look, which stitch the file, and to
+/// a project of it.
+fn points_to_frame_and_look(said: &str) -> Result<(), String> {
+    for words in ["frame and look stitch it", "project create"] {
+        if !said.contains(words) {
+            return Err(format!("no {words:?} in {said:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `said` says the file has no calibration and is shown as its
+/// lenses.
+fn says_no_calibration(said: &str) -> Result<(), String> {
+    match said.matches("no calibration: shown as its lenses").count() {
+        2 => Ok(()),
+        n => Err(format!("{n} of 2 say \"no calibration\" in {said:?}")),
+    }
+}
+
+/// Whether `said` holds none of M1's words for a camera's file, which
+/// called it unstitched and sent it elsewhere to be stitched.
+fn no_m1_words(said: &str) -> Result<(), String> {
+    for words in [
+        "stitch it to equirect first",
+        "stitching arrives in M3",
+        "unstitched",
+    ] {
+        if said.contains(words) {
+            return Err(format!("{words:?} in {said:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// `check` on an `.insv` points the agent to `frame` and `look`, which
+/// stitch it: the `spherical_metadata` rule and `equirect_doubt` name
+/// both, and `project create`, for `InsvSpec::small()`'s file, whose
+/// calibration reads, and say "no calibration: shown as its lenses" for
+/// one with none (`InsvFault::NoCalibration`). Neither says M1's words,
+/// "stitch it to equirect first" or "stitching arrives in M3". The
+/// controls: the uncalibrated file isn't pointed to the stitch, the
+/// calibrated one doesn't say "no calibration", and M1's words fail
+/// their check.
+#[test]
+fn an_insv_is_pointed_to_frame_and_look() {
+    let began = Instant::now();
+    let d = TempDir::new("insv-pair");
+    let [small, uncalibrated] = std::thread::scope(|s| {
+        [None, Some(InsvFault::NoCalibration)]
+            .map(|fault| {
+                let dir = d.0.join(format!("{fault:?}"));
+                s.spawn(move || {
+                    let spec = InsvSpec {
+                        frames: 2,
+                        fault,
+                        ..InsvSpec::small()
+                    };
+                    write_insv(&spec, &dir).unwrap().master
+                })
+            })
+            .map(|h| h.join().unwrap())
+    });
+    let tools = d.tools();
+    let [small, uncalibrated] = [&small, &uncalibrated].map(|f| said_of(&tools, f));
+    points_to_frame_and_look(&small).unwrap();
+    says_no_calibration(&uncalibrated).unwrap();
+    for said in [&small, &uncalibrated] {
+        no_m1_words(said).unwrap();
+    }
+    must_fail(
+        "the uncalibrated file, pointed to the stitch",
+        points_to_frame_and_look(&uncalibrated),
+    );
+    must_fail(
+        "the calibrated file, without calibration",
+        says_no_calibration(&small),
+    );
+    must_fail(
+        "M1's words",
+        no_m1_words(
+            "it is the camera's own unstitched recording, with no spherical metadata | stitch \
+             it to equirect first (the camera maker's app does, and tags it)",
+        ),
+    );
+    eprintln!(
+        "an_insv_is_pointed_to_frame_and_look: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
 }
 
 /// The most rules a synthetic file fails at once stay under

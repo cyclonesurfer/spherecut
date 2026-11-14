@@ -691,7 +691,7 @@ impl UploadThread {
         let layers = f.dmabuf().unwrap_or_default();
         let whole = SlotShape::of(f.layout(), f.size())?;
         let planes = dmabuf::plan(&whole, layers).map_err(RenderError::Import)?;
-        let textures = st.importer.import(&self.gpu, &planes)?;
+        let textures = st.importer.import(&self.gpu, f.as_ref(), &planes)?;
         let stats =
             st.uploader
                 .upload_imported(&self.gpu, f.as_ref(), &textures, placement, slot)?;

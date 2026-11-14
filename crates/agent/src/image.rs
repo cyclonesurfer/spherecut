@@ -268,6 +268,42 @@ pub fn caption(c: &mut Canvas, (x, y): (u32, u32), width: u32, scale: u32, lines
 /// The lines of an equirect's yaw and pitch, every 30°.
 pub const GRID_STEP: i32 = 30;
 
+/// `image`, an 8-bit picture `k` times the size wanted each way, scaled
+/// down by `k`: each pixel the mean of a `k` × `k` block, rounded to
+/// nearest, its codes averaged as they are. look's stitched equirect tile
+/// under 160 pixels wide is rendered so (amendment 5). A picture that
+/// isn't 8-bit, or `k` of 0 or 1, comes back as it is.
+pub fn shrink(image: Image, k: u32) -> Image {
+    let Pixels::Rgb8(px) = &image.pixels else {
+        return image;
+    };
+    if k < 2 {
+        return image;
+    }
+    let (w, h) = (image.width / k, image.height / k);
+    let n = u64::from(k * k);
+    let mut out = Vec::with_capacity(w as usize * h as usize * 3);
+    for y in 0..h {
+        for x in 0..w {
+            let mut sum = [0u64; 3];
+            for yy in y * k..(y + 1) * k {
+                for xx in x * k..(x + 1) * k {
+                    let i = (yy as usize * image.width as usize + xx as usize) * 3;
+                    for (c, s) in sum.iter_mut().enumerate() {
+                        *s += u64::from(px[i + c]);
+                    }
+                }
+            }
+            out.extend(sum.map(|s| ((s + n / 2) / n) as u8));
+        }
+    }
+    Image {
+        width: w,
+        height: h,
+        pixels: Pixels::Rgb8(out),
+    }
+}
+
 /// A yaw and pitch grid every [`GRID_STEP`] degrees over the equirect
 /// tile at (`x`, `y`), `w` × `h`: yaw 0 at its centre and growing to the
 /// right, pitch 90 at its top (D33). With `labels`, each line's angle is
@@ -306,6 +342,37 @@ pub fn grid(c: &mut Canvas, (x, y): (u32, u32), (w, h): (u32, u32), alpha: f32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each pixel of a shrunk picture is its block's mean, rounded; a
+    /// factor under 2 changes nothing. Control: the mean truncated, which
+    /// differs where a block's sum doesn't divide.
+    #[test]
+    fn shrink_takes_each_blocks_rounded_mean() {
+        // 4 × 2, scaled down by 2 to 2 × 1: blocks of (0, 1, 2, 4) and
+        // (10, 10, 10, 11) in every channel.
+        let row0 = [0u8, 1, 10, 10];
+        let row1 = [2u8, 4, 10, 11];
+        let px: Vec<u8> = row0.iter().chain(&row1).flat_map(|&v| [v; 3]).collect();
+        let image = || Image {
+            width: 4,
+            height: 2,
+            pixels: Pixels::Rgb8(px.clone()),
+        };
+        // 7 / 4 rounds to 2; 41 / 4 to 10.
+        let rounded = |p: &Pixels| match p {
+            Pixels::Rgb8(v) if *v == [2, 2, 2, 10, 10, 10] => Ok(()),
+            other => Err(format!("{other:?}")),
+        };
+        let small = shrink(image(), 2);
+        assert_eq!((small.width, small.height), (2, 1));
+        rounded(&small.pixels).unwrap();
+        assert_eq!(shrink(image(), 1).pixels, image().pixels);
+        let truncated: Vec<u8> = [7u8 / 4, 41 / 4].iter().flat_map(|&v| [v; 3]).collect();
+        spherecut_testkit::control::must_fail(
+            "the mean truncated",
+            rounded(&Pixels::Rgb8(truncated)),
+        );
+    }
 
     #[test]
     fn a_sheet_of_24_at_768_has_5_columns() {

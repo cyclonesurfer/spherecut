@@ -1,10 +1,11 @@
 //! Rung 1's camera, far tune, frames and views (M3 plan 4.2, amendment
 //! 5), kept where every rung reaches them: render's `tests/instrument.rs`
-//! (rung 1) takes its camera, tune, frames and views from here and adds
-//! its own scenes, rigs and plants; rung 3 (M3.5) renders this pair
-//! through `render_rig_of` beside the file synth writes of it; and M3.7's
-//! rung 2 takes them too. There is one copy: a change here is a change to
-//! every rung.
+//! (rung 1) takes its camera, tune, frames and views from here, and its
+//! scenes, rigs and plants (render's `tests/common/rung1.rs` and
+//! `attribution.rs`, which M3.7 lifted from it) add to them; rung 3
+//! (M3.5) renders this pair through `render_rig_of` beside the file synth
+//! writes of it; and M3.7's rung 2 takes them too. There is one copy: a
+//! change here is a change to every rung.
 //!
 //! The rig the frames are stitched with isn't here: it is sphere's, of
 //! [`Camera::cal`] under [`Camera::planted`] through the boundary

@@ -638,10 +638,15 @@ pub struct Tune {
     /// By calibration block.
     pub lenses: [LensTune; 2],
     /// The feather's half width h, in degrees: each lens's weight falls
-    /// from 1 to 0 over 90° ± h (the pane's seam width is 2h). 0 to 15,
-    /// and at most max(0, min(θ_max, θ_frame) − 90°) for each lens, so
-    /// that where a lens's min(θ_max, θ_frame) is under 90° only 0 is: a
-    /// hard switch, which makes no hole of its own. 5 by default,
+    /// from 1 to 0 over h either side of where it sees the seam's plane at
+    /// the stitch distance ([`Rig::band_centre`]: 90° + δ_b, δ_b =
+    /// atan(q c_b·a_b), 0 at q = 0 and 3.06° on the X5's baseline at 3.34
+    /// m⁻¹), so the pane's seam width is 2h at every q (the project
+    /// review's F025). 0 to 15, and at most max(0, min(θ_max, θ_frame) −
+    /// 90°) for each lens, so that where a lens's min(θ_max, θ_frame) is
+    /// under 90° only 0 is: a hard switch, which makes no hole of its own.
+    /// That bound has no δ in it: where the band, δ_b further out, would
+    /// pass the mask, [`Rig::feather_at`] shrinks h. 5 by default,
     /// question 3's recommendation.
     pub feather_deg: f64,
     /// The stitch distance as q = 1/D, in m⁻¹: 0 is infinitely far. 0 to
@@ -1021,36 +1026,57 @@ impl Rig {
     }
 
     /// Both lenses' weights for the rig direction `d`, lens b sampled at
-    /// LOD `lod[b]` (6.2): w_b = 1 − smoothstep(90° − h, 90° + h, θ_b) on
-    /// the parallax-corrected ray, 0 past θ_max − margin(λ_b) or where the
-    /// sample's footprint leaves its slot (10.3's frame term), then
-    /// normalised. h shrinks, never below 0.5°, where the margin or the
-    /// frame leaves less overlap than h.
+    /// LOD `lod[b]` (6.2): w_b = 1 − smoothstep(c_b − h_b, c_b + h_b, θ_b)
+    /// on the parallax-corrected ray, about the band's centre c_b
+    /// ([`Rig::band_centre`]) at h_b ([`Rig::feather_at`]), 0 past θ_max −
+    /// margin(λ_b) or where the sample's footprint leaves its slot (10.3's
+    /// frame term), then normalised. h_b shrinks, never below 0.5°, where
+    /// the margin or the frame leaves less room than h past c_b.
     ///
-    /// Where both of those are 0 and a lens covers `d` ([`Rig::covers`]),
-    /// the covering lens with the smaller θ takes `d` whole, at a weight
-    /// of 1, and where both cover it at one θ each takes ½. A lens covers
-    /// at a feathered weight of 0 past 90° + h, and the other lens can
-    /// weigh nothing there too: where the lenses' parallax or a tilt puts
-    /// the seam's plane further past 90° on both than the feather is wide
-    /// (the X5's baseline puts it 0.46° past at q = 0.5 m⁻¹ and 3.1° at
-    /// 3.34), or where one lens's θ_max is so near 90° that its mask ends
-    /// short of the other's band. So the weights sum to 1 wherever a lens
-    /// covers `d`, and both are 0 only where neither does: no direction a
-    /// lens covers is left black. Where one lens alone covers such a
-    /// direction, the rule goes on from the normalised weights, which are
-    /// 1 and 0 at its feather's end already. Where both cover, the picture
-    /// switches from one lens to the other where their θ meet, as a
-    /// feather of 0 switches at 90°; where their h differ and the θ meet
-    /// inside the wider band, the switch falls on that band's end. 10.3's
-    /// WGSL must copy the rule.
+    /// The band is centred where the lens sees the seam's plane, 90° + δ_b
+    /// (the project review's F025): centred on 90° (6.2's text), the band
+    /// where both lenses weigh was 2(h − δ) wide, 3.9° of a 10° band on
+    /// the X5's baseline at q = 3.34 m⁻¹, and at a feather of 0 a ring
+    /// about the seam where both lenses see the plane past 90° was
+    /// weighed by neither. Now it is 2h at every q, measured across the
+    /// seam where the lenses' axes are opposite; a tilt between the axes
+    /// moves one lens's band against the other's around the seam, as it
+    /// did at q = 0.
+    ///
+    /// Where both feathered weights are 0 and a lens covers `d`
+    /// ([`Rig::covers`]), the covering lens nearer its band's centre, by
+    /// θ_b − c_b, takes `d` whole, at a weight of 1, and where both cover
+    /// it equally near each takes ½. Where the two lenses' δ_b are equal,
+    /// as at q = 0 and wherever their centres lie equally far along their
+    /// axes, that is the smaller θ; where they differ, it keeps the
+    /// switch where each lens's own step would put it, so a feather of 0
+    /// switches nowhere but at a band's centre or where the two are
+    /// equally far past theirs. A lens covers at a feathered weight of 0
+    /// past c_b + h_b, and the other lens can weigh nothing there too:
+    /// where a tilt between the axes puts one lens's band beside the
+    /// other's rather than across it (lenses turned apart, or a feather of
+    /// 0 on lenses whose axes miss being opposite), or where one lens's
+    /// θ_max is so near 90° that its mask ends short of the other's band.
+    /// So the weights sum to 1 wherever a lens covers `d`, and both are 0
+    /// only where neither does: no direction a lens covers is left black.
+    /// Where one lens alone covers such a direction, the rule goes on from
+    /// the normalised weights, which are 1 and 0 at its feather's end
+    /// already. Where their h differ and the switch would fall inside the
+    /// wider band, it falls on that band's end, not by θ less h.
+    /// `fs_rig`'s `weigh` (render's `shaders/rig.wgsl`, M3.7) copies the
+    /// rule.
     pub fn weights(&self, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
-        // Each covering lens's θ and its feathered weight.
+        // Each covering lens's θ past its band's centre, and its
+        // feathered weight.
         let lenses = [0, 1].map(|b| {
             self.covers(b, d, lod[b]).then(|| {
                 let theta = off_axis(self.ray(b, d));
+                let centre = self.band_centre(b);
                 let h = self.feather_at(b, lod[b]);
-                (theta, 1.0 - smoothstep(FRAC_PI_2 - h, FRAC_PI_2 + h, theta))
+                (
+                    theta - centre,
+                    1.0 - smoothstep(centre - h, centre + h, theta),
+                )
             })
         });
         let w = lenses.map(|lens| lens.map_or(0.0, |(_, w)| w));
@@ -1058,9 +1084,10 @@ impl Rig {
         if sum > 0.0 {
             return w.map(|w| w / sum);
         }
-        // No feather weighs d: the covering lens nearer its axis takes it.
+        // No feather weighs d: the covering lens nearer its band's centre
+        // takes it.
         match lenses {
-            [Some((theta_0, _)), Some((theta_1, _))] => match theta_0.partial_cmp(&theta_1) {
+            [Some((past_0, _)), Some((past_1, _))] => match past_0.partial_cmp(&past_1) {
                 Some(Ordering::Less) => [1.0, 0.0],
                 Some(Ordering::Greater) => [0.0, 1.0],
                 _ => [0.5; 2],
@@ -1077,8 +1104,8 @@ impl Rig {
     /// with margin(λ) = margin_texels · 2^λ texels about it, inside its
     /// slot. λ is clamped at 0: a negative LOD's footprint is taken as LOD
     /// 0's, which bilinear sampling still reaches. 10.3's text writes the
-    /// margin as margin · 2^λ, unclamped; its WGSL must clamp λ as this
-    /// does.
+    /// margin as margin · 2^λ, unclamped; render's `shaders/rig.wgsl`
+    /// clamps λ as this does (`margin_px`).
     pub fn covers(&self, b: usize, d: DVec3, lod: f64) -> bool {
         let lens = &self.lenses[b];
         let margin = self.margin_px(lod);
@@ -1096,9 +1123,13 @@ impl Rig {
 
     /// The feather's half width lens `b` blends over at LOD `lod`, in
     /// radians (6.2): the rig's h, shrunk where min(θ_max, θ_frame) less
-    /// the margin in angle leaves less than h past 90°, but never below
-    /// 0.5° (nor above h, nor below 0: a feather of 0 or below is a hard
-    /// switch at 90°). The margin's angle is taken at the least slope
+    /// the margin in angle leaves less than h past the band's centre
+    /// ([`Rig::band_centre`], 90° + δ_b), but never below 0.5° (nor above
+    /// h, nor below 0: a feather of 0 or below is a hard switch at the
+    /// band's centre). So h_b = min(h, max(room_b, 0.5°)), not below 0,
+    /// with room_b = min(θ_max, θ_frame) − margin(λ) / band texels per
+    /// radian − c_b: at q > 0 the band sits δ_b further out, and has that
+    /// much less room. The margin's angle is taken at the least slope
     /// from 90° to θ_max ([`RigLens::band_texels_per_radian`]), so that
     /// the band ends inside the mask whether the slope falls towards
     /// θ_max or rises: on a rising one, with θ_frame the bound, the slope
@@ -1106,8 +1137,24 @@ impl Rig {
     pub fn feather_at(&self, b: usize, lod: f64) -> f64 {
         let lens = &self.lenses[b];
         let margin = self.margin_px(lod) / lens.band_texels_per_radian;
-        let room = lens.theta_max.min(lens.theta_frame) - margin - FRAC_PI_2;
+        let room = lens.theta_max.min(lens.theta_frame) - margin - self.band_centre(b);
         self.feather.min(room.max(MIN_FEATHER)).max(0.0)
+    }
+
+    /// Where lens `b`'s feather is centred, in radians off its axis (6.2,
+    /// the project review's F025): c_b = 90° + δ_b, where δ_b =
+    /// atan(q c_b·a_b) is the angle past 90° at which the lens sees the
+    /// seam's plane, the plane through the rig's origin square to its
+    /// axis a_b, at the stitch distance 1/q, for a centre c_b on that
+    /// axis. A centre off the axis, as the X5's 4.46 mm across the
+    /// baseline puts each lens 2.2 mm, moves where the lens sees that
+    /// plane by about q² (c_b·a_b) |c_b × a_b| (0.02° at 3.34 m⁻¹), with
+    /// the azimuth, and the two lenses' moves cancel across the seam. So
+    /// the band where both lenses weigh is 2h wide at every q. 90° at
+    /// q = 0, 90.46° on the X5's baseline at 0.5 m⁻¹ and 93.06° at 3.34.
+    pub fn band_centre(&self, b: usize) -> f64 {
+        let lens = &self.lenses[b];
+        FRAC_PI_2 + (self.q * (lens.lens_from_rig * lens.centre_m).z).atan()
     }
 
     /// The rig-frame unit direction lens `b` sees at pixel `px` of its
@@ -1121,7 +1168,7 @@ impl Rig {
 
     /// margin(λ) in texels: margin_texels · 2^λ, with λ clamped at 0, so
     /// that a negative LOD's footprint is LOD 0's. 10.3's text doesn't
-    /// clamp λ; its WGSL must, as this does.
+    /// clamp λ; `shaders/rig.wgsl`'s `margin_px` does, as this does.
     fn margin_px(&self, lod: f64) -> f64 {
         self.margin_texels * lod.max(0.0).exp2()
     }
@@ -1269,9 +1316,9 @@ fn off_axis(d: DVec3) -> f64 {
 /// 1 − w's ramp: 0 below `lo`, 1 above `hi`, Hermite's smooth step
 /// between. With `hi` ≤ `lo` it is a step at `lo`, ½ at `lo` itself:
 /// [`Rig::feather_at`] gives no h below 0, so a feather of 0 or below is a
-/// hard switch at 90° that gives each lens ½ on the edge. 10.3's WGSL must
-/// take that case apart, since WGSL's `smoothstep` is undefined when its
-/// edges meet.
+/// hard switch at the band's centre that gives each lens ½ on the edge.
+/// render's `shaders/rig.wgsl` takes that case apart (`feathered`), since
+/// WGSL's `smoothstep` is undefined when its edges meet.
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
     if hi <= lo {
         return match x.partial_cmp(&lo) {

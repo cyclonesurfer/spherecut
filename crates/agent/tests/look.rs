@@ -8,16 +8,29 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use spherecut_agent::error::codes;
-use spherecut_agent::limits::{JPEG_QSCALE, JPEG_QSCALE_MAX, MAX_IMAGE_BUDGET};
+use spherecut_agent::limits::{JPEG_QSCALE, JPEG_QSCALE_MAX, MAX_IMAGE_BUDGET, MIN_TILE_WIDTH};
 use spherecut_agent::rpc::{CallCx, Image, Tools};
+use spherecut_agent::still::{self, Options, PairOptions, Still};
 use spherecut_agent::tools::Spherecut;
 use spherecut_agent::{Roots, ToolError};
+use spherecut_core::TimeSpec;
+use spherecut_core::cancel::StopSource;
+use spherecut_media::Source;
+use spherecut_media::backend::SeekMode;
+use spherecut_render::compare::sample_diff;
+use spherecut_render::{AdapterChoice, Depth, Filter, OutKind, Pixels, ViewParams};
+use spherecut_sphere::orient::Ypr;
+use spherecut_sphere::perspective::{Lens, Projection as LensProjection};
+use spherecut_synth::insv::{InsvFault, InsvSpec, write_insv};
+use spherecut_synth::lens::{compose, x5_like, x5_like_planted};
 use spherecut_synth::media::{self, Codec, Spec};
 use spherecut_synth::{AXIS_MARKERS, RgbImage, decode_frame_code};
+use spherecut_testkit::control::must_fail;
 
 /// The test's own directory, removed with what it holds when dropped.
 struct TempDir(PathBuf);
@@ -93,7 +106,7 @@ fn px(img: &image::RgbImage, x: u32, y: u32) -> [f64; 3] {
 }
 
 fn far(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f64::max)
+    (0..3).map(|c| sample_diff(a[c], b[c])).fold(0.0, f64::max)
 }
 
 /// Tile `t`'s picture: `[x, y, w, h]`.
@@ -334,6 +347,411 @@ fn a_file_that_isnt_equirect_is_seen_raw() {
     )
     .unwrap();
     assert_eq!(r["tiles"][0]["time"]["frame"], 4);
+}
+
+// A camera's pair of lenses (M3.7).
+
+/// The name of a run's folder of `.insv` files, before its process's id.
+const RUN: &str = "look-insv-";
+
+/// The `.insv` files the pair's tests look at, in a folder of this
+/// binary's kept for the run.
+struct Insv {
+    dir: PathBuf,
+    /// `InsvSpec::small()`'s at 2 frames: two 384² lenses whose
+    /// calibration reads.
+    small: PathBuf,
+    /// Two 128² lenses, 2 frames, with no calibration
+    /// (`InsvFault::NoCalibration`).
+    uncalibrated: PathBuf,
+}
+
+impl Insv {
+    /// The tools, reading under the folder, with room inline for a PNG.
+    fn tools(&self) -> Spherecut {
+        Spherecut::new(Roots::new(std::slice::from_ref(&self.dir), None).unwrap())
+            .image_budget(MAX_IMAGE_BUDGET)
+    }
+}
+
+/// Both files, written once a binary, side by side, into a folder whose
+/// name ends in this process's id; the folders of runs that have ended go
+/// first, so that they don't pile up.
+fn insv() -> &'static Insv {
+    static FILES: OnceLock<Insv> = OnceLock::new();
+    FILES.get_or_init(|| {
+        let began = Instant::now();
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        sweep(root);
+        let dir = root.join(format!("{RUN}{}", std::process::id()));
+        let specs = [
+            InsvSpec {
+                frames: 2,
+                ..InsvSpec::small()
+            },
+            InsvSpec {
+                frames: 2,
+                fault: Some(InsvFault::NoCalibration),
+                rig: compose(&x5_like(), &x5_like_planted(), 0, [128; 2]),
+                ..InsvSpec::small()
+            },
+        ];
+        let [small, uncalibrated] = std::thread::scope(|s| {
+            let dir = &dir;
+            specs
+                .each_ref()
+                .map(|spec| {
+                    let folder = dir.join(if spec.fault.is_some() {
+                        "none"
+                    } else {
+                        "small"
+                    });
+                    s.spawn(move || write_insv(spec, &folder).unwrap().master)
+                })
+                .map(|h| h.join().unwrap())
+        });
+        eprintln!(
+            "the .insv files written in {:.3} s",
+            began.elapsed().as_secs_f64()
+        );
+        Insv {
+            dir,
+            small,
+            uncalibrated,
+        }
+    })
+}
+
+/// Removes each folder in `root` named [`RUN`] and the id of a process
+/// that is no longer running.
+fn sweep(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(RUN))
+            .and_then(|p| p.parse::<u32>().ok());
+        if let Some(pid) = pid
+            && !Path::new(&format!("/proc/{pid}")).exists()
+        {
+            std::fs::remove_dir_all(e.path()).ok();
+        }
+    }
+}
+
+/// A look at a file and its first tile: the tile's picture, its rect and
+/// the result.
+type Looked = (Vec<u8>, [u32; 4], Value);
+
+/// look at `file` as PNG at frame 0, with `extra`'s arguments.
+fn look_at(file: &Path, extra: Value) -> Looked {
+    let mut args = json!({"file": file, "format": "png", "times": ["0f"]});
+    args.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    let (r, images) = look(&insv().tools(), args).unwrap();
+    let t = r["tiles"][0].clone();
+    (picture_of(&png(&images), &t), rect(&t), r)
+}
+
+/// look at `InsvSpec::small()`'s file in mode view at +X (yaw 90, the
+/// seam's side), 256 pixels wide, once a binary: the stitch test's check
+/// and the uncalibrated test's control.
+fn small_at_x() -> &'static Looked {
+    static LOOKED: OnceLock<Looked> = OnceLock::new();
+    LOOKED.get_or_init(|| look_at(&insv().small, json!({"view": {"yaw": 90}, "size": 256})))
+}
+
+/// Tile `t`'s picture, its pixels' bytes row by row.
+fn picture_of(img: &image::RgbImage, t: &Value) -> Vec<u8> {
+    let [x, y, w, h] = rect(t);
+    (y..y + h)
+        .flat_map(|yy| (x..x + w).flat_map(move |xx| img.get_pixel(xx, yy).0))
+        .collect()
+}
+
+/// An 8-bit render's bytes.
+fn bytes(img: Image8) -> Vec<u8> {
+    match img.pixels {
+        Pixels::Rgb8(p) => p,
+        other => panic!("not 8-bit: {other:?}"),
+    }
+}
+
+type Image8 = spherecut_render::Image;
+
+/// `a` and `b` byte for byte, or how many bytes differ.
+fn same(a: &[u8], b: &[u8]) -> Result<(), String> {
+    let differ = a.iter().zip(b).filter(|(x, y)| x != y).count();
+    if a.len() == b.len() && differ == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "{differ} of {} bytes differ ({} beside {})",
+            a.len(),
+            a.len(),
+            b.len()
+        ))
+    }
+}
+
+/// A pixel no lens covered is black: none of its channels above this.
+const DARK: u8 = 8;
+
+/// That every pixel lit in `truth` is lit in `seen`, both `w` wide.
+fn lit_where(truth: &[u8], seen: &[u8], w: u32) -> Result<(), String> {
+    let lit = |p: &[u8]| p.iter().any(|&c| c > DARK);
+    let dark: Vec<(usize, usize)> = truth
+        .chunks(3)
+        .zip(seen.chunks(3))
+        .enumerate()
+        .filter(|(_, (t, s))| lit(t) && !lit(s))
+        .map(|(i, _)| (i % w as usize, i / w as usize))
+        .collect();
+    match dark.first() {
+        None => Ok(()),
+        Some(at) => Err(format!("{} pixels dark, the first at {at:?}", dark.len())),
+    }
+}
+
+/// `src`, `sw` × `sh`, scaled to `w` × `h` by area: each pixel the mean
+/// of the source's over its footprint, each source pixel weighed by how
+/// much of it lies there.
+fn by_area(src: &[u8], (sw, sh): (u32, u32), (w, h): (u32, u32)) -> Vec<u8> {
+    let (fx, fy) = (f64::from(sw) / f64::from(w), f64::from(sh) / f64::from(h));
+    // The source pixels a span covers, with how much of each.
+    let span = |i: u32, f: f64, n: u32| -> Vec<(u32, f64)> {
+        let (a, b) = (f64::from(i) * f, f64::from(i + 1) * f);
+        (a.floor() as u32..(b.ceil() as u32).min(n))
+            .map(|k| (k, (b.min(f64::from(k + 1)) - a.max(f64::from(k))).max(0.0)))
+            .collect()
+    };
+    let mut out = Vec::with_capacity((w * h * 3) as usize);
+    for y in 0..h {
+        let rows = span(y, fy, sh);
+        for x in 0..w {
+            let cols = span(x, fx, sw);
+            let mut sum = [0.0; 3];
+            let mut weight = 0.0;
+            for &(yy, wy) in &rows {
+                for &(xx, wx) in &cols {
+                    let i = ((yy * sw + xx) * 3) as usize;
+                    for c in 0..3 {
+                        sum[c] += f64::from(src[i + c]) * wx * wy;
+                    }
+                    weight += wx * wy;
+                }
+            }
+            out.extend(sum.map(|v| (v / weight).round() as u8));
+        }
+    }
+    out
+}
+
+/// look's view at `yaw`, its default fov of 90° across.
+fn view_at(yaw: f64) -> ViewParams {
+    ViewParams::new(
+        Ypr::from_degrees(yaw, 0.0, 0.0).to_quat(),
+        Lens::new(LensProjection::Rectilinear, 90f64.to_radians()),
+    )
+}
+
+/// The whole sphere as equirect, yaw 0 at the centre.
+fn equirect() -> ViewParams {
+    ViewParams {
+        out: OutKind::Equirect,
+        ..view_at(0.0)
+    }
+}
+
+/// How look renders a tile.
+const LOOK: still::Look = still::Look {
+    draw: still::Draw::View,
+    filter: Filter::Isotropic,
+    depth: Depth::Eight,
+};
+
+/// `look` at a calibrated `.insv` stitches its lens pair on the GPU,
+/// in this process as `Still::open_pair` and `StillPair::render` do:
+/// mode view at +X (yaw 90, the seam's side) is byte for byte their
+/// render at the tile's size; and a sphere tile under 160 pixels wide is
+/// rendered at 160 or more and scaled down (amendment 5), so that every
+/// pixel lit in the 160-pixel stitch scaled down by area is lit in it.
+/// Controls: assume_equirect's tile, the file read as one equirect,
+/// differs; and the stitch rendered at the tile's own width leaves
+/// pixels at the seam that no lens covers.
+#[test]
+fn look_stitches_an_insv() {
+    let began = Instant::now();
+    let files = insv();
+    let gpu = still::gpu(
+        &AdapterChoice::from_env().unwrap_or(AdapterChoice::Auto),
+        &Options::default(),
+    )
+    .unwrap();
+    let source = StopSource::new();
+    let stop = still::Stop::of(&source);
+    let src = Source::path(&files.small);
+    let report = still::probe_report(src, &stop).unwrap();
+    let mut pair = Still::open_pair(
+        src,
+        &report,
+        Some(&gpu),
+        &Options::default(),
+        &PairOptions::default(),
+        &stop,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let d = pair
+        .seek(TimeSpec::Frame(0), SeekMode::Exact, &mut Vec::new())
+        .unwrap();
+
+    let ask = |extra: Value| look_at(&files.small, extra);
+    let (tile, [_, _, w, h], r) = small_at_x();
+    assert_eq!(r["tiles"][0]["view"]["yaw"], 90.0, "{r}");
+    let stitched = bytes(pair.render(&d, &[view_at(90.0)], (*w, *h), LOOK).unwrap());
+    same(tile, &stitched).unwrap();
+    let (flat, ..) = ask(json!({"view": {"yaw": 90}, "size": 256, "assume_equirect": true}));
+    must_fail("assume_equirect's tile", same(&flat, &stitched));
+
+    let (tile, [_, _, w, h], r) = ask(json!({"mode": "sphere", "size": 128}));
+    assert!(
+        (MIN_TILE_WIDTH..160).contains(&w),
+        "a sphere tile {w} wide: {r}"
+    );
+    let wide = bytes(pair.render(&d, &[equirect()], (160, 80), LOOK).unwrap());
+    let truth = by_area(&wide, (160, 80), (w, h));
+    lit_where(&truth, &tile, w).unwrap();
+    let own = bytes(pair.render(&d, &[equirect()], (w, h), LOOK).unwrap());
+    must_fail(
+        "the stitch at the tile's own width",
+        lit_where(&truth, &own, w),
+    );
+    eprintln!(
+        "look_stitches_an_insv: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// That `r` shows a file as its two lenses, raw: a tile for each of its
+/// two video streams, as coded, and the warning that says why.
+fn shown_as_lenses(r: &Value) -> Result<(), String> {
+    shown_as_lenses_at(r, 1)
+}
+
+/// `shown_as_lenses` at each of `times` times.
+fn shown_as_lenses_at(r: &Value, times: usize) -> Result<(), String> {
+    let streams: Vec<&Value> = r["tiles"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|t| &t["stream"])
+        .collect();
+    let lenses = [json!(0), json!(1)];
+    let expected: Vec<&Value> = lenses.iter().cycle().take(2 * times).collect();
+    let warned = r["warnings"].as_array().is_some_and(|w| {
+        w.iter().any(|w| {
+            w["code"] == "no_calibration"
+                && w["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("no calibration: shown as its lenses"))
+        })
+    });
+    if streams == expected && warned {
+        Ok(())
+    } else {
+        Err(format!("streams {streams:?}, warned {warned}: {r}"))
+    }
+}
+
+/// `look` at an `.insv` with no calibration, in mode view, shows its two
+/// lenses' tracks side by side as mode raw shows them, with the
+/// `no_calibration` warning "no calibration: shown as its lenses".
+/// Control: `InsvSpec::small()`'s file, whose calibration reads, isn't
+/// shown so in mode view (the stitch test's look at +X).
+#[test]
+fn look_shows_an_uncalibrated_insv_as_lenses() {
+    let began = Instant::now();
+    let tools = insv().tools();
+    let at = |extra: Value| {
+        let mut args =
+            json!({"file": insv().uncalibrated, "format": "png", "size": 256, "times": ["1f"]});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        look(&tools, args).unwrap()
+    };
+    let (r, images) = at(json!({}));
+    shown_as_lenses(&r).unwrap();
+    let (raw, raw_images) = at(json!({"mode": "raw"}));
+    assert_eq!(r["tiles"], raw["tiles"], "{r}\n{raw}");
+    assert!(png(&images) == png(&raw_images), "not raw's picture");
+    must_fail("small()'s file", shown_as_lenses(&small_at_x().2));
+    eprintln!(
+        "look_shows_an_uncalibrated_insv_as_lenses: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// That `got` refuses a look as more tiles than an image holds because
+/// the file is shown as its two lenses, blamed on `arg`: `out_of_range`,
+/// the 26 tiles and the lenses named, and half `MAX_TILES` times as the
+/// limit.
+fn refused_as_lenses(got: Result<(Value, Vec<Image>), ToolError>, arg: &str) -> Result<(), String> {
+    let e = match got {
+        Ok((r, _)) => {
+            return Err(format!(
+                "{} tiles shown",
+                r["tiles"].as_array().map_or(0, Vec::len)
+            ));
+        }
+        Err(e) => e,
+    };
+    let valid = e.valid.as_deref().unwrap_or("");
+    if e.code == codes::OUT_OF_RANGE
+        && e.argument.as_deref() == Some(arg)
+        && e.message.contains("26 tiles")
+        && e.message.contains("its 2 lenses")
+        && valid.starts_with("12 times at most")
+    {
+        Ok(())
+    } else {
+        Err(format!("{e:?}"))
+    }
+}
+
+/// A look at an `.insv` with no calibration counts the tiles its lenses
+/// draw, two a time, whatever mode was asked (the M3.7 review's N10): a
+/// sheet of 13 times, which the plan takes as 13 tiles, is refused as 26
+/// at `times`, and 13 spread by `count` at `count`, each saying the file
+/// shows as its 2 lenses, 12 times at most. Control: 12 times, 24 tiles,
+/// are shown.
+#[test]
+fn an_uncalibrated_insvs_lenses_count_as_its_tiles() {
+    let began = Instant::now();
+    let tools = insv().tools();
+    let times = |n: usize| -> Vec<&str> { ["0f", "1f"].into_iter().cycle().take(n).collect() };
+    let sheet = |extra: Value| {
+        let mut args = json!({"file": insv().uncalibrated, "mode": "sheet", "size": 1568});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        look(&tools, args)
+    };
+    refused_as_lenses(sheet(json!({"times": times(13)})), "times").unwrap();
+    refused_as_lenses(sheet(json!({"count": 13})), "count").unwrap();
+    let twelve = sheet(json!({"times": times(12)}));
+    let (r, _) = twelve.as_ref().expect("12 times are shown");
+    shown_as_lenses_at(r, 12).unwrap();
+    must_fail("12 times", refused_as_lenses(twelve, "times"));
+    eprintln!(
+        "an_uncalibrated_insvs_lenses_count_as_its_tiles: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
 }
 
 #[test]

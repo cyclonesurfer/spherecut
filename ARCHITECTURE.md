@@ -88,13 +88,13 @@ samples reach it from playback's `audio-decode` thread.
 | `spherecut-boundary` | Test code only, and only ever a dev-dependency (the project review's F137): Pat's X5 calibration as synth's truths (`pats`, parsed from `testkit::pats` by the format notes' token layout with its own code, never camera's parser), and the boundary where synth's lens truth meets sphere's lens maths, field by field (`calibration`, `geometry`, `quarter_turn`, `euler_conv`, `v6_reading`, `lens_model`, and `sphere_rig`, `Rig::build` through them). synth's library shares no code with sphere (M3 plan 4.1 rule 2); this crate depends on both, and synth's `lens_against_sphere`, render's stitching tests, rung 3 and camera's tests share it instead of keeping copies | M3.5 |
 | `spherecut-camera` | Cameras' raw files, read from their bytes with no FFmpeg (D61, and the M3 plan's D62): the Insta360 trailer and its records (`insta360::read_trailer`, `read_record`, under the limits in `insta360::limits`), the metadata record (`parse_metadata`, through the schema-less protobuf walker `pb::Walker`), the thumbnail, IMU span and exposure records, the calibration strings parsed into named tokens and printed back byte for byte (`insta360::calib`), and a recording's files, by name (`companions`) and by bytes (`verify_companion`). Every reader takes `impl Read + Seek` and calls `may_block` first. Since M3.5, the conversion to sphere's rig: the V3 and V6 strings and field 27's window as `sphere::rig::Calibration` (`insta360::to_calibration`, which refuses numbers a rig can't hold with `CameraError::NotCalibration`), the built-in geometry table (`insta360::known::lookup`: for a model and firmware, the conventions its files leave open as `sphere::rig::Geometry` with a status and evidence, and the LRV's half order and the screen side; the X5's row is a placeholder until M3.6's fit, and a firmware or a model the table doesn't list gets it as provisional, saying so), and `insta360::stitching`, both for a file's metadata with the generation field 136 names, the one entry probe and the stitch read. Later, other cameras | M3.2: the types, then its units (a) to (d); M3.5: `to_calibration`, `known`, `stitching` |
 | `spherecut-motion` | IMU ingest, time sync, orientation fusion, stabilization | M4 |
-| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics, and since M3.4 their weighted forms), from testkit so that agent can use it (amendment 2 item 32); for stitching (D65), the CPU reference's stitch of a lens pair (`reference::render_rig`, with debug modes 4 to 7, and `render_rig_of` on a `LensPair` made ready once) and the seam instrument (`seam`: the masks, the strips about the seam, a bin's shifts and the signature with each term's standard error), held to synth's lens pictures by rung 1 and the attribution matrix (`tests/instrument.rs`); later the shader's stitch, the fit and scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare`; M3.4: `seam`, `render_rig` |
+| `spherecut-render` | The wgpu device (Vulkan only), canonical plane textures with area mip chains, the upload path, the projection and encode shaders with colour from `ColorInfo`, headless stills and readback, and the f64 CPU reference the tests hold the GPU to (D31), with the golden images in its tests (D32); for export, equirect output, the output frame, the YUV pass for the encoders, motion blur and a frame's views from the clip's keys (`output`, D49); image comparison (`compare`: PSNR, SSIM, per-pixel difference statistics, and since M3.4 their weighted forms), from testkit so that agent can use it (amendment 2 item 32); for stitching (D65), the CPU reference's stitch of a lens pair (`reference::render_rig`, with debug modes 4 to 7, and `render_rig_of` on a `LensPair` made ready once) and the seam instrument (`seam`: the masks, the strips about the seam, a bin's shifts and the signature with each term's standard error), held to synth's lens pictures by rung 1 and the attribution matrix (`tests/instrument.rs`); since M3.7 the shader's stitch (D66): `shaders/rig.wgsl`'s `fs_rig` and `fs_rig_strip` beside `fs_project`, the rig's uniform (`rig::pack`), a pair through `StillRenderer` (`SourceFrames`, each lens from its own `PlaneSource`) and its strips, and a rig's LOD map (`reference::rig_lod_map`), held to the CPU reference by `tests/rig_shader.rs`, rung 2 and the `dfish_*` goldens; later the fit and scopes | M1 slices 3a and 3b; M2.3; M2.4: `compare`; M3.4: `seam`, `render_rig`; M3.7: `rig`, `fs_rig` |
 | `spherecut-playback` | The headless playback engine (D34), with no UI type: the `Player` the GUI's viewer and the playback benchmarks drive (commands that never wait, `present` once a UI frame, `snapshot`, `events`, shutdown), which the export doesn't: it runs threads of its own (D52); a decode worker per video stream, on a decoder chosen from doctor's checks (`decoder`), with seeks answered from the cache's runs and catch-up; the bounded frame cache (`FrameCache`: decoded frames linked by run, the window ahead of the playhead, eviction and back-pressure) and its budget (`budget`: from `/proc/meminfo` and cgroup v2 limits, or a size given); the GPU slots (`SlotRing`) the upload thread fills and the presenter shows from; the file's audio (`audio`: `DeviceAudio`, which opens the output and the `audio-decode` thread, and the preroll that waits for audio, D35); and the numbers the overlay, the smoke run and the benchmarks read (`PerfStats`); and the frame lock (`lock`, D67): a camera's two lenses, opened with `Player::open_locked`, shown only as pairs of frames at one clip time | M1 slices 5 and 6; M3.8: `lock` |
 | `spherecut-audio` | The audio output (D35): the default device through cpal (PulseAudio's protocol, else ALSA) on the `audio-out` thread, the null output where there is none, the fake device the A/V tests script; the lock-free chunk ring the decoder fills; the callback all three run; and `AudioClock`, the clock video follows. Later mixing, ambisonics and loudness | M1 slice 6; M6 |
 | `spherecut-export` | The export (D52): `Export` runs an `ExportJob`, a project's sequence, on three threads (decode, render through the YUV pass, encode and mux) into a locked temporary file, then one last pass (V2, `SA3D`, the V1 box, the moov first) and section 9's read-back checks before it is put in place; the presets and their bitrates, the software encoders (libx264, libx265, libsvtav1) under a VBV cap, the size estimate and free-space check, audio copied (AAC and PCM cut to the sample), AAC or none; the job handle (progress, cancel, wait, the `Report` with each stage's time) that cli, the app and A2 drive; the VA-API encoders (VBR under the same cap, Mesa's quality level) tried before software, with a restart in software when one fails in its first second, and the decode on VA-API going on in software; the pace an export from the app keeps while the UI is busy (`Pace`, one frame per UI pass) | M2.4; M2.5: VA-API, the order and fallback, the decode path, stage times; M2.7: `Pace` |
 | `spherecut-app` | The GUI (D33, D36): eframe on render's device; the tiles (the viewer beside two rows of tabs: Info, Inspector, Doctor and Files, then Curves and Sphere); the viewer's paint callback, one pixel per pixel; the drag, zoom and projection switch (`view`); transport and scrubbing; the doctor check on a worker and its banners; the player's notices (`notices`); the overlay (`overlay`), the settings and their window (`settings`), the raw view, the smoke run (`smoke`) and the toolkit check's timeline prototype (`proto`, D53); `run`, which the CLI calls with no command; the reframer (M2.6, D54): the open project and its undo history (`doc`), the file work as jobs (each project file opened under its lock with the history beside it, and never saved over a file changed on disk: A2.3, D57), the keyed view and look-around and the output frame (`reframe`), and the timeline strip (`timeline`); and (M2.7, D55) the curve editor (`curves`), the sphere overview (`overview`), the Inspector and look-at targets (`inspector`) and the export window with its job (`export`). `SpherecutApp::ui` takes an egui `Ui` and no eframe type, so kittest drives what eframe runs | M1 slices 7 and 8, M2.6, M2.7 |
-| `spherecut-agent` | Agent integration (D23, D43 to D46, D57 to D59): the MCP server (`rpc`) and its eleven tools with their hand-written schemas and the validator for them (`tools`, `schema`, `ops`): probe, look, analyze, check and doctor (A1), then project, edit, undo, render, job and compare (A2), of which `spherecut call` runs all but render and job (`CALL_REFUSES`); the roots (`roots`), every limit an agent is held to (`limits`), a tool's failure with its code (`error`) and text from media files made safe to hand on (`text`); the JSON contract of `--json` (`contract`, D27); frame's core that look renders through (`still`), and since M3.5 a camera's pair opened, sought and stitched on the CPU reference (`Still::open_pair`, `StillPair`, by `pair_stitching`'s calibration and geometry), which `frame --reference` stitches through, look's canvas and font (`image`, `font`), the instructions and the skill; A2's project ops (`ops::project`, `ops::edit`, `reference`), render jobs (`jobs`, `ops::render`, `ops::job`), and a project's frames for compare, look and check (`ops::sequence`, `ops::compare`); since M3.2, what `doctor --file` says of a camera's file (`doctor_file`) and a recording's files grouped by camera's naming rule (`ops::clips`); since M3.9, schema 2's sources: `project create` and `edit`'s `add_media` make a camera's file a `dual_fisheye` source (media's `camera_source`), `set_source`'s camera form takes the calibration from the file (`calibration_mismatch` when a source sent whole isn't the file's), `set_stitch` and `set_caps`, the summary's `source`, `warnings` on every tool's result (F049), media named by id in errors (F051), and `not_yet` for a project of a camera's pair in look, compare, check and render until M3.11; later the GUI attach bridge | A1, A2; M3.2: `doctor_file`; M3.5: `Still::open_pair`; M3.9: the camera form, `calibration_mismatch`, `warnings` on every result, `not_yet` |
-| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it; since M3.5 `--projection equirect`, and a camera's pair stitched under `--reference` with `--geometry`, `--stitch-distance` and `--seam`, or one lens raw with `--lens`), `render` (a project's export, one envelope a line, D51; a project of a camera's pair is refused `not_yet` until M3.11, as `frame --project` refuses it), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project`; M3.5: frame on a camera's pair; M3.9: `not_yet` and `provisional_geometry` in `render` and `frame --project` |
+| `spherecut-agent` | Agent integration (D23, D43 to D46, D57 to D59): the MCP server (`rpc`) and its eleven tools with their hand-written schemas and the validator for them (`tools`, `schema`, `ops`): probe, look, analyze, check and doctor (A1), then project, edit, undo, render, job and compare (A2), of which `spherecut call` runs all but render and job (`CALL_REFUSES`); the roots (`roots`), every limit an agent is held to (`limits`), a tool's failure with its code (`error`) and text from media files made safe to hand on (`text`); the JSON contract of `--json` (`contract`, D27); frame's core that look renders through (`still`), and since M3.5 a camera's pair opened, sought and stitched (`Still::open_pair`, `StillPair`, by `pair_stitching`'s calibration and geometry): on the GPU since M3.7, each lens decoded as `Still::open` decodes one stream (two copy-outs under path B, two imports under zero copy, the bytes otherwise) and drawn through `StillRenderer`'s pair, or on the CPU reference with no GPU, which `frame` and, since M3.7, `look` stitch through (`look` decodes by the copy path alone: it has no zero copy), look's canvas and font (`image`, `font`), the instructions and the skill; A2's project ops (`ops::project`, `ops::edit`, `reference`), render jobs (`jobs`, `ops::render`, `ops::job`), and a project's frames for compare, look and check (`ops::sequence`, `ops::compare`); since M3.2, what `doctor --file` says of a camera's file (`doctor_file`) and a recording's files grouped by camera's naming rule (`ops::clips`); since M3.9, schema 2's sources: `project create` and `edit`'s `add_media` make a camera's file a `dual_fisheye` source (media's `camera_source`), `set_source`'s camera form takes the calibration from the file (`calibration_mismatch` when a source sent whole isn't the file's), `set_stitch` and `set_caps`, the summary's `source`, `warnings` on every tool's result (F049), media named by id in errors (F051), and `not_yet` for a project of a camera's pair in look, compare, check and render until M3.11; later the GUI attach bridge | A1, A2; M3.2: `doctor_file`; M3.5: `Still::open_pair`; M3.9: the camera form, `calibration_mismatch`, `warnings` on every result, `not_yet`; M3.7: the pair on the GPU, `look` at a camera's file |
+| `spherecut-cli` | The `spherecut` binary: the GUI with no command (slice 7), `probe`, `doctor`, `frame` (and `frame --project`, a sequence's frame as the export renders it; since M3.5 `--projection equirect`, and a camera's pair stitched with `--geometry`, `--stitch-distance` and `--seam`, on the GPU since M3.7 or on the CPU under `--reference`, or one lens raw with `--lens`), `render` (a project's export, one envelope a line, D51; a project of a camera's pair is refused `not_yet` until M3.11, as `frame --project` refuses it), `mcp`, `call` and `agents install-skill` (A1). Its library half re-exports `spherecut_agent::contract` as `contract` | M0: `probe`, `doctor`; M1: the JSON contract; slice 4: `frame`; slice 7: the GUI; A1: `mcp`, `call`, `agents install-skill`; M2.5: `render`, `frame --project`; M3.5: frame on a camera's pair; M3.9: `not_yet` and `provisional_geometry` in `render` and `frame --project`; M3.7: frame's pair on the GPU |
 | `xtask` | `check`, `compat` (clippy and a link of the tests against other FFmpeg builds, and Tier 1 against one, D2), `gen-media`, `hw-test` | M0; `compat` from 2026-10-24 |
 
 Crates are created when they get real content, not as empty shells. The
@@ -476,10 +476,11 @@ tools reuse its codes.
 
 `crates/cli/src/frame.rs` renders one frame of a stitched equirect into
 a PNG (M1 plan section 5, D27), in the plan's order; since M3.5 also a
-camera's pair of lenses, stitched on the CPU (below). Steps 4 to 8 are
-`spherecut_agent::still`'s since A1.4, so that the agent's `look` renders
-its tiles the way frame does and frame's tests cover that path; frame
-keeps its flags, its output file, SIGINT and its JSON:
+camera's pair of lenses, stitched on the GPU since M3.7, or on the CPU
+under `--reference` (below). Steps 4 to 8 are `spherecut_agent::still`'s
+since A1.4, so that the agent's `look` renders its tiles the way frame
+does and frame's tests cover that path; frame keeps its flags, its
+output file, SIGINT and its JSON:
 
 1. clap parses the flags, `--time` through `core::TimeSpec` (exact
    decimals, `m:s` and `h:m:s`, rationals, `Nf`), and
@@ -507,19 +508,25 @@ keeps its flags, its output file, SIGINT and its JSON:
    what it is) unless `--equirect` (which a project's clip implies);
    probe's damage becomes warnings, and so do its `bad_trailer`
    warnings. A camera's pair (layout `insta360_dual_fisheye`, without
-   `--equirect`, `--stream` or `--project`) is refused so too, the
-   message saying that `--reference` stitches it and that the GPU's
-   stitch arrives in M3.7; under `--reference` it leaves this list for
-   `Job::run_pair` (a pair decodes in software until M3.7, so
-   `--decoder vaapi` or `vulkan` is `usage` first): `Still::open_pair`
-   with `PairOptions` from the flags
+   `--equirect`, `--stream` or `--project`) leaves this list for
+   `Job::run_pair`: `still::check_pair` first, so that a pair that can't
+   be stitched is refused before any GPU is opened (on a host with no
+   GPU too), the GPU of step 5 unless `--reference`, then
+   `Still::open_pair` with the GPU, the decoder `--decoder` names (each
+   lens decoded as any stream is, under `--reference` too, and a decoder
+   that isn't there `hw_unavailable`, exit 3), `--zero-copy`'s imports
+   or path B's copies, and `PairOptions` from the flags
    (`--geometry` applied over `still::pair_stitching`'s entry, the
    tune's q from `--stitch-distance`, `--seam`'s `RigDebug`), both
-   tracks' exact seek (`StillPair::seek`), `StillPair::render`, then
-   steps 9 and 10 with `result.stitch`. `--lens N` on a pair instead
-   opens track N's stream as an equirect would be opened and draws it
-   flat (`Draw::Coded`) on either renderer. The pair's flags on any
-   other file are `usage`;
+   tracks' exact seek (`StillPair::seek`), `StillPair::render` (on the
+   GPU through `StillRenderer`'s pair, the weights and the seam
+   difference read back linear and coded with no OETF; on the CPU
+   reference under `--reference`), then steps 9 and 10 with
+   `result.stitch`. A pair that can't be stitched (no calibration, or
+   one that can't be read) is `not_equirect`, with `--lens 0|1`'s
+   hint. `--lens N` on a pair instead opens track N's stream as an
+   equirect would be opened and draws it flat (`Draw::Coded`) on either
+   renderer. The pair's flags on any other file are `usage`;
 5. `Gpu::headless` takes the adapter `--adapter` (or
    `SPHERECUT_ADAPTER`) names and checks `--size` against its limit,
    unless `--reference` renders on the CPU;
@@ -581,12 +588,17 @@ shell. The crate has no `unsafe`.
   call, made again if lost), draws the tiles and their labels on an RGB
   canvas (`image`, with the 8×8 public-domain font in `font`), and
   encodes it as JPEG (`media::encode_jpeg`) or PNG within the image
-  budget. doctor with a file opens it the same way and reports the
-  decode path look gets. analyze (D46) cuts a stretch into buckets
-  whose edges are fractions: `timing` reads the stream's packets
-  (`media::packets`) without decoding, `motion` decodes through `still`
-  as look does and compares each frame's 64×32 luma with the last, and
-  `audio` decodes every channel at the stream's rate
+  budget. Since M3.7 a camera's pair whose calibration reads opens as
+  `frame` opens it (`Still::open_pair` on look's GPU), and every mode
+  but raw draws the GPU's stitch, a stitched equirect tile under 160 px
+  wide rendered a whole number of times larger and scaled down by area
+  (`image::shrink`); a pair without a calibration is shown as its
+  lenses, with `no_calibration`. doctor with a file opens it the same
+  way and reports the decode path look gets. analyze (D46) cuts a
+  stretch into buckets whose edges are fractions: `timing` reads the
+  stream's packets (`media::packets`) without decoding, `motion` decodes
+  through `still` as look does and compares each frame's 64×32 luma with
+  the last, and `audio` decodes every channel at the stream's rate
   (`FfmpegAudio::open_raw`) on the video's clip time. Each stops at a
   bucket's end before the deadline and says where to go on from. check
   (D46) reads only probe's report: rules that always run (nothing
@@ -713,7 +725,8 @@ All stored time is exact (`spherecut_core::time`):
 
 Built in M1 slice 3 for equirect sources (`spherecut-render`, DECISIONS
 D31; the golden images that hold it, D32, are under Testing tiers);
-stitching and stabilization join the same pass later.
+since M3.7 a camera's lens pair is stitched in the same pass (D66), and
+stabilization joins it in M4.
 
 ```
 VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ LinearTarget ──Encoder──▶ screen or Rgba8Unorm
@@ -765,25 +778,43 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   from a DMA-BUF at that size. `Uploader::upload_imported` copies the
   8-bit planes GPU to GPU into the slot's level 0 and runs deep ones
   through the ingest pass, then the mips, as `upload` does. Each frame
-  is imported afresh, and the caller keeps the frame until the GPU work
-  that read it is done. Path B: `render::vkshare` opens the device
-  shared, planning a decode queue and two compute queues wgpu never
-  uses, one FFmpeg's and one its `Copier`'s. The copier copies a Vulkan
-  Video frame's planes, under FFmpeg's frame lock and its timeline
-  semaphore, into a buffer of its own; `Copier::order_before` makes
-  wgpu's next submission wait for the copy, and
-  `Uploader::upload_from_buffer` fills the slot from the buffer as the
-  copy path does from its staging. What a device needs to be shared (its
-  extensions, Vulkan 1.3, a decode family and a compute family with two
-  queues besides wgpu's) is planned by `core::vkplan`, which media's
-  doctor uses too, so that doctor's `shared_decode` is the renderer's
-  answer (slice 9).
-* **`Projector::record`** draws a slot through a `ViewParams`
-  (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
-  the lens, rotated into the world, its equirect uv, an LOD from central
-  differences of the direction, a trilinear (or anisotropic) tap of each
-  plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
-  `Filter` and `DebugMode` and are built on first use.
+  is imported afresh; `Importer::import` gives an `Imported` handle that
+  borrows the frame, so the frame outlives the handle (F120), and the
+  caller keeps the frame until the GPU work that read it is done (a
+  pair's still holds both lenses' imports until its render is done).
+  Path B: `render::vkshare` opens the device shared, planning a decode
+  queue and two compute queues wgpu never uses, one FFmpeg's and one its
+  `Copier`'s. The copier copies a Vulkan Video frame's planes, under
+  FFmpeg's frame lock and its timeline semaphore, into a buffer of its
+  own; `Copier::order_before` makes wgpu's next submission wait for the
+  copy, and `Uploader::upload_from_buffer` fills the slot from the
+  buffer as the copy path does from its staging. What a device needs to
+  be shared (its extensions, Vulkan 1.3, a decode family and a compute
+  family with two queues besides wgpu's) is planned by `core::vkplan`,
+  which media's doctor uses too, so that doctor's `shared_decode` is the
+  renderer's answer (slice 9).
+* **`Projector::record`** draws a `SourceRef` through a `ViewParams`
+  (orientation and `Lens`) into a `LinearTarget`: one equirect frame's
+  slot, or since M3.7 a lens pair's two slots, by track, with the rig
+  they are stitched by (the stitch on the GPU, below). For an equirect,
+  per pixel a ray from the lens, rotated into the world, its equirect
+  uv, an LOD from central differences of the direction, a trilinear (or
+  anisotropic) tap of each plane, and the 3×4 colour matrix and the
+  sRGB EOTF. Pipelines are keyed by `Filter`, `DebugMode`, pass
+  (project, flat or strip) and `SourceKind` (`Equirect` or `Rig`), and
+  built on first use or ahead of a draw (`prepare`, `prepare_flat`,
+  `prepare_rig`, `prepare_strip`), outside the map's lock. An equirect's
+  draw binds the view (group 0), its slot (group 1) and the sampler
+  (group 2), as before M3.7; a pair's binds the view with the rig at
+  binding 1 (each `LinearTarget`'s `rig_group`), block 0's slot, the
+  sampler with the caps uniform and a cap texture
+  (`layouts::sampler_caps`: until M3.20 one of the projector's four
+  caps-off groups) and block 1's slot (group 3). `record` refuses a
+  debug mode the source has no form for (4 to 7 with an equirect
+  frame), and a pair whose rig doesn't read tracks 0 and 1, one each,
+  or was packed for slots of other sizes than those bound.
+  `Projector::record_strip` is the strip pass (`fs_rig_strip`): one lens
+  of a pair unwrapped about the seam on `StripSpec::dir`'s grid.
   `Projector::record_flat_unchecked` is the flat pass (`fs_flat`, slice
   8): the picture's own texels through the clamp sampler, for the raw
   view and `StillOptions.flat`, against `reference::render_flat`.
@@ -798,7 +829,17 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   at an origin, for egui's frame (slice 7) or an offscreen texture.
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the
-  encode pass, 16-bit or linear from the linear target.
+  encode pass, 16-bit or linear from the linear target. `StillRenderer`
+  keeps a slot for each of a pair's tracks, and since M3.7 its
+  `render_blurred` and `render_yuv` (below) take `SourceFrames`: one
+  frame (`One`), or a lens pair with its `Rig` and the frame's gains
+  (`Pair`), each picture a `LensFrame`, its frame and where its planes
+  come from (`PlaneSource`: the frame's bytes, `Imported` textures, or
+  path B's `Buffer`). A pair is packed before any upload, and each lens
+  goes whole into its track's slot by its own path. `render`,
+  `render_imported` and `render_copied` stay one-frame wrappers, and
+  `strips` draws both blocks' strips through the strip pass, with
+  `seam::strip_coverage`'s validity.
 * **For export** *(M2.3, D49)*: a `ViewParams` also says what it
   renders (`out`: the lens, or the whole sphere as equirect, turned by
   its orientation) and may be framed (`Framing`: the lens spans a
@@ -819,16 +860,31 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   tests compare the two on lavapipe.
 * **The stitch on the CPU** *(M3.4, D65)*: `reference::render_rig`
   stitches a lens pair through a `sphere::rig::Rig` in f64, as the
-  shader will (M3.7): for each lens the parallax-corrected ray, a
+  shader does since M3.7: for each lens the parallax-corrected ray, a
   footprint from the pixel's own rays and its LOD, the mask, trilinear
   taps, the lens's gain in linear light, and the blend by the rig's
-  weights. The weights sum to 1 wherever a lens covers: where no
-  feather weighs a direction that a lens covers, the covering lens with
-  the smaller θ takes it whole (`Rig::weights`, D63's note of
-  2026-11-10), so the stitch is black only where no lens covers, and
-  the shader has to copy the rule. `RigDebug` writes a lens alone, the
-  weights or the seam difference instead (the plan's debug modes 4 to
-  7).
+  weights. Each lens's band is centred where it sees the seam, at c_b =
+  90° + δ_b (F025, D64's note of 2026-11-14). The weights sum to 1
+  wherever a lens covers: where no feather weighs a direction that a
+  lens covers, the covering lens nearer its band's centre, by θ_b − c_b,
+  takes it whole, ½ each at a tie (the smaller θ where δ_0 = δ_1;
+  `Rig::weights`, D63's note of 2026-11-10 and D64's of 2026-11-14), so
+  the stitch is black only where no lens covers, and `fs_rig`'s `weigh`
+  copies the rule. `RigDebug` writes a lens alone, the weights or the
+  seam difference instead (the plan's debug modes 4 to 7).
+* **The stitch on the GPU** *(M3.7, D66)*: `shaders/rig.wgsl`, appended
+  to `project.wgsl` in one module (`layouts::PROJECT_WGSL`), adds
+  `fs_rig`, which copies `render_rig` as built, and `fs_rig_strip`, one
+  lens unwrapped about the seam (`ViewUniform::strip`), beside
+  `fs_project` and `fs_flat`. `render::rig::pack` is the one place a
+  `Rig`'s f64 numbers become the shader's f32 (`RigUniform`, by
+  calibration block, for the slots' own sizes and with the frame's
+  gains). A pair draws every debug mode (`DebugMode::RIG`): 4 to 7 as
+  `RigDebug` writes them, and 3 the LOD of the lens that weighs more
+  (`reference::rig_lod_map`). `fs_project`'s layout is unchanged and
+  holds no rig global (`fs_project_holds_no_rig_global`). D66 has the
+  uniform's fields, the bind groups, the departures from the plan and
+  the tests.
 * **A pair made ready once** *(M3.4, D65)*: `reference::LensPair` is a
   pair's two pictures with their mip chains in f64, and nothing of a
   rig. `render_rig_of` and `seam::strips_of` take the pair and, with
@@ -845,13 +901,13 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   seam through each lens alone, on `StripSpec::dir`'s grid, and marks a
   sample outside its lens's mask invalid; `strip_coverage` gives those
   marks with no picture sampled, for a strip drawn another way on the
-  same grid (the shader's, M3.7). `bin_shifts` measures in each 5° of
-  azimuth how far one lens's picture sits from the other's (a coarse
-  NCC search, then Lucas–Kanade steps), in degrees, with the bin's
-  2 × 2 information, its NCC, each lens's contrast and the log gains.
-  `signature` fits eight harmonic terms to the bins, each of which a
-  wrong geometry of one kind leaves, and gives each term's standard
-  error. The fit that reads them is M3.6's.
+  same grid (the shader's strip pass since M3.7). `bin_shifts` measures
+  in each 5° of azimuth how far one lens's picture sits from the other's
+  (a coarse NCC search, then Lucas–Kanade steps), in degrees, with the
+  bin's 2 × 2 information, its NCC, each lens's contrast and the log
+  gains. `signature` fits eight harmonic terms to the bins, each of
+  which a wrong geometry of one kind leaves, and gives each term's
+  standard error. The fit that reads them is M3.6's.
 * **What a bin and a term say** *(M3.4, D65)*: a bin is in one of three
   states. It is invalid where it has nothing to measure a shift from,
   and its shift is NaN, never a zero. It is valid without information
@@ -869,13 +925,14 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   `Signature::term_se_deg` tells the two apart. The estimator's floors
   were set on synthetic strips and have met no footage.
 
-What is still planned *(M3 on)*, for every source type: in WGSL, "direction on the
-unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
-fisheye, with the view orientation composed with the stabilization
-rotation, lenses blended across the seam, and the colour pipeline in
-float before the output. Stitching, stabilization and reframing then
-happen in one pass shared by the viewer and the exporter, and an
-intermediate equirect exists only as the output of a 360 export.
+What is still planned *(M3 on)*: the stitch in the viewer (M3.10) and
+the exporter (M3.11); `fs_eac` for the GoPro EAC pair (M3.18); the
+poles' caps (`fs_project_caps` and each media's caps groups, M3.20);
+the view orientation composed with the stabilization rotation (M4);
+and the colour pipeline in float before the output (M7). Stitching,
+stabilization and reframing then happen in one pass shared by the
+viewer and the exporter, and an intermediate equirect exists only as
+the output of a 360 export.
 
 ## Export *(M2.4 and M2.5, D52)*
 
@@ -1504,6 +1561,17 @@ thresholds and every measured number. A source whose planes hash
 otherwise than blessed is reported as "the synthetic source changed",
 never compared as a render.
 
+Since M3.7 the same binary holds the stitch (D66): a lens pair's rows,
+`dfish_seam`'s 8 and `dfish_views`' 9 (the M3 plan's 10.5), each with
+its controls and blessed into a directory of its own
+(`goldens/dfish_seam/`, `goldens/dfish_views/`) with its own manifest,
+and rung 2, the shader's stitch of rung 1's pairs held to rung 1's
+pictures, with floors alone in `goldens/rung2.json`. A pair row's entry
+records `pictures_fnv64`, a hash of every picture and GPU strip it drew,
+which a run from the same source on the driver build that blessed it
+must match; other drivers are held by the thresholds alone. The older
+rows' PNGs and manifest are unchanged.
+
 To bless, after a change meant to move the pictures, or a Mesa update:
 
 ```sh
@@ -1595,11 +1663,20 @@ cores, and twice and four times that on two cores and on one (D65).
 The round trip proves the instrument consistent with synth's camera
 and nothing about a real one; the later rungs (the shader in M3.7, a
 lossless file in M3.5, exports, the viewer, and Pat's footage) take it
-from there. Rung 2 is these planes through the shader. Rung 1's
-camera, far tune, frames and views are `synth::rung`'s (M3.5), which
-`tests/instrument.rs` takes them from, and the boundary and
-`sphere_rig` are in the boundary crate (M3.5, F137): rung 3 and M3.7's
-rung 2 reach both, so every rung's camera is rung 1's. `Scene`,
-`Masks`, the stitches, the ideals and the attribution (`Plant`,
-`Lands`, `attribute_to`, `apart_deg`) stay private to
-`tests/instrument.rs` until M3.7 lifts what rung 2 needs.
+from there. Rung 2 is these planes through the shader: since M3.7 the
+goldens binary's `tests/dfish/rung2.rs` draws rung 1's shots through
+`StillRenderer` from rung 1's pairs and holds them to rung 1's pictures
+by D32's reference rule, with floors in `goldens/rung2.json`, and
+agent's `rung3_gpu_render_equals_rung2` holds the rung 3 file through
+`Still::open_pair` on the GPU to rung 2's render byte for byte. Rung 1's
+camera, far tune, frames and views are `synth::rung`'s (M3.5), and the
+boundary and `sphere_rig` are in the boundary crate (M3.5, F137):
+rung 3 and M3.7's rung 2 reach both, so every rung's camera is rung
+1's. `Scene`, `Masks`, the stitches, the ideals and the scores, with
+the camera's near scene and its rigs and the Kannala–Brandt camera,
+are in render's `tests/common/rung1.rs`, and the attribution (`Plant`,
+`Lands`, `attribute_to`, `apart_deg`) in `tests/common/attribution.rs`:
+M3.7 lifted them from `tests/instrument.rs` for rung 2 to share, moved
+and not copied, and `tests/instrument.rs` holds them to rung 1's floors,
+its band rule and the matrix. Each test binary that takes them renders
+its own pairs, since `RenderCache::shared()` is one process's.

@@ -236,7 +236,8 @@ fn ssim_sums<A: Sample, B: Sample>(
 /// How two images differ pixel by pixel ([`diff_stats`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiffStats {
-    /// The largest difference of any channel, in unit scale.
+    /// The largest difference of any channel, in unit scale: infinite
+    /// where a channel of either image is NaN ([`sample_diff`]).
     pub max: f64,
     /// Where it is, `(x, y)`; `None` for equal images.
     pub worst: Option<(usize, usize)>,
@@ -251,10 +252,22 @@ impl DiffStats {
     pub const LISTED: usize = 16;
 }
 
+/// How far apart two samples are: |a − b|, and infinite where either is
+/// NaN, which no picture holds. Each channel's difference in
+/// [`diff_stats`] is this, and so is a check's that folds differences by
+/// `f64::max`, which passes over a NaN and would read a picture with one
+/// as equal to any other (the project review's F039).
+pub fn sample_diff(a: f64, b: f64) -> f64 {
+    let d = (a - b).abs();
+    if d.is_nan() { f64::INFINITY } else { d }
+}
+
 /// Compare `a` and `b` pixel by pixel: the largest difference and the
 /// pixels with a channel more than `threshold` apart (unit scale, so
 /// `2.0 / 255.0` for two 8-bit steps). For seams and poles, where a line
-/// of wrong pixels barely moves PSNR.
+/// of wrong pixels barely moves PSNR. A channel that is NaN in either
+/// image differs infinitely ([`sample_diff`]), so its pixel is over any
+/// threshold and is the worst unless an earlier one is too.
 pub fn diff_stats<A: Sample, B: Sample>(
     a: View<'_, A>,
     b: View<'_, B>,
@@ -284,7 +297,7 @@ fn diff_stats_where<A: Sample, B: Sample>(
                 continue;
             }
             let (p, q) = (a.rgb(x, y), b.rgb(x, y));
-            let d = (0..3).map(|c| (p[c] - q[c]).abs()).fold(0.0, f64::max);
+            let d = (0..3).map(|c| sample_diff(p[c], q[c])).fold(0.0, f64::max);
             if d > s.max {
                 s.max = d;
                 s.worst = Some((x, y));
@@ -426,7 +439,8 @@ pub fn ssim_weighted<A: Sample, B: Sample>(
 /// [`diff_stats`] over the pixels whose weight is above 0: here the
 /// weights are a mask, since the largest difference and a count of pixels
 /// have no weighted form. `threshold` is in unit scale, as
-/// [`diff_stats`]'s. The weights must be of the images' size.
+/// [`diff_stats`]'s, and a NaN channel of a counted pixel differs
+/// infinitely, as there. The weights must be of the images' size.
 pub fn diff_stats_weighted<A: Sample, B: Sample>(
     a: View<'_, A>,
     b: View<'_, B>,
@@ -571,7 +585,7 @@ mod tests {
     use std::time::Instant;
 
     use proptest::prelude::{Just, Strategy};
-    use spherecut_testkit::control::{at_least, at_most, must_fail};
+    use spherecut_testkit::control::{above, at_least, at_most, must_fail};
 
     use super::*;
 
@@ -725,6 +739,56 @@ mod tests {
         assert!((d.max - 3.0 / 255.0).abs() < 1e-15);
         let d = diff_stats(View::new(8, 4, 3, &a), View::new(8, 4, 3, &b), 1.0 / 255.0).unwrap();
         assert_eq!(d.over, vec![(5, 2), (1, 3)]);
+    }
+
+    /// A NaN in a picture is an infinite difference, never none (the
+    /// project review's F039): a NaN planted in one channel of one pixel
+    /// makes the largest difference infinite, is the worst pixel and the
+    /// one over the threshold, and fails a rule of no channel 0.1 off, in
+    /// the plain and the weighted form alike.
+    #[test]
+    fn a_nan_counts_as_an_infinite_difference() {
+        let (w, h) = (40, 30);
+        let a = scene(w, h);
+        let mut b = a.clone();
+        b[(15 * w + 30) * 3 + 1] = f64::NAN;
+        let (va, vb) = (View::new(w, h, 3, &a), View::new(w, h, 3, &b));
+        let clean = diff_stats(va, va, 0.1).unwrap();
+        assert_eq!(at_most(clean.max, 0.1).passes(), Some(true), "{clean:?}");
+        let ones = vec![1.0; w * h];
+        let all = weights(w, h, &ones);
+        for (form, d) in [
+            ("diff_stats", diff_stats(va, vb, 0.1).unwrap()),
+            (
+                "diff_stats_weighted",
+                diff_stats_weighted(va, vb, &all, 0.1).unwrap(),
+            ),
+        ] {
+            let off = must_fail(
+                &format!("a NaN channel under {form}'s 0.1 channel rule"),
+                at_most(d.max, 0.1),
+            );
+            assert_eq!(off, f64::INFINITY, "{form}: {d:?}");
+            assert_eq!(
+                (d.worst, d.count_over, d.over.as_slice()),
+                (Some((30, 15)), 1, &[(30, 15)][..]),
+                "{form}"
+            );
+        }
+        // Control: the fold the metrics made before F039, by `f64::max`,
+        // which passes over the NaN and reads the pictures as equal.
+        let by_max = (0..w * h)
+            .map(|i| {
+                (0..3)
+                    .map(|c| (a[3 * i + c] - b[3 * i + c]).abs())
+                    .fold(0.0, f64::max)
+            })
+            .fold(0.0, f64::max);
+        let missed = must_fail(
+            "the f64::max fold seeing the NaN past 0.1",
+            above(by_max, 0.1),
+        );
+        assert_eq!(missed, 0.0);
     }
 
     #[test]

@@ -14,10 +14,12 @@
 //! wgpu-hal's import and wrap, and the acquire.
 
 use std::collections::HashMap;
+use std::marker::PhantomData;
+use std::ops::Deref;
 use std::os::fd::BorrowedFd;
 
 use ash::vk;
-use spherecut_core::video::{DmabufLayer, fourcc};
+use spherecut_core::video::{DmabufLayer, VideoPlanes, fourcc};
 
 use crate::error::RenderError;
 use crate::gpu::Gpu;
@@ -169,6 +171,31 @@ pub fn plan(whole: &SlotShape, layers: &[DmabufLayer]) -> Result<Vec<PlaneImport
         .collect()
 }
 
+/// The textures [`Importer::import`] made, one a plane, over the memory of
+/// the frame it borrowed: while this handle lives, the frame does, and
+/// with it the fds and the decoder's surface under them (the project
+/// review's F120). They read as a slice of textures, as
+/// [`Uploader::upload_imported`](crate::Uploader::upload_imported) and
+/// [`StillRenderer::render_imported`](crate::StillRenderer::render_imported)
+/// take them. The borrow is the handle's, not each texture's: a
+/// `wgpu::Texture` is `Clone`, and a clone taken from the slice escapes
+/// it, so a caller keeps no clone of these textures past the handle.
+#[derive(Debug)]
+pub struct Imported<'f> {
+    textures: Vec<wgpu::Texture>,
+    /// The borrow of the frame, which needn't be `Sync` for the textures
+    /// to be sent.
+    frame: PhantomData<&'f ()>,
+}
+
+impl Deref for Imported<'_> {
+    type Target = [wgpu::Texture];
+
+    fn deref(&self) -> &[wgpu::Texture] {
+        &self.textures
+    }
+}
+
 /// Imports planes into one device, remembering what the driver said of
 /// each format and modifier, so it is asked once.
 #[derive(Debug, Default)]
@@ -183,21 +210,66 @@ impl Importer {
     }
 
     /// Imports each plane `planes` holds as a texture of its own over the
-    /// frame's memory, in [`USAGE`], and acquires them from the decoder
-    /// for wgpu's queue in a submission of their own, ahead of anything
-    /// that reads them. A texture holds a dup of its layer's fd. Nothing
-    /// stops the decoder writing the memory again: the caller holds the
-    /// frame until the GPU is done with the work that reads it
+    /// memory of `frame`, the frame whose layers they are, in [`USAGE`],
+    /// and acquires them from the decoder for wgpu's queue in a submission
+    /// of their own, ahead of anything that reads them. A texture holds a
+    /// dup of its layer's fd, but the decoder writes the memory again once
+    /// the frame is let go, so the [`Imported`] handle borrows `frame`: it
+    /// can't be let go while the handle lives. A clone of one of its
+    /// textures escapes the borrow, so the caller keeps none past the
+    /// handle. The GPU may read them after, so the caller holds the frame
+    /// on until the work that reads them is done
     /// (`Queue::on_submitted_work_done`).
     ///
-    /// `Import` when the device can't import or the driver refuses the
-    /// plane's format, modifier or size, with the reason; the copy path
-    /// still takes the frame.
-    pub fn import(
+    /// `Invalid` when a plane isn't one of `frame`'s layers. `Import` when
+    /// the device can't import or the driver refuses the plane's format,
+    /// modifier or size, with the reason; the copy path still takes the
+    /// frame.
+    ///
+    /// The frame outlives the handle:
+    ///
+    /// ```
+    /// # use spherecut_core::video::VideoPlanes;
+    /// # use spherecut_render::dmabuf::{Importer, PlaneImport};
+    /// # use spherecut_render::{Gpu, RenderError};
+    /// fn upload(
+    ///     gpu: &Gpu,
+    ///     frame: Box<dyn VideoPlanes>,
+    ///     planes: &[PlaneImport],
+    /// ) -> Result<(), RenderError> {
+    ///     let textures = Importer::new().import(gpu, frame.as_ref(), planes)?;
+    ///     assert_eq!(textures.len(), planes.len());
+    ///     drop(textures);
+    ///     drop(frame);
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// and a frame let go while the handle lives doesn't compile:
+    ///
+    /// ```compile_fail,E0505
+    /// # use spherecut_core::video::VideoPlanes;
+    /// # use spherecut_render::Gpu;
+    /// # use spherecut_render::dmabuf::{Importer, PlaneImport};
+    /// fn misuse(gpu: &Gpu, frame: Box<dyn VideoPlanes>, planes: &[PlaneImport]) {
+    ///     let textures = Importer::new().import(gpu, frame.as_ref(), planes).unwrap();
+    ///     drop(frame);
+    ///     assert_eq!(textures.len(), planes.len());
+    /// }
+    /// ```
+    pub fn import<'f>(
         &mut self,
         gpu: &Gpu,
+        frame: &'f dyn VideoPlanes,
         planes: &[PlaneImport],
-    ) -> Result<Vec<wgpu::Texture>, RenderError> {
+    ) -> Result<Imported<'f>, RenderError> {
+        let layers = frame.dmabuf().unwrap_or_default();
+        if let Some(i) = planes.iter().position(|p| !layers.contains(&p.layer)) {
+            return Err(RenderError::Invalid(format!(
+                "plane {i} to import isn't one of the frame's {} DMA-BUF layers",
+                layers.len()
+            )));
+        }
         if !gpu.caps.dmabuf_import {
             return Err(RenderError::Import(
                 "this device has no DMA-BUF import (VK_EXT_external_memory_dma_buf and \
@@ -213,7 +285,10 @@ impl Importer {
             })
             .collect::<Result<Vec<_>, RenderError>>()?;
         acquire(gpu, &imported)?;
-        Ok(imported.into_iter().map(|(_, t)| t).collect())
+        Ok(Imported {
+            textures: imported.into_iter().map(|(_, t)| t).collect(),
+            frame: PhantomData,
+        })
     }
 
     /// `Import` unless the driver takes `p`'s format and modifier, as
@@ -396,7 +471,8 @@ fn import_one(gpu: &Gpu, p: &PlaneImport) -> Result<(vk::Image, wgpu::Texture), 
     let l = &p.layer;
     // SAFETY: `plan` takes only fds that aren't negative, and the frame the
     // layer came from holds its fd open while it lives, which is longer
-    // than this call (the caller has the frame).
+    // than this call: `Importer::import` borrows the frame, and found the
+    // layer among its own.
     let fd = unsafe { BorrowedFd::borrow_raw(l.fd) }
         .try_clone_to_owned()
         .map_err(|e| RenderError::Import(format!("duplicating a DMA-BUF's fd: {e}")))?;
@@ -465,7 +541,10 @@ mod tests {
     use super::*;
     use crate::plane::SlotShape;
     use ash::vk::Handle;
-    use spherecut_core::video::{ColorFamily, PixelLayout, PlaneDesc, SampleBytes};
+    use spherecut_core::video::{
+        Assumed, ChromaSiting, ColorCodes, ColorFamily, ColorInfo, Matrix, PixelLayout, PlaneData,
+        PlaneDesc, Primaries, Range, SampleBytes, Transfer,
+    };
 
     fn layout(bytes: SampleBytes) -> PixelLayout {
         let plane = |components, log2_sub| PlaneDesc {
@@ -490,6 +569,57 @@ mod tests {
             offset: 0,
             pitch,
             size,
+        }
+    }
+
+    /// A frame that says the decoder exported it as `layers`, with no
+    /// bytes of its own: what an import borrows.
+    #[derive(Debug)]
+    struct Exported {
+        layout: PixelLayout,
+        size: (u32, u32),
+        color: ColorInfo,
+        layers: Vec<DmabufLayer>,
+    }
+
+    impl Exported {
+        fn new(size: (u32, u32), layers: Vec<DmabufLayer>) -> Exported {
+            Exported {
+                layout: layout(SampleBytes::One),
+                size,
+                color: ColorInfo {
+                    codes: ColorCodes::UNSPECIFIED,
+                    range: Range::Limited,
+                    matrix: Matrix::Bt709,
+                    transfer: Transfer::Sdr,
+                    primaries: Primaries::Bt709,
+                    siting: ChromaSiting::Left,
+                    assumed: Assumed::default(),
+                },
+                layers,
+            }
+        }
+    }
+
+    impl VideoPlanes for Exported {
+        fn layout(&self) -> &PixelLayout {
+            &self.layout
+        }
+
+        fn size(&self) -> (u32, u32) {
+            self.size
+        }
+
+        fn plane(&self, _: usize) -> Option<PlaneData<'_>> {
+            None
+        }
+
+        fn color(&self) -> &ColorInfo {
+            &self.color
+        }
+
+        fn dmabuf(&self) -> Option<&[DmabufLayer]> {
+            Some(&self.layers)
         }
     }
 
@@ -819,24 +949,54 @@ mod tests {
     fn a_device_without_import_says_so() {
         let mut gpu = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
         let shape = SlotShape::of(&layout(SampleBytes::One), (64, 32)).unwrap();
-        let planes = plan(
-            &shape,
-            &[
-                layer(fourcc::R8, (64, 32), 64),
-                layer(fourcc::GR88, (32, 16), 64),
-            ],
-        )
-        .unwrap();
+        let layers = vec![
+            layer(fourcc::R8, (64, 32), 64),
+            layer(fourcc::GR88, (32, 16), 64),
+        ];
+        let planes = plan(&shape, &layers).unwrap();
+        let frame = Exported::new((64, 32), layers);
         // This box's lavapipe has the DMA-BUF extension but not the
         // modifier one, so wgpu doesn't offer the feature (D25); odin's,
         // Mesa 26.2.5's, has both. The refusal is the importer's, so the
         // device here is made one without.
         gpu.caps.dmabuf_import = false;
-        let e = Importer::new().import(&gpu, &planes).unwrap_err();
+        let e = Importer::new().import(&gpu, &frame, &planes).unwrap_err();
         assert!(
             matches!(&e, RenderError::Import(m) if m.contains("no DMA-BUF import")),
             "{e}"
         );
         assert_eq!(e.code(), "import_failed");
+    }
+
+    /// The frame an import borrows is the one whose memory the planes are
+    /// (F120): planes of another frame are refused before anything asks
+    /// the device, whose fds that frame needn't hold open.
+    #[test]
+    fn planes_of_another_frame_are_refused() {
+        let mut gpu = Gpu::headless(&crate::AdapterChoice::Cpu).unwrap();
+        // Nothing here reaches the driver: the layers' fds are made up.
+        gpu.caps.dmabuf_import = false;
+        let shape = SlotShape::of(&layout(SampleBytes::One), (64, 32)).unwrap();
+        let layers = vec![
+            layer(fourcc::R8, (64, 32), 64),
+            layer(fourcc::GR88, (32, 16), 64),
+        ];
+        let planes = plan(&shape, &layers).unwrap();
+        let foreign = |frame: &Exported| {
+            let e = Importer::new()
+                .import(&gpu, frame, &planes)
+                .map(|t| t.len());
+            matches!(&e, Err(RenderError::Invalid(m)) if m.contains("isn't one of the frame's"))
+        };
+        // The same layers on another fd, and a frame not exported at all.
+        let other = Exported::new(
+            (64, 32),
+            layers.iter().map(|l| DmabufLayer { fd: 8, ..*l }).collect(),
+        );
+        assert!(foreign(&other), "another frame's planes");
+        assert!(foreign(&Exported::new((64, 32), Vec::new())), "no layers");
+        // Control: the frame's own planes pass that check, to the device's.
+        let own = Exported::new((64, 32), layers);
+        spherecut_testkit::control::must_fail("the frame's own planes", foreign(&own));
     }
 }

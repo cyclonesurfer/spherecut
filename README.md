@@ -10,13 +10,14 @@ with FFmpeg: in software, or on the GPU through Vulkan Video or VA-API.
 It runs offline: no accounts, no telemetry, no network access.
 
 **Status: early.** M3, stitching a camera's raw files, is under way:
-M3.0 to M3.4 and M3.8 are in, and stitching itself comes with M3.5 and
-later. M0 (foundations) is done. M1 (the viewer) is done, its last
-hardware rows waiting on huginn's run. M2 (reframing and export) has
-all its code in (M2.1 to M2.10); the project format (Pat's call), and
-huginn's 4K30 export row and toolkit check, are open. Track A, the tools
-for AI agents: A1 and A2 are in, waiting on runs with a real agent.
-What works today:
+M3.0 to M3.5 and M3.7 to M3.9 are in: an Insta360 X5's file stitches, on
+the GPU, with a placeholder geometry until M3.6 fits it. M0
+(foundations) is done. M1 (the viewer) is done, its last hardware rows
+waiting on huginn's run. M2 (reframing and export) has all its code in
+(M2.1 to M2.10); the project format (Pat's call), and huginn's 4K30
+export row and toolkit check, are open. Track A, the tools for AI
+agents: A1 and A2 are in, waiting on runs with a real agent. What works
+today:
 
 - `spherecut [file]` opens the viewer: a stitched equirect played on the
   GPU with its audio, looked around by dragging (the point you grab stays
@@ -60,9 +61,9 @@ What works today:
   equirect through a virtual camera (yaw, pitch, roll, field of view,
   rectilinear, fisheye or stereographic, and a morph between two), or
   the whole sphere as an equirect, into a PNG, headless, on the GPU's
-  Vulkan driver or Mesa's lavapipe. With `--reference` it stitches an
-  Insta360 camera's two lenses on the CPU (the GPU's stitch comes in
-  M3.7). The frame is exactly the one asked for, by time or by number.
+  Vulkan driver or Mesa's lavapipe. It stitches an Insta360 camera's
+  two lenses there too, or on the CPU with `--reference`. The frame is
+  exactly the one asked for, by time or by number.
 - `spherecut render <project> -o out.mp4` exports a project's sequence
   as an MP4, encoded on the GPU through VA-API or in software. Every
   export, the window's too, is read back before it is put in place, by
@@ -346,8 +347,8 @@ spherecut frame clip.mp4 -o out.png --overwrite --depth 16 --json
 spherecut frame two-views.mkv -o out.png --stream 2 --equirect   # the video stream FFmpeg numbers 2, rendered as an equirect
 spherecut frame --project trip.spherecut -o out.png --time 2.5   # the sequence at 2.5 s, as render writes it
 spherecut frame clip.mp4 -o out.png --projection equirect --yaw 90 --size 2048x1024   # the whole sphere, turned
-spherecut frame VID_20261022_165829_00_008.insv -o out.png --reference --projection equirect --size 2048x1024 --time 1   # an X5 file, stitched
-spherecut frame VID_20261022_165829_00_008.insv -o out.png --reference --seam weights --projection equirect --size 2048x1024   # where each lens counts
+spherecut frame VID_20261022_165829_00_008.insv -o out.png --projection equirect --size 2048x1024 --time 1   # an X5 file, stitched on the GPU
+spherecut frame VID_20261022_165829_00_008.insv -o out.png --reference --seam weights --projection equirect --size 2048x1024   # where each lens counts, on the CPU
 spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x1024   # lens 1 as it was coded
 ```
 
@@ -374,13 +375,14 @@ spherecut frame VID_20261022_165829_00_008.insv -o out.png --lens 1 --size 1024x
   Stereo files render the left eye, a cropped picture shows black where
   it doesn't cover the sphere, and a pose in the metadata isn't applied
   yet; each says so in a warning.
-- **A camera's two lenses** (an Insta360 `.insv` master): `--reference`
-  stitches them on the CPU with the file's calibration and the
-  geometry Spherecut's table of cameras gives the model, which for the
-  X5 is a placeholder until M3.6 fits it, so seams may show; without
-  `--reference` the run is refused until M3.7 brings the GPU's stitch,
-  and until then the pair decodes in software (`--decoder vaapi` or
-  `vulkan` is refused).
+- **A camera's two lenses** (an Insta360 `.insv` master) are stitched
+  on the GPU with the file's calibration and the geometry Spherecut's
+  table of cameras gives the model, which for the X5 is a placeholder
+  until M3.6 fits it, so seams may show; `--reference` stitches them on
+  the CPU instead. Both lenses decode as any file's stream does
+  (`--decoder` and `--zero-copy`, below): `--decoder` works under
+  `--reference` too, and `--zero-copy`, which keeps both lenses on the
+  GPU, can't be given with `--reference` (exit 2).
   `--geometry binding=reversed,canvas=b,...` changes the table's
   geometry key by key (binding, canvas, turn, tz, upright,
   generation), `--stitch-distance 1.5m` (or `inf`; 2 m by default) sets
@@ -488,17 +490,17 @@ parse, 3 when a GPU, an adapter or an encoder it needs is missing or
 fails, and 4 when interrupted.
 
 A project of a camera's two lenses (an `.insv` an agent's `project
-create` made, which stores the file's calibration and the lens
-geometry it was made with: DECISIONS D68) isn't exported yet: until
-M3.11 stitches a project's export, `render` refuses it with exit 1
-(`not_yet`) and writes nothing, rather than export one lens as an
-equirect; `frame --reference` of the `.insv` itself shows it
-stitched, and an EAC pair has no stitched view yet. When the project's
-geometry was a provisional guess and Spherecut's table of cameras has
-it measured, or guesses differently (the table keeps no order, so the
-project's guess may be the later one), `render` warns
-(`provisional_geometry`), giving the table's evidence: the project
-keeps its own geometry, and renders the same, until it is changed.
+create` made, which stores the file's calibration and the lens geometry
+it was made with: DECISIONS D68) isn't exported yet: until M3.11
+stitches a project's export, `render` refuses it with exit 1 (`not_yet`)
+and writes nothing, rather than export one lens as an equirect; `frame`
+of the `.insv` itself shows it stitched, and an EAC pair has no stitched
+view yet. When the project's geometry was a provisional guess and
+Spherecut's table of cameras has it measured, or guesses differently
+(the table keeps no order, so the project's guess may be the later one),
+`render` warns (`provisional_geometry`), giving the table's evidence:
+the project keeps its own geometry, and renders the same, until it is
+changed.
 
 ### Agents
 

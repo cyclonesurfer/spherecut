@@ -18,6 +18,7 @@ use spherecut_sphere::rig::{
     Binding, CalibTerms, CanvasMap, EulerConv, Extrinsics, Generation, Geometry, LensCalib,
     LensTune, QuarterTurn, Status, Tune, TurnAxis, TzSign,
 };
+use spherecut_testkit::bless;
 use spherecut_testkit::control::must_fail;
 
 /// The checked-in file, and where its media is said to be.
@@ -362,7 +363,7 @@ fn the_checked_in_schema_1_file_loads_unchanged() {
 
 /// The schema 2 fixture, `schema2.spherecut` (M3 plan 11.2), holds a
 /// dual-fisheye source and loads and saves the same; it alone may be
-/// blessed, through F055's `testkit::bless` once M3.7 has merged (F063).
+/// blessed, through F055's `testkit::bless` (F063).
 /// Marked schema 3 it is refused as newer.
 ///
 /// Control: the schema 1 file's text isn't what a save writes.
@@ -370,10 +371,8 @@ fn the_checked_in_schema_1_file_loads_unchanged() {
 fn the_checked_in_schema_2_file_loads_and_saves_the_same() {
     let path = data_dir().join("schema2.spherecut");
     let text = file::to_json(&schema2(), &data_dir()).unwrap();
-    // The variable's presence blesses, as M2's schema 1 test read it;
-    // M3.7's F055 brings `testkit::bless`, whose one rule reads unset,
-    // empty and "0" as off, and takes this switch over when it merges.
-    if std::env::var_os("SPHERECUT_BLESS_PROJECT").is_some() {
+    // `testkit::bless`'s one rule (F055): unset, empty and "0" are off.
+    if bless::on(bless::BLESS_PROJECT) {
         std::fs::write(&path, &text).unwrap();
     }
     let on_disk = std::fs::read_to_string(&path).unwrap();

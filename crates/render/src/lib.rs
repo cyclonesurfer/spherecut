@@ -5,7 +5,8 @@
 //! tests hold the GPU to.
 //!
 //! Data flows one way: [`VideoPlanes`](spherecut_core::video::VideoPlanes)
-//! → [`Uploader`] → a [`GpuFrame`] slot → [`Projector`] → a
+//! → [`Uploader`] → a [`GpuFrame`] slot (or a lens pair's two, with the
+//! [`rig`] they are stitched by) → [`Projector`] → a
 //! [`LinearTarget`] → [`Encoder`] → the screen, or a readback
 //! ([`render_still`]), or → [`YuvConverter`] → an encoder's planes (M2). A decoder's picture can arrive as DMA-BUF planes
 //! instead ([`dmabuf`]), which the uploader copies from on the GPU, or as
@@ -33,6 +34,7 @@ pub mod probe;
 pub mod project;
 pub mod readback;
 pub mod reference;
+pub mod rig;
 pub mod seam;
 pub mod still;
 pub mod timers;
@@ -51,9 +53,14 @@ pub use output::FrameViews;
 pub use plane::{LayoutKind, PlaneFormat, PlaneShape, SlotShape};
 pub use probe::{GateProbe, ProbeReport, ProbeSample};
 pub use project::{
-    DebugMode, Filter, Framing, LinearTarget, OutKind, Projector, ViewParams, ViewUniform,
+    CapsUniform, DebugMode, Filter, Framing, LinearTarget, OutKind, Projector, SourceKind,
+    SourceRef, ViewParams, ViewUniform,
 };
-pub use still::{Depth, Image, Pixels, StillOptions, StillRenderer, YuvImage, render_still};
+pub use rig::{LensUniform, RigUniform, SlotGeom};
+pub use still::{
+    Depth, Image, LensFrame, Pixels, PlaneSource, SourceFrames, StillOptions, StillRenderer,
+    YuvImage, render_still,
+};
 pub use timers::{GpuTimers, TimerSpan};
 pub use upload::{IngestUniform, UploadPath, UploadStats, Uploader};
 pub use wgpu;

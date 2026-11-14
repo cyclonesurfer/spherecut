@@ -50,7 +50,7 @@ use spherecut_core::{FrameRate, StopToken};
 use spherecut_media::backend::{FfmpegBackend, MediaBackend, NextFrame, VideoRequest};
 use spherecut_media::encode::{ColorTags, Mp4Writer, PixelLayout, VideoSettings, YuvPlanes};
 use spherecut_media::ff;
-use spherecut_render::compare::{View, psnr, ssim};
+use spherecut_render::compare::{View, psnr, sample_diff, ssim};
 use spherecut_render::reference;
 use spherecut_render::{Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -60,7 +60,7 @@ use spherecut_synth::media::{self, CLIP_COLOR, Codec, Spec};
 use spherecut_synth::yuv::{self, Chroma, YuvFormat};
 use spherecut_synth::{AXIS_MARKERS, Pattern, RgbImage, decode_frame_code, render_equirect};
 use spherecut_testkit::control::must_fail;
-use spherecut_testkit::{Fnv64, fnv64};
+use spherecut_testkit::{Fnv64, bless, fnv64};
 
 use document::document;
 
@@ -198,7 +198,7 @@ fn rgb(img: &Image, x: u32, y: u32) -> [f64; 3] {
 }
 
 fn far(a: [f64; 3], b: [f64; 3]) -> f64 {
-    (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f64::max)
+    (0..3).map(|c| sample_diff(a[c], b[c])).fold(0.0, f64::max)
 }
 
 /// A spherical clip of synth's grid, `frames` long at 30 fps.
@@ -227,7 +227,7 @@ fn within_cpu_rule(got: &Image, want: &Image) -> Result<(), String> {
     let far = a
         .iter()
         .zip(&b)
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, *y))
         .fold(0.0, f64::max);
     if db >= 36.0 && far <= 0.1 {
         Ok(())
@@ -1645,8 +1645,8 @@ fn has_two_keys(w: &Value) -> bool {
 
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
-const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
-const LOWER: &str = "lower";
+const UPDATE: &str = bless::UPDATE_GOLDENS;
+const LOWER: &str = bless::LOWER;
 const REGENERATE: &str =
     "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-cli --test frame pipeline_goldens";
 /// The render goldens' rules (D32): between driver builds, at most
@@ -1775,7 +1775,7 @@ fn max_diff(a: &Image, b: &Image) -> f64 {
     unit(a)
         .iter()
         .zip(unit(b))
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, y))
         .fold(0.0, f64::max)
 }
 
@@ -1888,7 +1888,6 @@ struct Run {
 
 impl Run {
     fn new() -> Run {
-        let update = std::env::var(UPDATE).ok();
         let path = Path::new(GOLDENS).join(MANIFEST);
         let manifest = std::fs::read_to_string(&path)
             .map_err(|e| format!("no manifest at {} ({e})", path.display()))
@@ -1897,8 +1896,8 @@ impl Run {
                     .map_err(|e| format!("{} doesn't parse: {e}", path.display()))
             });
         Run {
-            bless: update.is_some(),
-            lower_floors: update.as_deref() == Some(LOWER),
+            bless: bless::on(UPDATE),
+            lower_floors: bless::lower(UPDATE),
             manifest,
             driver: None,
             row: String::new(),
@@ -2829,7 +2828,7 @@ fn swscale_cross_check(run: &mut Run) {
                         .flat_map(|&(o, t)| {
                             (0..3).map(move |c| {
                                 let s = (f64::from(rgb48[3 * t + c]) / 257.0).round();
-                                (f64::from(px[3 * o + c]) - s).abs()
+                                sample_diff(f64::from(px[3 * o + c]), s)
                             })
                         })
                         .fold(0.0, f64::max)
@@ -2843,7 +2842,7 @@ fn swscale_cross_check(run: &mut Run) {
                     .iter()
                     .flat_map(|&(o, t)| {
                         let x = exact_rgb(&planes, t, matrix, range);
-                        (0..3).map(move |c| (f64::from(px[3 * o + c]) - 255.0 * x[c]).abs())
+                        (0..3).map(move |c| sample_diff(f64::from(px[3 * o + c]), 255.0 * x[c]))
                     })
                     .fold(0.0, f64::max);
                 exact_worst = exact_worst.max(e);

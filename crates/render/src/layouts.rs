@@ -5,10 +5,13 @@
 /// What every pass starts with: the full-screen triangle and `round_f16`,
 /// which a Tier 1 test runs on its own.
 pub const COMMON_WGSL: &str = include_str!("shaders/common.wgsl");
-/// The projection pass, `shaders/common.wgsl` then `shaders/project.wgsl`.
+/// The projection pass, `shaders/common.wgsl` then `shaders/project.wgsl`,
+/// then a lens pair's stitch and strips, `shaders/rig.wgsl`, which use
+/// `project.wgsl`'s functions.
 pub const PROJECT_WGSL: &str = concat!(
     include_str!("shaders/common.wgsl"),
-    include_str!("shaders/project.wgsl")
+    include_str!("shaders/project.wgsl"),
+    include_str!("shaders/rig.wgsl")
 );
 /// The mip pass: a render pass a level, for deep planes.
 pub const MIPS_WGSL: &str = concat!(
@@ -84,7 +87,19 @@ pub(crate) fn view(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-/// Projection group 1: a slot's source uniform and its three planes.
+/// A lens pair's group 0: the view, and the rig at binding 1.
+pub(crate) fn view_rig(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("view and rig"),
+        entries: &[
+            uniform(0, size_of::<crate::project::ViewUniform>() as u64),
+            uniform(1, size_of::<crate::rig::RigUniform>() as u64),
+        ],
+    })
+}
+
+/// Projection group 1, and a lens pair's group 3: a slot's source
+/// uniform and its three planes.
 pub(crate) fn source(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("source"),
@@ -101,13 +116,30 @@ pub(crate) fn source(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 pub(crate) fn sampler(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("sampler"),
-        entries: &[wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        }],
+        entries: &[filtering_sampler(0)],
     })
+}
+
+/// A lens pair's group 2: the sampler, the caps uniform at binding 1 and
+/// the cap texture at binding 2 (M3 plan 10.2).
+pub(crate) fn sampler_caps(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("sampler and caps"),
+        entries: &[
+            filtering_sampler(0),
+            uniform(1, size_of::<crate::project::CapsUniform>() as u64),
+            texture(2, FILTERABLE),
+        ],
+    })
+}
+
+fn filtering_sampler(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    }
 }
 
 /// The mip pass, group 0: the level above, read with `textureLoad`, by

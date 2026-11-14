@@ -33,6 +33,22 @@
 //! run of the same check, with software in the hardware's place, and a
 //! different frame, which must fail it.
 //!
+//! `zero_copy_pair_frame_matches_the_copy` and
+//! `shared_vulkan_pair_frame_matches_the_copy` (M3.7) run the same for a
+//! camera's pair: synth's `InsvSpec::small()` stitched with `--zero-copy`
+//! (both lenses imported from VA-API's DMA-BUFs, or both decoded on the
+//! renderer's own device and copied out, path B) against `--decoder
+//! software`, byte for byte through every view, each run's wall time
+//! printed. Both slots the stitch leaves are then read back in this
+//! process (`StillPair::renderer`, `StillRenderer::slots`) and held to
+//! each lens's frame decoded in software, a slot that differs labelled
+//! against odin's GFX11 R8 signature (`gfx11_r8`, copied from the
+//! playback check), before the slot check's controls run.
+//! `the_pair_slot_check_runs_on_lavapipe_with_software_standing_in`,
+//! `the_slot_check_labels_odins_gfx11_r8_signature` and
+//! `a_swapped_slot_is_judged_before_the_controls` are their Tier 1
+//! halves.
+//!
 //! `samples_frame_clip8_renders` is Tier 2c (M3.5): Pat's clip 8,
 //! stitched by `frame --reference` on the CPU alone, so it runs wherever
 //! `SPHERECUT_SAMPLES` names the samples, the cloud included.
@@ -41,9 +57,12 @@
 //! ignored.
 
 // Test helpers outside #[test] functions; panicking is the point here.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod document;
+mod gfx11_r8;
+#[allow(dead_code)]
+mod insv;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -52,18 +71,20 @@ use std::time::Instant;
 use serde_json::Value;
 use spherecut_agent::still::{self, Look, Options, PairOptions, Still, Stop};
 use spherecut_core::cancel::StopSource;
-use spherecut_core::{FrameRate, StopToken};
+use spherecut_core::{FrameRate, StopToken, TimeSpec};
 use spherecut_media::backend::{
     DecodeMode, Fallback, FfmpegBackend, HwKind, MediaBackend, SeekMode, VideoRequest,
 };
 use spherecut_media::decode::open_vulkan_device;
 use spherecut_media::{HwError, MediaError, Source, capture_hw_decode_log};
+use spherecut_render::compare::sample_diff;
 use spherecut_render::reference::{RigDebug, RigOptions};
-use spherecut_render::{Image, Pixels, ViewParams};
+use spherecut_render::{AdapterChoice, Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_synth::Pattern;
+use spherecut_synth::insv::{InsvSpec, write_insv};
 use spherecut_synth::media::{self, Codec, Spec};
-use spherecut_testkit::control::must_fail;
+use spherecut_testkit::control::{at_most, must_fail};
 use spherecut_testkit::{samples, tier2};
 
 use document::document;
@@ -176,7 +197,7 @@ fn max_lsb(a: &Path, b: &Path) -> f64 {
     unit(&a)
         .iter()
         .zip(unit(&b))
-        .map(|(x, y)| (x - y).abs() * 255.0)
+        .map(|(x, y)| sample_diff(*x, y) * 255.0)
         .fold(0.0, f64::max)
 }
 
@@ -524,6 +545,473 @@ fn shared_vulkan_frame_matches_the_copy() {
         "vulkan",
         &["--zero-copy", "--decoder", "vulkan"],
         "vulkan",
+    );
+}
+
+/// `frame --zero-copy` of synth's `InsvSpec::small()` under VA-API
+/// stitches what a software decode does, byte for byte, through every
+/// view, both lenses imported from VA-API's DMA-BUFs (rung 7, strict);
+/// both slots hold their lens's frame, read back in this process. Skips,
+/// with frame's reason, where the GPU or its driver can't import or the
+/// driver turns the lossless stream down.
+#[test]
+#[ignore = "tier2: needs a VA-API GPU that imports DMA-BUFs"]
+fn zero_copy_pair_frame_matches_the_copy() {
+    let node = tier2::require_render_node();
+    let opts = Options {
+        decoder: still::Decoder::Vaapi,
+        render_node: Some(node.clone()),
+        zero_copy: true,
+        ..Options::default()
+    };
+    pair_zero_copy_against_software(Some(&node), &opts, &["--zero-copy"], ("vaapi", "drm_prime"));
+}
+
+/// `frame --zero-copy --decoder vulkan` of synth's `InsvSpec::small()`
+/// stitches what a software decode does, byte for byte, through every
+/// view, both lenses decoded by Vulkan Video on the renderer's own device
+/// and copied out there (path B, rung 7, strict); both slots hold their
+/// lens's frame, read back in this process. Skips as
+/// `shared_vulkan_frame_matches_the_copy` does.
+#[test]
+#[ignore = "tier2: needs Vulkan Video decode (optional path)"]
+fn shared_vulkan_pair_frame_matches_the_copy() {
+    tier2::require_hw_run();
+    let node = tier2::render_node();
+    vulkan_gpu(node.as_deref());
+    let opts = Options {
+        decoder: still::Decoder::Vulkan,
+        render_node: node.clone(),
+        zero_copy: true,
+        ..Options::default()
+    };
+    pair_zero_copy_against_software(
+        node.as_deref(),
+        &opts,
+        &["--zero-copy", "--decoder", "vulkan"],
+        ("vulkan", "vulkan"),
+    );
+}
+
+/// The geometry the pair runs stitch `InsvSpec::small()` under: its own,
+/// binding=direct, infinitely far.
+const PAIR_GEOMETRY: [&str; 4] = ["--geometry", "binding=direct", "--stitch-distance", "inf"];
+
+/// The pair's frame the runs show: past the first, so that the decoder's
+/// references matter.
+const PAIR_FRAME: u64 = 17;
+
+/// Whether a run of `frame` under test was turned down for a reason the
+/// machine gives, not the build: zero copy refused (`import_failed`), or
+/// the driver turning the lossless stream down (`hw_unsupported`).
+fn pair_refused(r: &Ran) -> Option<String> {
+    let code = r.doc["error"]["code"].as_str().unwrap_or("");
+    (r.status == Some(3) && matches!(code, "import_failed" | "hw_unsupported")).then(|| {
+        format!(
+            "{code}: {}",
+            r.doc["error"]["message"].as_str().unwrap_or("")
+        )
+    })
+}
+
+/// `InsvSpec::small()`'s frame [`PAIR_FRAME`] through every view, with
+/// `zero_copy`'s flags and with `--decoder software`, under
+/// [`PAIR_GEOMETRY`]: 0 LSB apart, the first's JSON saying it was decoded
+/// on `decoder` and took `transfer`, the second's that it was decoded in
+/// software, each run's wall time printed. Then both slots after the same
+/// stitch in this process under `opts` ([`pair_slots`]), each held to its
+/// lens's frame decoded in software, a slot that differs labelled against
+/// odin's GFX11 R8 signature, that verdict given before the slot check's
+/// controls ([`judge_pair`]). The control: the zero-copy run under
+/// binding=reversed isn't the software truth.
+fn pair_zero_copy_against_software(
+    node: Option<&Path>,
+    opts: &Options,
+    zero_copy: &[&str],
+    (decoder, transfer): (&str, &str),
+) {
+    let node_arg = node.map(|n| n.to_string_lossy().into_owned());
+    let dir = TempDir::new(&format!("pair-{decoder}"));
+    let common = hardware_args(&node_arg);
+    require_gpu(&dir, &common);
+    let began = Instant::now();
+    let file = write_insv(&InsvSpec::small(), &dir).unwrap().master;
+    eprintln!(
+        "InsvSpec::small(): written in {:.2} s",
+        began.elapsed().as_secs_f64()
+    );
+    let at = PAIR_FRAME.to_string();
+    let run = |out: &Path, view: &[&str], geometry: &[&str], extra: &[&str]| {
+        let mut args: Vec<&str> = view.to_vec();
+        args.extend(&common);
+        args.extend(geometry);
+        args.extend(extra);
+        args.extend(["--frame", at.as_str()]);
+        let began = Instant::now();
+        let r = frame(&file, out, &args);
+        (r, began.elapsed().as_secs_f64())
+    };
+    let mut lsb = Vec::new();
+    for (i, view) in VIEWS.iter().enumerate() {
+        let got = dir.join(format!("zero-copy-{i}.png"));
+        let want = dir.join(format!("software-{i}.png"));
+        let (z, z_s) = run(&got, view, &PAIR_GEOMETRY, zero_copy);
+        if let Some(why) = pair_refused(&z) {
+            tier2::skip(format!("InsvSpec::small() under {zero_copy:?}: {why}"));
+        }
+        assert_eq!(z.status, Some(0), "{} {}", z.doc, z.stderr);
+        let r = &z.doc["result"];
+        assert_eq!(
+            r["decode"],
+            serde_json::json!({"path": decoder, "transfer": transfer}),
+            "{r}"
+        );
+        assert_eq!(r["renderer"], "gpu", "{r}");
+        let (s, s_s) = run(&want, view, &PAIR_GEOMETRY, &["--decoder", "software"]);
+        assert_eq!(s.status, Some(0), "software: {} {}", s.doc, s.stderr);
+        let truth = &s.doc["result"];
+        assert_eq!(truth["decode"]["path"], "software", "{truth}");
+        assert_eq!(r["gpu"], truth["gpu"], "rendered on two adapters");
+        assert_eq!(
+            r["stitch"]["lenses"], truth["stitch"]["lenses"],
+            "the lenses' frames"
+        );
+        let apart = max_lsb(&got, &want);
+        eprintln!(
+            "view {i}: frame {zero_copy:?} {z_s:.2} s ({}), --decoder software {s_s:.2} s ({}), \
+             {apart} LSB apart",
+            r["decode"], truth["decode"]
+        );
+        lsb.push(apart);
+    }
+    let slots = match pair_slots(&file, PAIR_FRAME, &AdapterChoice::Auto, opts) {
+        Ok(s) => s,
+        Err(f) if matches!(f.code, "import_failed" | "hw_unsupported") => tier2::skip(format!(
+            "InsvSpec::small() in process: {}: {}",
+            f.code, f.message
+        )),
+        Err(f) => panic!("InsvSpec::small() in process: {}: {}", f.code, f.message),
+    };
+    for (t, info) in slots.decode.iter().enumerate() {
+        assert_eq!(
+            *info,
+            serde_json::json!({"path": decoder, "transfer": transfer}),
+            "lens {t} in process"
+        );
+    }
+    eprintln!("slots read in process in {:.2} s", slots.took);
+    judge_pair(&lsb, slots);
+    // The control: binding=reversed, under zero copy, isn't the truth.
+    let reversed = dir.join("reversed.png");
+    let geometry = ["--geometry", "binding=reversed", "--stitch-distance", "inf"];
+    let (r, _) = run(&reversed, VIEWS[0], &geometry, zero_copy);
+    assert_eq!(r.status, Some(0), "{} {}", r.doc, r.stderr);
+    let apart = must_fail(
+        "binding=reversed under zero copy against the software truth",
+        at_most(max_lsb(&reversed, &dir.join("software-0.png")), 0.0),
+    );
+    eprintln!("binding=reversed under zero copy: {apart} LSB from the software truth");
+    eprintln!("InsvSpec::small(): zero copy byte-identical to software through every view");
+}
+
+/// The pair runs' verdict and the slot check's controls: `lsb`, each
+/// view's distance from the software truth, all 0, and both of `slots`'
+/// slots holding their lens's frame, or a panic naming each view's LSB
+/// and each slot that differs, labelled against odin's GFX11 R8
+/// signature; then the controls, lens 0's slot against lens 1's frame
+/// and against its next frame, which judge the slot check alone.
+fn judge_pair(lsb: &[f64], slots: PairSlots) {
+    let wrong: Vec<String> = slots
+        .held
+        .iter()
+        .enumerate()
+        .filter_map(|(t, h)| {
+            h.as_ref()
+                .err()
+                .map(|why| format!("lens {t}'s slot: {why}"))
+        })
+        .collect();
+    assert!(
+        lsb.iter().all(|&l| l == 0.0) && wrong.is_empty(),
+        "zero copy against software, by view: {lsb:?} LSB; {}",
+        if wrong.is_empty() {
+            "both slots hold their lens's frame, so the stitch drew the right bytes wrong".into()
+        } else {
+            wrong.join("; ")
+        }
+    );
+    must_fail("lens 0's slot against lens 1's frame", slots.crossed);
+    must_fail("lens 0's slot against its next frame", slots.stale);
+}
+
+/// What `f` panicked with, or `None` if it returned.
+fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+    std::panic::catch_unwind(f).err().map(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default()
+    })
+}
+
+/// That `judge_pair` of `lsb` and `slots` panicked with the labelled
+/// verdict, naming lens 0's slot and why it differs.
+fn verdict_names_lens_0(lsb: &[f64], slots: PairSlots) -> Result<(), String> {
+    let lsb = lsb.to_vec();
+    match panic_message(move || judge_pair(&lsb, slots)) {
+        Some(m)
+            if m.starts_with("zero copy against software, by view: ")
+                && m.contains("lens 0's slot: Y: ") =>
+        {
+            Ok(())
+        }
+        Some(m) => Err(format!("panicked otherwise: {m}")),
+        None => Err("no verdict".into()),
+    }
+}
+
+/// The pair runs' verdict comes before the slot check's controls (the
+/// M3.7 review's N11), in Tier 1 with the slot reads stubbed: when lens
+/// 0's slot holds lens 1's frame, the swap the check is for, lens 0's
+/// slot differs from its own frame and `crossed` holds, and `judge_pair`
+/// reports the labelled verdict, `lens 0's slot: ...`, not a control that
+/// stopped failing. Control: slots that hold their frames, 0 LSB through
+/// every view, give no verdict.
+#[test]
+fn a_swapped_slot_is_judged_before_the_controls() {
+    let slots = |swapped: bool| PairSlots {
+        held: [
+            if swapped {
+                Err("Y: 4096 samples differ, off odin's GFX11 R8 signature".into())
+            } else {
+                Ok(())
+            },
+            Ok(()),
+        ],
+        crossed: if swapped {
+            Ok(())
+        } else {
+            Err("Y: 4096 samples differ".into())
+        },
+        stale: Err("Y: 4096 samples differ".into()),
+        decode: [Value::Null, Value::Null],
+        took: 0.0,
+    };
+    let lsb = [0.0; VIEWS.len()];
+    verdict_names_lens_0(&lsb, slots(true)).unwrap();
+    must_fail(
+        "slots that hold their frames",
+        verdict_names_lens_0(&lsb, slots(false)),
+    );
+}
+
+/// What [`pair_slots`] read back: each lens's slot held to its frame
+/// decoded in software ([`gfx11_r8::slot_holds`]); the controls, lens 0's
+/// slot held to lens 1's frame and to its own lens's next frame (the
+/// corner codes tell both apart); each lens's decode as the JSON names
+/// it; and the seconds the opens, stitch and reads took.
+struct PairSlots {
+    held: [Result<(), String>; 2],
+    crossed: Result<(), String>,
+    stale: Result<(), String>,
+    decode: [Value; 2],
+    took: f64,
+}
+
+/// `file`'s frame `at` stitched in this process on `adapter` under `opts`
+/// (one equirect view, 256 × 128), and both slots the stitch left
+/// (`StillPair::renderer`, `StillRenderer::slots`) read back, each held to
+/// its lens's frame `at` decoded in software, on no GPU; and lens 0's
+/// slot held to lens 1's frame and to lens 0's frame `at + 1`, the
+/// controls. A failure to open or stitch is frame's.
+fn pair_slots(
+    file: &Path,
+    at: u64,
+    adapter: &AdapterChoice,
+    opts: &Options,
+) -> Result<PairSlots, still::Failure> {
+    let began = Instant::now();
+    let src = Source::path(file);
+    let stop = Stop::of(&StopSource::new());
+    let report = still::probe_report(src, &stop)?;
+    let mut warnings = Vec::new();
+    let when = TimeSpec::Frame(at);
+    let software = Options {
+        decoder: still::Decoder::Software,
+        ..Options::default()
+    };
+    let mut truth = Still::open_pair(
+        src,
+        &report,
+        None,
+        &software,
+        &PairOptions::default(),
+        &stop,
+        &mut warnings,
+    )?;
+    let next = truth.seek(TimeSpec::Frame(at + 1), SeekMode::Exact, &mut warnings)?;
+    let next = gfx11_r8::yuv_of(next.frames[0].as_ref()).unwrap();
+    let truth = truth.seek(when, SeekMode::Exact, &mut warnings)?;
+    let want = truth
+        .frames
+        .each_ref()
+        .map(|f| gfx11_r8::yuv_of(f.as_ref()).unwrap());
+    let gpu = still::gpu(adapter, opts)?;
+    still::check_gpu(&gpu, opts)?;
+    let mut pair = Still::open_pair(
+        src,
+        &report,
+        Some(&gpu),
+        opts,
+        &PairOptions::default(),
+        &stop,
+        &mut warnings,
+    )?;
+    let decoded = pair.seek(when, SeekMode::Exact, &mut warnings)?;
+    for t in 0..2 {
+        assert_eq!(decoded.frames[t].pts, truth.frames[t].pts, "lens {t}'s pts");
+    }
+    let turn = Ypr::from_degrees(0.0, 0.0, 0.0).to_quat();
+    pair.render(
+        &decoded,
+        &[ViewParams::equirect(turn)],
+        (256, 128),
+        Look::default(),
+    )?;
+    let slots = pair
+        .renderer()
+        .expect("a renderer after a stitch on the GPU")
+        .slots();
+    let read = |t: usize| {
+        slots[t]
+            .ok_or_else(|| format!("no slot for lens {t}"))
+            .and_then(|s| gfx11_r8::read_planes(&gpu, s))
+    };
+    let got = [read(0), read(1)];
+    let held_to = |t: usize, frame: &gfx11_r8::Yuv| {
+        got[t]
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|g| gfx11_r8::slot_holds(g, frame))
+    };
+    let decode = [0, 1]
+        .map(|t| serde_json::to_value(pair.lens(t).frame_decode_info(&decoded.frames[t])).unwrap());
+    Ok(PairSlots {
+        held: [held_to(0, &want[0]), held_to(1, &want[1])],
+        crossed: held_to(0, &want[1]),
+        stale: held_to(0, &next),
+        decode,
+        took: began.elapsed().as_secs_f64(),
+    })
+}
+
+/// The pair's slot check in Tier 1, on lavapipe, with a software decode
+/// standing in for the hardware: after a stitch of the CLI's 2 × 128²
+/// master (`tests/insv/mod.rs`) on the CPU's adapter, both slots hold
+/// their lens's frame as the software decode on no GPU gives it. The
+/// controls: lens 0's slot against lens 1's frame fails the check, and so
+/// does lens 0's slot against its own lens's next frame, which a decoder
+/// that lost its place would give (the corner codes tell both apart).
+#[test]
+fn the_pair_slot_check_runs_on_lavapipe_with_software_standing_in() {
+    let began = Instant::now();
+    let dir = TempDir::new("pair-stand-in");
+    let file = insv::master(&dir, insv::MASTER, None).path;
+    let software = Options {
+        decoder: still::Decoder::Software,
+        ..Options::default()
+    };
+    let slots = pair_slots(&file, 3, &AdapterChoice::Cpu, &software)
+        .unwrap_or_else(|f| panic!("{}: {}", f.code, f.message));
+    for (t, held) in slots.held.iter().enumerate() {
+        if let Err(why) = held {
+            panic!("lens {t}'s slot: {why}");
+        }
+        assert_eq!(slots.decode[t]["path"], "software", "lens {t}");
+    }
+    for (name, control) in [
+        ("lens 0's slot against lens 1's frame", slots.crossed),
+        ("lens 0's slot against its next frame", slots.stale),
+    ] {
+        let why = must_fail(name, control);
+        assert!(why.starts_with("Y: "), "{name}: {why}");
+        assert!(why.contains("odin's GFX11 R8 signature"), "{name}: {why}");
+    }
+    eprintln!(
+        "the_pair_slot_check_runs_on_lavapipe_with_software_standing_in: {:.2} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// The slot check's label, as odin's GFX11 R8 signature has it
+/// ([`gfx11_r8`], copied from the playback check): a slot whose Y differs
+/// in one cell's 4×2 block at x%8 4..7, y%4 2..3, U and V right, is on
+/// it; the same samples with U wrong too, Y wrong in the cell's left
+/// half, or Y wrong in more than [`gfx11_r8::CELLS`] cells, are off it,
+/// each saying why. A slot that is right is `Ok`; one of another shape
+/// says so.
+#[test]
+fn the_slot_check_labels_odins_gfx11_r8_signature() {
+    use gfx11_r8::{CELLS, Plane, slot_holds};
+    let (width, height) = (64u32, 16u32);
+    let noise = |seed: u32, (w, h): (u32, u32)| Plane {
+        width: w,
+        height: h,
+        samples: (0..w * h)
+            .map(|i| ((i ^ seed.wrapping_mul(0x9e37_79b9)).wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect(),
+    };
+    let chroma = (width / 2, height / 2);
+    let want = [
+        noise(1, (width, height)),
+        noise(2, chroma),
+        noise(3, chroma),
+    ];
+    // `want` with Y's samples in `xs` × `ys` flipped.
+    let flip = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+        let mut slot = want.clone();
+        for y in ys {
+            for x in xs.clone() {
+                slot[0].samples[(y * width + x) as usize] ^= 0x5a;
+            }
+        }
+        slot
+    };
+    assert_eq!(slot_holds(&want, &want), Ok(()));
+    let on = slot_holds(&flip(12..16, 6..8), &want).unwrap_err();
+    assert!(
+        on.contains(
+            "on odin's GFX11 R8 signature: the 4x2 at x%8 4..7, y%4 2..3 of the 8x4 cell at x 8 y 4"
+        ),
+        "{on}"
+    );
+    assert!(on.starts_with("Y: 8 samples differ"), "{on}");
+    let mut chroma_too = flip(12..16, 6..8);
+    chroma_too[1].samples[0] ^= 1;
+    let off = |slot: &gfx11_r8::Yuv, why: &str| {
+        let said = slot_holds(slot, &want).unwrap_err();
+        assert!(
+            said.contains("off odin's GFX11 R8 signature") && said.contains(why),
+            "{said}"
+        );
+    };
+    off(&chroma_too, "U differs");
+    off(&flip(8..12, 4..8), "its left half alone");
+    // Every cell of two rows of cells: 16 cells of 8 × 4 in 64 × 8.
+    let cells = (width / 8 * 2) as usize;
+    assert!(cells == CELLS, "the plane's two rows of cells are CELLS");
+    off(
+        &flip(0..width, 0..12),
+        "more than the 16 the signature allows",
+    );
+    let small = [noise(1, (8, 8)), noise(2, (4, 4)), noise(3, (4, 4))];
+    let shape = slot_holds(&small, &want).unwrap_err();
+    assert!(shape.starts_with("planes of 8x8, 4x4, 4x4"), "{shape}");
+    must_fail(
+        "Y's left half on the signature",
+        slot_holds(&flip(8..12, 4..8), &want)
+            .unwrap_err()
+            .contains("on odin's"),
     );
 }
 

@@ -29,6 +29,11 @@
 //! Every check has a control that must fail, run on every run
 //! ([`control::must_fail`]): a control that stops failing fails the test.
 //!
+//! # Blessing
+//!
+//! [`bless`] is the one rule every variable that blesses is read by:
+//! unset, empty and "0" are off, anything else on.
+//!
 //! # Pat's calibration
 //!
 //! [`pats`] holds the four calibration strings of Pat's X5 files as text,
@@ -46,6 +51,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bless;
 pub mod control;
 pub mod memory;
 pub mod pats;

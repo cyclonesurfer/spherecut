@@ -40,10 +40,35 @@
 //! `tests/upload.rs` (45 to 22 and 23 to 11, R8, Rg8, R16Float and
 //! Rg16Float, against an independent area mean), which covers it whole.
 //!
+//! A lens pair's goldens (M3 plan 10.5) are rows of their own, in
+//! submodules that bless into directories of their own beside these:
+//! [`dfish_seam`] into `goldens/dfish_seam/`, [`dfish_views`] into
+//! `goldens/dfish_views/`, each with its manifest, since a blessing
+//! removes the PNGs its own manifest doesn't list; and [`rung2`], the
+//! shader's stitch held to rung 1's, which stores floors alone, in
+//! `goldens/rung2.json`. They share rung 1's pairs (`tests/common/rung1.rs`)
+//! with the rest of the binary, rendered once a run. A pair row's entry
+//! records its source (the calibration's FNV-64, the geometry with R,
+//! the gains and both lenses' FNV-64), and keeps only a picture that the
+//! rig those build drew ([`PairSource::rig`]; a control's is refused): a
+//! change in how a rig is built from them is a change in code the rows
+//! hold, and reads as a changed render, not a changed source. Every pair
+//! row's entry, check rows' too, records `pictures_fnv64`, a hash of all
+//! it drew (`Run::hold_pictures`): on the driver build that blessed it,
+//! from the same source, a run whose pictures hash otherwise fails, so a
+//! render that moves within a row's thresholds still fails there; other
+//! drivers are held by the thresholds alone. Their tests carry the
+//! module's path, `dfish_seam::dfish_seam_rows`,
+//! `dfish_views::dfish_view_rows` and `rung2::rung2_x5_like_matches_rung1`
+//! among them, which a filter given `--exact` spells out whole: the bare
+//! name with `--exact` matches no test, runs nothing and passes.
+//!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
 //! CPU and ideal references only, at the floors blessed here, and on the
-//! machine's own llvmpipe by the other-driver rule, recording the drift;
-//! on a GPU each CPU check's error is broken down by LOD band too. The
+//! machine's own llvmpipe by the other-driver rule, recording the drift,
+//! the lens pair's two lists among them, each against its own manifest
+//! ([`run_dfish`]); on a GPU each CPU check's error is broken down by LOD
+//! band too. The
 //! mip pass rounds its 8-bit means to codes and the encode pass its
 //! output, so a driver that converts to nearest, as Vulkan asks, stores
 //! those codes: when the mip pass left its means to the driver, RADV's
@@ -55,6 +80,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
+#[path = "dfish/seam.rs"]
+mod dfish_seam;
+#[path = "dfish/views.rs"]
+mod dfish_views;
+#[path = "dfish/rung2.rs"]
+mod rung2;
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -71,27 +102,37 @@ use spherecut_core::video::{
     ChromaSiting, ColorInfo, Matrix, Range, SampleBytes, Transfer, VideoPlanes,
 };
 use spherecut_render::blur;
-use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, ssim};
+use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, sample_diff, ssim};
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
+use spherecut_render::seam::Strips;
 use spherecut_render::{
-    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, OutKind, Pixels, Placement,
-    PlaneFormat, SlotShape, Stereo, StillOptions, StillRenderer, ViewParams,
+    AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, LensFrame, OutKind, Pixels, Placement,
+    PlaneFormat, PlaneSource, SlotShape, SourceFrames, Stereo, StillOptions, StillRenderer,
+    ViewParams,
 };
 use spherecut_sphere::LonLat;
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::pixel;
+use spherecut_sphere::rig::{Rig, Tune};
+use spherecut_synth::lens::{CalibTruth, Planted, x5_like, x5_like_planted};
+use spherecut_synth::rung::{FRONT_TRACK, far};
 use spherecut_synth::{Pattern, RgbImage, render_equirect, render_view_ideal};
-use spherecut_testkit::{Fnv64, bench, tier2};
+use spherecut_testkit::control::{above, at_most, below, must_fail};
+use spherecut_testkit::{Fnv64, bench, bless, tier2};
 
 /// Where the stored images and the manifest live.
 const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "manifest.json";
+/// What the goldens' manifest says it is.
+const ABOUT: &str = "The render goldens (M1 plan section 6, DECISIONS D32): images rendered on \
+                     lavapipe from synth's in-memory planes, with each check's thresholds and \
+                     what it measured when blessed.";
 /// Set to bless; set to [`LOWER`] to let the blessing lower a floor by
 /// more than [`FLOOR_DROP_DB`].
-const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
-const LOWER: &str = "lower";
+const UPDATE: &str = bless::UPDATE_GOLDENS;
+const LOWER: &str = bless::LOWER;
 /// What rewrites the goldens.
 const REGENERATE: &str = "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens";
 
@@ -107,6 +148,15 @@ const OTHER_SSIM: f64 = 0.995;
 const OTHER_PAST_LSB: f64 = 4.0;
 const OTHER_PIXELS_PAST: f64 = 4.0;
 const OTHER_MAX_LSB: f64 = 8.0;
+/// The other-driver rule's two thresholds in 8-bit steps, as a picture in
+/// display codes takes them. Rung 2 holds the seam difference, a picture
+/// of linear light, to these scaled by what a driver's steps in each
+/// lens's display codes come to there (`rung2`'s `Picture::steps`); the
+/// count, the PSNR and the SSIM stay.
+const OTHER_STEPS: Steps = Steps {
+    past: OTHER_PAST_LSB,
+    max: OTHER_MAX_LSB,
+};
 /// The CPU tolerance: measured − 3 dB when blessing, never below 36.
 const CPU_MARGIN_DB: f64 = 3.0;
 const CPU_FLOOR_DB: f64 = 36.0;
@@ -267,17 +317,161 @@ impl Source {
 
     /// FNV-64 of the planes' samples, row by row without the padding.
     fn hash(&self) -> u64 {
-        let mut h = Fnv64::new();
-        for (desc, (bytes, stride, (w, rows))) in
-            self.frame.layout.planes.iter().zip(&self.frame.planes)
-        {
-            let row = desc.row_bytes(*w);
-            for y in 0..*rows as usize {
-                h.write(&bytes[y * stride..y * stride + row]);
+        planes_fnv64(&self.frame)
+    }
+}
+
+/// FNV-64 of `frame`'s planes' samples, row by row without the padding.
+fn planes_fnv64(frame: &dyn VideoPlanes) -> u64 {
+    let mut h = Fnv64::new();
+    for (i, desc) in frame.layout().planes.iter().enumerate() {
+        let Some(plane) = frame.plane(i) else {
+            continue;
+        };
+        let row = desc.row_bytes(plane.width);
+        for y in 0..plane.height {
+            h.write(plane.row(y, row).unwrap());
+        }
+    }
+    h.finish()
+}
+
+/// A lens pair and what it is, for a dfish manifest (M3 plan 10.5).
+struct PairSource<'a> {
+    /// The scene, as rung 1 names it.
+    name: String,
+    /// By track.
+    frames: [&'a dyn VideoPlanes; 2],
+    /// FNV-64 of the calibration the rig is built from.
+    calibration_fnv64: u64,
+    /// The geometry the rig is built under and the scene's distance R.
+    geometry: Value,
+    /// The rig built from that calibration under that geometry: the one
+    /// whose picture of the pair [`Run::stored_pair`] keeps (the M3.7
+    /// review's N8).
+    rig: Rig,
+    /// The frame's gains, by calibration block.
+    gains: [[f64; 3]; 2],
+}
+
+impl<'a> PairSource<'a> {
+    /// The pair `frames` (by track) of the scene `name`, seen through
+    /// `cal` under `geometry` ([`pair_geometry`]), with `gains`; `rig` is
+    /// the rig `cal` and `geometry` build.
+    fn new(
+        name: &str,
+        frames: [&'a dyn VideoPlanes; 2],
+        cal: &CalibTruth,
+        geometry: Value,
+        rig: &Rig,
+        gains: [[f64; 3]; 2],
+    ) -> PairSource<'a> {
+        PairSource {
+            name: name.into(),
+            frames,
+            calibration_fnv64: calibration_fnv64(cal),
+            geometry,
+            rig: *rig,
+            gains,
+        }
+    }
+
+    /// Each track's [`planes_fnv64`].
+    fn hash(&self) -> [u64; 2] {
+        self.frames.map(planes_fnv64)
+    }
+
+    /// The manifest's `source` for the pair: the scene, each track's
+    /// picture as [`Source`] records a frame, the calibration's hash, the
+    /// geometry with R, and the gains. Its `source_fnv64` is [`Self::hash`],
+    /// as [`Self::hashes`] writes it.
+    fn about(&self) -> Value {
+        let lens = |f: &dyn VideoPlanes| {
+            let c = f.color();
+            let (w, h) = f.size();
+            json!({
+                "size": [w, h],
+                "layout": f.layout().name,
+                "range": format!("{:?}", c.range).to_lowercase(),
+                "matrix": format!("{:?}", c.matrix).to_lowercase(),
+                "siting": format!("{:?}", c.siting).to_lowercase(),
+            })
+        };
+        json!({
+            "scene": self.name,
+            "tracks": [lens(self.frames[0]), lens(self.frames[1])],
+            "calibration_fnv64": format!("{:016x}", self.calibration_fnv64),
+            "geometry": self.geometry,
+            "gains": self.gains,
+        })
+    }
+
+    /// Both tracks' FNV-64, as the manifest writes them.
+    fn hashes(&self) -> Value {
+        json!(self.hash().map(|h| format!("{h:016x}")))
+    }
+}
+
+/// A lens pair's picture ([`Run::render_pair`]), and whether the pair's
+/// own rig ([`PairSource::rig`]) drew it.
+struct Stitched {
+    image: Image,
+    by_source_rig: bool,
+}
+
+impl std::ops::Deref for Stitched {
+    type Target = Image;
+
+    fn deref(&self) -> &Image {
+        &self.image
+    }
+}
+
+/// Folds `image` into `hash`: its size, then its samples, each as its
+/// little-endian bytes.
+fn picture_fnv64(hash: &mut Fnv64, image: &Image) {
+    hash.write(&image.width.to_le_bytes())
+        .write(&image.height.to_le_bytes());
+    match &image.pixels {
+        Pixels::Rgb8(v) => {
+            hash.write(&[8]).write(v);
+        }
+        Pixels::Rgb16(v) => {
+            hash.write(&[16]);
+            for s in v {
+                hash.write(&s.to_le_bytes());
             }
         }
-        h.finish()
+        Pixels::LinearF32(v) => {
+            hash.write(&[32]);
+            for s in v {
+                hash.write(&s.to_le_bytes());
+            }
+        }
     }
+}
+
+/// FNV-64 of a calibration synth makes: of its every number, as `Debug`
+/// writes them (each to the shortest digits that read back as it).
+fn calibration_fnv64(cal: &CalibTruth) -> u64 {
+    spherecut_testkit::fnv64(format!("{cal:?}").as_bytes())
+}
+
+/// Each lens's side in pixels, by track: the `sides` a pair's rig is
+/// built with for `frames` (`sphere_rig`'s).
+fn sides(frames: [&dyn VideoPlanes; 2]) -> [u32; 2] {
+    frames.map(|f| f.size().0)
+}
+
+/// The geometry a pair's rig is built under, for [`PairSource`]: synth's
+/// planted conventions (as `Debug` writes them), the tune, and the
+/// scene's distance R in metres, `"inf"` where it is infinitely far.
+fn pair_geometry(planted: &Planted, tune: &Tune, r_m: f64) -> Value {
+    json!({
+        "planted": format!("{planted:?}"),
+        "tune": serde_json::to_value(tune).unwrap(),
+        "r_m": num(r_m),
+    })
 }
 
 fn limited709() -> ColorInfo {
@@ -545,11 +739,31 @@ fn rms(a: &[f64], b: &[f64]) -> f64 {
     (a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum::<f64>() / a.len().max(1) as f64).sqrt()
 }
 
+/// The largest difference between two images' samples, infinite where
+/// either holds a NaN ([`sample_diff`]): a bare `f64::max` fold passes over
+/// a NaN and would call a render with one equal to its reference (the
+/// project review's F039).
 fn max_diff(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b)
-        .map(|(x, y)| (x - y).abs())
+        .map(|(x, y)| sample_diff(*x, *y))
         .fold(0.0, f64::max)
+}
+
+/// One value as itself, more as a list, in their order: a manifest
+/// entry's sources and views.
+fn one_or_list(mut v: Vec<Value>) -> Value {
+    if v.len() == 1 {
+        v.remove(0)
+    } else {
+        Value::Array(v)
+    }
+}
+
+/// A string as it reads, anything else as JSON writes it: a hash in a
+/// message.
+fn bare(v: &Value) -> String {
+    v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
 
 /// A JSON number, to 4 decimals; ±∞ as a string.
@@ -563,18 +777,35 @@ fn num(v: f64) -> Value {
     }
 }
 
+/// The other-driver rule's thresholds in 8-bit steps: a pixel is past at
+/// more than `past` off in some channel, and none may be more than `max`
+/// off ([`OTHER_STEPS`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Steps {
+    past: f64,
+    max: f64,
+}
+
 /// How a render compares with its stored golden.
 #[derive(Debug, Clone, PartialEq)]
 struct Drift {
     identical: bool,
     psnr: f64,
     ssim: f64,
-    /// Pixels with a channel more than [`OTHER_PAST_LSB`] off.
+    /// Pixels with a channel more than `steps.past` off.
     past: f64,
     max_lsb: f64,
+    /// The thresholds `past` was counted at and [`judge`] holds.
+    steps: Steps,
 }
 
 fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
+    drift_in(got, want, OTHER_STEPS)
+}
+
+/// [`drift`] with the pixels past counted at `steps.past`, for
+/// [`judge`] to hold to `steps`.
+fn drift_in(got: &Image, want: &Image, steps: Steps) -> Result<Drift, String> {
     if (got.width, got.height) != (want.width, want.height) {
         return Err(format!(
             "{}x{} against a {}x{} golden",
@@ -601,16 +832,19 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
         identical: got.pixels == want.pixels,
         psnr: psnr_of(size, &a, &b),
         ssim: ssim_of(size, &a, &b),
-        past: lsb.iter().filter(|d| **d > OTHER_PAST_LSB).count() as f64,
+        past: lsb.iter().filter(|d| **d > steps.past).count() as f64,
         max_lsb: lsb.iter().copied().fold(0.0, f64::max),
+        steps,
     })
 }
 
 /// Section 6's rule for a stored image: identical at the driver build it
-/// was blessed on, else within the other-driver tolerance.
+/// was blessed on, else within the other-driver tolerance, at the
+/// thresholds the drift was measured for (`d.steps`).
 fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
+    let Steps { past, max } = d.steps;
     let numbers = format!(
-        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {OTHER_PAST_LSB} LSB off, max {:.0} LSB",
+        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {past} LSB off, max {:.0} LSB",
         d.psnr,
         d.ssim,
         d.past,
@@ -629,14 +863,14 @@ fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
     if d.psnr >= OTHER_PSNR_DB
         && d.ssim >= OTHER_SSIM
         && d.past <= OTHER_PIXELS_PAST
-        && d.max_lsb <= OTHER_MAX_LSB
+        && d.max_lsb <= max
     {
         Ok(())
     } else {
         Err(format!(
             "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ {OTHER_SSIM}, \
-             at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} LSB off, none more \
-             than {OTHER_MAX_LSB}): {numbers}"
+             at most {OTHER_PIXELS_PAST} pixels more than {past} LSB off, none more than \
+             {max}): {numbers}"
         ))
     }
 }
@@ -645,6 +879,12 @@ fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
 fn diff_dir() -> PathBuf {
     let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
     tmp.parent().unwrap_or(tmp).join("golden-diffs")
+}
+
+/// `golden-diffs-<name>/`, beside [`diff_dir`] and never inside it, which
+/// [`goldens`] removes as it starts: a dfish module's diffs.
+fn diff_dir_beside(name: &str) -> PathBuf {
+    diff_dir().with_file_name(format!("golden-diffs-{name}"))
 }
 
 /// An 8-bit picture of `rgb` (unit scale).
@@ -791,10 +1031,17 @@ struct Run<'g> {
     /// don't.
     tell: bool,
     /// Where the goldens are read and blessed, and where failures' diffs
-    /// go: [`GOLDENS`] and [`diff_dir`], or scratch directories for the
-    /// harness's own tests.
+    /// go: [`GOLDENS`] and [`diff_dir`], a dfish module's own, or scratch
+    /// directories for the harness's own tests.
     dir: PathBuf,
     diffs: PathBuf,
+    /// What the manifest says it is: [`ABOUT`], or a dfish module's own.
+    about: &'static str,
+    /// The pictures the row has drawn of lens pairs ([`Self::render_pair`])
+    /// and the GPU's strips of them it read ([`Self::drew_strips`]), as
+    /// one FNV-64 of them in order, and how many; `None` for a row that
+    /// drew none.
+    pictures: Option<(Fnv64, usize)>,
 }
 
 impl<'g> Run<'g> {
@@ -830,6 +1077,8 @@ impl<'g> Run<'g> {
             tell: false,
             dir: dir.to_path_buf(),
             diffs: diffs.to_path_buf(),
+            about: ABOUT,
+            pictures: None,
         }
     }
 
@@ -842,6 +1091,7 @@ impl<'g> Run<'g> {
         self.started = Instant::now();
         self.thresholds.clear();
         self.measured.clear();
+        self.pictures = None;
     }
 
     /// Records a failure of the current row, with the driver build.
@@ -961,6 +1211,75 @@ impl<'g> Run<'g> {
         }
     }
 
+    /// Renders `pair` stitched by `rig` with `gains`, as
+    /// [`StillRenderer::render_blurred`] renders a pair of its frames'
+    /// bytes, or records why it couldn't. `gains` must be the pair's own,
+    /// which its manifest entry records: other gains are a failure, and
+    /// nothing is rendered. `rig` may be any, a control's among them, and
+    /// the picture says whether it was the pair's own ([`Stitched`]).
+    /// Every picture it gives goes into the row's [`Self::pictures`].
+    #[allow(clippy::too_many_arguments)]
+    fn render_pair(
+        &mut self,
+        pair: &PairSource<'_>,
+        rig: &Rig,
+        gains: [[f64; 3]; 2],
+        view: &ViewParams,
+        size: (u32, u32),
+        opts: StillOptions,
+    ) -> Option<Stitched> {
+        if gains != pair.gains {
+            self.fail(format!(
+                "render_pair's gains {gains:?} aren't the pair's {:?}, which its manifest \
+                 entry records",
+                pair.gains
+            ));
+            return None;
+        }
+        let lenses = pair.frames.map(|frame| LensFrame {
+            frame,
+            from: PlaneSource::Bytes,
+        });
+        let source = SourceFrames::Pair { lenses, rig, gains };
+        let views = std::slice::from_ref(view);
+        match self
+            .renderer
+            .render_blurred(self.gpu, source, views, size, &opts)
+        {
+            Ok(image) => {
+                let (hash, n) = self.pictures.get_or_insert((Fnv64::new(), 0));
+                picture_fnv64(hash, &image);
+                *n += 1;
+                Some(Stitched {
+                    image,
+                    by_source_rig: *rig == pair.rig,
+                })
+            }
+            Err(e) => {
+                self.fail(format!("render_blurred of a pair: {e} ({})", e.code()));
+                None
+            }
+        }
+    }
+
+    /// Folds the GPU's `strips` of a lens pair, which a row drew itself
+    /// (`StillRenderer::strips`), into the row's [`Self::pictures`]: each
+    /// lens's size, its samples' little-endian bytes and where it is
+    /// valid.
+    fn drew_strips(&mut self, strips: &Strips) {
+        let (hash, n) = self.pictures.get_or_insert((Fnv64::new(), 0));
+        for strip in &strips.lenses {
+            hash.write(&strip.width.to_le_bytes())
+                .write(&strip.height.to_le_bytes());
+            for c in strip.rgb.iter().flatten() {
+                hash.write(&c.to_le_bytes());
+            }
+            let valid: Vec<u8> = strip.valid.iter().map(|&v| u8::from(v)).collect();
+            hash.write(&valid);
+        }
+        *n += 1;
+    }
+
     fn render_with(
         &mut self,
         f: &Frame,
@@ -1063,13 +1382,6 @@ impl<'g> Run<'g> {
     /// every view it renders them through: one of each is recorded as
     /// itself, more as a list, in the row's order.
     fn end_check(&mut self, what: &str, sources: &[&Source], views: Vec<Value>) {
-        let one_or_list = |mut v: Vec<Value>| {
-            if v.len() == 1 {
-                v.remove(0)
-            } else {
-                Value::Array(v)
-            }
-        };
         let mut m = self.stamp();
         m.insert("what".into(), json!(what));
         if !sources.is_empty() {
@@ -1087,13 +1399,37 @@ impl<'g> Run<'g> {
         self.end(m, false);
     }
 
+    /// [`Self::end_check`] for rows that render lens pairs: each pair's
+    /// entry as 10.5 asks, its calibration's hash, the geometry, the
+    /// gains, R and both lenses' FNV-64, beside every view.
+    fn end_pair_check(&mut self, what: &str, pairs: &[&PairSource<'_>], views: Vec<Value>) {
+        let mut m = self.stamp();
+        m.insert("what".into(), json!(what));
+        if !pairs.is_empty() {
+            let about = pairs.iter().map(|p| p.about()).collect();
+            let hashes = pairs.iter().map(|p| p.hashes()).collect();
+            m.insert("source".into(), one_or_list(about));
+            m.insert("source_fnv64".into(), one_or_list(hashes));
+        }
+        if !views.is_empty() {
+            m.insert("view".into(), one_or_list(views));
+        }
+        self.end(m, false);
+    }
+
     /// Ends the row with its manifest entry, which must say what it
-    /// rendered, from what and how (D32).
-    fn end(&mut self, entry: Map<String, Value>, image: bool) {
+    /// rendered, from what and how (D32), and, for a row that drew lens
+    /// pairs, the pictures it drew ([`Self::hold_pictures`]).
+    fn end(&mut self, mut entry: Map<String, Value>, image: bool) {
         for field in ["source", "source_fnv64", "view"] {
             if !entry.contains_key(field) {
                 self.fail(format!("its manifest entry has no {field}"));
             }
+        }
+        if let Some((hash, n)) = self.pictures.take() {
+            let hash = json!(format!("{:016x}", hash.finish()));
+            self.hold_pictures(&entry, image, &hash, n);
+            entry.insert("pictures_fnv64".into(), hash);
         }
         if matches!(self.mode, Mode::References | Mode::OtherDriver) {
             let numbers: Vec<String> = self
@@ -1121,11 +1457,83 @@ impl<'g> Run<'g> {
         );
     }
 
+    /// A lens pair row's pictures, all that [`Self::render_pair`] drew
+    /// for it in order (its controls' among them) and the strips it read
+    /// ([`Self::drew_strips`]), `hash` over the `n` of them, against
+    /// those it blessed: on the driver build that blessed it (its adapter
+    /// and driver info, the same-driver rule a stored PNG is held to) and
+    /// from the same source, they must be the same bytes, or a render
+    /// moved (the M3.7 review's N6: D66's "three runs identical", held on
+    /// every run, check rows' among them). Another driver, a changed
+    /// source, a blessing or a Tier 2 run holds nothing here.
+    fn hold_pictures(&mut self, entry: &Map<String, Value>, image: bool, hash: &Value, n: usize) {
+        if self.mode != (Mode::Golden { bless: false }) {
+            return;
+        }
+        let Ok(manifest) = &self.manifest else {
+            return;
+        };
+        let blessed = &manifest[if image { "images" } else { "checks" }][&self.row];
+        let same_driver = blessed["adapter"].as_str() == Some(&self.driver.adapter)
+            && blessed["driver_info"].as_str() == Some(&self.driver.driver_info);
+        let same_source = entry.get("source_fnv64") == Some(&blessed["source_fnv64"])
+            && entry.get("source") == Some(&blessed["source"]);
+        if !same_driver || !same_source || blessed["pictures_fnv64"] == *hash {
+            return;
+        }
+        let msg = match &blessed["pictures_fnv64"] {
+            Value::Null => {
+                format!("the manifest has no pictures_fnv64 for it: bless with `{REGENERATE}`")
+            }
+            was => format!(
+                "the pictures it drew ({n}) hash {}, blessed as {} on this driver from the same \
+                 source: a render moved since the blessing; if it should have, bless again with \
+                 `{REGENERATE}`",
+                bare(hash),
+                bare(was)
+            ),
+        };
+        self.fail(msg);
+    }
+
     /// The row's image against its stored golden, by the rules of section
     /// 6, or kept for blessing; then the row ends.
     fn stored(&mut self, what: &str, got: &Image, source: &Source, view: Value) {
+        let hash = json!(format!("{:016x}", source.hash()));
+        self.store(what, got, (&source.about, None), hash, view);
+    }
+
+    /// [`Self::stored`] for a row that renders a lens pair: the image
+    /// against its stored golden, its entry recording the pair as
+    /// [`Self::end_pair_check`] does. A picture that the pair's own rig
+    /// didn't draw, a control's, isn't the source its entry records: it
+    /// is a failure, and nothing is stored.
+    fn stored_pair(&mut self, what: &str, got: &Stitched, pair: &PairSource<'_>, view: Value) {
+        if !got.by_source_rig {
+            self.fail(format!(
+                "{what} was drawn by a rig other than its source's, which the calibration and \
+                 geometry its entry records build: only that rig's picture is stored"
+            ));
+            return;
+        }
+        let about = pair.about();
+        self.store(what, got, (&about, Some(&about)), pair.hashes(), view);
+    }
+
+    /// [`Self::stored`]'s body: `about` is the entry's `source`, and
+    /// `matched`, when given, must be the blessed one's as `hash` must be
+    /// its `source_fnv64`, for the render to be compared (a pair's whole
+    /// source: a changed calibration, geometry or gains is a changed
+    /// source, 10.5).
+    fn store(
+        &mut self,
+        what: &str,
+        got: &Image,
+        (about, matched): (&Value, Option<&Value>),
+        hash: Value,
+        view: Value,
+    ) {
         let png = format!("{}.png", self.row);
-        let hash = format!("{:016x}", source.hash());
         let mut entry = Map::new();
         match self.mode {
             Mode::References => {}
@@ -1149,7 +1557,7 @@ impl<'g> Run<'g> {
                 Err(e) => self.fail(format!("encoding {png}: {e}")),
             },
             Mode::Golden { bless: false } | Mode::OtherDriver => {
-                self.compare_stored(&png, &hash, got)
+                self.compare_stored(&png, matched, &hash, got)
             }
         }
         self.threshold("same_driver", json!("identical pixels"));
@@ -1166,13 +1574,17 @@ impl<'g> Run<'g> {
         m.append(&mut entry);
         m.insert("what".into(), json!(what));
         m.insert("png".into(), json!(png));
-        m.insert("source".into(), source.about.clone());
-        m.insert("source_fnv64".into(), json!(hash));
+        m.insert("source".into(), about.clone());
+        m.insert("source_fnv64".into(), hash);
         m.insert("view".into(), view);
         self.end(m, true);
     }
 
-    fn compare_stored(&mut self, png: &str, hash: &str, got: &Image) {
+    /// `got` against the stored `png`, when the blessed entry's
+    /// `source_fnv64` is `hash` and, if `source` is given, its `source` is
+    /// `source`: otherwise the source changed, and the render isn't
+    /// compared.
+    fn compare_stored(&mut self, png: &str, source: Option<&Value>, hash: &Value, got: &Image) {
         let entry = match &self.manifest {
             Ok(m) => m["images"][&self.row].clone(),
             Err(e) => {
@@ -1187,12 +1599,24 @@ impl<'g> Run<'g> {
             ));
             return;
         }
-        let blessed_hash = entry["source_fnv64"].as_str().unwrap_or("");
+        let blessed_hash = &entry["source_fnv64"];
         if blessed_hash != hash {
+            let (hash, blessed_hash) = (bare(hash), bare(blessed_hash));
             self.fail(format!(
                 "the synthetic source changed (its planes hash {hash}, blessed as {blessed_hash}): \
                  synth or libm moved, not the renderer, so the render isn't compared; check synth \
                  and bless again with `{REGENERATE}`"
+            ));
+            return;
+        }
+        if let Some(source) = source
+            && entry["source"] != *source
+        {
+            self.fail(format!(
+                "the pair's source changed (its calibration, geometry, R or gains): it is {source}, \
+                 blessed as {}; the camera's numbers moved, not the renderer, so the render isn't \
+                 compared; bless again with `{REGENERATE}`",
+                entry["source"]
             ));
             return;
         }
@@ -1271,9 +1695,7 @@ impl<'g> Run<'g> {
         }
         let manifest = json!({
             "schema": "spherecut.goldens/1",
-            "about": "The render goldens (M1 plan section 6, DECISIONS D32): images rendered on \
-                      lavapipe from synth's in-memory planes, with each check's thresholds and \
-                      what it measured when blessed.",
+            "about": self.about,
             "regenerate": REGENERATE,
             "images": self.images,
             "checks": self.checks,
@@ -1333,7 +1755,13 @@ const ROWS: &[(&str, Row)] = &[
 ];
 
 fn run_rows(run: &mut Run<'_>, only: Option<&[&str]>) {
-    for (name, row) in ROWS {
+    run_these(run, ROWS, only);
+}
+
+/// Runs `rows`, or those of them `only` names, in order: [`ROWS`], or a
+/// dfish module's.
+fn run_these(run: &mut Run<'_>, rows: &[(&str, Row)], only: Option<&[&str]>) {
+    for (name, row) in rows {
         if only.is_some_and(|o| !o.contains(name)) {
             continue;
         }
@@ -2702,7 +3130,7 @@ fn lod_heatmap(run: &mut Run<'_>) {
             let want = [l.clamp(0.0, 4.0), c.clamp(0.0, 3.0), l];
             let have = got.unit_at(i, j).unwrap();
             for k in 0..3 {
-                let d = (have[k] - want[k]).abs();
+                let d = sample_diff(have[k], want[k]);
                 worst = worst.max(d);
                 if d > 0.5 {
                     over += 1.0;
@@ -3376,11 +3804,14 @@ fn widened(v: &ViewParams, size: (u32, u32), px: f64) -> Option<ViewParams> {
 fn goldens() {
     let gpu = gpu();
     assert_eq!(gpu.caps.info.device_type, wgpu::DeviceType::Cpu);
-    let update = std::env::var_os(UPDATE);
-    let bless = update.as_ref().is_some_and(|v| !v.is_empty() && v != "0");
     let _ = std::fs::remove_dir_all(diff_dir());
-    let mut run = Run::new(gpu, Mode::Golden { bless });
-    run.lower_floors = update.is_some_and(|v| v == LOWER);
+    let mut run = Run::new(
+        gpu,
+        Mode::Golden {
+            bless: bless::on(UPDATE),
+        },
+    );
+    run.lower_floors = bless::lower(UPDATE);
     run.tell = true;
     let start = Instant::now();
     run_rows(&mut run, None);
@@ -3526,6 +3957,339 @@ fn blessing_writes_everything_or_nothing() {
     );
 }
 
+/// A lens pair for the harness's own tests: two NV12 ramps at 64² a
+/// lens, unlike each other, under sphere's rig of synth's X5-like camera
+/// infinitely far.
+struct TinyPair {
+    frames: [Frame; 2],
+    rig: Rig,
+    tune: Tune,
+}
+
+fn tiny_pair() -> &'static TinyPair {
+    static PAIR: OnceLock<TinyPair> = OnceLock::new();
+    PAIR.get_or_init(|| {
+        let ramp = |k: u32| {
+            coded(Kind::Nv12, (64, 64), limited709(), move |p, x, y| {
+                if p == 0 {
+                    (16 + (x * 3 + y * k) % 220) as u16
+                } else {
+                    128
+                }
+            })
+        };
+        let tune = far();
+        let rig =
+            common::rig::sphere_rig(&x5_like(), &x5_like_planted(), &tune, FRONT_TRACK, [64; 2])
+                .unwrap();
+        TinyPair {
+            frames: [ramp(1), ramp(2)],
+            rig,
+            tune,
+        }
+    })
+}
+
+impl TinyPair {
+    fn source(&self) -> PairSource<'_> {
+        let geometry = pair_geometry(&x5_like_planted(), &self.tune, f64::INFINITY);
+        PairSource::new(
+            "ramps",
+            [&self.frames[0], &self.frames[1]],
+            &x5_like(),
+            geometry,
+            &self.rig,
+            [[1.0; 3]; 2],
+        )
+    }
+}
+
+/// The harness's own pair rows: the tiny pair stitched to a 64 × 32
+/// equirect and stored, and the same as a check that stores nothing.
+const PAIR_ROWS: &[(&str, Row)] = &[("pair_stored", pair_stored), ("pair_checked", pair_checked)];
+
+fn pair_stored(run: &mut Run<'_>) {
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let opts = StillOptions::default();
+    if let Some(img) = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts) {
+        run.stored_pair("the tiny pair, stored", &img, &pair, view_about(&v, size));
+    }
+}
+
+fn pair_checked(run: &mut Run<'_>) {
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let opts = StillOptions::default();
+    if let Some(img) = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts) {
+        run.measure(
+            "lit",
+            unit(&img).iter().filter(|c| **c > 0.0).count() as f64,
+        );
+    }
+    run.end_pair_check(
+        "the tiny pair, checked",
+        &[&pair],
+        vec![view_about(&v, size)],
+    );
+}
+
+/// Blesses `rows`, those of them `only` names, into `dir` as a run that
+/// says it is `about`.
+fn bless_these(dir: &Path, diffs: &Path, rows: &[(&str, Row)], only: &[&str], about: &'static str) {
+    let mut run = Run::at(gpu(), Mode::Golden { bless: true }, dir, diffs);
+    run.about = about;
+    run_these(&mut run, rows, Some(only));
+    run.finish();
+}
+
+/// Every file directly in `dir` (not in the directories under it), by
+/// name, with its bytes.
+fn files_in(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            (name, std::fs::read(e.path()).unwrap())
+        })
+        .collect()
+}
+
+/// A directory's manifest, parsed.
+fn manifest_in(dir: &Path) -> Value {
+    serde_json::from_str(&std::fs::read_to_string(dir.join(MANIFEST)).unwrap()).unwrap()
+}
+
+/// Blessing one directory's rows, a dfish module's into its own, leaves a
+/// sibling directory's manifest and PNGs as they were: each blessing
+/// sweeps its own directory's stale images alone, and writes its own
+/// manifest's `about`. Its control blesses both into one directory, where
+/// the second sweep removes the first's PNGs.
+///
+/// A scratch directory stands for `goldens/`, holding `rect_forward`,
+/// and two directories in it for `goldens/dfish_seam/` and
+/// `goldens/dfish_views/`, holding the harness's own pair rows (a pair
+/// stored, and a pair as a check), each blessed with its module's
+/// `about`. Blessing each again leaves the other two byte for byte, and
+/// a pair's entry records 10.5's fields.
+#[test]
+fn blessing_one_directory_leaves_its_siblings() {
+    let s = scratch("siblings");
+    let root = s.dir.clone();
+    let seam = root.join("dfish_seam");
+    let views = root.join("dfish_views");
+    let diffs = s.diffs.clone();
+    type Blessing<'r> = (&'r Path, &'r [(&'r str, Row)], &'r [&'r str], &'static str);
+    let blessings: [Blessing<'_>; 3] = [
+        (&root, ROWS, &["rect_forward"], ABOUT),
+        (&seam, PAIR_ROWS, &["pair_stored"], dfish_seam::ABOUT),
+        (
+            &views,
+            PAIR_ROWS,
+            &["pair_stored", "pair_checked"],
+            dfish_views::ABOUT,
+        ),
+    ];
+    for (dir, rows, only, about) in blessings {
+        bless_these(dir, &diffs, rows, only, about);
+    }
+    for (dir, _, only, about) in blessings {
+        let m = manifest_in(dir);
+        assert_eq!(m["about"], json!(about), "{}", dir.display());
+        assert!(
+            dir.join(format!("{}.png", only[0])).exists(),
+            "{}",
+            dir.display()
+        );
+    }
+    // A pair's entry: the calibration's hash, the geometry with R, the
+    // gains, and both lenses' FNV-64, stored or checked.
+    let m = manifest_in(&views);
+    for entry in [&m["images"]["pair_stored"], &m["checks"]["pair_checked"]] {
+        let source = &entry["source"];
+        let hex = |v: &Value| v.as_str().is_some_and(|h| h.len() == 16);
+        assert!(hex(&source["calibration_fnv64"]), "{entry}");
+        assert_eq!(source["geometry"]["r_m"], json!("inf"), "{entry}");
+        assert_eq!(
+            source["gains"],
+            json!([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]),
+            "{entry}"
+        );
+        let hashes = entry["source_fnv64"].as_array().unwrap();
+        assert!(hashes.len() == 2 && hashes.iter().all(hex), "{entry}");
+        assert_ne!(hashes[0], hashes[1], "{entry}");
+    }
+    // Each blessed again: the other two as they were, byte for byte.
+    for (k, (dir, rows, only, about)) in blessings.into_iter().enumerate() {
+        let others: Vec<&Path> = (0..3).filter(|&o| o != k).map(|o| blessings[o].0).collect();
+        let before: Vec<_> = others.iter().map(|d| files_in(d)).collect();
+        bless_these(dir, &diffs, rows, only, about);
+        for (d, was) in others.iter().zip(&before) {
+            assert_eq!(
+                &files_in(d),
+                was,
+                "blessing {} changed {}",
+                dir.display(),
+                d.display()
+            );
+        }
+    }
+    // Control: two runs blessed into one directory, rect_forward then the
+    // pair; the second's sweep takes the first's PNG.
+    let png = root.join("rect_forward.png");
+    let first = std::fs::read(&png).unwrap();
+    bless_these(&root, &diffs, PAIR_ROWS, &["pair_stored"], ABOUT);
+    let kept = std::fs::read(&png).is_ok_and(|b| b == first);
+    must_fail(
+        "the first run's PNG kept by a second blessed into its directory",
+        kept,
+    );
+}
+
+/// A pair whose calibration, geometry, R or gains changed since it was
+/// blessed is a changed source (10.5), and its render isn't compared;
+/// unchanged, it matches its PNG pixel for pixel.
+#[test]
+fn a_changed_pair_is_not_compared_as_a_render() {
+    let s = scratch("pair-source");
+    let (dir, diffs) = (s.dir.clone(), s.diffs.clone());
+    bless_these(&dir, &diffs, PAIR_ROWS, &["pair_stored"], dfish_seam::ABOUT);
+    let path = dir.join(MANIFEST);
+    let blessed = manifest_in(&dir);
+    let rerun = || {
+        let mut run = Run::at(gpu(), Mode::Golden { bless: false }, &dir, &diffs);
+        run_these(&mut run, PAIR_ROWS, Some(&["pair_stored"]));
+        (run.failures, run.images)
+    };
+    let (failures, images) = rerun();
+    assert!(failures.is_empty(), "{failures:?}");
+    assert_eq!(
+        images["pair_stored"]["measured"]["golden_identical"],
+        json!(1.0)
+    );
+    for (field, to) in [
+        ("calibration_fnv64", json!("0123456789abcdef")),
+        ("gains", json!([[1.0, 1.0, 1.0], [1.0, 1.1, 1.0]])),
+    ] {
+        let mut m = blessed.clone();
+        m["images"]["pair_stored"]["source"][field] = to;
+        std::fs::write(&path, m.to_string()).unwrap();
+        let (failures, _) = rerun();
+        assert!(
+            failures.len() == 1 && failures[0].contains("the pair's source changed"),
+            "{field}: {failures:?}"
+        );
+    }
+    let mut m = blessed.clone();
+    m["images"]["pair_stored"]["source"]["geometry"]["r_m"] = json!(2.0);
+    std::fs::write(&path, m.to_string()).unwrap();
+    let (failures, _) = rerun();
+    assert!(
+        failures.len() == 1 && failures[0].contains("the pair's source changed"),
+        "R: {failures:?}"
+    );
+    // A lens's planes hashing otherwise than blessed.
+    let mut m = blessed;
+    m["images"]["pair_stored"]["source_fnv64"][1] = json!("0123456789abcdef");
+    std::fs::write(&path, m.to_string()).unwrap();
+    let (failures, _) = rerun();
+    assert!(
+        failures.len() == 1 && failures[0].contains("the synthetic source changed"),
+        "{failures:?}"
+    );
+    // Gains other than the pair's, which its entry records, aren't
+    // rendered; its own are (the control).
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let mut run = Run::at(gpu(), Mode::Golden { bless: false }, &dir, &diffs);
+    run.begin("pair_gains");
+    let other = [[1.0, 1.1, 1.0], [1.0; 3]];
+    let drawn = run.render_pair(&pair, &t.rig, other, &v, size, StillOptions::default());
+    assert!(
+        drawn.is_none() && run.failures.len() == 1 && run.failures[0].contains("aren't the pair's"),
+        "gains the pair doesn't record: {:?}",
+        run.failures
+    );
+    let own = run.render_pair(&pair, &t.rig, pair.gains, &v, size, StillOptions::default());
+    must_fail("the pair's own gains refused", own.is_none());
+}
+
+/// A stored pair row keeps only a picture its source's own rig drew, the
+/// rig built from the calibration and geometry its entry records (the
+/// M3.7 review's N8): one a control's rig drew is refused, and nothing is
+/// stored.
+///
+/// The tiny pair drawn by its rig with the feather at 0 and stored: the
+/// run fails, naming the rig. Control: drawn by its own rig, it is
+/// stored.
+#[test]
+fn a_pair_drawn_by_another_rig_isnt_stored() {
+    let s = scratch("pair-rig");
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let refused = |rig: &Rig| {
+        let mut run = Run::at(gpu(), Mode::Golden { bless: true }, &s.dir, &s.diffs);
+        run.begin("pair_stored");
+        let drawn = run.render_pair(&pair, rig, pair.gains, &v, size, StillOptions::default());
+        if let Some(img) = drawn {
+            run.stored_pair("the tiny pair", &img, &pair, view_about(&v, size));
+        }
+        eprintln!("{:?}", run.failures);
+        run.failures.len() == 1 && run.failures[0].contains("rig other than its source's")
+    };
+    let hard = Rig {
+        feather: 0.0,
+        ..t.rig
+    };
+    assert!(refused(&hard), "a hard switch's picture stored");
+    must_fail("the pair's own rig's picture refused", refused(&t.rig));
+}
+
+/// A lens pair row holds the pictures it draws, on the driver that
+/// blessed it and from the same source, to those it blessed (the M3.7
+/// review's N6): D66's "three runs identical", held on every run, check
+/// rows among them.
+///
+/// The tiny pair's check row blessed as drawn, then run again with its
+/// picture drawn in debug mode 5, lens 1 alone, as a render that moved
+/// would be: the run fails, naming its pictures. Control: run again as
+/// blessed, it passes.
+#[test]
+fn a_pair_rows_pictures_are_held_to_its_blessing() {
+    let s = scratch("pair-pictures");
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let row = |mode: Mode, debug: DebugMode| {
+        let mut run = Run::at(gpu(), mode, &s.dir, &s.diffs);
+        run.begin("pair_checked");
+        let opts = StillOptions {
+            debug,
+            ..StillOptions::default()
+        };
+        let _ = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts);
+        run.end_pair_check("the tiny pair", &[&pair], vec![view_about(&v, size)]);
+        run
+    };
+    row(Mode::Golden { bless: true }, DebugMode::Off).finish();
+    let held = |debug: DebugMode| {
+        let run = row(Mode::Golden { bless: false }, debug);
+        eprintln!("{:?}", run.failures);
+        run.failures.len() == 1 && run.failures[0].contains("the pictures it drew")
+    };
+    assert!(held(DebugMode::Lens1), "a render that moved passed");
+    must_fail(
+        "the blessed pictures, drawn again, held as moved",
+        held(DebugMode::Off),
+    );
+}
+
 #[test]
 fn a_bound_over_is_strict() {
     // "Over 100 bad pixels" fails at 100.
@@ -3536,6 +4300,30 @@ fn a_bound_over_is_strict() {
     assert!(run.over("control", 101.0, 100.0));
     assert_eq!(run.failures.len(), 1, "{:?}", run.failures);
     assert_eq!(run.thresholds["control_over"], json!(100.0));
+}
+
+#[test]
+fn a_nan_is_infinitely_far_from_the_reference() {
+    // The CPU rule and the emulation's 1e-12 both read max_diff, which a
+    // render holding a NaN must fail (F039).
+    let want = [0.25, 0.5, 0.75, 0.1, 0.2, 0.3];
+    let mut got = want;
+    assert_eq!(at_most(max_diff(&got, &want), 0.0).passes(), Some(true));
+    got[4] = f64::NAN;
+    let off = max_diff(&got, &want);
+    assert_eq!(off, f64::INFINITY);
+    must_fail("a NaN under the CPU rule", at_most(off, CPU_MAX_CHANNEL));
+    must_fail("a NaN under the emulation's bound", below(off, 1e-12));
+    // Control: the bare fold this replaced reads the NaN picture as exact.
+    let bare = got
+        .iter()
+        .zip(&want)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0.0, f64::max);
+    assert_eq!(
+        must_fail("the bare fold seeing the NaN", above(bare, 0.0)),
+        0.0
+    );
 }
 
 #[test]
@@ -3808,6 +4596,7 @@ fn goldens_on_gpu_match_reference() {
             bench::note(n);
         }
         failed.extend(run.failures);
+        failed.extend(run_dfish(g, Mode::References));
     }
     assert!(
         failed.is_empty(),
@@ -3828,9 +4617,58 @@ fn goldens_on_host_llvmpipe() {
         )),
     };
     assert_eq!(gpu.caps.info.device_type, wgpu::DeviceType::Cpu);
+    let failed = run_dfish(&gpu, Mode::OtherDriver);
     let mut run = Run::new(&gpu, Mode::OtherDriver);
     run_rows(&mut run, None);
+    run.failures.extend(failed);
     run.finish();
+}
+
+/// The lens pair's two row lists ([`dfish_seam`] and [`dfish_views`]),
+/// each with its directory, its manifest's words and the name of its
+/// diffs' directory, as their Tier 1 tests run them on lavapipe.
+type DfishList = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, Row)],
+    &'static str,
+);
+const DFISH: [DfishList; 2] = [
+    (
+        dfish_seam::DIR,
+        dfish_seam::ABOUT,
+        dfish_seam::ROWS,
+        "dfish-seam",
+    ),
+    (
+        dfish_views::DIR,
+        dfish_views::ABOUT,
+        dfish_views::ROWS,
+        "dfish-views",
+    ),
+];
+
+/// Both of the lens pair's row lists ([`DFISH`]) on `gpu` in `mode`, a
+/// Tier 2 mode, each against its own directory's manifest: their notes
+/// written to the bench log, and their failures given back, each naming
+/// its row and driver as [`Run::fail`] names it. On a GPU
+/// ([`Mode::References`]) that is the CPU rule, the ideal references and
+/// the controls; on the machine's llvmpipe ([`Mode::OtherDriver`]) the
+/// stored pictures too, by the other-driver rule.
+fn run_dfish(gpu: &Gpu, mode: Mode) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (dir, about, rows, diffs) in DFISH {
+        let diffs = diff_dir_beside(diffs);
+        let _ = std::fs::remove_dir_all(&diffs);
+        let mut run = Run::at(gpu, mode, Path::new(dir), &diffs);
+        run.about = about;
+        run_these(&mut run, rows, None);
+        for n in &run.notes {
+            bench::note(n);
+        }
+        failed.extend(run.failures);
+    }
+    failed
 }
 
 /// Every CPU check's PSNR on the RX 7600 (RADV NAVI33, Mesa 26.2.5) at

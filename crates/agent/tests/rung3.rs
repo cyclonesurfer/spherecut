@@ -1,9 +1,10 @@
-//! Rung 3 of the round-trip ladder (M3 plan 4.2; M3.5's unit (c)): the
-//! lossless synthetic `.insv` (`InsvSpec::rung3()`) through probe, the
-//! camera crate and `Still::open_pair` to the CPU reference, held to the
-//! planes synth coded and to rung 1's render of them, within 3 s
-//! (amendment 5), and `StillPair`'s seek and refusals, and
-//! `pair_stitching`'s guard against the UI thread.
+//! Rung 3 of the round-trip ladder (M3 plan 4.2; M3.5's unit (c), M3.7's
+//! unit (d)): the lossless synthetic `.insv` (`InsvSpec::rung3()`)
+//! through probe, the camera crate and `Still::open_pair` to the CPU
+//! reference and to the GPU on lavapipe, held to the planes synth coded,
+//! to rung 1's render of them and to rung 2's (the GPU's stitch of
+//! synth's planes, byte for byte), and `StillPair`'s seek and refusals,
+//! and `pair_stitching`'s guard against the UI thread.
 //!
 //! Rung 1's picture is made here from `synth::rung`'s pair, synth's
 //! planes with no file between, and the boundary crate's `sphere_rig`:
@@ -17,8 +18,10 @@
 //! runs its controls, beside its own check rather than after it: rung
 //! 3's file alone takes most of the budget to write.
 //!
-//! Budget (4.1 rule 5, 19.6): 2 s of the row's 3 s, rung 1's own render
-//! of its pair included. Each test prints its time and the suite's.
+//! Budget (4.1 rule 5, 19.6): 2.3 s, the binary's measured time on the
+//! cloud host with the GPU half (2.05 to 2.11 s without it), within the
+//! 3.1 s M3.7 allows it, rung 1's and rung 2's own renders of their pair
+//! included. Each test prints its time and the suite's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -27,7 +30,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use spherecut_agent::still::{
-    self, DecodedPair, Failure, Look, Options, PairOptions, Still, StillPair, Stop,
+    self, DecodedPair, Decoder, Failure, Look, Options, PairOptions, Still, StillPair, Stop,
 };
 use spherecut_boundary::sphere_rig;
 use spherecut_core::TimeSpec;
@@ -37,7 +40,10 @@ use spherecut_core::video::VideoPlanes;
 use spherecut_media::Source;
 use spherecut_media::backend::SeekMode;
 use spherecut_render::reference::{self, RigOptions};
-use spherecut_render::{AdapterChoice, Depth, Image, ViewParams};
+use spherecut_render::{
+    AdapterChoice, Depth, Image, LensFrame, PlaneSource, SourceFrames, StillOptions, StillRenderer,
+    ViewParams,
+};
 use spherecut_sphere::rig::{Binding, Generation, Geometry, Rig, Tune};
 use spherecut_synth::Pattern;
 use spherecut_synth::code::{CornerCode, Luma, read_corner_code};
@@ -49,7 +55,7 @@ use spherecut_testkit::control::must_fail;
 use spherecut_testkit::{Fnv64, fnv64};
 
 /// The suite's budget in seconds (amendment 5, 19.6).
-const BUDGET_S: f64 = 2.0;
+const BUDGET_S: f64 = 2.3;
 
 /// When the suite's first test began.
 static BEGAN: OnceLock<Instant> = OnceLock::new();
@@ -203,6 +209,10 @@ fn open(path: &Path, pair: &PairOptions) -> (Result<StillPair<'static>, Failure>
     open_on(path, None, pair)
 }
 
+/// [`open`] on `gpu`. Both lenses decode in software whatever the host
+/// has: `open_pair` takes the caller's decoder since M3.7, and rung 3's
+/// equalities are of the file's planes as FFmpeg's software decoder gives
+/// them, never a hardware decoder's (the M3.7 review).
 fn open_on<'g>(
     path: &Path,
     gpu: Option<&'g spherecut_render::Gpu>,
@@ -216,7 +226,10 @@ fn open_on<'g>(
             src,
             &report,
             gpu,
-            &Options::default(),
+            &Options {
+                decoder: Decoder::Software,
+                ..Options::default()
+            },
             pair,
             &stop,
             &mut warnings,
@@ -492,6 +505,91 @@ fn rung3_render_equals_rung1() {
     });
 }
 
+/// Rung 3's GPU half: `StillPair::render` of the file on lavapipe equals
+/// rung 2's stitch of the same planes and rig, byte for byte: the one
+/// through the file, the camera crate and `Still::open_pair` with the
+/// GPU, the other `render_blurred` of synth's planes (a
+/// `SourceFrames::Pair` of their bytes) and the boundary's rig, as
+/// render's `tests/dfish/rung2.rs` draws them. Both through the same
+/// views at the same depth, with unit gains. The control opens the file
+/// under the entry stitching gives it, unchanged (Reversed), which
+/// renders and isn't rung 2's picture.
+#[test]
+fn rung3_gpu_render_equals_rung2() {
+    let _t = timed("rung3_gpu_render_equals_rung2");
+    let shots = [rung::equirect(), rung::whole_view(0)];
+    let gpu = std::thread::spawn(|| still::gpu(&AdapterChoice::Cpu, &Options::default()));
+    let camera = rung::camera();
+    let rig = sphere_rig(
+        &camera.cal,
+        &camera.planted,
+        &rung::far(),
+        rung::FRONT_TRACK,
+        rung::SIDES,
+    )
+    .unwrap();
+    let frames = rung::pair(Pattern::SeamLines);
+    let planted = planted_geometry(rung3_file());
+    let gpu = gpu.join().unwrap().unwrap();
+    // Rung 2's: synth's planes, uploaded from their bytes.
+    let mut renderer = StillRenderer::new(&gpu);
+    let rung2: Vec<Image> = shots
+        .iter()
+        .map(|shot| {
+            let lenses = frames.each_ref().map(|frame| LensFrame {
+                frame,
+                from: PlaneSource::Bytes,
+            });
+            let source = SourceFrames::Pair {
+                lenses,
+                rig: &rig,
+                gains: UNIT,
+            };
+            renderer
+                .render_blurred(
+                    &gpu,
+                    source,
+                    &[view_of(shot)],
+                    shot.size,
+                    &StillOptions::default(),
+                )
+                .unwrap()
+        })
+        .collect();
+    let options = |geometry: Option<Geometry>| PairOptions {
+        geometry,
+        tune: rung::far(),
+        rig: RigOptions::default(),
+    };
+    let render = |pair: &mut StillPair<'_>, decoded: &DecodedPair, shot: &Shot| {
+        pair.render(decoded, &[view_of(shot)], shot.size, Look::default())
+            .unwrap()
+    };
+    let (gpu, rung2) = (&gpu, &rung2);
+    std::thread::scope(|s| {
+        // Control: the entry stitching gives, unchanged (Reversed).
+        let as_stored = s.spawn(|| {
+            let (opened, _) = open_on(rung3_file(), Some(gpu), &options(None));
+            let mut as_stored = opened.unwrap();
+            assert_eq!(as_stored.geometry().binding, Binding::Reversed);
+            let decoded = seek(&mut as_stored, 0).unwrap();
+            must_fail(
+                "the X5 row's binding, Reversed, on the GPU",
+                same_picture(&render(&mut as_stored, &decoded, &shots[0]), &rung2[0]),
+            );
+        });
+        let (opened, _) = open_on(rung3_file(), Some(gpu), &options(Some(planted.clone())));
+        let mut pair = opened.unwrap();
+        assert_eq!(pair.rig(), &rig);
+        let decoded = seek(&mut pair, 0).unwrap();
+        for (shot, want) in shots.iter().zip(rung2) {
+            same_picture(&render(&mut pair, &decoded, shot), want)
+                .unwrap_or_else(|e| panic!("{shot:?}: {e}"));
+        }
+        as_stored.join().unwrap();
+    });
+}
+
 /// `StillPair::seek` lands both lenses on the frame asked for, at one
 /// time with equal pts, from any frame before or after it.
 #[test]
@@ -531,7 +629,7 @@ fn open_pair_seeks_both_lenses_to_one_time() {
 /// failure: one with no calibration (`InsvFault::NoCalibration`), one
 /// whose calibration strings can't be read (`InsvFault::WrongTokenCount`),
 /// a pair of tracks with no trailer, and a geometry `Rig::build` refuses;
-/// and it refuses a GPU until M3.7, and `render` more than one view.
+/// and with no GPU `render` refuses more than one view.
 #[test]
 fn open_pair_refuses_a_file_it_cant_stitch() {
     let _t = timed("open_pair_refuses_a_file_it_cant_stitch");
@@ -540,7 +638,6 @@ fn open_pair_refuses_a_file_it_cant_stitch() {
         Err(e) => e,
     };
     let files = [uncalibrated_file, bad_strings_file, plain_file].map(std::thread::spawn);
-    let gpu = std::thread::spawn(|| still::gpu(&AdapterChoice::Cpu, &Options::default()));
     small_file();
     let [uncalibrated, bad_strings, plain] = files.map(|f| f.join().unwrap());
     // No calibration.
@@ -573,12 +670,7 @@ fn open_pair_refuses_a_file_it_cant_stitch() {
     ));
     assert_eq!(e.code, "not_equirect", "{e:?}");
     assert!(e.message.contains("no rig"), "{}", e.message);
-    // A GPU: the stitch is the CPU reference's until M3.7.
-    let gpu = gpu.join().unwrap().unwrap();
-    let e = refused(open_on(small_file(), Some(&gpu), &PairOptions::default()));
-    assert_eq!(e.code, "internal", "{e:?}");
-    assert!(e.message.contains("M3.7"), "{}", e.message);
-    // Two views.
+    // Two views, on the CPU reference.
     let (opened, warnings) = open(small_file(), &PairOptions::default());
     let mut pair = opened.unwrap();
     assert_eq!(warnings, Vec::<String>::new());
