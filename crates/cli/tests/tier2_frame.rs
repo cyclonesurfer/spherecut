@@ -43,8 +43,10 @@
 //! process (`StillPair::renderer`, `StillRenderer::slots`) and held to
 //! each lens's frame decoded in software, a slot that differs labelled
 //! against odin's GFX11 R8 signature (`gfx11_r8`, copied from the
-//! playback check). `the_pair_slot_check_runs_on_lavapipe_with_software_standing_in`
-//! and `the_slot_check_labels_odins_gfx11_r8_signature` are their Tier 1
+//! playback check), before the slot check's controls run.
+//! `the_pair_slot_check_runs_on_lavapipe_with_software_standing_in`,
+//! `the_slot_check_labels_odins_gfx11_r8_signature` and
+//! `a_swapped_slot_is_judged_before_the_controls` are their Tier 1
 //! halves.
 //!
 //! `samples_frame_clip8_renders` is Tier 2c (M3.5): Pat's clip 8,
@@ -619,7 +621,8 @@ fn pair_refused(r: &Ran) -> Option<String> {
 /// software, each run's wall time printed. Then both slots after the same
 /// stitch in this process under `opts` ([`pair_slots`]), each held to its
 /// lens's frame decoded in software, a slot that differs labelled against
-/// odin's GFX11 R8 signature. The control: the zero-copy run under
+/// odin's GFX11 R8 signature, that verdict given before the slot check's
+/// controls ([`judge_pair`]). The control: the zero-copy run under
 /// binding=reversed isn't the software truth.
 fn pair_zero_copy_against_software(
     node: Option<&Path>,
@@ -697,8 +700,7 @@ fn pair_zero_copy_against_software(
         );
     }
     eprintln!("slots read in process in {:.2} s", slots.took);
-    must_fail("lens 0's slot against lens 1's frame", slots.crossed);
-    must_fail("lens 0's slot against its next frame", slots.stale);
+    judge_pair(&lsb, slots);
     // The control: binding=reversed, under zero copy, isn't the truth.
     let reversed = dir.join("reversed.png");
     let geometry = ["--geometry", "binding=reversed", "--stitch-distance", "inf"];
@@ -709,6 +711,16 @@ fn pair_zero_copy_against_software(
         at_most(max_lsb(&reversed, &dir.join("software-0.png")), 0.0),
     );
     eprintln!("binding=reversed under zero copy: {apart} LSB from the software truth");
+    eprintln!("InsvSpec::small(): zero copy byte-identical to software through every view");
+}
+
+/// The pair runs' verdict and the slot check's controls: `lsb`, each
+/// view's distance from the software truth, all 0, and both of `slots`'
+/// slots holding their lens's frame, or a panic naming each view's LSB
+/// and each slot that differs, labelled against odin's GFX11 R8
+/// signature; then the controls, lens 0's slot against lens 1's frame
+/// and against its next frame, which judge the slot check alone.
+fn judge_pair(lsb: &[f64], slots: PairSlots) {
     let wrong: Vec<String> = slots
         .held
         .iter()
@@ -728,7 +740,69 @@ fn pair_zero_copy_against_software(
             wrong.join("; ")
         }
     );
-    eprintln!("InsvSpec::small(): zero copy byte-identical to software through every view");
+    must_fail("lens 0's slot against lens 1's frame", slots.crossed);
+    must_fail("lens 0's slot against its next frame", slots.stale);
+}
+
+/// What `f` panicked with, or `None` if it returned.
+fn panic_message(f: impl FnOnce() + std::panic::UnwindSafe) -> Option<String> {
+    std::panic::catch_unwind(f).err().map(|e| {
+        e.downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+            .unwrap_or_default()
+    })
+}
+
+/// That `judge_pair` of `lsb` and `slots` panicked with the labelled
+/// verdict, naming lens 0's slot and why it differs.
+fn verdict_names_lens_0(lsb: &[f64], slots: PairSlots) -> Result<(), String> {
+    let lsb = lsb.to_vec();
+    match panic_message(move || judge_pair(&lsb, slots)) {
+        Some(m)
+            if m.starts_with("zero copy against software, by view: ")
+                && m.contains("lens 0's slot: Y: ") =>
+        {
+            Ok(())
+        }
+        Some(m) => Err(format!("panicked otherwise: {m}")),
+        None => Err("no verdict".into()),
+    }
+}
+
+/// The pair runs' verdict comes before the slot check's controls (the
+/// M3.7 review's N11), in Tier 1 with the slot reads stubbed: when lens
+/// 0's slot holds lens 1's frame, the swap the check is for, lens 0's
+/// slot differs from its own frame and `crossed` holds, and `judge_pair`
+/// reports the labelled verdict, `lens 0's slot: ...`, not a control that
+/// stopped failing. Control: slots that hold their frames, 0 LSB through
+/// every view, give no verdict.
+#[test]
+fn a_swapped_slot_is_judged_before_the_controls() {
+    let slots = |swapped: bool| PairSlots {
+        held: [
+            if swapped {
+                Err("Y: 4096 samples differ, off odin's GFX11 R8 signature".into())
+            } else {
+                Ok(())
+            },
+            Ok(()),
+        ],
+        crossed: if swapped {
+            Ok(())
+        } else {
+            Err("Y: 4096 samples differ".into())
+        },
+        stale: Err("Y: 4096 samples differ".into()),
+        decode: [Value::Null, Value::Null],
+        took: 0.0,
+    };
+    let lsb = [0.0; VIEWS.len()];
+    verdict_names_lens_0(&lsb, slots(true)).unwrap();
+    must_fail(
+        "slots that hold their frames",
+        verdict_names_lens_0(&lsb, slots(false)),
+    );
 }
 
 /// What [`pair_slots`] read back: each lens's slot held to its frame
