@@ -1536,13 +1536,16 @@ Tier 2 passed as at 0b3ab9b (59 passed, 0 failed, 1 skipped, against
 the zero-copy tests and `vaapi_render_matches_software` passed.
 
 Pending odin (M3.7, the stitch in the projection pass, DECISIONS D66):
-no report has these rows yet.
+odin's run at 1a7a64e failed two of the stitch's goldens checks on
+RADV, the poles' implicit-LOD control and rung 2's seam difference on
+the count of pixels past 4 LSB (D66 has both, and what changed), and
+these rows wait on its rerun.
 
 | Row | Measured by | Asks |
 |---|---|---|
 | P-SHADE, pending odin | `bench_stitch_pass` | the stitched pass within 0.8 ms at 1080p and 2.0 ms at 4K on RADV (M3 plan 4.3); a miss names the redirect |
 | `frame <insv>` stitched still, wall time, pending odin | the `view N: frame … s` lines of `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` (synth's `InsvSpec::small()`, 2 × 384², each run a process of its own, under zero copy and in software) | recorded, no gate |
-| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | the rows against their CPU and ideal references and controls, within the floors lavapipe's runs set (D32's CPU rule; never lavapipe's stored PNGs, which `goldens_on_host_llvmpipe` holds by the other-driver rule); `rung2_on_radv` against lavapipe's pictures by the other-driver rule and against rung 1 by the reference rule |
+| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | the rows against their CPU and ideal references and controls, within the floors lavapipe's runs set (D32's CPU rule; never lavapipe's stored PNGs, which `goldens_on_host_llvmpipe` holds by the other-driver rule); `rung2_on_radv` against lavapipe's pictures by the other-driver rule, the seam difference with its LSB thresholds scaled to the linear light it is held in (D66), and against rung 1 by the reference rule |
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 

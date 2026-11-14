@@ -5076,10 +5076,12 @@ each GPU (RADV on odin) against the rows' CPU and ideal references and
 their controls, never lavapipe's stored PNGs, and
 `goldens_on_host_llvmpipe` against those PNGs by the other-driver rule;
 `rung2_on_radv` holds rung 2 on RADV against lavapipe's pictures by the
-other-driver rule and against rung 1 by the reference rule. The 24 old
-rows' PNGs and manifest are untouched. On the cloud's four cores the
-binary takes 17.54 s, against 9.81 s with M3.7's tests left out (alone,
-`dfish_seam` takes 3.24 s, `dfish_views` 3.46 s and rung 2 4.99 s).
+other-driver rule, the seam difference with the rule's two LSB
+thresholds scaled to the linear light it is held in (D66), and against
+rung 1 by the reference rule. The 24 old rows' PNGs and manifest are
+untouched. On the cloud's four cores the binary takes 17.54 s, against
+9.81 s with M3.7's tests left out (alone, `dfish_seam` takes 3.24 s,
+`dfish_views` 3.46 s and rung 2 4.99 s).
 
 ## D33. View conventions
 
@@ -11285,7 +11287,19 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   `.insv`'s `frame --zero-copy` under VA-API (DMA-BUF) and path B
   against a software decode, strict, with each lens's slot read back and
   labelled against odin's GFX11 R8 signature (D77) where a slot holds
-  other bytes than its frame's.
+  other bytes than its frame's. On the seam difference, which rung 2
+  holds in the lenses' linear light, `rung2_on_radv` scales the
+  other-driver rule's two LSB thresholds by what a driver's steps in
+  each lens's display values come to there: each block's largest gain
+  times the sRGB EOTF's slope at 1 (2.4/1.055), summed, and one f16
+  step more, which makes 18.32 and 36.52 LSB at unit gains. The count,
+  the PSNR and the SSIM stay. Odin's RX 7600 under RADV at 1a7a64e had
+  put 6 and 7 pixels of the equirect's and the −X stripe's seam
+  difference past D32's 4 LSB, at most 6 and 5, and failed on the count
+  alone. The seam difference's control, lens 1's centre moved 1 px,
+  fails the scaled rule by each clause the scaling widened (2202 pixels
+  past 18.32 LSB and 61.66 LSB at most on lavapipe), and each failure
+  names its picture's worst pixels.
 
 P-SHADE, the pass's cost on odin (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K;
 `bench_stitch_pass`), is pending odin, and with it the RADV goldens. On a

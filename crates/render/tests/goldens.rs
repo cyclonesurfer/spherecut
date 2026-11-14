@@ -148,6 +148,15 @@ const OTHER_SSIM: f64 = 0.995;
 const OTHER_PAST_LSB: f64 = 4.0;
 const OTHER_PIXELS_PAST: f64 = 4.0;
 const OTHER_MAX_LSB: f64 = 8.0;
+/// The other-driver rule's two thresholds in 8-bit steps, as a picture in
+/// display codes takes them. Rung 2 holds the seam difference, a picture
+/// of linear light, to these scaled by what a driver's steps in each
+/// lens's display codes come to there (`rung2`'s `Picture::steps`); the
+/// count, the PSNR and the SSIM stay.
+const OTHER_STEPS: Steps = Steps {
+    past: OTHER_PAST_LSB,
+    max: OTHER_MAX_LSB,
+};
 /// The CPU tolerance: measured − 3 dB when blessing, never below 36.
 const CPU_MARGIN_DB: f64 = 3.0;
 const CPU_FLOOR_DB: f64 = 36.0;
@@ -768,18 +777,35 @@ fn num(v: f64) -> Value {
     }
 }
 
+/// The other-driver rule's thresholds in 8-bit steps: a pixel is past at
+/// more than `past` off in some channel, and none may be more than `max`
+/// off ([`OTHER_STEPS`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Steps {
+    past: f64,
+    max: f64,
+}
+
 /// How a render compares with its stored golden.
 #[derive(Debug, Clone, PartialEq)]
 struct Drift {
     identical: bool,
     psnr: f64,
     ssim: f64,
-    /// Pixels with a channel more than [`OTHER_PAST_LSB`] off.
+    /// Pixels with a channel more than `steps.past` off.
     past: f64,
     max_lsb: f64,
+    /// The thresholds `past` was counted at and [`judge`] holds.
+    steps: Steps,
 }
 
 fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
+    drift_in(got, want, OTHER_STEPS)
+}
+
+/// [`drift`] with the pixels past counted at `steps.past`, for
+/// [`judge`] to hold to `steps`.
+fn drift_in(got: &Image, want: &Image, steps: Steps) -> Result<Drift, String> {
     if (got.width, got.height) != (want.width, want.height) {
         return Err(format!(
             "{}x{} against a {}x{} golden",
@@ -806,16 +832,19 @@ fn drift(got: &Image, want: &Image) -> Result<Drift, String> {
         identical: got.pixels == want.pixels,
         psnr: psnr_of(size, &a, &b),
         ssim: ssim_of(size, &a, &b),
-        past: lsb.iter().filter(|d| **d > OTHER_PAST_LSB).count() as f64,
+        past: lsb.iter().filter(|d| **d > steps.past).count() as f64,
         max_lsb: lsb.iter().copied().fold(0.0, f64::max),
+        steps,
     })
 }
 
 /// Section 6's rule for a stored image: identical at the driver build it
-/// was blessed on, else within the other-driver tolerance.
+/// was blessed on, else within the other-driver tolerance, at the
+/// thresholds the drift was measured for (`d.steps`).
 fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
+    let Steps { past, max } = d.steps;
     let numbers = format!(
-        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {OTHER_PAST_LSB} LSB off, max {:.0} LSB",
+        "PSNR {:.2} dB, SSIM {:.5}, {:.0} {} more than {past} LSB off, max {:.0} LSB",
         d.psnr,
         d.ssim,
         d.past,
@@ -834,14 +863,14 @@ fn judge(d: &Drift, same_driver: bool) -> Result<(), String> {
     if d.psnr >= OTHER_PSNR_DB
         && d.ssim >= OTHER_SSIM
         && d.past <= OTHER_PIXELS_PAST
-        && d.max_lsb <= OTHER_MAX_LSB
+        && d.max_lsb <= max
     {
         Ok(())
     } else {
         Err(format!(
             "outside the other-driver tolerance (PSNR ≥ {OTHER_PSNR_DB} dB, SSIM ≥ {OTHER_SSIM}, \
-             at most {OTHER_PIXELS_PAST} pixels more than {OTHER_PAST_LSB} LSB off, none more \
-             than {OTHER_MAX_LSB}): {numbers}"
+             at most {OTHER_PIXELS_PAST} pixels more than {past} LSB off, none more than \
+             {max}): {numbers}"
         ))
     }
 }
