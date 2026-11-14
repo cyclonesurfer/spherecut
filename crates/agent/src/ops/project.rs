@@ -176,7 +176,10 @@ fn create(file: &Path, media: &Path, cx: &Ctx) -> Result<Value, ToolError> {
 /// equirect, with the doubt and a `no_calibration` warning: it shows as
 /// its lenses. So does one whose calibration reads but whose source at
 /// the default tune `validate` refuses (the M3.9 review's R7), its
-/// warning giving `validate`'s words.
+/// warning giving `validate`'s words. Either's doubt is in project
+/// create's words for it ([`still::INSTA360_NO_CALIBRATION`]), never in
+/// those of a pair it makes a project of, which `still::equirect_doubt`
+/// gives a file whose calibration reads (the M3.7 review).
 pub(crate) fn probe_media(
     arg: &str,
     path: &Path,
@@ -226,18 +229,27 @@ pub(crate) fn probe_media(
             d.tracks[0], media.video.stream
         )));
     }
-    match camera {
+    let uncalibrated = match camera {
         Ok(Some(d)) => {
             media.source = Source::DualFisheye(Box::new(d));
             return Ok(media);
         }
-        Ok(None) if probed.report.camera_file.lenses.is_some() => {
-            doubts.push(no_calibration(None));
-        }
-        Ok(None) => {}
-        Err(why) => doubts.push(no_calibration(Some(&why))),
-    }
-    if let Some(why) = still::equirect_doubt(&probed) {
+        Ok(None) if probed.report.camera_file.lenses.is_some() => Some(no_calibration(None)),
+        Ok(None) => None,
+        Err(why) => Some(no_calibration(Some(&why))),
+    };
+    // A camera's pair the project takes no source of, though its
+    // calibration may read, is no pair it makes a project of.
+    let doubt = still::equirect_doubt(&probed).map(|why| match &uncalibrated {
+        Some(_) => format!(
+            "{} is {}",
+            probed.report.path.display(),
+            still::INSTA360_NO_CALIBRATION
+        ),
+        None => why,
+    });
+    doubts.extend(uncalibrated);
+    if let Some(why) = doubt {
         doubts.push(Warning::new(
             codes::NOT_EQUIRECT,
             format!("{why}; the project renders it as a stitched equirect all the same"),

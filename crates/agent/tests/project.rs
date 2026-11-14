@@ -18,7 +18,7 @@ use spherecut_agent::error::codes;
 use spherecut_agent::limits::FIELD_BYTES;
 use spherecut_agent::rpc::{CallCx, Tools};
 use spherecut_agent::tools::Spherecut;
-use spherecut_agent::{Roots, ToolError, reference, text};
+use spherecut_agent::{Roots, ToolError, reference, still, text};
 use spherecut_camera::insta360::limits::MAX_METADATA;
 use spherecut_camera::insta360::{parse_metadata, read_record, read_trailer, stitching};
 use spherecut_core::project::folder::ProjectFolder;
@@ -1491,8 +1491,10 @@ fn a_project_of_an_insv_records_its_camera() {
 
 /// `project create` of a two-lens file with no calibration a stitch reads
 /// makes an equirect media with its doubt and a `no_calibration` warning,
-/// as does one whose calibration camera refuses. Control: cam.insv, whose
-/// calibration a stitch reads, is made without them.
+/// as does one whose calibration camera refuses; the doubt says "no
+/// calibration: shown as its lenses" too ([`uncalibrated_doubt`]).
+/// Control: cam.insv, whose calibration a stitch reads, is made without
+/// them.
 #[test]
 fn no_calibration_is_made_with_a_warning() {
     let _t = timed("no_calibration_is_made_with_a_warning");
@@ -1530,9 +1532,9 @@ fn no_calibration_is_made_with_a_warning() {
         if warned("no_calibration") != Some(json!(message)) {
             return Err(format!("{file}: no {message:?}: {r}"));
         }
-        if warned(codes::NOT_EQUIRECT).is_none() {
-            return Err(format!("{file}: no doubt: {r}"));
-        }
+        let doubt = warned(codes::NOT_EQUIRECT).unwrap_or_default();
+        uncalibrated_doubt(doubt.as_str().unwrap_or_default())
+            .map_err(|e| format!("{file}: {e}: {r}"))?;
         if r["media"][0]["source"] != json!({"kind": "equirect"}) {
             return Err(format!("{file}: not an equirect: {r}"));
         }
@@ -1547,6 +1549,27 @@ fn no_calibration_is_made_with_a_warning() {
         "cam.insv, whose calibration a stitch reads",
         check("cam.spherecut", &cam, &plain),
     );
+}
+
+/// Whether `doubt`, the `not_equirect` warning of a camera's file that a
+/// project took as an equirect, says so in project create's words ("no
+/// calibration: shown as its lenses", `still::INSTA360_NO_CALIBRATION`)
+/// and that the project renders it as an equirect all the same, never in
+/// `still::INSTA360_PAIR`'s, which say that project create makes a
+/// project of the pair (the M3.7 review's finding on `probe_media`).
+fn uncalibrated_doubt(doubt: &str) -> Result<(), String> {
+    for words in [
+        still::INSTA360_NO_CALIBRATION,
+        "the project renders it as a stitched equirect all the same",
+    ] {
+        if !doubt.contains(words) {
+            return Err(format!("no {words:?} in the doubt {doubt:?}"));
+        }
+    }
+    if doubt.contains(still::INSTA360_PAIR) {
+        return Err(format!("the pair's words in the doubt {doubt:?}"));
+    }
+    Ok(())
 }
 
 /// Each lens's θ_frame, in degrees, of the calibration camera reads from
@@ -1571,7 +1594,9 @@ fn frame_deg(path: &Path) -> [f64; 2] {
 /// a project all the same, through `create` and through `add_media`: an
 /// equirect, shown as its lenses, with `not_equirect` and `no_calibration`
 /// warnings that give `validate`'s words, as one whose calibration can't
-/// be read does. The files: cam.insv's calibration with both blocks'
+/// be read does: the doubt in project create's words for it, never those
+/// of a pair it makes a project of ([`uncalibrated_doubt`], the M3.7
+/// review). The files: cam.insv's calibration with both blocks'
 /// focals times 1.07, so that each lens's θ_frame is under the 95° the
 /// default 5° feather needs, and with block 0's ξ at −1.5, where the lens
 /// images nothing. The camera form, at the default tune, is refused on
@@ -1579,8 +1604,9 @@ fn frame_deg(path: &Path) -> [f64; 2] {
 /// media equirect, since the form has nothing to fix (the review of R7's
 /// fix); the first is made a source after by a whole `set_source` whose
 /// feather fits its frame. Controls: cam.insv itself is made a
-/// dual-fisheye source without the warnings, and a camera form refused
-/// for another reason gets another `next`.
+/// dual-fisheye source without the warnings, a camera form refused for
+/// another reason gets another `next`, and the doubt M3.7 first gave such
+/// a file, in `still::INSTA360_PAIR`'s words, fails the doubt's check.
 #[test]
 fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
     let _t = timed("a_calibration_no_project_takes_at_the_default_tune_stays_equirect");
@@ -1633,9 +1659,8 @@ fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
             if !(why.starts_with("no calibration: shown as its lenses (") && why.contains(words)) {
                 return Err(format!("{file} by {how}: no_calibration {why:?}: {r}"));
             }
-            if warned(codes::NOT_EQUIRECT).is_none() {
-                return Err(format!("{file} by {how}: no doubt: {r}"));
-            }
+            uncalibrated_doubt(&warned(codes::NOT_EQUIRECT).unwrap_or_default())
+                .map_err(|e| format!("{file} by {how}: {e}: {r}"))?;
             if !matches!(source, Source::Equirect {}) {
                 return Err(format!("{file} by {how}: {source:?}"));
             }
@@ -1683,6 +1708,16 @@ fn a_calibration_no_project_takes_at_the_default_tune_stays_equirect() {
     must_fail(
         "cam.insv, whose source at the default tune validates",
         check("cam.spherecut", &cam, "source.tune"),
+    );
+    // The doubt M3.7 first gave such a file, in the words of a pair that
+    // project create makes a project of.
+    must_fail(
+        "the pair's words for a file no project takes as one",
+        uncalibrated_doubt(&format!(
+            "{} is {}; the project renders it as a stitched equirect all the same",
+            long.display(),
+            still::INSTA360_PAIR
+        )),
     );
 }
 
