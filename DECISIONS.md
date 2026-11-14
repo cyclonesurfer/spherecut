@@ -11258,7 +11258,18 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   stored pair row keeps only the picture of the rig its recorded
   calibration and geometry build (N8), and `dfish_hifreq_tinyplanet` is
   held to the CPU reference over its whole picture as well as to the
-  ideal over its minified disc (N5).
+  ideal over its minified disc (N5). The poles' rows, `dfish_zenith` and
+  `dfish_nadir`, hold the far `Grid` pair's picture to its twin's (the
+  rig turned 180° about +Y with its blocks swapped) within 2/255 at
+  every pixel. Their control fails by geometry on any driver: it is the
+  twin with each block keeping the track it read in the camera, as a
+  stitch that bound each block to the slot of its own index would draw
+  it, and it put 65 411 and 65 311 of the 65 536 pixels past 2/255 on
+  lavapipe, most by more than 32 LSB, where D32's other-driver rule
+  lets a driver move each picture by 8 LSB at most. 10.5's implicit-LOD
+  control is measured there and not held: a fisheye's uv has no wrap
+  for a quad's derivatives to cross, and on odin's RX 7600 under RADV
+  (1a7a64e) it put no pixel past 2/255.
 - agent's `rung3_gpu_render_equals_rung2`: the rung 3 file through
   `open_pair` on lavapipe equals rung 2's render of synth's planes byte
   for byte (control: the stored reversed binding).

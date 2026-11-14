@@ -513,6 +513,19 @@ fn twin_of(rig: &Rig, turn: DQuat) -> Rig {
     Rig { lenses, ..*rig }
 }
 
+/// `twin` with each block reading the track that block read in `camera`:
+/// the twin as a stitch draws it that binds each block to the slot of its
+/// own index rather than to its lens's track. For a camera whose block b
+/// reads track b, as the X5-like camera's do, that stitch draws every
+/// other picture of these rows right and only the twin wrong.
+fn keeping_tracks(twin: &Rig, camera: &Rig) -> Rig {
+    let mut lenses = twin.lenses;
+    for (lens, was) in lenses.iter_mut().zip(&camera.lenses) {
+        lens.track = was.track;
+    }
+    Rig { lenses, ..*twin }
+}
+
 /// A picture turned 180° in its plane: pixel (i, j) of the result is
 /// pixel (w − 1 − i, h − 1 − j) of `rgb`.
 fn turned_180(rgb: &[f64]) -> Vec<f64> {
@@ -527,15 +540,47 @@ fn turned_180(rgb: &[f64]) -> Vec<f64> {
 /// 255 − j), from the same texels of the same track, and no pixel may be
 /// more than 2/255 apart.
 ///
-/// The control is 10.5's implicit LOD, drawn on both the camera and its
-/// twin as `twin_check` draws M1's roll twins: it must fail the row's own
-/// check, some pixel more than 2/255 apart. It does so by tens of pixels
-/// (59 at the zenith, 22 at the nadir when blessed), not by 10.5's more
-/// than 100: a fisheye's uv has no wrap, so there is no seam for a 2×2
-/// quad's derivatives to cross, as there is in M1's twins, and the half
-/// turn about the view's centre takes quads to quads. A second control
-/// shows the check's reach, the twin drawn with implicit LOD against the
-/// camera drawn with the analytic LOD, over 100 bad pixels; since the
+/// What the check holds: the seam's circle runs through both poles, so
+/// each view is half one lens and half the other, blended across its
+/// middle. The half turn about +Y is a symmetry of the stitch's maths,
+/// and the swap changes nothing in them: the blend sums over the blocks,
+/// so the rig turned without its blocks swapped draws the same picture to
+/// the byte (no pixel apart at either pole on lavapipe when this was
+/// written). What the swap changes is which block index draws each half
+/// and which track each block reads: in the twin block 0 reads track 1,
+/// where the camera's block b reads track b. So the check holds that the
+/// stitch treats its two blocks alike where they meet at the poles, that
+/// it turns with the rig to the byte, and that it binds each block to its
+/// own lens's track.
+///
+/// The control is the last of those mistakes: the twin with each block
+/// keeping the track it read in the camera ([`keeping_tracks`]), which is
+/// how a stitch that bound each block to the slot of its own index would
+/// draw the twin. It must fail the check by over 100 bad pixels, 10.5's
+/// bound, and does so by geometry on any driver. Block 0, turned to where
+/// lens 0 looked, then reads lens 0's picture through lens 1's model, so
+/// near each pixel it shows what the camera itself shows there (about 2°
+/// off, the lenses' own small differences), where the twin must show the
+/// camera's pixel turned 180° about the pole; and the far `Grid` is not
+/// the same under a half turn about +Y (its colour follows the direction,
+/// and each pole's disc carries a letter). When blessed it failed by
+/// 65 411 of the 65 536 pixels at the zenith and 65 311 at the nadir, up
+/// to 255 LSB, 64 049 and 62 751 of them by more than 32 LSB. D32's
+/// other-driver rule lets a driver move a pixel of a picture by at most 8
+/// LSB, 16 over the two pictures compared, so no conforming driver can
+/// bring those within 2/255.
+///
+/// 10.5's own control, implicit LOD, is measured and not held. Drawn on
+/// both the camera and its twin, as `twin_check` draws M1's roll twins,
+/// it puts tens of pixels past 2/255 on lavapipe (59 at the zenith and 22
+/// at the nadir when blessed, at most 3 LSB) and none on odin's RX 7600
+/// under RADV (at most 1 LSB): a fisheye's uv has no wrap, so there is no
+/// seam for a 2×2 quad's derivatives to cross, as there is in M1's twins,
+/// and the half turn takes quads to quads, so whether the two implicit
+/// pictures differ depends on how a driver forms its derivatives, not on
+/// the rig. A second control shows the check's reach: the twin drawn with
+/// implicit LOD against the camera drawn with the analytic LOD, over 100
+/// bad pixels (690 and 255 on lavapipe, 2723 and 753 on RADV). Since the
 /// twin is the camera's picture to the byte, that is implicit LOD against
 /// analytic on one picture, which shows that 2/255 sees the implicit
 /// LOD's departures, not that the twin holds.
@@ -549,6 +594,7 @@ fn pole_twin(run: &mut Run<'_>, k: usize) {
     let pair = x5_source(Scene::Grid.row(), planes(both(grid())), &far());
     let shot = whole_view(k);
     let twin = twin_of(&x5.rig, DQuat::from_rotation_y(PI));
+    let by_block = keeping_tracks(&twin, &x5.rig);
     let mut draw = |rig: &Rig, debug: DebugMode| render(run, &pair, rig, &shot, debug);
     let (Some(camera), Some(twin_off), Some(camera_implicit), Some(twin_implicit)) = (
         draw(&x5.rig, DebugMode::Off),
@@ -558,6 +604,9 @@ fn pole_twin(run: &mut Run<'_>, k: usize) {
     ) else {
         return;
     };
+    let Some(by_block) = draw(&by_block, DebugMode::Off) else {
+        return;
+    };
     let camera = unit(&camera);
     let seen = turned_180(&unit(&twin_off));
     let d = bad(shot.1, &camera, &seen, TWIN_THRESHOLD);
@@ -565,13 +614,21 @@ fn pole_twin(run: &mut Run<'_>, k: usize) {
     if !run.at_most("bad_pixels", d.count_over as f64, 0.0) {
         run.write_diffs("twin", shot.1, &camera, &seen);
     }
+    let by_block = turned_180(&unit(&by_block));
+    let c = bad(shot.1, &camera, &by_block, TWIN_THRESHOLD);
+    run.measure("control_tracks_by_block_bad_pixels_max_lsb", c.max * 255.0);
+    if !run.over(
+        "control_tracks_by_block_bad_pixels",
+        c.count_over as f64,
+        CONTROL_BAD_OVER as f64,
+    ) {
+        run.write_diffs("control_tracks_by_block", shot.1, &camera, &by_block);
+    }
     let camera_implicit = unit(&camera_implicit);
     let implicit = turned_180(&unit(&twin_implicit));
-    let c = bad(shot.1, &camera_implicit, &implicit, TWIN_THRESHOLD);
-    run.measure("control_implicit_bad_pixels_max_lsb", c.max * 255.0);
-    if !run.over("control_implicit_bad_pixels", c.count_over as f64, 0.0) {
-        run.write_diffs("control_implicit", shot.1, &camera_implicit, &implicit);
-    }
+    let m = bad(shot.1, &camera_implicit, &implicit, TWIN_THRESHOLD);
+    run.measure("implicit_bad_pixels_max_lsb", m.max * 255.0);
+    run.measure("implicit_bad_pixels", m.count_over as f64);
     let reach = bad(shot.1, &camera, &implicit, TWIN_THRESHOLD);
     run.measure(
         "control_implicit_against_analytic_bad_pixels_max_lsb",
@@ -589,7 +646,7 @@ fn pole_twin(run: &mut Run<'_>, k: usize) {
          against the camera's (255 − i, 255 − j)"
     );
     run.end_pair_check(
-        "against its twin rig, with the implicit-LOD control",
+        "against its twin rig, with each block keeping the camera's track as the control",
         &[&pair],
         vec![view],
     );

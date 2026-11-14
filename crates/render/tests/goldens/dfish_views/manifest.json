@@ -1145,7 +1145,7 @@
     },
     "dfish_nadir": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "76da39f2f2",
+      "commit": "1a7a64ea1a",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1155,10 +1155,12 @@
         "bad_pixels_max_lsb": 0.0,
         "control_implicit_against_analytic_bad_pixels": 255.0,
         "control_implicit_against_analytic_bad_pixels_max_lsb": 5.0,
-        "control_implicit_bad_pixels": 22.0,
-        "control_implicit_bad_pixels_max_lsb": 3.0
+        "control_tracks_by_block_bad_pixels": 65311.0,
+        "control_tracks_by_block_bad_pixels_max_lsb": 255.0,
+        "implicit_bad_pixels": 22.0,
+        "implicit_bad_pixels_max_lsb": 3.0
       },
-      "pictures_fnv64": "ba62a4db589e5da0",
+      "pictures_fnv64": "cf328d5e5277b99b",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "calibration_fnv64": "71b8ca38f07272d7",
@@ -1244,7 +1246,7 @@
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
         "control_implicit_against_analytic_bad_pixels_over": 100.0,
-        "control_implicit_bad_pixels_over": 0.0
+        "control_tracks_by_block_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -1266,11 +1268,11 @@
         "yaw_deg": 0.0
       },
       "wgpu": "30.0.1",
-      "what": "against its twin rig, with the implicit-LOD control"
+      "what": "against its twin rig, with each block keeping the camera's track as the control"
     },
     "dfish_zenith": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "76da39f2f2",
+      "commit": "1a7a64ea1a",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1280,10 +1282,12 @@
         "bad_pixels_max_lsb": 0.0,
         "control_implicit_against_analytic_bad_pixels": 690.0,
         "control_implicit_against_analytic_bad_pixels_max_lsb": 5.0,
-        "control_implicit_bad_pixels": 59.0,
-        "control_implicit_bad_pixels_max_lsb": 3.0
+        "control_tracks_by_block_bad_pixels": 65411.0,
+        "control_tracks_by_block_bad_pixels_max_lsb": 255.0,
+        "implicit_bad_pixels": 59.0,
+        "implicit_bad_pixels_max_lsb": 3.0
       },
-      "pictures_fnv64": "6ea5934312e7b7db",
+      "pictures_fnv64": "e91cc98fd8608d30",
       "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
       "source": {
         "calibration_fnv64": "71b8ca38f07272d7",
@@ -1369,7 +1373,7 @@
         "bad_pixel_over": 0.0078,
         "bad_pixels_max": 0.0,
         "control_implicit_against_analytic_bad_pixels_over": 100.0,
-        "control_implicit_bad_pixels_over": 0.0
+        "control_tracks_by_block_bad_pixels_over": 100.0
       },
       "view": {
         "filter": "isotropic",
@@ -1391,7 +1395,7 @@
         "yaw_deg": 0.0
       },
       "wgpu": "30.0.1",
-      "what": "against its twin rig, with the implicit-LOD control"
+      "what": "against its twin rig, with each block keeping the camera's track as the control"
     }
   },
   "images": {
