@@ -2196,7 +2196,10 @@ bit on lavapipe (control: the buffers swapped between the tracks).
 --zero-copy` to a software decode on odin, strictly, and read each
 lens's slot back to label one that holds other bytes than its frame's
 against D77's signature; they are pending odin. The player's locked
-pairs kept their zero copy from M3.8 (D67, D77).
+pairs kept their zero copy from M3.8 (D67, D77). *Updated 2026-11-14
+(M3.7's last unit):* both passed on odin's RX 7600 at 1a7a64e (PR #40):
+each view 0 LSB from the software decode, the reversed binding 92 LSB
+off, no slot mismatch and no GFX11 R8 signature.
 
 Revisit if: path B fails or is refused on a GPU that doctor said could
 share its device (the copy path takes over, said once a file); huginn's
@@ -5082,6 +5085,17 @@ rung 1 by the reference rule. The 24 old rows' PNGs and manifest are
 untouched. On the cloud's four cores the binary takes 17.54 s, against
 9.81 s with M3.7's tests left out (alone, `dfish_seam` takes 3.24 s,
 `dfish_views` 3.46 s and rung 2 4.99 s).
+
+*Updated 2026-11-14 (M3.7's last unit):* those times moved with the
+slice's fix round and unit (e), which changed the poles' control and
+the seam difference's rule on another driver (D66). At aef3e69, on the
+same four cores, the binary takes 18.27 to 19.69 s in six runs (18.95 s
+on average), against 10.38 to 11.23 s (10.65 s) with M3.7's tests left
+out, and 10.90 to 11.47 s with only the three dfish modules left out.
+Alone, by libtest's clock in three runs each, `dfish_seam` takes 3.66
+to 3.93 s, `dfish_views` 3.67 to 3.86 s, and rung 2's module 5.57 to
+5.64 s, its five renders now beside four tests of its rule and its
+ledger.
 
 ## D33. View conventions
 
@@ -10370,6 +10384,20 @@ score both V3 orders.
 is the rig's, not the lens model's, and D64 now holds it; the note stays
 here for its measurements and controls.
 
+*Updated 2026-11-14 (M3.7, D66):* the shader evaluates this form only,
+as **One canonical form** said it would. `fs_rig` (`shaders/rig.wgsl`)
+takes a Mei lens through `Unified`'s projection and then
+`Canonical::rest`'s tangential terms with their r² extensions and the
+thin prism, and a Kannala–Brandt lens through `KbLens`'s polynomial and
+the same rest; `rig::pack` refuses a pair with one lens of each.
+`tests/rig_shader.rs` and the dfish rows hold it to `render_rig_of` by
+D32's reference rule, V6 readings and `dfish_kb_rig` among them. The
+note of 2026-11-10 said 10.3's WGSL must copy the weights rule; it does,
+as F025 rebuilt the rule about each lens's own band centre (D64's note
+of this date), and `fs_rig_weights_light_the_ring_no_feather_weighs`
+holds it, with 10.3's normalised weights, black where both are 0, as
+its control.
+
 ## D64. Geometry is data: the conventions a camera's files leave open, as values with their status and evidence
 
 *2026-11-12, M3 slice M3.5. A draft: M3.6 completes it with what its
@@ -10991,7 +11019,16 @@ here that 10.3 to 10.5 and 13.4 don't say.
   `StripSpec::dir`'s grid with `strip_coverage`'s validity
   (`StillRenderer::strips`, held to `strips_of`); and a rig's LOD map
   (`reference::rig_lod_map`). 13.4's target size is still Measure seam's
-  to settle (M3.13).
+  to settle (M3.13). *Updated 2026-11-14 (M3.7's last unit):* what this
+  list left to M3.7 is built: the map for a lens is
+  `reference::rig_lod_map`, debug mode 3 for a pair, which
+  `rig_shader.rs` holds the GPU's map to, and rung 2 took what it needed
+  of rung 1 from `tests/common` as the note of 2026-11-13 says. The
+  times in the note above moved: at aef3e69 rung 2's module, nine tests
+  with unit (e)'s, takes 5.57 to 5.64 s alone, and M3.7's tests take
+  the goldens binary from 10.38 to 11.23 s to 18.27 to 19.69 s, about
+  8.3 s; with the slice's tests outside the binary, about 10.5 s against
+  19.6's 7 s (D32's and D66's notes, plan amendment 10).
 
 **For the fit** (M3.6): what it must not take on trust.
 
@@ -11238,8 +11275,9 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   with no image, blur in linear light, `render_yuv`, the refusals of
   `render_from` and `pack`, a side unlike its slot, a rig packed for
   other slots than those bound (`record` refuses it), the GPU's strips
-  against `strips_of`, and `rig_lod_map` against mode 3. 0.73 to 0.77 s
-  of its 0.8.
+  against `strips_of`, and `rig_lod_map` against mode 3. It takes 0.72
+  to 0.80 s by its own clock at aef3e69, against a 0.8 s share it prints
+  and doesn't assert.
 - `tests/upload.rs`: `a_pair_renders_alike_on_every_upload_path`, bytes,
   buffers, imports and each mixed pair bit for bit (control: the
   buffers swapped between tracks, 23418 of 24576 values differ).
@@ -11317,31 +11355,52 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   GPU's. Each failure names its picture's worst pixels.
 
 P-SHADE, the pass's cost on odin (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K;
-`bench_stitch_pass`), is pending odin, and with it the RADV goldens. On a
-miss the redirect is an analytic Jacobian for the LOD in place of the
-five rays, then a cheaper mask.
+`bench_stitch_pass`), passed on odin's RX 7600 under RADV at 1a7a64e
+(PR #40, `hw-reports/m37-1a7a64e/`): the stitch took 0.49 ms at 1080p
+and 1.90 and 1.88 ms at 4K, the medians of three in each of two runs
+(0.48 to 0.50 ms and 1.84 to 1.94 ms across their samples), against
+`fs_project`'s 0.22 and 0.77 ms on the same frames, so 0.10 to 0.12 ms
+to spare at 4K and neither redirect needed. On a miss the redirect would
+have been an analytic Jacobian for the LOD in place of the five rays,
+then a cheaper mask. The same run passed the zero-copy pair tests at 0
+LSB on both views (the reversed binding 92 LSB off, no slot mismatch)
+and `goldens_on_host_llvmpipe`, and failed the two checks unit (e) then
+changed in the tests, the poles' implicit-LOD control and the seam
+difference's count (above). odin's rerun of the three goldens tests at
+aef3e69 is recorded in PROGRESS's M3.7 note.
 
 Cost, against 19.6's M3.7 line (what it adds to the goldens binary,
 rung 1's pairs rendered afresh included, at most 7 s), on the cloud's
-four cores in the debug build: the goldens binary takes 17.54 s, 9.81 s
-with M3.7's tests left out, so 7.73 s more; and outside it
-`rig_shader.rs` 0.74 to 0.76 s, `upload.rs`'s pair test and bench smoke
-0.16 s, `rung3_gpu_render_equals_rung2` about 0.17 s of `rung3.rs`'s
-2.25 s (its `BUDGET_S` raised from 2.0 to 2.3), `look`'s two `.insv`
-tests 0.61 s, and `tier2_frame.rs`'s two lavapipe checks 0.23 s;
-`pipelines.rs` (0.81 to 0.87 s), `reference_rig.rs` (1.62 s) and
-`frame_insv.rs` (1.66 to 1.72 s) changed tests rather than adding
-binaries. M3.7 is past its 7 s by about 0.7 s in the goldens binary
-alone and by about 2.7 s with the rest (9.66 s); the plan's row is the
-orchestrator's to change.
+four cores in the debug build at aef3e69: the goldens binary takes
+18.27 to 19.69 s (18.95 s on average over six runs), and 10.38 to
+11.23 s (10.65 s) with M3.7's tests left out, so about 8.3 s more. The
+three dfish modules are about 7.8 s of that (the binary takes 10.90 to
+11.47 s without them, 11.19 s on average), and the slice's five harness
+tests about 0.5 s (0.70 to 0.72 s alone). Outside the binary, by each
+test's own cost: `rig_shader.rs` about 0.8 s (0.72 to 0.80 s by its
+clock), `upload.rs`'s pair test and bench smoke 0.16 s,
+`rung3_gpu_render_equals_rung2` about 0.17 s of `rung3.rs`'s 2.20 to
+2.25 s (its `BUDGET_S` raised from 2.0 to 2.3), `frame_insv.rs`'s GPU
+tests about 0.31 s, `look`'s three `.insv` tests about 0.56 s, and
+`tier2_frame.rs`'s two lavapipe checks 0.21 to 0.23 s; `pipelines.rs`
+and `reference_rig.rs` changed tests rather than adding binaries. So
+M3.7 adds about 10.0 s with the modules alone counted in the binary and
+about 10.5 s with its harness tests, past its 7 s by 3.0 to 3.5 s.
+Unit (d) had counted 9.66 s at 93dc284, without `frame_insv.rs`'s GPU
+tests and against the binary's older 9.81 s base. Pat's card on the row
+recommends raising it to 10 s; until Pat answers, the plan keeps 7 s
+with the overrun named (plan amendment 10). No fixture was shrunk and
+no check cut.
 
 Considered and not done: an override constant for the stitch, and an
 intermediate equirect (both above); capping the margin for `look`'s
 small equirect tiles, amendment 5's other choice, which would change the
 mask from the one every test holds the stitch to.
 
-Revisit if: P-SHADE misses on odin (the analytic Jacobian, then the
-mask); a camera pairs unlike models, which would need a model a lens; a
+Revisit if: P-SHADE misses on odin or another GPU, its 4K margin of
+0.10 to 0.12 ms being small (the analytic Jacobian, then the mask);
+Pat's card on 19.6's M3.7 row is answered with a cut rather than a
+raise; a camera pairs unlike models, which would need a model a lens; a
 driver's atan2 misses by more than one Newton step takes back; or
 M3.20's caps want more than group 2 holds.
 
@@ -12612,6 +12671,34 @@ misses refresh; path A becomes a default anywhere; a Mesa caches
 multi-plane staging or unmaps it with `DELAY_UPDATE`; a kernel stops
 making later submissions wait for a freed range's clearing; or
 FFmpeg's VA-API decode returns to a pool that lists its surfaces.
+
+*Updated 2026-11-14 (M3.7's last unit, PR #39):* the drained seek rows
+have run. odin's `bench_seek_latency` at acd9d6f (PR #39,
+`hw-reports/stall-confirm-acd9d6f/`, 4 of 4 passed in 1302 s) put each
+VA-API row beside its drained twin, the median and p95 of three runs
+each. Drained keyframe seeks came out 14 to 30 % slower at the median
+and 13 to 18 % at p95: 4.98 against 4.36 ms on the X5's LRV (1664 × 832
+H.264; 1.14, and 5.41 against 4.78 ms at p95, 1.13), 28.07 against 21.61
+ms on the X5's 3840² HEVC stream (1.30; 41.91 against 35.61 ms, 1.18)
+and 58.63 against 49.20 ms on the noisy 5760 × 2880 HEVC clip (1.19;
+64.83 against 55.94 ms, 1.16). Exact seeks came within 2 to 8 % (1.05,
+1.03 and 1.08 at the median). A drain costs a seek about 0.6 to 9.5 ms,
+which weighs most on the short keyframe seeks; Vulkan Video's keyframe
+seeks took 3.61, 16.43 and 44.46 ms at the median on the same files. So
+this entry's 15 % line is crossed, by the keyframe rows on the X5's
+stream and the 5.7K clip at the median and at p95. The same run passed
+`gui_decode_behind` (its VA-API run presented every UI frame expected,
+rounded, at a UI p99 of 18.6 ms, with 101 frames drained at 108.0 /
+141.0 ms p50 / p95) and `gui_smoke`'s five runs on Vulkan with no frame
+drained, and the realtime 10-bit VA-API row showed 4.00 frames a second
+in real time (3 to 9 a second), with the drain at 110.52 / 132.27 ms and
+the download at 66.49 / 67.97 ms at p50 / p95. `download` stays the
+default: the gate it clears falls on every frame the window shows while
+decode is behind, and the seek's cost falls on a wait the window already
+shows. A follow-up could skip the drain on a seek's landing download,
+which would leave that one download to the gate; it is neither built nor
+measured. The choice is Pat's, with the card of 2026-11-13, which asks
+whether to accept the cost.
 
 ## Open
 
