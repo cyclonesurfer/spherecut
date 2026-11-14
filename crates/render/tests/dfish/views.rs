@@ -256,6 +256,17 @@ fn cpu_kb_equirect(k: usize) -> &'static ImageF64 {
     })
 }
 
+/// The CPU reference's stitch of the `HighFrequency` pair at 384² through
+/// the tiny planet, made once for the binary.
+fn cpu_hifreq_planet() -> &'static ImageF64 {
+    static PICTURE: OnceLock<ImageF64> = OnceLock::new();
+    PICTURE.get_or_init(|| {
+        let h = hifreq(Content::ToTheCircle);
+        let shot = (tinyplanet_view(), HIFREQ_PLANET);
+        stitch(both(&h.frames), &h.rig, UNIT, &shot, RigDebug::Off)
+    })
+}
+
 /// What the rows read that the CPU makes, each made once for the binary:
 /// the pairs, the ideals, the true rig's masks and the CPU's pictures, in
 /// the order the rows first read them. `dfish_view_rows` makes them on
@@ -280,6 +291,7 @@ const MADE_BESIDE: &[fn()] = &[
     || {
         hifreq(Content::ToTheCircle);
         hifreq(Content::ToTheMask);
+        cpu_hifreq_planet();
     },
     || {
         for k in 0..KB_BASES.len() {
@@ -679,9 +691,14 @@ fn minified_pair(frames: Pair, rig: &Rig, v: &ViewParams, size: (u32, u32)) -> V
 const HIFREQ_PLANET: (u32, u32) = (128, 128);
 
 /// The `HighFrequency` pair at 384² as a tiny planet on the nadir,
-/// stored, against the ideal over the pixels 2.5 levels down or more: a
-/// floor 1 dB under what it measured when blessed, and at least 3 dB
-/// above the level-0 control, as `stereo_tinyplanet` holds a frame.
+/// stored: against the CPU reference by the CPU rule over the whole
+/// picture, and against the ideal over the pixels 2.5 levels down or
+/// more, a floor 1 dB under what it measured when blessed and at least
+/// 3 dB above the level-0 control, as `stereo_tinyplanet` holds a frame
+/// (the CPU rule over the whole picture is the M3.7 review's N5: the
+/// ideal's disc holds 1267 of the 16384 pixels, and Tier 2's References
+/// mode reads no PNG). The CPU rule's control is the level-0 picture,
+/// which aliases: more than 0.1 off the CPU's somewhere.
 fn dfish_hifreq_tinyplanet(run: &mut Run<'_>) {
     let h = hifreq(Content::ToTheCircle);
     let pair = h.source("x5_hifreq_384", &far());
@@ -700,6 +717,18 @@ fn dfish_hifreq_tinyplanet(run: &mut Run<'_>) {
         IDEAL_N_CHECKER,
     );
     ideal_check(run, &mask, &got, &level0, &ideal);
+    let cpu = cpu_hifreq_planet();
+    cpu_rule(run, "cpu", &got, cpu);
+    let control = unit(&level0);
+    run.measure(
+        "control_level0_cpu_psnr_db",
+        psnr_of(HIFREQ_PLANET, &control, &cpu.data),
+    );
+    run.over(
+        "control_level0_cpu_max_channel",
+        max_diff(&control, &cpu.data),
+        CPU_MAX_CHANNEL,
+    );
     run.stored_pair(
         "the X5-like camera's HighFrequency pair at 384², tiny planet (stereographic 300°, pitch \
          −90)",

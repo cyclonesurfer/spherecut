@@ -3,7 +3,7 @@
   "checks": {
     "dfish_kb_rig": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -522,7 +522,7 @@
     },
     "dfish_lens_only_0": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -644,7 +644,7 @@
     },
     "dfish_lens_only_1": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -766,7 +766,7 @@
     },
     "dfish_lod_heatmap": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -884,7 +884,7 @@
     },
     "dfish_mask_margin": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1140,7 +1140,7 @@
     },
     "dfish_nadir": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1264,7 +1264,7 @@
     },
     "dfish_zenith": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1390,7 +1390,7 @@
   "images": {
     "dfish_equirect_identity": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
@@ -1525,13 +1525,17 @@
     },
     "dfish_hifreq_tinyplanet": {
       "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
-      "commit": "1eb05d6727",
+      "commit": "d1dae36c24",
       "date": "2026-11-14",
       "driver": "llvmpipe",
       "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
       "llvm": "20.1.2",
       "measured": {
+        "control_level0_cpu_max_channel": 0.4612,
+        "control_level0_cpu_psnr_db": 18.397,
         "control_level0_ideal_psnr_db": 14.0996,
+        "cpu_max_channel": 0.0058,
+        "cpu_psnr_db": 56.0423,
         "ideal_over_level0_db": 18.1043,
         "ideal_pixels": 1267.0,
         "ideal_psnr_db": 32.2038
@@ -1620,6 +1624,9 @@
         "bd90f4141a3fd73c"
       ],
       "thresholds": {
+        "control_level0_cpu_max_channel_over": 0.1,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 53.04,
         "ideal_min_lod": 2.5,
         "ideal_over_level0_db_min": 3.0,
         "ideal_pixels_min": 1000.0,
