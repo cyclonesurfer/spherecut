@@ -90,6 +90,7 @@ use spherecut_render::seam::{BinShift, Signature};
 use spherecut_sphere::rig::Rig;
 use spherecut_synth::Pattern;
 use spherecut_synth::rung::{SIDE, SS, VIEW_SIDE};
+use spherecut_testkit::bless;
 use spherecut_testkit::control::{at_least, at_most, below, must_fail};
 
 use common::attribution::{
@@ -173,19 +174,19 @@ const GOLDENS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/goldens");
 const MANIFEST: &str = "instrument.json";
 
 /// Set to bless; set to [`LOWER`] to let the blessing lower a floor by
-/// more than its [`Floor::drop`]. `goldens.rs`'s variable, read the same
-/// way.
-const UPDATE: &str = "SPHERECUT_UPDATE_GOLDENS";
-const LOWER: &str = "lower";
+/// more than its [`Floor::drop`]. `goldens.rs`'s variable, read by
+/// [`bless`]'s one rule (F055).
+const UPDATE: &str = bless::UPDATE_GOLDENS;
+const LOWER: &str = bless::LOWER;
 const REGENERATE: &str =
     "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test instrument";
 
 fn blessing() -> bool {
-    spherecut_testkit::bless::on(UPDATE)
+    bless::on(UPDATE)
 }
 
 fn may_lower() -> bool {
-    std::env::var_os(UPDATE).is_some_and(|v| v == LOWER)
+    bless::lower(UPDATE)
 }
 
 /// How a floor is blessed (4.2's thresholds, D32's rules): `margin` below
