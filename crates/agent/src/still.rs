@@ -279,9 +279,16 @@ fn choose_stream<'r>(
 /// What `not_equirect` says an Insta360 file is, after "{file} is ",
 /// when its calibration reads ([`pair_reads`]): not one equirect, but a
 /// pair that frame and look stitch (M3.7) and a project renders from
-/// M3.11. The words compare's refusal of a file and a project's doubt
-/// give, through [`equirect_doubt`]; frame and look reach the pair
-/// through [`Still::open_pair`] instead.
+/// M3.11. Only a caller that takes such a file as one stream with the
+/// equirect check on ([`Options::equirect`] false) gives these words:
+/// the CLI's `frame --stream N`, which refuses the file and adds its
+/// `--equirect` hint, and [`equirect_doubt`] asked of it directly. The
+/// others never do (the M3.7 review's N9): frame without `--stream`
+/// and look stitch the pair through [`Still::open_pair`], and look's
+/// `raw` and `assume_equirect` turn the check off, as compare, doctor
+/// and a sequence always do; a project's doubt comes after a pair it
+/// makes a project of has returned, and is in
+/// [`INSTA360_NO_CALIBRATION`]'s words for one it doesn't.
 pub const INSTA360_PAIR: &str = "an Insta360 camera's pair of lenses (dual fisheye), not one \
                                  equirect: frame and look stitch it, and project create makes a \
                                  project of it, which render renders from M3.11";

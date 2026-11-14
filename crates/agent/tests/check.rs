@@ -427,8 +427,10 @@ fn an_insv_without_its_trailer_fails_archive() {
 }
 
 /// What `check` (YouTube 360's `spherical_metadata` rule, its message
-/// and fix) and `still::equirect_doubt`, through which look's, compare's
-/// and a project's words come, say of the camera's file at `file`.
+/// and fix) and `still::equirect_doubt` say of the camera's file at
+/// `file`: the doubt's words are those `frame --stream N` refuses a
+/// calibrated file with (`still::INSTA360_PAIR`'s doc says which callers
+/// give them).
 fn said_of(tools: &Spherecut, file: &Path) -> String {
     let r = check(tools, file, Some("youtube_360"));
     let rule = rule(&r, "spherical_metadata");
