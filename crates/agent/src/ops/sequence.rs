@@ -61,15 +61,15 @@ pub fn load(cx: &Ctx, arg: &str, path: &Path) -> Result<Loaded, ToolError> {
 /// (M3 plan 14): until M3.11 stitches a project, every tool that renders
 /// one would read its first lens as an equirect, so look, compare, check
 /// and render refuse it at `arg` instead. An equirect media passes. The
-/// `next` is the pair's (the M3.9 review's R9 and N9): `look`'s raw mode
-/// shows either file as it is, and `frame --reference` stitches two
-/// fisheye lenses; nothing stitches an EAC pair yet.
+/// `next` is the pair's (the M3.9 review's R9 and N9): look and frame
+/// stitch two fisheye lenses' file as it is (M3.7), and nothing stitches
+/// an EAC pair yet, whose file `look`'s raw mode shows as coded.
 fn not_yet(arg: &str, m: &Media) -> Result<(), ToolError> {
     let (pair, next) = match m.source {
         Source::Equirect {} => return Ok(()),
         Source::DualFisheye(_) => (
             "a camera's two fisheye lenses",
-            "look at the file itself with mode \"raw\", or frame it with --reference in a terminal",
+            "look at the file itself, or frame it in a terminal",
         ),
         Source::EacPair(_) => (
             "a camera's two EAC tracks",

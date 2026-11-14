@@ -484,9 +484,10 @@ pub(crate) fn media(
     };
     // A camera's pair: the table's other geometry, if it has one, then
     // the refusal, which the failure's warnings carry it beside, with the
-    // pair's advice (the M3.9 review's R9): `frame --reference` stitches
-    // two fisheye lenses, and nothing stitches an EAC pair yet, whose
-    // advice names no flag (`--equirect` would show one track alone).
+    // pair's advice (the M3.9 review's R9): frame stitches two fisheye
+    // lenses' file as it is, on the GPU from M3.7, and nothing stitches an
+    // EAC pair yet; neither advice names a flag (`--equirect` would show
+    // one track alone).
     let pair = match &m.source {
         Source::Equirect {} => None,
         Source::DualFisheye(d) => {
@@ -497,7 +498,7 @@ pub(crate) fn media(
             }
             Some((
                 "a camera's two fisheye lenses",
-                "frame the file itself with --reference to see it stitched",
+                "frame the file itself to see it stitched",
             ))
         }
         Source::EacPair(_) => Some((

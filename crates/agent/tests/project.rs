@@ -1937,10 +1937,12 @@ fn errors_name_media_by_id_and_keep_file_text_out() {
 /// `look`, `compare`, `check` and `render` of a dual-fisheye project, or
 /// of an EAC pair's, are `not_yet` until M3.11 (M3 plan 14), with no file
 /// written and no job started, and a `next` for the pair's kind (the M3.9
-/// review's R9 and N9): `look`'s raw mode, and for two fisheye lenses
-/// `frame --reference`, which stitches them; an EAC pair has no stitched
-/// view and isn't an `.insv`. Control: none of the four is `not_yet` on
-/// an equirect project.
+/// review's R9 and N9): for two fisheye lenses the file itself, which
+/// look and frame stitch from M3.7, with no mode or flag named (M3.9's
+/// next named `frame --reference`); an EAC pair has no stitched view and
+/// isn't an `.insv`, so look's raw mode. Controls: none of the four is
+/// `not_yet` on an equirect project, and M3.9's fisheye next names
+/// `--reference`.
 #[test]
 fn a_dual_fisheye_project_is_refused_not_yet() {
     let _t = timed("a_dual_fisheye_project_is_refused_not_yet");
@@ -2029,9 +2031,19 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
     };
     let before = names();
     let raw = "look at the file itself with mode \"raw\"";
-    let fisheye_next = format!("{raw}, or frame it with --reference in a terminal");
+    // A next that names no flag of frame's that the file no longer needs.
+    let no_reference = |next: &str| -> Result<(), String> {
+        match next.contains("--reference") {
+            false => Ok(()),
+            true => Err(format!("{next:?} names --reference")),
+        }
+    };
+    // look stitches a fisheye pair's file from M3.7 and frame does on the
+    // GPU, so its advice names no mode and no flag (M3.9's named
+    // `--reference`).
+    let fisheye_next = "look at the file itself, or frame it in a terminal";
     for (project, pair, next) in [
-        (&p, "two fisheye lenses", fisheye_next.as_str()),
+        (&p, "two fisheye lenses", fisheye_next),
         (&eac, "two EAC tracks", raw),
     ] {
         for said in calls(project) {
@@ -2039,8 +2051,15 @@ fn a_dual_fisheye_project_is_refused_not_yet() {
             let e = said.2.as_ref().unwrap_err();
             assert!(e.message.contains(pair), "{}: {e:?}", said.0);
             assert_eq!(e.next.as_deref(), Some(next), "{}: {pair}", said.0);
+            no_reference(next).unwrap();
         }
     }
+    must_fail(
+        "M3.9's fisheye next",
+        no_reference(&format!(
+            "{raw}, or frame it with --reference in a terminal"
+        )),
+    );
     // Nothing written beside the project: no picture, no render and no
     // render's temporary file. A refused render answers with an error,
     // so no job's id exists to ask after.

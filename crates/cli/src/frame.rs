@@ -86,7 +86,8 @@ const SIDES: std::ops::RangeInclusive<u32> = 16..=16384;
 pub struct FrameArgs {
     /// The video: a stitched equirect, tagged with spherical metadata or
     /// treated as one with --equirect, or a camera's pair of lenses (an
-    /// Insta360 file), stitched with --reference. Not with --project.
+    /// Insta360 file), stitched on the GPU, or on the CPU with --reference.
+    /// Not with --project.
     #[arg(required_unless_present = "project")]
     pub file: Option<PathBuf>,
     /// A project file: render its sequence's frame at --time or --frame,
