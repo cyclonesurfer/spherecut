@@ -311,16 +311,17 @@ when a call gives `output` and `project` when it gives `create`, as are
   stitch, one view a tile, its `decode` lens 0's; `raw` shows each
   lens's track as coded, and `assume_equirect` reads the file as one
   equirect (its first lens). One with no calibration is shown as its
-  lenses, raw, with the `no_calibration` warning. `seek` `keyframe`
-  lands lens 0 on its keyframe and decodes lens 1 exactly to that
-  time, so the two always show one time. With `project` in place of
-  `file`, the tiles are the project's render: its frames at the times,
-  which are the render's (0 is its first frame, `"12f"` its frame 12),
-  rendered as the export renders them (`frame --project`), in `mode`
-  `view` or `sheet` (12 over the render by default). Each tile gives
-  `time`, the render's, and `source`, the media's. `view`, `views`,
-  `seek` and `assume_equirect` are refused there: a view of the source
-  is a look at the project's media file.
+  lenses, raw, in every mode, with the `no_calibration` warning: a tile
+  for each lens at each time, so 12 `times` or `count` at most.
+  `seek` `keyframe` lands lens 0 on its keyframe and decodes lens 1
+  exactly to that time, so the two always show one time. With `project`
+  in place of `file`, the tiles are the project's render: its frames at
+  the times, which are the render's (0 is its first frame, `"12f"` its
+  frame 12), rendered as the export renders them (`frame --project`), in
+  `mode` `view` or `sheet` (12 over the render by default). Each tile
+  gives `time`, the render's, and `source`, the media's. `view`,
+  `views`, `seek` and `assume_equirect` are refused there: a view of the
+  source is a look at the project's media file.
 - **`analyze`**: a measure over time in `buckets` (50 by default, up to
   200), between `from` and `to`. `kind`: `timing` (packets only: frame
   durations, `vfr`, duplicate timestamps, gaps and frames missing,
@@ -741,7 +742,7 @@ test; a test checks that each is listed here.
 | `ERROR_CHARS` | 500 | an error's JSON |
 | `CHECK_BYTES` | 2 KiB | a `check` result; passed rules' messages, then advice, give way |
 | `SPEED_TIME` | 5 s | doctor's `speed` decodes for at most this |
-| `MAX_TILES` | 24 | tiles in one `look`: times × views |
+| `MAX_TILES` | 24 | tiles in one `look`: times × views, × 6 for cube, × streams for raw (a camera's pair with no calibration: × its 2 lenses, in every mode) |
 | `IMAGE_DEFAULT_EDGE` | 768 px | `look`'s long edge by default |
 | `IMAGE_MAX_EDGE` | 1568 px | the longest edge inline |
 | `IMAGE_LIMIT_EDGE` | 4096 px | the longest edge at all, to a file |

@@ -636,10 +636,10 @@ fn plan(req: &Request, cx: &Ctx) -> Result<Plan, ToolError> {
         // raw's streams are known once the file is open.
         Mode::Sphere | Mode::Sheet | Mode::Raw => 1,
     };
-    let tiles_arg = if req.views.is_some() {
-        "views"
-    } else {
-        "times"
+    let tiles_arg = match (&req.views, &times) {
+        (Some(_), _) => "views",
+        (None, Times::Spread { arg, .. }) => *arg,
+        (None, Times::Given(_)) => "times",
     };
     if n * per_time > MAX_TILES {
         return Err(too_many(n * per_time, tiles_arg));
@@ -684,6 +684,24 @@ fn too_many(n: usize, arg: &str) -> ToolError {
     .at(arg)
     .valid(format!(
         "{MAX_TILES} tiles at most: times × views, × 6 for cube, × streams for raw"
+    ))
+}
+
+/// More tiles than an image holds because a camera's pair whose
+/// calibration doesn't read is shown as its `lenses`, raw, in the mode
+/// asked for, which the plan counted as a tile a time.
+fn lenses_too_many(n: usize, lenses: usize, arg: &str) -> ToolError {
+    ToolError::new(
+        codes::OUT_OF_RANGE,
+        format!(
+            "{n} tiles, past the {MAX_TILES} an image holds: with no calibration the file is \
+             shown as its {lenses} lenses, {lenses} tiles a time"
+        ),
+    )
+    .at(arg)
+    .valid(format!(
+        "{} times at most for this file",
+        MAX_TILES / lenses.max(1)
     ))
 }
 
@@ -1190,6 +1208,17 @@ pub fn run(req: Request, cx: &Ctx) -> Result<(Value, Vec<rpc::Image>), ToolError
             }
             _ => vec![probed.stream.clone()],
         };
+        // The tiles the mode draws, a time each stream's, counted before
+        // the stills open: a pair with no calibration draws its lenses
+        // for each time, more than the plan counted for its mode.
+        let tiles = plan.times.len() * streams.len();
+        if tiles > MAX_TILES {
+            return Err(if mode == req.mode {
+                too_many(tiles, plan.tiles_arg)
+            } else {
+                lenses_too_many(tiles, streams.len(), plan.tiles_arg)
+            });
+        }
         let mut stills = Vec::with_capacity(streams.len());
         for s in streams {
             let p = still::Probed {

@@ -640,12 +640,19 @@ fn look_stitches_an_insv() {
 /// That `r` shows a file as its two lenses, raw: a tile for each of its
 /// two video streams, as coded, and the warning that says why.
 fn shown_as_lenses(r: &Value) -> Result<(), String> {
+    shown_as_lenses_at(r, 1)
+}
+
+/// `shown_as_lenses` at each of `times` times.
+fn shown_as_lenses_at(r: &Value, times: usize) -> Result<(), String> {
     let streams: Vec<&Value> = r["tiles"]
         .as_array()
         .into_iter()
         .flatten()
         .map(|t| &t["stream"])
         .collect();
+    let lenses = [json!(0), json!(1)];
+    let expected: Vec<&Value> = lenses.iter().cycle().take(2 * times).collect();
     let warned = r["warnings"].as_array().is_some_and(|w| {
         w.iter().any(|w| {
             w["code"] == "no_calibration"
@@ -654,7 +661,7 @@ fn shown_as_lenses(r: &Value) -> Result<(), String> {
                     .is_some_and(|m| m.contains("no calibration: shown as its lenses"))
         })
     });
-    if streams == [&json!(0), &json!(1)] && warned {
+    if streams == expected && warned {
         Ok(())
     } else {
         Err(format!("streams {streams:?}, warned {warned}: {r}"))
@@ -686,6 +693,63 @@ fn look_shows_an_uncalibrated_insv_as_lenses() {
     must_fail("small()'s file", shown_as_lenses(&small_at_x().2));
     eprintln!(
         "look_shows_an_uncalibrated_insv_as_lenses: {:.3} s",
+        began.elapsed().as_secs_f64()
+    );
+}
+
+/// That `got` refuses a look as more tiles than an image holds because
+/// the file is shown as its two lenses, blamed on `arg`: `out_of_range`,
+/// the 26 tiles and the lenses named, and half `MAX_TILES` times as the
+/// limit.
+fn refused_as_lenses(got: Result<(Value, Vec<Image>), ToolError>, arg: &str) -> Result<(), String> {
+    let e = match got {
+        Ok((r, _)) => {
+            return Err(format!(
+                "{} tiles shown",
+                r["tiles"].as_array().map_or(0, Vec::len)
+            ));
+        }
+        Err(e) => e,
+    };
+    let valid = e.valid.as_deref().unwrap_or("");
+    if e.code == codes::OUT_OF_RANGE
+        && e.argument.as_deref() == Some(arg)
+        && e.message.contains("26 tiles")
+        && e.message.contains("its 2 lenses")
+        && valid.starts_with("12 times at most")
+    {
+        Ok(())
+    } else {
+        Err(format!("{e:?}"))
+    }
+}
+
+/// A look at an `.insv` with no calibration counts the tiles its lenses
+/// draw, two a time, whatever mode was asked (the M3.7 review's N10): a
+/// sheet of 13 times, which the plan takes as 13 tiles, is refused as 26
+/// at `times`, and 13 spread by `count` at `count`, each saying the file
+/// shows as its 2 lenses, 12 times at most. Control: 12 times, 24 tiles,
+/// are shown.
+#[test]
+fn an_uncalibrated_insvs_lenses_count_as_its_tiles() {
+    let began = Instant::now();
+    let tools = insv().tools();
+    let times = |n: usize| -> Vec<&str> { ["0f", "1f"].into_iter().cycle().take(n).collect() };
+    let sheet = |extra: Value| {
+        let mut args = json!({"file": insv().uncalibrated, "mode": "sheet", "size": 1568});
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        look(&tools, args)
+    };
+    refused_as_lenses(sheet(json!({"times": times(13)})), "times").unwrap();
+    refused_as_lenses(sheet(json!({"count": 13})), "count").unwrap();
+    let twelve = sheet(json!({"times": times(12)}));
+    let (r, _) = twelve.as_ref().expect("12 times are shown");
+    shown_as_lenses_at(r, 12).unwrap();
+    must_fail("12 times", refused_as_lenses(twelve, "times"));
+    eprintln!(
+        "an_uncalibrated_insvs_lenses_count_as_its_tiles: {:.3} s",
         began.elapsed().as_secs_f64()
     );
 }
