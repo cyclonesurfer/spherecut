@@ -10,7 +10,8 @@
 //! as an upload does, and planes already there (slice 5b's imports, made
 //! here by wgpu) fill one byte for byte as their bytes do; a renderer's
 //! slot holds the frame it drew last; and the upload bench runs, small
-//! (its Tier 2 form, `bench_upload_5k7`, is here too).
+//! (its Tier 2 form, `bench_upload_5k7`, is here too), as does the
+//! stitched projection pass's (P-SHADE's `bench_stitch_pass`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -24,13 +25,13 @@ use spherecut_render::readback::{f16_to_f32, read_texture, round_f16};
 use spherecut_render::upload::EightBitMips;
 use spherecut_render::{
     AdapterChoice, DebugMode, Depth, Filter, Gpu, GpuFrame, GpuTimers, Image, LensFrame,
-    LinearTarget, Pixels, Placement, PlaneFormat, PlaneSource, Projector, SlotShape, SourceFrames,
-    StillOptions, StillRenderer, UploadPath, Uploader, ViewParams, dmabuf, reference, upload,
-    vkshare,
+    LinearTarget, Pixels, Placement, PlaneFormat, PlaneSource, Projector, SlotGeom, SlotShape,
+    SourceFrames, SourceRef, StillOptions, StillRenderer, UploadPath, Uploader, ViewParams, dmabuf,
+    reference, rig, upload, vkshare,
 };
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_synth::lens::{x5_like, x5_like_planted};
-use spherecut_synth::rung::{FRONT_TRACK, far};
+use spherecut_synth::rung::{FRONT_TRACK, far, whole_view};
 use spherecut_synth::{Pattern, render_equirect};
 use spherecut_testkit::bench;
 use spherecut_testkit::control::must_fail;
@@ -1646,12 +1647,214 @@ fn bench_upload_5k7() {
     );
 }
 
-/// P-SHADE (M3 plan 4.3): the projection pass's GPU time stitched
-/// against equirect, at 1080p and 4K.
+/// P-SHADE's bounds on the stitched projection pass's GPU time (M3 plan
+/// 4.3), in ms, at the plan's two outputs: 1080p and 4K.
+const P_SHADE_MS: [f64; 2] = [0.8, 2.0];
+
+/// `fs_project`'s time at the same two outputs, the baseline beside the
+/// stitch: `bench_upload_5k7`'s project rows on odin's RADV, rectilinear
+/// 90° on a 5.7K NV12 frame (M3 plan amendment 6).
+const PROJECT_BASELINE_MS: [f64; 2] = [0.22, 0.77];
+
+/// `bench_stitch_pass`'s body (M3 plan 4.3's P-SHADE) on `gpu`, at
+/// `plan`'s sizes: a pair of 8-bit NV12 lenses of `plan.pair` (the X5's
+/// 8K, two 3840² streams) and an 8-bit NV12 equirect frame of
+/// `plan.single` (5.7K), noise with the pooled download's rows, each
+/// uploaded once. At each of `plan.outputs`, rectilinear 90° on the +X
+/// side seam (`synth::rung::whole_view`'s), where both lenses are
+/// sampled across the band: the projection pass's GPU time with the pair
+/// stitched by sphere's rig of synth's X5-like camera (`fs_rig`), and
+/// with the equirect frame (`fs_project`) beside it, each a run's mean
+/// of `plan.passes` passes, recorded as the median and range of
+/// `plan.runs` runs after one to warm up (D20); `plan.frames` is
+/// unused. With `verdict`, P-SHADE's: the stitch within 0.8 ms at the
+/// first output and 2.0 ms at the second passes, and a miss names the
+/// plan's redirect, which isn't built.
+fn stitch_bench(gpu: &Gpu, plan: &BenchPlan, verdict: bool) {
+    let started = std::time::Instant::now();
+    let tag = |s: (u32, u32)| format!("{}x{}", s.0, s.1);
+    let no_timer = "no timestamps between passes";
+    let frame = |size, seed| pooled(noise(Kind::Nv12, size, 0, seed));
+    let lenses = [frame(plan.pair, 7), frame(plan.pair, 8)];
+    let equirect = frame(plan.single, 9);
+    let mut uploader = Uploader::new(gpu);
+    let upload = |uploader: &mut Uploader, f: &Frame| {
+        let slot = GpuFrame::new(gpu, &SlotShape::of(&f.layout, f.size).unwrap()).unwrap();
+        uploader.upload(gpu, f, &slot).unwrap();
+        slot
+    };
+    let slots = lenses.each_ref().map(|f| upload(&mut uploader, f));
+    let flat = upload(&mut uploader, &equirect);
+    wait(gpu);
+    let x5 = sphere_rig(
+        &x5_like(),
+        &x5_like_planted(),
+        &far(),
+        FRONT_TRACK,
+        [plan.pair.0; 2],
+    )
+    .unwrap();
+    let uniform = rig::pack(&x5, slots.each_ref().map(SlotGeom::of), [[1.0; 3]; 2]).unwrap();
+    let pair = SourceRef::Rig {
+        lenses: slots.each_ref(),
+        rig: &uniform,
+    };
+    let seam = whole_view(0);
+    let view = ViewParams::new(seam.turn, seam.lens.unwrap());
+    let projector = Projector::new(gpu);
+    let mut stitched = Vec::new();
+    for &size in &plan.outputs {
+        let target = LinearTarget::new(gpu, size).unwrap();
+        let time = |source: SourceRef<'_>| -> Vec<Option<f64>> {
+            (0..=plan.runs)
+                .map(|_| {
+                    gpu_pass_ms(gpu, plan.passes, |enc, t| {
+                        projector
+                            .record(
+                                enc,
+                                source,
+                                &view,
+                                &target,
+                                Filter::Isotropic,
+                                DebugMode::Off,
+                                Some(t),
+                            )
+                            .unwrap();
+                    })
+                })
+                .skip(1)
+                .collect()
+        };
+        let (with_pair, with_flat) = (time(pair), time(SourceRef::Equirect(&flat)));
+        let on = format!("rectilinear 90° on the +X seam to {}: GPU", tag(size));
+        record_or_not(
+            &format!("stitch {} 8-bit NV12 pair, {on}", tag(plan.pair)),
+            &with_pair,
+            "ms",
+            no_timer,
+        );
+        record_or_not(
+            &format!("project {} 8-bit NV12, {on}", tag(plan.single)),
+            &with_flat,
+            "ms",
+            no_timer,
+        );
+        let all: Option<Vec<f64>> = with_pair.into_iter().collect();
+        stitched.push((size, all.map(|v| median(&v))));
+    }
+    bench::note(format!(
+        "fs_project's baseline beside the stitch: bench_upload_5k7's project rows on odin's RADV, \
+         {} ms at 1920x1080 and {} ms at 3840x2160 (M3 plan amendment 6)",
+        PROJECT_BASELINE_MS[0], PROJECT_BASELINE_MS[1]
+    ));
+    if verdict {
+        bench::note(p_shade(&stitched));
+    }
+    bench::note(format!(
+        "bench_stitch_pass ran on {} ({:?}, {} {}) in {:.2} s",
+        gpu.caps.info.name,
+        gpu.caps.info.device_type,
+        gpu.caps.info.driver,
+        gpu.caps.info.driver_info,
+        started.elapsed().as_secs_f64()
+    ));
+}
+
+/// P-SHADE's verdict on the stitch's median GPU time at each output,
+/// against [`P_SHADE_MS`] in order: a pass, or each miss and the plan's
+/// redirect, named and not built.
+fn p_shade(stitched: &[((u32, u32), Option<f64>)]) -> String {
+    let mut misses = Vec::new();
+    let mut times = Vec::new();
+    for (&(size, ms), bound) in stitched.iter().zip(P_SHADE_MS) {
+        let Some(ms) = ms else {
+            return format!(
+                "P-SHADE: no verdict, no timestamps at {}x{}",
+                size.0, size.1
+            );
+        };
+        times.push(format!(
+            "{ms:.3} ms at {}x{} (at most {bound})",
+            size.0, size.1
+        ));
+        if ms > bound {
+            misses.push(format!("{}x{}", size.0, size.1));
+        }
+    }
+    if misses.is_empty() {
+        format!("P-SHADE passes: the stitch takes {}", times.join(", "))
+    } else {
+        format!(
+            "P-SHADE misses at {}: the stitch takes {}; the redirect is an analytic Jacobian for \
+             the LOD, which saves 8 of the 10 lens projections, then a cheaper mask (neither built)",
+            misses.join(" and "),
+            times.join(", ")
+        )
+    }
+}
+
 #[test]
-#[ignore = "M3.7 unit (b)"]
+fn stitch_bench_smoke() {
+    // Tier 1: the bench runs on lavapipe, small, as upload_bench_smoke's
+    // plan has it, with no verdict.
+    stitch_bench(
+        gpu(),
+        &BenchPlan {
+            single: (640, 320),
+            pair: (320, 320),
+            outputs: [(64, 36), (128, 72)],
+            frames: 3,
+            passes: 2,
+            runs: 1,
+        },
+        false,
+    );
+}
+
+/// P-SHADE (M3 plan 4.3): the projection pass's GPU time stitched
+/// against equirect, at 1080p and 4K, and the plan's verdict on it.
+#[test]
+#[ignore = "tier2: needs a GPU"]
 fn bench_stitch_pass() {
-    todo!()
+    // About 160 MB on the GPU (two 3840² NV12 slots and a 5.7K one with
+    // their mips, 90 MB, and the 4K linear target, 66 MB) and 70 MB of
+    // frames in memory.
+    let gpu = common::hardware_gpu();
+    stitch_bench(
+        &gpu,
+        &BenchPlan {
+            single: (5760, 2880),
+            pair: (3840, 3840),
+            outputs: [(1920, 1080), (3840, 2160)],
+            frames: 0,
+            passes: 60,
+            runs: bench::runs(),
+        },
+        true,
+    );
+}
+
+#[test]
+fn p_shade_names_the_redirect_on_a_miss() {
+    // The verdict's rule on numbers of its own: within both bounds it
+    // passes, and past either it misses there and names the redirect.
+    let at = |ms: [f64; 2]| p_shade(&[((1920, 1080), Some(ms[0])), ((3840, 2160), Some(ms[1]))]);
+    let passes = at([0.8, 2.0]);
+    assert!(passes.starts_with("P-SHADE passes"), "{passes}");
+    for (ms, at_size) in [([0.81, 2.0], "1920x1080"), ([0.8, 2.01], "3840x2160")] {
+        let missed = at(ms);
+        must_fail(
+            &format!("P-SHADE at {ms:?}"),
+            missed.starts_with("P-SHADE passes"),
+        );
+        assert!(
+            missed.contains(&format!("misses at {at_size}"))
+                && missed.contains("an analytic Jacobian for the LOD"),
+            "{missed}"
+        );
+    }
+    let blind = p_shade(&[((1920, 1080), None), ((3840, 2160), Some(1.0))]);
+    assert!(blind.contains("no verdict"), "{blind}");
 }
 
 /// Whether level 0 of each plane of `slot` holds 8-bit `frame`'s codes;
