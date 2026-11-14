@@ -11238,7 +11238,17 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   identical; and rung 2's 5 tests, rung 1's shots drawn by
   `StillRenderer` from rung 1's pairs against rung 1's pictures, floors
   in `goldens/rung2.json` (D32's note of this date). The 24 old rows
-  pass against their untouched PNGs and manifest.
+  pass against their untouched PNGs and manifest. "Identical" is held,
+  not only measured (the M3.7 review's N6): each dfish row's entry
+  records `pictures_fnv64`, an FNV-64 of every picture the row drew of
+  a pair and every GPU strip it read, its controls' among them, and a
+  run on the driver build that blessed it (adapter and driver info),
+  from the same source, fails if the hash moved; on another driver, or
+  in Tier 2's modes, the row's thresholds alone hold it, as before. A
+  stored pair row keeps only the picture of the rig its recorded
+  calibration and geometry build (N8), and `dfish_hifreq_tinyplanet` is
+  held to the CPU reference over its whole picture as well as to the
+  ideal over its minified disc (N5).
 - agent's `rung3_gpu_render_equals_rung2`: the rung 3 file through
   `open_pair` on lavapipe equals rung 2's render of synth's planes byte
   for byte (control: the stored reversed binding).

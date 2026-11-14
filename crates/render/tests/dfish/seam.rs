@@ -256,7 +256,10 @@ fn gpu_seams(
             from: PlaneSource::Bytes,
         });
         match run.renderer.strips(run.gpu, lenses, rig, &SPEC) {
-            Ok(strips) => drawn.push(strips),
+            Ok(strips) => {
+                run.drew_strips(&strips);
+                drawn.push(strips);
+            }
             Err(e) => {
                 run.fail(format!("the strip pass: {e} ({})", e.code()));
                 return None;

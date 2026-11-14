@@ -52,8 +52,13 @@
 //! the gains and both lenses' FNV-64), and keeps only a picture that the
 //! rig those build drew ([`PairSource::rig`]; a control's is refused): a
 //! change in how a rig is built from them is a change in code the rows
-//! hold, and reads as a changed render, not a changed source. Their
-//! tests carry the module's path, `dfish_seam::dfish_seam_rows`,
+//! hold, and reads as a changed render, not a changed source. Every pair
+//! row's entry, check rows' too, records `pictures_fnv64`, a hash of all
+//! it drew (`Run::hold_pictures`): on the driver build that blessed it,
+//! from the same source, a run whose pictures hash otherwise fails, so a
+//! render that moves within a row's thresholds still fails there; other
+//! drivers are held by the thresholds alone. Their tests carry the
+//! module's path, `dfish_seam::dfish_seam_rows`,
 //! `dfish_views::dfish_view_rows` and `rung2::rung2_x5_like_matches_rung1`
 //! among them, which a filter given `--exact` spells out whole: the bare
 //! name with `--exact` matches no test, runs nothing and passes.
@@ -100,6 +105,7 @@ use spherecut_render::blur;
 use spherecut_render::compare::{DiffStats, View, diff_stats, psnr, sample_diff, ssim};
 use spherecut_render::readback::round_f16;
 use spherecut_render::reference::{self, ImageF64};
+use spherecut_render::seam::Strips;
 use spherecut_render::{
     AdapterChoice, DebugMode, Depth, Gpu, Image, LayoutKind, LensFrame, OutKind, Pixels, Placement,
     PlaneFormat, PlaneSource, SlotShape, SourceFrames, Stereo, StillOptions, StillRenderer,
@@ -409,6 +415,30 @@ impl std::ops::Deref for Stitched {
 
     fn deref(&self) -> &Image {
         &self.image
+    }
+}
+
+/// Folds `image` into `hash`: its size, then its samples, each as its
+/// little-endian bytes.
+fn picture_fnv64(hash: &mut Fnv64, image: &Image) {
+    hash.write(&image.width.to_le_bytes())
+        .write(&image.height.to_le_bytes());
+    match &image.pixels {
+        Pixels::Rgb8(v) => {
+            hash.write(&[8]).write(v);
+        }
+        Pixels::Rgb16(v) => {
+            hash.write(&[16]);
+            for s in v {
+                hash.write(&s.to_le_bytes());
+            }
+        }
+        Pixels::LinearF32(v) => {
+            hash.write(&[32]);
+            for s in v {
+                hash.write(&s.to_le_bytes());
+            }
+        }
     }
 }
 
@@ -978,6 +1008,11 @@ struct Run<'g> {
     diffs: PathBuf,
     /// What the manifest says it is: [`ABOUT`], or a dfish module's own.
     about: &'static str,
+    /// The pictures the row has drawn of lens pairs ([`Self::render_pair`])
+    /// and the GPU's strips of them it read ([`Self::drew_strips`]), as
+    /// one FNV-64 of them in order, and how many; `None` for a row that
+    /// drew none.
+    pictures: Option<(Fnv64, usize)>,
 }
 
 impl<'g> Run<'g> {
@@ -1014,6 +1049,7 @@ impl<'g> Run<'g> {
             dir: dir.to_path_buf(),
             diffs: diffs.to_path_buf(),
             about: ABOUT,
+            pictures: None,
         }
     }
 
@@ -1026,6 +1062,7 @@ impl<'g> Run<'g> {
         self.started = Instant::now();
         self.thresholds.clear();
         self.measured.clear();
+        self.pictures = None;
     }
 
     /// Records a failure of the current row, with the driver build.
@@ -1151,6 +1188,7 @@ impl<'g> Run<'g> {
     /// which its manifest entry records: other gains are a failure, and
     /// nothing is rendered. `rig` may be any, a control's among them, and
     /// the picture says whether it was the pair's own ([`Stitched`]).
+    /// Every picture it gives goes into the row's [`Self::pictures`].
     #[allow(clippy::too_many_arguments)]
     fn render_pair(
         &mut self,
@@ -1179,15 +1217,38 @@ impl<'g> Run<'g> {
             .renderer
             .render_blurred(self.gpu, source, views, size, &opts)
         {
-            Ok(image) => Some(Stitched {
-                image,
-                by_source_rig: *rig == pair.rig,
-            }),
+            Ok(image) => {
+                let (hash, n) = self.pictures.get_or_insert((Fnv64::new(), 0));
+                picture_fnv64(hash, &image);
+                *n += 1;
+                Some(Stitched {
+                    image,
+                    by_source_rig: *rig == pair.rig,
+                })
+            }
             Err(e) => {
                 self.fail(format!("render_blurred of a pair: {e} ({})", e.code()));
                 None
             }
         }
+    }
+
+    /// Folds the GPU's `strips` of a lens pair, which a row drew itself
+    /// (`StillRenderer::strips`), into the row's [`Self::pictures`]: each
+    /// lens's size, its samples' little-endian bytes and where it is
+    /// valid.
+    fn drew_strips(&mut self, strips: &Strips) {
+        let (hash, n) = self.pictures.get_or_insert((Fnv64::new(), 0));
+        for strip in &strips.lenses {
+            hash.write(&strip.width.to_le_bytes())
+                .write(&strip.height.to_le_bytes());
+            for c in strip.rgb.iter().flatten() {
+                hash.write(&c.to_le_bytes());
+            }
+            let valid: Vec<u8> = strip.valid.iter().map(|&v| u8::from(v)).collect();
+            hash.write(&valid);
+        }
+        *n += 1;
     }
 
     fn render_with(
@@ -1328,12 +1389,18 @@ impl<'g> Run<'g> {
     }
 
     /// Ends the row with its manifest entry, which must say what it
-    /// rendered, from what and how (D32).
-    fn end(&mut self, entry: Map<String, Value>, image: bool) {
+    /// rendered, from what and how (D32), and, for a row that drew lens
+    /// pairs, the pictures it drew ([`Self::hold_pictures`]).
+    fn end(&mut self, mut entry: Map<String, Value>, image: bool) {
         for field in ["source", "source_fnv64", "view"] {
             if !entry.contains_key(field) {
                 self.fail(format!("its manifest entry has no {field}"));
             }
+        }
+        if let Some((hash, n)) = self.pictures.take() {
+            let hash = json!(format!("{:016x}", hash.finish()));
+            self.hold_pictures(&entry, image, &hash, n);
+            entry.insert("pictures_fnv64".into(), hash);
         }
         if matches!(self.mode, Mode::References | Mode::OtherDriver) {
             let numbers: Vec<String> = self
@@ -1359,6 +1426,45 @@ impl<'g> Run<'g> {
             self.row,
             self.started.elapsed().as_secs_f64()
         );
+    }
+
+    /// A lens pair row's pictures, all that [`Self::render_pair`] drew for
+    /// it in order (its controls' among them) and the strips it read
+    /// ([`Self::drew_strips`]), `hash` over the `n` of them, against those it blessed: on the driver build that blessed
+    /// it (its adapter and driver info, the same-driver rule a stored
+    /// PNG is held to) and from the same source, they must be the same
+    /// bytes, or a render moved (the M3.7 review's N6: D66's "three runs
+    /// identical", held on every run, check rows' among them). Another
+    /// driver, a changed source, a blessing or a Tier 2 run holds nothing
+    /// here.
+    fn hold_pictures(&mut self, entry: &Map<String, Value>, image: bool, hash: &Value, n: usize) {
+        if self.mode != (Mode::Golden { bless: false }) {
+            return;
+        }
+        let Ok(manifest) = &self.manifest else {
+            return;
+        };
+        let blessed = &manifest[if image { "images" } else { "checks" }][&self.row];
+        let same_driver = blessed["adapter"].as_str() == Some(&self.driver.adapter)
+            && blessed["driver_info"].as_str() == Some(&self.driver.driver_info);
+        let same_source = entry.get("source_fnv64") == Some(&blessed["source_fnv64"])
+            && entry.get("source") == Some(&blessed["source"]);
+        if !same_driver || !same_source || blessed["pictures_fnv64"] == *hash {
+            return;
+        }
+        let msg = match &blessed["pictures_fnv64"] {
+            Value::Null => {
+                format!("the manifest has no pictures_fnv64 for it: bless with `{REGENERATE}`")
+            }
+            was => format!(
+                "the pictures it drew ({n}) hash {}, blessed as {} on this driver from the same \
+                 source: a render moved since the blessing; if it should have, bless again with \
+                 `{REGENERATE}`",
+                bare(hash),
+                bare(was)
+            ),
+        };
+        self.fail(msg);
     }
 
     /// The row's image against its stored golden, by the rules of section
@@ -4114,6 +4220,45 @@ fn a_pair_drawn_by_another_rig_isnt_stored() {
     };
     assert!(refused(&hard), "a hard switch's picture stored");
     must_fail("the pair's own rig's picture refused", refused(&t.rig));
+}
+
+/// A lens pair row holds the pictures it draws, on the driver that
+/// blessed it and from the same source, to those it blessed (the M3.7
+/// review's N6): D66's "three runs identical", held on every run, check
+/// rows among them.
+///
+/// The tiny pair's check row blessed as drawn, then run again with its
+/// picture drawn in debug mode 5, lens 1 alone, as a render that moved
+/// would be: the run fails, naming its pictures. Control: run again as
+/// blessed, it passes.
+#[test]
+fn a_pair_rows_pictures_are_held_to_its_blessing() {
+    let s = scratch("pair-pictures");
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let row = |mode: Mode, debug: DebugMode| {
+        let mut run = Run::at(gpu(), mode, &s.dir, &s.diffs);
+        run.begin("pair_checked");
+        let opts = StillOptions {
+            debug,
+            ..StillOptions::default()
+        };
+        let _ = run.render_pair(&pair, &t.rig, pair.gains, &v, size, opts);
+        run.end_pair_check("the tiny pair", &[&pair], vec![view_about(&v, size)]);
+        run
+    };
+    row(Mode::Golden { bless: true }, DebugMode::Off).finish();
+    let held = |debug: DebugMode| {
+        let run = row(Mode::Golden { bless: false }, debug);
+        eprintln!("{:?}", run.failures);
+        run.failures.len() == 1 && run.failures[0].contains("the pictures it drew")
+    };
+    assert!(held(DebugMode::Lens1), "a render that moved passed");
+    must_fail(
+        "the blessed pictures, drawn again, held as moved",
+        held(DebugMode::Off),
+    );
 }
 
 #[test]
