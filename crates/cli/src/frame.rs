@@ -1261,10 +1261,12 @@ impl Job {
 
     /// Steps 5 to 10 for a camera's pair: both lens tracks decoded as any
     /// stream is (`--decoder`, `--render-node` and `--zero-copy`, which
-    /// imports both lenses) and stitched ([`Still::open_pair`]) on the
-    /// GPU, or on the CPU reference under `--reference`, by the file's
-    /// calibration and the table's geometry, or `--geometry`'s over it,
-    /// at `--stitch-distance`, through the view or `--seam`'s debug mode.
+    /// keeps both lenses on the GPU: imported from VA-API, or under
+    /// `--decoder vulkan` copied out of FFmpeg's images, path B) and
+    /// stitched ([`Still::open_pair`]) on the GPU, or on the CPU
+    /// reference under `--reference`, by the file's calibration and the
+    /// table's geometry, or `--geometry`'s over it, at
+    /// `--stitch-distance`, through the view or `--seam`'s debug mode.
     /// A pair that can't be stitched is refused with the flags that
     /// answer it ([`Self::flags`]), before the GPU is opened.
     fn run_pair(

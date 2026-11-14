@@ -248,7 +248,7 @@ pub fn render_blurred(
 /// θ = π is black, as [`render`]'s is. The rows are dealt to threads
 /// ([`row_threads`]), and the picture is the same on any number of them.
 ///
-/// What the shader's stitch (M3.7) must match that 10.3 doesn't say: the
+/// What `fs_rig`, the shader's stitch, matches that 10.3 doesn't say: the
 /// mask's θ test is made in angle. 10.3 writes it as cos θ ≥ cos(θ_max −
 /// margin · 2^λ / texels per radian), and [`Rig::covers`] compares θ with
 /// that bound. The two agree while the bound is 0 or more. Once the
@@ -261,10 +261,10 @@ pub fn render_blurred(
 /// along a meridian, the cosine form covers 14 at LOD 7.272 (a bound of
 /// −1.36°) and 108 at 7.4 (−10.77°), whichever the meridian, and 10 to 26
 /// at 7.565 (−24.19°), by the meridian, where the angle covers none; at
-/// LOD 7.202 both cover 35 and at 7.635 neither any. So the WGSL compares
-/// θ in angle, or guards the cosine form (the bound 0 or more, and cos θ
-/// ≥ cos of it), and M3.7's mask test needs a case at such an LOD, an
-/// output a few pixels across.
+/// LOD 7.202 both cover 35 and at 7.635 neither any. So `fs_rig` compares
+/// θ in angle, and `tests/rig_shader.rs`'s
+/// `fs_rig_tests_the_mask_in_angle` holds it at such an LOD, on a 5 × 5
+/// output, with the unguarded cosine form as its control.
 ///
 /// This builds both pictures' mip chains and renders once: a caller with
 /// more than one picture to make of one pair of frames makes a

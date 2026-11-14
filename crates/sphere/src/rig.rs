@@ -1062,8 +1062,9 @@ impl Rig {
     /// Where one lens alone covers such a direction, the rule goes on from
     /// the normalised weights, which are 1 and 0 at its feather's end
     /// already. Where their h differ and the switch would fall inside the
-    /// wider band, it falls on that band's end, not by θ less h. 10.3's
-    /// WGSL must copy the rule.
+    /// wider band, it falls on that band's end, not by θ less h.
+    /// `fs_rig`'s `weigh` (render's `shaders/rig.wgsl`, M3.7) copies the
+    /// rule.
     pub fn weights(&self, d: DVec3, lod: [f64; 2]) -> [f64; 2] {
         // Each covering lens's θ past its band's centre, and its
         // feathered weight.
@@ -1316,8 +1317,8 @@ fn off_axis(d: DVec3) -> f64 {
 /// between. With `hi` ≤ `lo` it is a step at `lo`, ½ at `lo` itself:
 /// [`Rig::feather_at`] gives no h below 0, so a feather of 0 or below is a
 /// hard switch at the band's centre that gives each lens ½ on the edge.
-/// 10.3's WGSL must take that case apart, since WGSL's `smoothstep` is
-/// undefined when its edges meet.
+/// render's `shaders/rig.wgsl` takes that case apart (`feathered`), since
+/// WGSL's `smoothstep` is undefined when its edges meet.
 fn smoothstep(lo: f64, hi: f64, x: f64) -> f64 {
     if hi <= lo {
         return match x.partial_cmp(&lo) {

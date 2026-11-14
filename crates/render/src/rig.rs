@@ -33,9 +33,10 @@ pub struct LensUniform {
     /// base, 0 to 3 in `Lens::radius`'s order (equidistant, equisolid,
     /// stereographic, orthographic).
     pub prism: [f32; 4],
-    /// θ_frame, the band's texels per radian, the slot's side in texels
-    /// as `RigLens::side` gives it, which the frame term reads, and the
-    /// band's centre c_b ([`Rig::band_centre`], 90° + δ_b, F025).
+    /// θ_frame, the band's texels per radian, the rig's side for the lens
+    /// in texels (`RigLens::side`, which needn't be the slot's size),
+    /// which the frame term reads, and the band's centre c_b
+    /// ([`Rig::band_centre`], 90° + δ_b, F025).
     pub frame: [f32; 4],
     /// The slot's luma size in texels, which a texel is divided by to
     /// give its uv (zw unused).

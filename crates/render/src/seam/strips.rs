@@ -152,9 +152,11 @@ pub fn strips_of(pair: &LensPair, rig: &Rig, spec: &StripSpec) -> Result<Strips,
 /// Which samples of each lens's strip are valid, by calibration block:
 /// [`Strip::valid`] as [`strips()`] gives it for `rig` and `spec`, row
 /// after row, with no picture sampled. A strip drawn another way on
-/// [`StripSpec::dir`]'s grid, as the shader will draw Measure seam's
-/// (10.5, 13.4), takes its samples' validity from here: the mask at each
-/// sample's own footprint's LOD, as it is nowhere else worked out.
+/// [`StripSpec::dir`]'s grid, as the shader's strip pass draws them
+/// ([`crate::StillRenderer::strips`]: 10.5's goldens read them, and
+/// M3.13's Measure seam will), takes its samples' validity from here: the
+/// mask at each sample's own footprint's LOD, as it is nowhere else
+/// worked out.
 ///
 /// Refuses what [`strips()`] refuses of the spec.
 pub fn strip_coverage(rig: &Rig, spec: &StripSpec) -> Result<[Vec<bool>; 2], RenderError> {
