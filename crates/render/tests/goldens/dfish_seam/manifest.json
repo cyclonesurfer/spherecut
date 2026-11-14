@@ -1,0 +1,1788 @@
+{
+  "about": "The seam's dual-fisheye goldens (M3 plan 10.5, DECISIONS D32): lens pairs rendered from synth's planes and stitched by the shader on lavapipe, with each check's thresholds and what it measured when blessed.",
+  "checks": {
+    "dfish_exposure_match": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_gains_off_step_b_lsb": 19.6668,
+        "control_gains_off_step_g_lsb": 19.0254,
+        "control_gains_off_step_lsb": 22.3468,
+        "control_gains_off_step_r_lsb": 22.3468,
+        "step_b_lsb": 0.5499,
+        "step_g_lsb": -0.091,
+        "step_lsb": 0.5499,
+        "step_pixels": 30374.0,
+        "step_r_lsb": 0.1919
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              0.6734350297014737,
+              0.7071067811865475,
+              0.7071067811865475
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines, lens 1 at +0.5 EV and +5 % red",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines, lens 1 at +0.5 EV and +5 % red",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        }
+      ],
+      "source_fnv64": [
+        [
+          "50189836dd3e6b09",
+          "d741b1f2de0e1a34"
+        ],
+        [
+          "50189836dd3e6b09",
+          "d741b1f2de0e1a34"
+        ]
+      ],
+      "thresholds": {
+        "control_gains_off_step_lsb_min": 8.0,
+        "step_lsb_under": 1.0,
+        "step_pixels_min": 10000.0
+      },
+      "view": {
+        "filter": "isotropic",
+        "output": "equirect",
+        "pitch_deg": 0.0,
+        "quaternion_xyzw": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          512,
+          256
+        ],
+        "yaw_deg": 0.0
+      },
+      "wgpu": "30.0.1",
+      "what": "lens 1 at +0.5 EV and +5 % red matched by the frame's gains, each lens alone (modes 4 and 5) on the equirect: the mean step across the seam where both cover, under 1 LSB a channel; control: the gains off, at least 8 LSB"
+    },
+    "dfish_feather": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "control_h0_neg_x_step_lsb": 5.8566,
+        "control_h0_neg_x_two_bins_lsb": 9.1247,
+        "control_h0_neg_y_step_lsb": 7.3986,
+        "control_h0_neg_y_two_bins_lsb": 9.0304,
+        "control_h0_pos_x_step_lsb": 6.2817,
+        "control_h0_pos_x_two_bins_lsb": 6.2817,
+        "control_h0_pos_y_step_lsb": 8.2215,
+        "control_h0_pos_y_two_bins_lsb": 9.1107,
+        "neg_x_across_lsb": 12.1806,
+        "neg_x_against_ideal_step_lsb": 1.8075,
+        "neg_x_pixels_a_bin": 269.0,
+        "neg_x_step_lsb": 0.8169,
+        "neg_y_across_lsb": 9.15,
+        "neg_y_against_ideal_step_lsb": 0.9676,
+        "neg_y_pixels_a_bin": 256.0,
+        "neg_y_step_lsb": 0.6676,
+        "pos_x_across_lsb": 6.0984,
+        "pos_x_against_ideal_step_lsb": 1.1262,
+        "pos_x_pixels_a_bin": 269.0,
+        "pos_x_step_lsb": 0.4938,
+        "pos_y_across_lsb": 9.156,
+        "pos_y_against_ideal_step_lsb": 1.3479,
+        "pos_y_pixels_a_bin": 256.0,
+        "pos_y_step_lsb": 0.7335
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines, lens 1 at +0.25 EV",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        }
+      ],
+      "source_fnv64": [
+        [
+          "50189836dd3e6b09",
+          "a958943c8db957c8"
+        ],
+        [
+          "50189836dd3e6b09",
+          "73056a6480c81112"
+        ]
+      ],
+      "thresholds": {
+        "control_h0_neg_x_step_lsb_min": 4.0,
+        "control_h0_neg_x_two_bins_lsb_min": 8.0,
+        "control_h0_neg_y_step_lsb_min": 4.0,
+        "control_h0_neg_y_two_bins_lsb_min": 8.0,
+        "control_h0_pos_x_step_lsb_min": 4.0,
+        "control_h0_pos_y_step_lsb_min": 4.0,
+        "control_h0_pos_y_two_bins_lsb_min": 8.0,
+        "neg_x_pixels_a_bin_min": 50.0,
+        "neg_x_step_lsb_under": 1.0,
+        "neg_y_pixels_a_bin_min": 50.0,
+        "neg_y_step_lsb_under": 1.0,
+        "pos_x_pixels_a_bin_min": 50.0,
+        "pos_x_step_lsb_under": 1.0,
+        "pos_y_pixels_a_bin_min": 50.0,
+        "pos_y_step_lsb_under": 1.0
+      },
+      "view": [
+        {
+          "band_stripe": {
+            "of_the_view": "middle columns",
+            "size": [
+              48,
+              256
+            ]
+          },
+          "filter": "isotropic",
+          "hfov_deg": 90.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            -0.7071067811865475,
+            0.0,
+            0.7071067811865476
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            256,
+            256
+          ],
+          "yaw_deg": 90.0
+        },
+        {
+          "band_stripe": {
+            "of_the_view": "middle columns",
+            "size": [
+              48,
+              256
+            ]
+          },
+          "filter": "isotropic",
+          "hfov_deg": 90.0,
+          "pitch_deg": 0.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.0,
+            0.7071067811865475,
+            0.0,
+            0.7071067811865476
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            256,
+            256
+          ],
+          "yaw_deg": -90.0
+        },
+        {
+          "band_stripe": {
+            "of_the_view": "middle rows",
+            "size": [
+              256,
+              48
+            ]
+          },
+          "filter": "isotropic",
+          "hfov_deg": 90.0,
+          "pitch_deg": 90.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            0.7071067811865475,
+            0.0,
+            0.0,
+            0.7071067811865476
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            256,
+            256
+          ],
+          "yaw_deg": 0.0
+        },
+        {
+          "band_stripe": {
+            "of_the_view": "middle rows",
+            "size": [
+              256,
+              48
+            ]
+          },
+          "filter": "isotropic",
+          "hfov_deg": 90.0,
+          "pitch_deg": -90.0,
+          "projection": "rectilinear",
+          "quaternion_xyzw": [
+            -0.7071067811865475,
+            0.0,
+            0.0,
+            0.7071067811865476
+          ],
+          "roll_deg": 0.0,
+          "size": [
+            256,
+            256
+          ],
+          "yaw_deg": 0.0
+        }
+      ],
+      "wgpu": "30.0.1",
+      "what": "lens 1 at +0.25 EV with the gains off on the four seam views' stripes, against the pair at unit gains: the mean difference by 0.45° of angle from the seam changes by under 1 LSB a bin; control: h = 0, at least 4 LSB between neighbouring bins, and 8 LSB between bins two apart on −X, +Y and −Y"
+    },
+    "dfish_fullrange_left": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "coded_full_bt709_left": 1.0,
+        "control_limited_db_off": 27.244,
+        "control_limited_psnr_db": 30.107,
+        "cpu_max_channel": 0.0104,
+        "cpu_psnr_db": 57.351
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "limited",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "limited",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        }
+      ],
+      "source_fnv64": [
+        [
+          "50189836dd3e6b09",
+          "73056a6480c81112"
+        ],
+        [
+          "50189836dd3e6b09",
+          "73056a6480c81112"
+        ]
+      ],
+      "thresholds": {
+        "coded_full_bt709_left_min": 1.0,
+        "control_limited_db_off_min": 10.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 54.35
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": 90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the X5's coding (8-bit 4:2:0, full range, BT.709, chroma left) through +X, against the CPU reference; control: the same planes tagged limited, at least 10 dB off"
+    },
+    "dfish_layout_invariance": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "nv12_against_p010le_max_channel": 0.0118,
+        "nv12_against_p010le_psnr_db": 55.18,
+        "nv12_against_yuv420p_identical": 1.0,
+        "nv12_against_yuv420p_max_channel": 0.0,
+        "yuv420p_against_p010le_max_channel": 0.0118,
+        "yuv420p_against_p010le_psnr_db": 55.18
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "nv12",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "nv12",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "p010le",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "p010le",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        }
+      ],
+      "source_fnv64": [
+        [
+          "84466eb3b10b47b9",
+          "4aa115f1f28b89aa"
+        ],
+        [
+          "56bb2c8ad3cf98d3",
+          "2cb2bfd6861511de"
+        ],
+        [
+          "87508a4a2fcc58ff",
+          "5de66e041994e9da"
+        ]
+      ],
+      "thresholds": {
+        "nv12_against_p010le_max_channel_max": 0.1,
+        "nv12_against_p010le_psnr_db_min": 52.17,
+        "nv12_against_yuv420p_identical_min": 1.0,
+        "nv12_against_yuv420p_max_channel_max": 0.1,
+        "yuv420p_against_p010le_max_channel_max": 0.1,
+        "yuv420p_against_p010le_psnr_db_min": 52.17
+      },
+      "view": {
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": 90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the far SeamLines pair as NV12, I420 and P010 (full range, BT.709, chroma left) through +X, each two within the CPU rule of each other, NV12 and I420 the same pixels"
+    },
+    "dfish_seam_registration": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "a0_deg": 0.0016,
+        "a1_deg": 0.0011,
+        "a2_deg": 0.0,
+        "b1_deg": 0.0002,
+        "b2_deg": 0.0003,
+        "bins_measured": 72.0,
+        "c0_deg": -0.0002,
+        "c1_deg": 0.0001,
+        "control_centre_a0_deg": 0.0011,
+        "control_centre_a1_deg": 0.5239,
+        "control_centre_a2_deg": 0.0012,
+        "control_centre_attributed": 1.0,
+        "control_centre_b1_deg": 0.0066,
+        "control_centre_b2_deg": 0.0025,
+        "control_centre_bins_predicted": 72.0,
+        "control_centre_bins_unmeasured": 0.0,
+        "control_centre_c0_deg": 0.002,
+        "control_centre_c1_deg": 0.0043,
+        "control_centre_d1_deg": -0.3309,
+        "control_centre_misregistration_px": 1.67,
+        "control_centre_off_prediction_px": 0.0227,
+        "control_focal_a0_deg": -2.1396,
+        "control_focal_a1_deg": -0.0138,
+        "control_focal_a2_deg": 0.0004,
+        "control_focal_attributed": 1.0,
+        "control_focal_b1_deg": -0.0019,
+        "control_focal_b2_deg": 0.0004,
+        "control_focal_bins_predicted": 72.0,
+        "control_focal_bins_unmeasured": 0.0,
+        "control_focal_c0_deg": -0.0003,
+        "control_focal_c1_deg": -0.0102,
+        "control_focal_d1_deg": -0.0022,
+        "control_focal_misregistration_px": 8.1567,
+        "control_focal_off_prediction_px": 0.0209,
+        "control_roll_a0_deg": 0.0016,
+        "control_roll_a1_deg": 0.0009,
+        "control_roll_a2_deg": 0.0001,
+        "control_roll_attributed": 1.0,
+        "control_roll_b1_deg": 0.0001,
+        "control_roll_b2_deg": 0.0003,
+        "control_roll_bins_predicted": 72.0,
+        "control_roll_bins_unmeasured": 0.0,
+        "control_roll_c0_deg": 0.4999,
+        "control_roll_c1_deg": -0.0001,
+        "control_roll_d1_deg": 0.0004,
+        "control_roll_misregistration_px": 1.9056,
+        "control_roll_off_prediction_px": 0.0223,
+        "control_tilt_a0_deg": 0.0016,
+        "control_tilt_a1_deg": 0.0011,
+        "control_tilt_a2_deg": -0.0001,
+        "control_tilt_attributed": 1.0,
+        "control_tilt_b1_deg": 0.5001,
+        "control_tilt_b2_deg": 0.0006,
+        "control_tilt_bins_predicted": 72.0,
+        "control_tilt_bins_unmeasured": 0.0,
+        "control_tilt_c0_deg": -0.0002,
+        "control_tilt_c1_deg": -0.0016,
+        "control_tilt_d1_deg": 0.0004,
+        "control_tilt_misregistration_px": 1.3483,
+        "control_tilt_off_prediction_px": 0.0221,
+        "control_v6_reading_a0_deg": -0.0279,
+        "control_v6_reading_a1_deg": -0.2102,
+        "control_v6_reading_a2_deg": -0.0274,
+        "control_v6_reading_attributed": 1.0,
+        "control_v6_reading_b1_deg": 0.4422,
+        "control_v6_reading_b2_deg": 0.0365,
+        "control_v6_reading_bins_predicted": 72.0,
+        "control_v6_reading_bins_unmeasured": 20.0,
+        "control_v6_reading_c0_deg": -0.0076,
+        "control_v6_reading_c1_deg": -0.3824,
+        "control_v6_reading_d1_deg": -1.8143,
+        "control_v6_reading_misregistration_px": 5.4916,
+        "d1_deg": 0.0004,
+        "gpu_against_strips_of_largest_term_deg": 0.0002,
+        "lands_nowhere": 1.0,
+        "largest_term_deg": 0.0016,
+        "median_ncc": 0.988,
+        "misregistration_px": 0.0223,
+        "off_prediction_px": 0.0223,
+        "strips_of_a0_deg": 0.0018,
+        "strips_of_a1_deg": 0.001,
+        "strips_of_a2_deg": 0.0,
+        "strips_of_b1_deg": 0.0003,
+        "strips_of_b2_deg": 0.0003,
+        "strips_of_c0_deg": -0.0001,
+        "strips_of_c1_deg": 0.0,
+        "strips_of_d1_deg": 0.0005,
+        "strips_of_median_ncc": 0.9878,
+        "strips_of_misregistration_px": 0.0226,
+        "v6_as_rendered_bins_unmeasured": 5.0,
+        "v6_as_rendered_lands_nowhere": 1.0,
+        "v6_as_rendered_misregistration_px": 0.0475
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": [
+        {
+          "calibration_fnv64": "71b8ca38f07272d7",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "x5_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                768,
+                768
+              ]
+            }
+          ]
+        },
+        {
+          "calibration_fnv64": "2ca72fbfc8c89a33",
+          "gains": [
+            [
+              1.0,
+              1.0,
+              1.0
+            ],
+            [
+              1.0,
+              1.0,
+              1.0
+            ]
+          ],
+          "geometry": {
+            "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: Some(Tangential { pair: D5D6, extension: true }), prism: Some(Prism { at: D9, order: ByAxis }) } }",
+            "r_m": "inf",
+            "tune": {
+              "feather_deg": 5.0,
+              "lenses": [
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                },
+                {
+                  "centre_px": [
+                    0.0,
+                    0.0
+                  ],
+                  "radius_scale": 1.0,
+                  "theta_max_deg": 100.0,
+                  "xi_delta": 0.0,
+                  "ypr_deg": [
+                    0.0,
+                    0.0,
+                    0.0
+                  ]
+                }
+              ],
+              "q_per_m": 0.0
+            }
+          },
+          "scene": "v6_seamlines",
+          "tracks": [
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                384,
+                384
+              ]
+            },
+            {
+              "layout": "yuv420p",
+              "matrix": "bt709",
+              "range": "full",
+              "siting": "left",
+              "size": [
+                384,
+                384
+              ]
+            }
+          ]
+        }
+      ],
+      "source_fnv64": [
+        [
+          "50189836dd3e6b09",
+          "73056a6480c81112"
+        ],
+        [
+          "590e24768102bec4",
+          "970f24c0446d9729"
+        ]
+      ],
+      "thresholds": {
+        "bins_measured_min": 72.0,
+        "control_centre_attributed_min": 1.0,
+        "control_centre_bins_predicted_min": 72.0,
+        "control_centre_bins_unmeasured_max": 0.0,
+        "control_centre_misregistration_px_over": 0.1,
+        "control_focal_attributed_min": 1.0,
+        "control_focal_bins_predicted_min": 72.0,
+        "control_focal_bins_unmeasured_max": 0.0,
+        "control_focal_misregistration_px_over": 0.1,
+        "control_roll_attributed_min": 1.0,
+        "control_roll_bins_predicted_min": 72.0,
+        "control_roll_bins_unmeasured_max": 0.0,
+        "control_roll_misregistration_px_over": 0.1,
+        "control_tilt_attributed_min": 1.0,
+        "control_tilt_bins_predicted_min": 72.0,
+        "control_tilt_bins_unmeasured_max": 0.0,
+        "control_tilt_misregistration_px_over": 0.1,
+        "control_v6_reading_attributed_min": 1.0,
+        "control_v6_reading_bins_predicted_min": 72.0,
+        "control_v6_reading_misregistration_px_over": 0.1,
+        "lands_nowhere_min": 1.0,
+        "largest_term_deg_under": 0.03,
+        "median_ncc_min": 0.5,
+        "misregistration_px_max": 0.1,
+        "v6_as_rendered_lands_nowhere_min": 1.0
+      },
+      "view": {
+        "bin_deg": 5.0,
+        "half_band_deg": 8.0,
+        "output": "seam strips, StripSpec::TIER1",
+        "px_per_deg": 3.81,
+        "search_deg": 3.0,
+        "size": [
+          1372,
+          61
+        ]
+      },
+      "wgpu": "30.0.1",
+      "what": "the far SeamLines pair's seam on the GPU's strips through the true rig, misregistered at most 0.1 px rms, strips_of's numbers beside; controls, each misregistered and attributed by 8.3's step 3: lens 1 rolled 0.5°, lens 1 pitched 0.5°, f × 1.012 (map A), cx + 2 px on lens 1, and the V6 camera at 384² read as {D5D6, D7 ByAxis}"
+    },
+    "dfish_stitch_distance": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "a0_deg": 0.0013,
+        "a1_deg": -0.0006,
+        "a2_deg": -0.0005,
+        "b1_deg": 0.0011,
+        "b2_deg": 0.001,
+        "bins_measured": 72.0,
+        "c0_deg": 0.0,
+        "c1_deg": 0.0001,
+        "control_q0_a0_deg": 1.2227,
+        "control_q0_a0_off_1_20_deg": 0.0227,
+        "control_q0_a1_deg": -0.003,
+        "control_q0_a2_deg": 0.0001,
+        "control_q0_attributed": 1.0,
+        "control_q0_b1_deg": 0.0006,
+        "control_q0_b2_deg": 0.0006,
+        "control_q0_c0_deg": -0.0001,
+        "control_q0_c1_deg": 0.0067,
+        "control_q0_d1_deg": -0.1641,
+        "control_q0_d1_of_a0": -0.1342,
+        "control_q0_misregistration_px": 4.6824,
+        "control_q0_predicted_d1_of_a0": -0.1342,
+        "d1_deg": 0.0004,
+        "lands_nowhere": 1.0,
+        "largest_term_deg": 0.0013,
+        "median_ncc": 0.9877,
+        "misregistration_px": 0.0181,
+        "off_prediction_px": 0.0181
+      },
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "calibration_fnv64": "71b8ca38f07272d7",
+        "gains": [
+          [
+            1.0,
+            1.0,
+            1.0
+          ],
+          [
+            1.0,
+            1.0,
+            1.0
+          ]
+        ],
+        "geometry": {
+          "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+          "r_m": 1.5,
+          "tune": {
+            "feather_deg": 5.0,
+            "lenses": [
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ],
+            "q_per_m": 0.6666666666666666
+          }
+        },
+        "scene": "x5_seamlines_1m5",
+        "tracks": [
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          },
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          }
+        ]
+      },
+      "source_fnv64": [
+        "49e57deddf5100ee",
+        "7c08cb27cb25dcbc"
+      ],
+      "thresholds": {
+        "bins_measured_min": 72.0,
+        "control_q0_a0_off_1_20_deg_max": 0.05,
+        "control_q0_attributed_min": 1.0,
+        "control_q0_misregistration_px_over": 0.1,
+        "lands_nowhere_min": 1.0,
+        "largest_term_deg_under": 0.03,
+        "median_ncc_min": 0.5,
+        "misregistration_px_max": 0.1
+      },
+      "view": {
+        "bin_deg": 5.0,
+        "half_band_deg": 8.0,
+        "output": "seam strips, StripSpec::TIER1",
+        "px_per_deg": 3.81,
+        "search_deg": 3.0,
+        "size": [
+          1372,
+          61
+        ]
+      },
+      "wgpu": "30.0.1",
+      "what": "SeamLines 1.5 m away on the GPU's strips stitched at q = 1/1.5, misregistered at most 0.1 px rms; control: stitched at q = 0, a0 = 1.20° ± 0.05° with d1 at its predicted ratio, attributed to a0 and d1"
+    }
+  },
+  "images": {
+    "dfish_rect_seam_left": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "band_over_better_db": 0.4728,
+        "band_pixels": 6902.0,
+        "control_no_turn_apart_deg": 90.0,
+        "control_no_turn_apart_least_deg": 0.0,
+        "control_no_turn_apart_most_deg": 180.0,
+        "control_no_turn_bins_predicted": 0.0,
+        "control_no_turn_ideal_band_psnr_db": 18.3538,
+        "control_no_turn_median_ncc": 0.9655,
+        "control_no_turn_misregistration_px": 16.1697,
+        "control_no_turn_under_ideal_floor_db": 6.0862,
+        "control_yawed_band_over_better_db": -4.4929,
+        "control_yawed_under_band_rule_db": 3.4929,
+        "cpu_max_channel": 0.0117,
+        "cpu_psnr_db": 57.3582,
+        "ideal_band_psnr_db": 25.4447,
+        "lens_0_band_psnr_db": 24.9486,
+        "lens_1_band_psnr_db": 24.9719
+      },
+      "png": "dfish_rect_seam_left.png",
+      "png_fnv64": "d1d08dce029e79bc",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "calibration_fnv64": "71b8ca38f07272d7",
+        "gains": [
+          [
+            1.0,
+            1.0,
+            1.0
+          ],
+          [
+            1.0,
+            1.0,
+            1.0
+          ]
+        ],
+        "geometry": {
+          "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+          "r_m": "inf",
+          "tune": {
+            "feather_deg": 5.0,
+            "lenses": [
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ],
+            "q_per_m": 0.0
+          }
+        },
+        "scene": "x5_seamlines",
+        "tracks": [
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          },
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          }
+        ]
+      },
+      "source_fnv64": [
+        "50189836dd3e6b09",
+        "73056a6480c81112"
+      ],
+      "thresholds": {
+        "band_over_better_db_min": -1.0,
+        "control_no_turn_apart_deg_over": 3.0,
+        "control_no_turn_misregistration_px_over": 0.1,
+        "control_no_turn_under_ideal_floor_db_over": 0.0,
+        "control_yawed_under_band_rule_db_over": 0.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 54.35,
+        "ideal_band_psnr_db_min": 24.44,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "band_stripe": {
+          "of_the_view": "middle columns",
+          "size": [
+            48,
+            256
+          ]
+        },
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": -90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the far SeamLines pair across its left (−X) side seam, against the CPU reference and the ideal in the band; controls: lens 1 yawed 0.5° (the band's rule), the turn left out (the prediction's size, the misregistration, the ideal's floor)"
+    },
+    "dfish_rect_seam_right": {
+      "adapter": "llvmpipe (LLVM 20.1.2, 256 bits)",
+      "commit": "fe433f2bc4",
+      "date": "2026-11-14",
+      "driver": "llvmpipe",
+      "driver_info": "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)",
+      "llvm": "20.1.2",
+      "measured": {
+        "band_over_better_db": 0.3754,
+        "band_pixels": 6298.0,
+        "control_no_turn_apart_deg": 90.0,
+        "control_no_turn_apart_least_deg": 0.0,
+        "control_no_turn_apart_most_deg": 180.0,
+        "control_no_turn_bins_predicted": 0.0,
+        "control_no_turn_ideal_band_psnr_db": 12.8274,
+        "control_no_turn_median_ncc": 0.9655,
+        "control_no_turn_misregistration_px": 16.1697,
+        "control_no_turn_under_ideal_floor_db": 11.3826,
+        "control_yawed_band_over_better_db": -4.1051,
+        "control_yawed_under_band_rule_db": 3.1051,
+        "cpu_max_channel": 0.0104,
+        "cpu_psnr_db": 57.351,
+        "ideal_band_psnr_db": 25.2145,
+        "lens_0_band_psnr_db": 24.7424,
+        "lens_1_band_psnr_db": 24.8391
+      },
+      "png": "dfish_rect_seam_right.png",
+      "png_fnv64": "817335f80e5f392d",
+      "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+      "source": {
+        "calibration_fnv64": "71b8ca38f07272d7",
+        "gains": [
+          [
+            1.0,
+            1.0,
+            1.0
+          ],
+          [
+            1.0,
+            1.0,
+            1.0
+          ]
+        ],
+        "geometry": {
+          "planted": "Planted { binding: Direct, canvas: C, euler: TruthEuler { axes: [Y, X, Z], order: [Yaw, Pitch, Roll], signs: [Plus, Plus, Plus], roll_offset: Minus90 }, turn: Y, upright: Zero, tz: AsStored, v6: TruthV6 { tangential: None, prism: None } }",
+          "r_m": "inf",
+          "tune": {
+            "feather_deg": 5.0,
+            "lenses": [
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              {
+                "centre_px": [
+                  0.0,
+                  0.0
+                ],
+                "radius_scale": 1.0,
+                "theta_max_deg": 100.0,
+                "xi_delta": 0.0,
+                "ypr_deg": [
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            ],
+            "q_per_m": 0.0
+          }
+        },
+        "scene": "x5_seamlines",
+        "tracks": [
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          },
+          {
+            "layout": "yuv420p",
+            "matrix": "bt709",
+            "range": "full",
+            "siting": "left",
+            "size": [
+              768,
+              768
+            ]
+          }
+        ]
+      },
+      "source_fnv64": [
+        "50189836dd3e6b09",
+        "73056a6480c81112"
+      ],
+      "thresholds": {
+        "band_over_better_db_min": -1.0,
+        "control_no_turn_apart_deg_over": 3.0,
+        "control_no_turn_misregistration_px_over": 0.1,
+        "control_no_turn_under_ideal_floor_db_over": 0.0,
+        "control_yawed_under_band_rule_db_over": 0.0,
+        "cpu_max_channel_max": 0.1,
+        "cpu_psnr_db_min": 54.35,
+        "ideal_band_psnr_db_min": 24.21,
+        "other_driver": {
+          "max_lsb": 8.0,
+          "pixels_past_4_lsb_max": 4.0,
+          "psnr_db_min": 48.0,
+          "ssim_min": 0.995
+        },
+        "same_driver": "identical pixels"
+      },
+      "view": {
+        "band_stripe": {
+          "of_the_view": "middle columns",
+          "size": [
+            48,
+            256
+          ]
+        },
+        "filter": "isotropic",
+        "hfov_deg": 90.0,
+        "pitch_deg": 0.0,
+        "projection": "rectilinear",
+        "quaternion_xyzw": [
+          0.0,
+          -0.7071067811865475,
+          0.0,
+          0.7071067811865476
+        ],
+        "roll_deg": 0.0,
+        "size": [
+          256,
+          256
+        ],
+        "yaw_deg": 90.0
+      },
+      "wgpu": "30.0.1",
+      "what": "the far SeamLines pair across its right (+X) side seam, against the CPU reference and the ideal in the band; controls: lens 1 yawed 0.5° (the band's rule), the turn left out (the prediction's size, the misregistration, the ideal's floor)"
+    }
+  },
+  "regenerate": "SPHERECUT_UPDATE_GOLDENS=1 cargo test -p spherecut-render --test goldens",
+  "schema": "spherecut.goldens/1"
+}
