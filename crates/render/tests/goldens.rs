@@ -55,8 +55,10 @@
 //!
 //! The Tier 2 tests at the end run the same rows on a GPU, against the
 //! CPU and ideal references only, at the floors blessed here, and on the
-//! machine's own llvmpipe by the other-driver rule, recording the drift;
-//! on a GPU each CPU check's error is broken down by LOD band too. The
+//! machine's own llvmpipe by the other-driver rule, recording the drift,
+//! the lens pair's two lists among them, each against its own manifest
+//! ([`run_dfish`]); on a GPU each CPU check's error is broken down by LOD
+//! band too. The
 //! mip pass rounds its 8-bit means to codes and the encode pass its
 //! output, so a driver that converts to nearest, as Vulkan asks, stores
 //! those codes: when the mip pass left its means to the driver, RADV's
@@ -4341,6 +4343,7 @@ fn goldens_on_gpu_match_reference() {
             bench::note(n);
         }
         failed.extend(run.failures);
+        failed.extend(run_dfish(g, Mode::References));
     }
     assert!(
         failed.is_empty(),
@@ -4361,9 +4364,58 @@ fn goldens_on_host_llvmpipe() {
         )),
     };
     assert_eq!(gpu.caps.info.device_type, wgpu::DeviceType::Cpu);
+    let failed = run_dfish(&gpu, Mode::OtherDriver);
     let mut run = Run::new(&gpu, Mode::OtherDriver);
     run_rows(&mut run, None);
+    run.failures.extend(failed);
     run.finish();
+}
+
+/// The lens pair's two row lists ([`dfish_seam`] and [`dfish_views`]),
+/// each with its directory, its manifest's words and the name of its
+/// diffs' directory, as their Tier 1 tests run them on lavapipe.
+type DfishList = (
+    &'static str,
+    &'static str,
+    &'static [(&'static str, Row)],
+    &'static str,
+);
+const DFISH: [DfishList; 2] = [
+    (
+        dfish_seam::DIR,
+        dfish_seam::ABOUT,
+        dfish_seam::ROWS,
+        "dfish-seam",
+    ),
+    (
+        dfish_views::DIR,
+        dfish_views::ABOUT,
+        dfish_views::ROWS,
+        "dfish-views",
+    ),
+];
+
+/// Both of the lens pair's row lists ([`DFISH`]) on `gpu` in `mode`, a
+/// Tier 2 mode, each against its own directory's manifest: their notes
+/// written to the bench log, and their failures given back, each naming
+/// its row and driver as [`Run::fail`] names it. On a GPU
+/// ([`Mode::References`]) that is the CPU rule, the ideal references and
+/// the controls; on the machine's llvmpipe ([`Mode::OtherDriver`]) the
+/// stored pictures too, by the other-driver rule.
+fn run_dfish(gpu: &Gpu, mode: Mode) -> Vec<String> {
+    let mut failed = Vec::new();
+    for (dir, about, rows, diffs) in DFISH {
+        let diffs = diff_dir_beside(diffs);
+        let _ = std::fs::remove_dir_all(&diffs);
+        let mut run = Run::at(gpu, mode, Path::new(dir), &diffs);
+        run.about = about;
+        run_these(&mut run, rows, None);
+        for n in &run.notes {
+            bench::note(n);
+        }
+        failed.extend(run.failures);
+    }
+    failed
 }
 
 /// Every CPU check's PSNR on the RX 7600 (RADV NAVI33, Mesa 26.2.5) at
