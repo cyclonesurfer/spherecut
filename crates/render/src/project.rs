@@ -200,11 +200,15 @@ pub enum DebugMode {
     /// Mode 5: block 1's lens alone, as [`DebugMode::Lens0`].
     Lens1,
     /// Mode 6: the weights the lenses blend by, block 0's in red and
-    /// block 1's in blue.
+    /// block 1's in blue. They are values, not light, each the nearest
+    /// f16 with no dim and no OETF, as the reference codes them: read them
+    /// back with [`crate::Depth::Linear`], since an 8- or 16-bit read
+    /// passes them through the OETF.
     Weights,
     /// Mode 7: the seam difference, |g0·lin0 − g1·lin1| × 8 in linear
     /// light, the frame's gains applied, where both lenses cover; black
-    /// elsewhere.
+    /// elsewhere. Values as [`DebugMode::Weights`] are, unclamped (they
+    /// pass 1): read them back with [`crate::Depth::Linear`].
     SeamDiff,
 }
 

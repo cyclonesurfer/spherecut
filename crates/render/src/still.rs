@@ -33,7 +33,9 @@ pub enum Depth {
     /// as 16-bit codes: `frame --depth 16`.
     Sixteen,
     /// The linear target as it is, for checks of the LOD heat map and of
-    /// linear light.
+    /// linear light, and how a lens pair's weights and seam difference
+    /// ([`DebugMode::Weights`], [`DebugMode::SeamDiff`]), which are values
+    /// with no OETF, are read.
     Linear,
 }
 
@@ -462,7 +464,10 @@ impl StillRenderer {
     /// ([`Projector::record_strip`]) and read back: each pixel's rgb in
     /// linear light at unit gain, its `valid` from
     /// [`crate::seam::strip_coverage`], and rgb 0 where it is invalid, as
-    /// [`crate::seam::strips_of`] gives them from the CPU reference.
+    /// [`crate::seam::strips_of`] gives them from the CPU reference, but
+    /// each value the nearest f16, as the pass's `Rgba16Float` target holds
+    /// it (M3 plan amendment 5), where the reference's aren't rounded:
+    /// at most 2⁻¹¹ of a value apart for that alone.
     ///
     /// Each lens is uploaded into its track's slot, whole, as
     /// [`Self::render_blurred`] uploads a pair's. Refuses a spec with no

@@ -29,7 +29,7 @@ use spherecut_render::reference::{
     ImageF64, LensPair, RigDebug, RigOptions, lens_footprint, render_rig_of, rig_lod_map, srgb_oetf,
 };
 use spherecut_render::rig::{SlotGeom, pack};
-use spherecut_render::seam::{StripSpec, strip_coverage, strips_of};
+use spherecut_render::seam::{StripSpec, Strips, strip_coverage, strips_of};
 use spherecut_render::yuv::{self, YuvLayout};
 use spherecut_render::{
     DebugMode, Depth, GpuFrame, Image, LensFrame as StillLens, LinearTarget, PlaneSource,
@@ -1649,9 +1649,12 @@ fn record_refuses_a_rig_packed_for_other_slots() {
 /// `StillRenderer::strips` matches `seam::strips_of` on the strips' grid.
 ///
 /// The 192² `SeamLines` pair at 0.95 px/° (192²'s own scale): `valid`
-/// equals strip_coverage, and each valid sample holds the CPU rule
-/// against strips_of's. Control: the strips drawn as mode 4 ends a
-/// picture (f16, then the OETF).
+/// equals strip_coverage, each valid sample holds the CPU rule against
+/// strips_of's, and is an IEEE half, as `StillRenderer::strips` says (its
+/// target is `Rgba16Float`, M3 plan amendment 5; the M3.7 review's N2).
+/// Controls: the strips drawn as mode 4 ends a picture (f16, then the
+/// OETF) miss the rule; strips_of's own strips, which aren't rounded, are
+/// not halves.
 #[test]
 fn gpu_strips_match_strips_of() {
     let _time = timed("gpu_strips_match_strips_of");
@@ -1701,6 +1704,22 @@ fn gpu_strips_match_strips_of() {
         rule(&drawn, &theirs),
     );
     eprintln!("the strips through the OETF: {off}");
+    halves(&got).unwrap();
+    let unrounded = must_fail("strips_of's strips as halves", halves(&want));
+    eprintln!("strips_of's strips: {unrounded}");
+}
+
+/// Whether every valid sample of `strips` is an IEEE half: the first that
+/// isn't, if any.
+fn halves(strips: &Strips) -> Result<(), String> {
+    for (b, strip) in strips.lenses.iter().enumerate() {
+        for (n, (rgb, valid)) in strip.rgb.iter().zip(&strip.valid).enumerate() {
+            if *valid && rgb.iter().any(|&v| round_f16(v) != v) {
+                return Err(format!("block {b}'s sample {n}, {rgb:?}, isn't a half"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `reference::rig_lod_map` is what debug mode 3 draws for a pair.

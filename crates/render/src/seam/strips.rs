@@ -100,7 +100,9 @@ fn weight(holds: bool) -> f64 {
 /// from the strip pixel's own four ±½ px rays, the mask at its LOD, the
 /// taps, the matrix and the EOTF. Nothing after them: no gain, no dim,
 /// and no rounding to f16, so the shifts are measured on what the lens
-/// shows and not on a target's steps. An invalid sample's `rgb` is 0.
+/// shows and not on a target's steps (the shader's strips,
+/// [`crate::StillRenderer::strips`], are the nearest f16 of the same
+/// light). An invalid sample's `rgb` is 0.
 ///
 /// This builds both pictures' mip chains and unwraps once: a caller with
 /// more than one rig to try on one pair of frames, as the fit has (8.4),
