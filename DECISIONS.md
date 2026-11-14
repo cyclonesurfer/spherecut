@@ -5058,10 +5058,14 @@ pair's stitch too. `dfish_seam`'s 8 rows (`tests/dfish/seam.rs`) and
 list with its own manifest and stored PNGs (two each) under
 `goldens/dfish_seam/` and `goldens/dfish_views/`, the rest held by
 measured floors, and every control measured and held each run. A pair's
-row records its pair's source, so a pair whose calibration, gains or
-rig changed fails as changed rather than being compared as a render
-(`a_changed_pair_is_not_compared_as_a_render`), and blessing one list
-leaves the others byte for byte. Rung 2's 5 tests (`tests/dfish/rung2.rs`)
+row records its pair's source, so a pair whose calibration, geometry, R
+or gains changed fails as changed rather than being compared as a
+render (`a_changed_pair_is_not_compared_as_a_render`). A stored row
+keeps only the picture of the rig its source builds
+(`a_pair_drawn_by_another_rig_isnt_stored`, the M3.7 review's N8), each
+row's pictures are held to its blessing on the driver build that
+blessed it (`pictures_fnv64`, N6), and blessing one list leaves the
+others byte for byte. Rung 2's 5 tests (`tests/dfish/rung2.rs`)
 hold rung 1's shots drawn by the shader from rung 1's pairs to rung 1's
 pictures by this entry's reference rule; a ledger of their own blesses
 their floors into `goldens/rung2.json`, which stores no PNG, as the
@@ -11109,8 +11113,9 @@ What:
   `Projector::pipeline` builds outside its map's lock, so threads
   preparing different pipelines build them side by side. `SourceRef`
   says what a draw reads: one equirect slot, or two slots by track with
-  the packed rig. `fs_eac` (M3.18) and `fs_project_caps` (M3.20) aren't
-  built.
+  the packed rig, which `record` refuses where it was packed for slots
+  of other sizes than those bound (the M3.7 review's N1 and N3).
+  `fs_eac` (M3.18) and `fs_project_caps` (M3.20) aren't built.
 - **Bind groups.** Group 0 is the view at binding 0 and, for a pair, the
   rig at binding 1 (`layouts::view_rig`), a bind group each
   `LinearTarget` holds as `rig_group` beside `view_group`. Group 1 is
@@ -11125,8 +11130,8 @@ What:
   place a `Rig`'s f64 numbers become the shader's f32: `RigUniform`, 416
   bytes, two `LensUniform`s by calibration block (`lens_from_rig`'s rows,
   `centre_m` with θ_max, Mei's or Kannala–Brandt's numbers with the
-  base, texels a radian at θ_max and in the band, θ_frame, the rig's side
-  (never the slot's, which the frame term reads), the band's centre
+  base, texels a radian at θ_max and in the band, θ_frame, the rig's
+  side, which the frame term reads (never the slot's), the band's centre
   c_b, the slot's luma size and the frame's gain), then q, h, the margin
   at LOD 0, the model and each block's track, which only the draw reads,
   to bind the slots. It refuses a Mei lens beside a Kannala–Brandt one

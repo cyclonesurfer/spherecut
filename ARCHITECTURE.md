@@ -509,7 +509,9 @@ output file, SIGINT and its JSON:
    probe's damage becomes warnings, and so do its `bad_trailer`
    warnings. A camera's pair (layout `insta360_dual_fisheye`, without
    `--equirect`, `--stream` or `--project`) leaves this list for
-   `Job::run_pair`: the GPU of step 5 unless `--reference`, then
+   `Job::run_pair`: `still::check_pair` first, so that a pair that can't
+   be stitched is refused before any GPU is opened (on a host with no
+   GPU too), the GPU of step 5 unless `--reference`, then
    `Still::open_pair` with the GPU, the decoder `--decoder` names (each
    lens decoded as any stream is, under `--reference` too, and a decoder
    that isn't there `hw_unavailable`, exit 3), `--zero-copy`'s imports
@@ -1559,6 +1561,17 @@ every source it renders and the hash of its planes, every view, the
 thresholds and every measured number. A source whose planes hash
 otherwise than blessed is reported as "the synthetic source changed",
 never compared as a render.
+
+Since M3.7 the same binary holds the stitch (D66): a lens pair's rows,
+`dfish_seam`'s 8 and `dfish_views`' 9 (the M3 plan's 10.5), each with
+its controls and blessed into a directory of its own
+(`goldens/dfish_seam/`, `goldens/dfish_views/`) with its own manifest,
+and rung 2, the shader's stitch of rung 1's pairs held to rung 1's
+pictures, with floors alone in `goldens/rung2.json`. A pair row's entry
+records `pictures_fnv64`, a hash of every picture and GPU strip it drew,
+which a run from the same source on the driver build that blessed it
+must match; other drivers are held by the thresholds alone. The older
+rows' PNGs and manifest are unchanged.
 
 To bless, after a change meant to move the pictures, or a Mesa update:
 
