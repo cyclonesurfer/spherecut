@@ -30,7 +30,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use spherecut_agent::still::{
-    self, DecodedPair, Failure, Look, Options, PairOptions, Still, StillPair, Stop,
+    self, DecodedPair, Decoder, Failure, Look, Options, PairOptions, Still, StillPair, Stop,
 };
 use spherecut_boundary::sphere_rig;
 use spherecut_core::TimeSpec;
@@ -209,6 +209,10 @@ fn open(path: &Path, pair: &PairOptions) -> (Result<StillPair<'static>, Failure>
     open_on(path, None, pair)
 }
 
+/// [`open`] on `gpu`. Both lenses decode in software whatever the host
+/// has: `open_pair` takes the caller's decoder since M3.7, and rung 3's
+/// equalities are of the file's planes as FFmpeg's software decoder gives
+/// them, never a hardware decoder's (the M3.7 review).
 fn open_on<'g>(
     path: &Path,
     gpu: Option<&'g spherecut_render::Gpu>,
@@ -222,7 +226,10 @@ fn open_on<'g>(
             src,
             &report,
             gpu,
-            &Options::default(),
+            &Options {
+                decoder: Decoder::Software,
+                ..Options::default()
+            },
             pair,
             &stop,
             &mut warnings,
