@@ -782,18 +782,17 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   borrows the frame, so the frame outlives the handle (F120), and the
   caller keeps the frame until the GPU work that read it is done (a
   pair's still holds both lenses' imports until its render is done).
-  Path B: `render::vkshare` opens the device
-  shared, planning a decode queue and two compute queues wgpu never
-  uses, one FFmpeg's and one its `Copier`'s. The copier copies a Vulkan
-  Video frame's planes, under FFmpeg's frame lock and its timeline
-  semaphore, into a buffer of its own; `Copier::order_before` makes
-  wgpu's next submission wait for the copy, and
-  `Uploader::upload_from_buffer` fills the slot from the buffer as the
-  copy path does from its staging. What a device needs to be shared (its
-  extensions, Vulkan 1.3, a decode family and a compute family with two
-  queues besides wgpu's) is planned by `core::vkplan`, which media's
-  doctor uses too, so that doctor's `shared_decode` is the renderer's
-  answer (slice 9).
+  Path B: `render::vkshare` opens the device shared, planning a decode
+  queue and two compute queues wgpu never uses, one FFmpeg's and one its
+  `Copier`'s. The copier copies a Vulkan Video frame's planes, under
+  FFmpeg's frame lock and its timeline semaphore, into a buffer of its
+  own; `Copier::order_before` makes wgpu's next submission wait for the
+  copy, and `Uploader::upload_from_buffer` fills the slot from the
+  buffer as the copy path does from its staging. What a device needs to
+  be shared (its extensions, Vulkan 1.3, a decode family and a compute
+  family with two queues besides wgpu's) is planned by `core::vkplan`,
+  which media's doctor uses too, so that doctor's `shared_decode` is the
+  renderer's answer (slice 9).
 * **`Projector::record`** draws a `SourceRef` through a `ViewParams`
   (orientation and `Lens`) into a `LinearTarget`: one equirect frame's
   slot, or since M3.7 a lens pair's two slots, by track, with the rig

@@ -1104,8 +1104,8 @@ impl Rig {
     /// with margin(λ) = margin_texels · 2^λ texels about it, inside its
     /// slot. λ is clamped at 0: a negative LOD's footprint is taken as LOD
     /// 0's, which bilinear sampling still reaches. 10.3's text writes the
-    /// margin as margin · 2^λ, unclamped; its WGSL must clamp λ as this
-    /// does.
+    /// margin as margin · 2^λ, unclamped; render's `shaders/rig.wgsl`
+    /// clamps λ as this does (`margin_px`).
     pub fn covers(&self, b: usize, d: DVec3, lod: f64) -> bool {
         let lens = &self.lenses[b];
         let margin = self.margin_px(lod);
@@ -1168,7 +1168,7 @@ impl Rig {
 
     /// margin(λ) in texels: margin_texels · 2^λ, with λ clamped at 0, so
     /// that a negative LOD's footprint is LOD 0's. 10.3's text doesn't
-    /// clamp λ; its WGSL must, as this does.
+    /// clamp λ; `shaders/rig.wgsl`'s `margin_px` does, as this does.
     fn margin_px(&self, lod: f64) -> f64 {
         self.margin_texels * lod.max(0.0).exp2()
     }
