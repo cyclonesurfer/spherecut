@@ -1566,6 +1566,16 @@ impl<'g> StillPair<'g> {
         &self.lenses[track]
     }
 
+    /// The GPU's renderer, once a render on the GPU has made it. Only
+    /// tests read it: the Tier 2 zero-copy check of a pair reads both
+    /// lenses' slots through it ([`StillRenderer::slots`]), to tell a slot
+    /// that holds other bytes than its frame's from a stitch that drew the
+    /// right bytes wrong.
+    #[doc(hidden)]
+    pub fn renderer(&self) -> Option<&StillRenderer> {
+        self.renderer.as_ref()
+    }
+
     /// Step 7 for both lenses: the frame `when` names on each track,
     /// exactly, both at one time, or with [`SeekMode::Keyframe`] the
     /// keyframe a seek on track 0 lands on and track 1's frame at its
