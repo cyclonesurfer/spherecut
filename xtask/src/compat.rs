@@ -14,7 +14,9 @@
 //! and one built against anything else is deleted first (ffmpeg-sys-next
 //! binds again only when its own variables change, not when the FFmpeg
 //! behind a prefix does). `--test` also runs the Tier 1 tests against one
-//! of them, loading its libraries through `LD_LIBRARY_PATH`, and `--clean`
+//! of them, loading its libraries through `LD_LIBRARY_PATH` (it refuses to
+//! start while a variable that blesses is on, as `cargo xtask check` does,
+//! and runs the tests without one), and `--clean`
 //! deletes each target directory once its build is checked (about 1.4 GB
 //! after clippy and the link, and 1.8 GB after the Tier 1 tests).
 //!
@@ -61,6 +63,8 @@ use std::process::{Command, Stdio};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result, bail};
+
+use spherecut_testkit::bless;
 
 use crate::{hw_test, run_step};
 
@@ -128,6 +132,7 @@ pub struct Args {
 }
 
 pub fn run(a: Args) -> Result<()> {
+    refuse_blessing_for(a.test.as_deref(), &|name: &str| std::env::var_os(name))?;
     let env = std::env::var_os(PREFIXES_ENV);
     let prefixes = prefix_list(&a.prefixes, env.as_deref(), a.test.as_deref());
     if prefixes.is_empty() {
@@ -138,6 +143,23 @@ pub fn run(a: Args) -> Result<()> {
     }
     let test = a.test.as_deref().map(absolute);
     check(&prefixes, test.as_deref(), a.clean)
+}
+
+/// Refuses a run with `--test` (`test`) while a variable that blesses is
+/// on, as `cargo xtask check` and `hw-test` refuse
+/// ([`crate::refuse_blessing`]): its Tier 1 tests would rewrite the
+/// goldens, floors and fixtures, the pipeline goldens as another FFmpeg
+/// decodes them, rather than check them (the M3.7 review's R2). A run
+/// without it lints and links, which blesses nothing. `var` looks a
+/// variable up.
+pub(crate) fn refuse_blessing_for(
+    test: Option<&Path>,
+    var: &dyn Fn(&str) -> Option<OsString>,
+) -> Result<()> {
+    match test {
+        Some(_) => crate::refuse_blessing(var),
+        None => Ok(()),
+    }
 }
 
 /// `cargo xtask check`'s stage: clippy and the link against each FFmpeg
@@ -1074,6 +1096,22 @@ fn cargo_env(
     env
 }
 
+/// The variables the Tier 1 tests and the doc tests run with:
+/// [`cargo_env`]'s with the libraries on the loader's path, and without
+/// any variable that blesses ([`bless::VARIABLES`]), whatever `vars`
+/// holds, so that this step can only check (R2; [`run`] has already
+/// refused a run with one on).
+fn tier1_env(
+    pc_dir: &Path,
+    target: &Path,
+    libdirs: &[PathBuf],
+    vars: &[(OsString, OsString)],
+) -> Vec<(String, Option<OsString>)> {
+    let mut env = cargo_env(pc_dir, target, libdirs, true, vars);
+    env.extend(bless::VARIABLES.map(|name| (name.to_owned(), None)));
+    env
+}
+
 /// `libdirs` ahead of this process's `LD_LIBRARY_PATH` in `vars`.
 fn loader_path(libdirs: &[PathBuf], vars: &[(OsString, OsString)]) -> Option<OsString> {
     libdirs
@@ -1443,7 +1481,7 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
                     }),
                 );
                 if link == Stage::Passed && row.tier1.is_some() {
-                    let env = cargo_env(pc, &target, &found.libdirs, true, &vars);
+                    let env = tier1_env(pc, &target, &found.libdirs, &vars);
                     row.tier1 = Some(Stage::of(
                         run_step(
                             &format!("tests (Tier 1) {what}"),
@@ -1495,6 +1533,8 @@ fn check(prefixes: &[PathBuf], test: Option<&Path>, clean: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use spherecut_testkit::control::must_fail;
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -1746,6 +1786,45 @@ mod tests {
             set(&env, "CARGO_ENCODED_RUSTFLAGS"),
             Some("-L\x1fnative=/ff/lib\x1f-L\x1fnative=/ff/lib64".into())
         );
+    }
+
+    /// Whether `env` runs cargo without each variable that blesses: the
+    /// first it leaves to the caller, if any.
+    fn unblessed(env: &[(String, Option<OsString>)]) -> Result<(), String> {
+        match bless::VARIABLES
+            .into_iter()
+            .find(|name| value(env, name) != Some(None))
+        {
+            Some(name) => Err(match value(env, name) {
+                Some(v) => format!("{name} reaches the tests as {v:?}"),
+                None => format!("{name} reaches the tests as the caller's shell has it"),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    #[test]
+    fn the_tier1_tests_run_without_a_blessing() {
+        // The caller's shell blesses with both (R2): compat has refused
+        // to start, and the tests' cargo runs without them too.
+        let on = vars(&[
+            (bless::UPDATE_GOLDENS, bless::LOWER),
+            (bless::BLESS_PROJECT, "1"),
+        ]);
+        let (pc, target, dirs) = (
+            Path::new("/ff/lib/pkgconfig"),
+            Path::new("/t/compat/ff"),
+            [p("/ff/lib")],
+        );
+        unblessed(&tier1_env(pc, target, &dirs, &on)).unwrap();
+        unblessed(&tier1_env(pc, target, &dirs, &[])).unwrap();
+        // Control: the variables clippy and the link run with, which pass
+        // the caller's on.
+        let e = must_fail(
+            "the link's variables",
+            unblessed(&cargo_env(pc, target, &dirs, true, &on)),
+        );
+        assert!(e.contains(bless::UPDATE_GOLDENS), "{e}");
     }
 
     #[test]

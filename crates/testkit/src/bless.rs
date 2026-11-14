@@ -5,9 +5,10 @@
 //! are off, and any other value is on; [`LOWER`] is on, and also lets a
 //! blessing lower a floor by more than its drop.
 //!
-//! `cargo xtask check` and `cargo xtask hw-test` refuse to start while
-//! either is on ([`on_in`]), since a run of either would rewrite what the
-//! tests hold the code to.
+//! `cargo xtask check`, `cargo xtask hw-test` and `cargo xtask compat
+//! --test` refuse to start while either is on ([`on_in`]), since a run of
+//! any of them would rewrite what the tests hold the code to; compat's
+//! Tier 1 tests also run with [`VARIABLES`] removed.
 
 use std::ffi::{OsStr, OsString};
 

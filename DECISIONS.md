@@ -8261,9 +8261,11 @@ isn't UTF-8, as `not_project` (F034).
 every variable that blesses: unset, empty and "0" are off, and any
 other value is on. So `SPHERECUT_BLESS_PROJECT=0` no longer rewrites
 `schema2.spherecut`, as it did while the fixture's test read the
-variable by its presence. `cargo xtask check`, and `hw-test` past
-`--list`, refuse to start while it or `SPHERECUT_UPDATE_GOLDENS` is on,
-naming it.
+variable by its presence. `cargo xtask check`, `hw-test` past
+`--list`, and `compat` with `--test` (which runs the Tier 1 suite;
+the M3.7 review's R2), refuse to start while it or
+`SPHERECUT_UPDATE_GOLDENS` is on, naming it, and compat's Tier 1 tests
+run with both removed.
 
 ## D48. The project model and `Edit`
 

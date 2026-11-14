@@ -38,7 +38,7 @@ enum Cmd {
     Check(check::Args),
     /// Clippy and a link of the tests against other FFmpeg builds, each in
     /// its own target directory; --test also runs the Tier 1 tests against
-    /// one.
+    /// one, and refuses to start while a variable that blesses is on.
     ///
     /// Each build's target directory is `spherecut-compat-<label>`, `<label>`
     /// being the prefix's last component, in the directory
@@ -98,10 +98,11 @@ pub fn have_cargo_subcommand(sub: &str) -> bool {
 }
 
 /// Refuses to start while a variable that blesses is on
-/// ([`spherecut_testkit::bless`]): `cargo xtask check` and `hw-test` hold
-/// the code to the goldens, floors and fixtures, and a run with one on
-/// would rewrite them instead (the project review's F055). `var` looks a
-/// variable up.
+/// ([`spherecut_testkit::bless`]): `cargo xtask check`, `hw-test` and
+/// `compat --test` hold the code to the goldens, floors and fixtures, and
+/// a run with one on would rewrite them instead (the project review's
+/// F055; compat's since the M3.7 review's R2, through
+/// [`compat::refuse_blessing_for`]). `var` looks a variable up.
 pub fn refuse_blessing(var: &dyn Fn(&str) -> Option<OsString>) -> Result<()> {
     let on = bless::on_in(var);
     let (names, verb, them) = match on.as_slice() {
@@ -156,6 +157,29 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn compat_refuses_to_run_the_tier1_tests_while_blessing() {
+        // `cargo xtask compat --test PREFIX` runs the Tier 1 suite (R2).
+        refuses_each_variable(|var| {
+            compat::refuse_blessing_for(Some(Path::new("/ff/n8.1.3")), var)
+        })
+        .unwrap();
+        let e = must_fail(
+            "compat as it was, refusing nothing",
+            refuses_each_variable(|_| Ok(())),
+        );
+        assert!(e.contains(UPDATE_GOLDENS), "{e}");
+        // Without --test it runs clippy and a link, which bless nothing.
+        let on = |name: &str| (name == UPDATE_GOLDENS).then(|| OsString::from("1"));
+        compat::refuse_blessing_for(None, &on).unwrap();
+        // Control: a copy that refuses whatever the run, which refuses a
+        // lint alone.
+        fn always(_test: Option<&Path>, var: &dyn Fn(&str) -> Option<OsString>) -> Result<()> {
+            refuse_blessing(var)
+        }
+        must_fail("refusing without --test", always(None, &on));
     }
 
     #[test]
