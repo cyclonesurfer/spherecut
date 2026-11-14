@@ -582,14 +582,20 @@ impl Picture {
     /// factor plus that step, to 0.01 below: 18.32 LSB past which a pixel
     /// counts, and 36.52 LSB at most, at unit gains.
     ///
-    /// The count stays 4. It counts pixels, which no factor on light
-    /// scales: where both blocks are within 4 LSB, the seam difference is
-    /// within 4 times the factor plus the step. The two blocks' pictures
-    /// could each have 4 pixels further off, 8 in all, but the stitched
-    /// picture, whose band reads both lenses at a pixel too, is held to 4
-    /// such pixels, and so is this. The PSNR and SSIM floors stay at
-    /// D32's 48 dB and 0.995 as well, stricter than the factor would make
-    /// the PSNR's (34.8 dB).
+    /// D32's steps are taken here as how far v_b itself may move, though
+    /// D32 counts them on 8-bit codes: two codes 4 apart allow display
+    /// values just under 5 steps apart, and 8 apart just under 9, which
+    /// the same arithmetic would make 22.87 and 41.07 LSB. The count
+    /// stays 4. It counts pixels, which no factor on light scales: where
+    /// both blocks are within 4 LSB, the seam difference is within 4 times
+    /// the factor plus the step. The two blocks' pictures could each have
+    /// 4 pixels further off, 8 in all, but the stitched picture, whose
+    /// band reads both lenses at a pixel too, is held to 4 such pixels,
+    /// and so is this. The PSNR and SSIM floors stay at D32's 48 dB and
+    /// 0.995 as well, stricter than the factor would make the PSNR's
+    /// (34.8 dB). So the rule is stricter than its arithmetic in three
+    /// places, the steps, the count and the floors, each by choice, and
+    /// wider in none.
     fn steps(&self) -> Steps {
         if self.debug == RigDebug::SeamDiff {
             seam_diff_steps(self.gains)
@@ -820,22 +826,31 @@ fn hold(rows: &mut [Row], pictures: &[Picture], drawn: &[(Image, ImageF64)]) {
 /// (5376/768 to one).
 const CX_1_PX: f64 = 7.0;
 
-/// The seam difference's control's picture: the −X band stripe's.
+/// 4.2's "cx + 2 px" itself (`attribution::Plant::Centre`): lens 1's
+/// centre moved two pixels of its track along x.
+const CX_2_PX: f64 = 14.0;
+
+/// The seam difference's controls' picture: the −X band stripe's.
 const SHIFTED_KEY: &str = "neg_x_seam_difference";
 
-/// The seam difference's control's rig: the X5-like rig with lens 1's
-/// centre moved [`CX_1_PX`], a lens misplaced by one pixel of its track.
-fn shifted() -> Rig {
-    tuned(|t| t.lenses[1].centre_px = [CX_1_PX, 0.0])
+/// The seam difference's controls' rig: the X5-like rig with lens 1's
+/// centre moved `cx` canvas pixels along x ([`CX_1_PX`] or [`CX_2_PX`]),
+/// a lens misplaced.
+fn shifted(cx: f64) -> Rig {
+    tuned(|t| t.lenses[1].centre_px = [cx, 0.0])
 }
 
-/// Asserts that `d`, the seam difference's control drawn on `on` against
-/// lavapipe's true picture ([`shifted`], [`SHIFTED_KEY`]), fails the
-/// other-driver rule as rung 7 holds the seam difference, and fails it by
-/// each clause the scaling widened ([`Picture::steps`]): more than 4
-/// pixels past the scaled step, and one past the scaled most.
-fn the_shift_fails(d: &Drift, on: &str) {
-    let name = format!("lens 1's centre 1 px along x on {on}, under the seam difference's rule");
+/// Asserts that `d`, the seam difference's control drawn on `on` with
+/// lens 1's centre moved `cx` canvas pixels ([`shifted`], [`SHIFTED_KEY`])
+/// against lavapipe's true picture, fails the other-driver rule as rung 7
+/// holds the seam difference, and fails it by each clause the scaling
+/// widened ([`Picture::steps`]): more than 4 pixels past the scaled step,
+/// and one past the scaled most.
+fn the_shift_fails(d: &Drift, cx: f64, on: &str) {
+    let name = format!(
+        "lens 1's centre {} px along x on {on}, under the seam difference's rule",
+        cx / CX_1_PX
+    );
     must_fail(&name, judge(d, false));
     must_fail(
         &format!(
@@ -850,11 +865,26 @@ fn the_shift_fails(d: &Drift, on: &str) {
     );
 }
 
-/// Picture `p` drawn on `gpu` through `rig` in its own's place, against
-/// `theirs`, the true picture drawn on lavapipe, by the other-driver rule
-/// as rung 7 holds `p` ([`Picture::steps`]): in the lenses' light for the
-/// seam difference, with each pixel past the rule's step at a tie of the
-/// true rig's masks held to nothing, as the true picture's are.
+/// Picture `p` drawn on `gpu` through `rig` in its own's place, and
+/// `theirs`, the true picture drawn on lavapipe, as rung 7 holds `p`
+/// against it ([`Picture::steps`]): in the lenses' light for the seam
+/// difference, with each pixel past the rule's step at a tie of the true
+/// rig's masks held to nothing, as the true picture's are.
+fn held_against(
+    p: &Picture,
+    renderer: &mut StillRenderer,
+    gpu: &Gpu,
+    rig: &Rig,
+    theirs: &Image,
+) -> (Image, Image) {
+    let drawn = p.draw_by(renderer, gpu, rig, p.gains, p.depth);
+    let (mut got, theirs) = (p.held_image(&drawn), p.held_image(theirs));
+    p.untie_image(&mut got, &theirs, p.steps().past / 255.0);
+    (got, theirs)
+}
+
+/// [`held_against`]'s two pictures by the other-driver rule as rung 7
+/// holds `p` ([`Picture::steps`]).
 fn other_driver_drift(
     p: &Picture,
     renderer: &mut StillRenderer,
@@ -862,11 +892,118 @@ fn other_driver_drift(
     rig: &Rig,
     theirs: &Image,
 ) -> Drift {
-    let drawn = p.draw_by(renderer, gpu, rig, p.gains, p.depth);
-    let steps = p.steps();
-    let (mut got, theirs) = (p.held_image(&drawn), p.held_image(theirs));
-    p.untie_image(&mut got, &theirs, steps.past / 255.0);
-    drift_in(&got, &theirs, steps).unwrap()
+    let (got, theirs) = held_against(p, renderer, gpu, rig, theirs);
+    drift_in(&got, &theirs, p.steps()).unwrap()
+}
+
+/// How far each pixel of `got`, a control's picture of `p` drawn through
+/// `rig` and held against `theirs` ([`held_against`]), is off in 8-bit
+/// steps, as `drift_in` counts a picture that isn't 8-bit, and `None`
+/// where it is more than twice `steps.past` off and one of `rig`'s own
+/// hard masks ties there ([`Picture::ties`]): another driver may draw
+/// that mask the other way. [`fails_on_every_driver`] counts no pixel
+/// nearer than that.
+fn settled_off(
+    p: &Picture,
+    rig: &Rig,
+    got: &Image,
+    theirs: &Image,
+    steps: Steps,
+) -> Vec<Option<f64>> {
+    let control = Picture {
+        rig: *rig,
+        ..p.clone()
+    };
+    let (a, b) = (unit(got), unit(theirs));
+    let mut off: Vec<Option<f64>> = a
+        .chunks(3)
+        .zip(b.chunks(3))
+        .map(|(x, y)| Some(max_diff(x, y) * 255.0))
+        .collect();
+    let w = got.width as usize;
+    for (i, j) in control.ties(&a, &b, 2.0 * steps.past / 255.0) {
+        off[j as usize * w + i as usize] = None;
+    }
+    off
+}
+
+/// Whether a control whose picture lavapipe drew `off` from the true
+/// picture ([`settled_off`]) fails the other-driver rule at `steps` on
+/// every driver the rule admits, and not only on lavapipe. Such a driver
+/// draws the control within the rule of lavapipe's drawing of it: no
+/// more than `steps.past` from it at all but [`OTHER_PIXELS_PAST`]
+/// pixels, and no more than `steps.max` at those. Both drawings are held
+/// against the same true picture, so each of that driver's pixels is
+/// off it by at least lavapipe's `off` less the driver's own distance
+/// from lavapipe there. So a pixel more than twice `steps.past` off on
+/// lavapipe is still more than `steps.past` off on that driver, at all
+/// but those few, and one more than twice `steps.max` off is still more
+/// than `steps.max` off.
+/// The control fails the count on every such driver if more than twice
+/// [`OTHER_PIXELS_PAST`] pixels are more than twice the step off on
+/// lavapipe, and fails the most if one pixel is more than twice the most
+/// off. A pixel at a tie of the control's masks, and a NaN, count for
+/// neither.
+fn fails_on_every_driver(off: &[Option<f64>], steps: Steps) -> Result<(), String> {
+    let settled = || off.iter().flatten().copied();
+    let twice = settled().filter(|d| *d > 2.0 * steps.past).count() as f64;
+    let most = settled().fold(0.0, f64::max);
+    let count = above(twice, 2.0 * OTHER_PIXELS_PAST);
+    let worst = above(most, 2.0 * steps.max);
+    if count.passes() == Some(true) && worst.passes() == Some(true) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{twice:.0} pixels more than {:.2} LSB off, where it takes more than {}, and \
+             {most:.2} LSB at most, where it takes more than {:.2}",
+            2.0 * steps.past,
+            2.0 * OTHER_PIXELS_PAST,
+            2.0 * steps.max
+        ))
+    }
+}
+
+/// The seam difference's control with lens 1's centre moved `cx` canvas
+/// pixels ([`shifted`]), drawn on lavapipe against `theirs`, lavapipe's
+/// own true picture, and held as rung 7 holds the seam difference, with
+/// what it measured noted in `row` under `slug`. Asserts that it fails
+/// the scaled rule by each clause ([`the_shift_fails`]), and gives
+/// whether it fails on every GPU the rule admits as well
+/// ([`fails_on_every_driver`]).
+fn shift_on_lavapipe(
+    row: &mut Row,
+    p: &Picture,
+    renderer: &mut StillRenderer,
+    gpu: &Gpu,
+    theirs: &Image,
+    (cx, slug): (f64, &str),
+) -> Result<(), String> {
+    let rig = shifted(cx);
+    let (got, theirs) = held_against(p, renderer, gpu, &rig, theirs);
+    let d = drift_in(&got, &theirs, p.steps()).unwrap();
+    let off = settled_off(p, &rig, &got, &theirs, d.steps);
+    let settled = || off.iter().flatten().copied();
+    let twice = settled().filter(|v| *v > 2.0 * d.steps.past).count();
+    let twice_most = settled().filter(|v| *v > 2.0 * d.steps.max).count();
+    let ties = off.iter().filter(|v| v.is_none()).count();
+    row.measure(&format!("control_{slug}_other_driver_psnr_db"), d.psnr);
+    row.measure(&format!("control_{slug}_other_driver_ssim"), d.ssim);
+    row.measure(&format!("control_{slug}_other_driver_pixels_past"), d.past);
+    row.measure(&format!("control_{slug}_other_driver_max_lsb"), d.max_lsb);
+    row.measure(
+        &format!("control_{slug}_ties_past_twice_the_step"),
+        ties as f64,
+    );
+    row.measure(
+        &format!("control_{slug}_pixels_past_twice_the_step"),
+        twice as f64,
+    );
+    row.measure(
+        &format!("control_{slug}_pixels_past_twice_the_most"),
+        twice_most as f64,
+    );
+    the_shift_fails(&d, cx, "lavapipe");
+    fails_on_every_driver(&off, d.steps)
 }
 
 /// Makes the pairs a test reads side by side, before its first picture.
@@ -1089,16 +1226,26 @@ fn modes_pictures() -> Vec<Picture> {
 /// codes back to linear light: clipped at 1, it fails the check that the
 /// difference passes 1.
 ///
-/// A second control holds the seam difference as [`rung2_on_radv`] holds
+/// Two more controls hold the seam difference as [`rung2_on_radv`] holds
 /// it, by the other-driver rule scaled to it ([`Picture::steps`]): the
-/// −X stripe's drawn with lens 1's centre moved 1 px of its track in the
-/// rig ([`shifted`]), here on lavapipe, against lavapipe's true picture.
-/// It must fail by each clause the scaling widened, more than 4 pixels
-/// past the scaled step and one past the scaled most, and when this was
-/// written it put 2202 pixels past 18.32 LSB, 61.66 LSB at most (26.08
-/// dB, SSIM 0.3088). Half a pixel along x put 95 pixels past it and 35.07
-/// LSB at most, so the rule's count still sees a lens misplaced by half a
-/// pixel there.
+/// −X stripe's drawn on lavapipe with lens 1's centre moved in the rig
+/// ([`shifted`]), against lavapipe's true picture. Each must fail by each
+/// clause the scaling widened, more than 4 pixels past the scaled step
+/// and one past the scaled most. Moved 1 px of its track, it put 2202
+/// pixels past 18.32 LSB and 61.66 LSB at most (26.08 dB, SSIM 0.3088)
+/// when this was written, and half a pixel put 95 pixels past 18.32 and
+/// 35.07 LSB at most, so the rule's count still sees a lens misplaced by
+/// half a pixel there. Moved 2 px, 4.2's own plant, it put 5347 pixels
+/// past 18.32 and 89.55 LSB at most (20.99 dB, SSIM 0.1262).
+///
+/// The 2 px shift is `rung2_on_radv`'s control on each GPU, so it must
+/// also be far enough off here to fail on every GPU the rule admits
+/// ([`fails_on_every_driver`]). It had 1677 pixels more than twice the
+/// scaled step off, where that takes more than 8, and 14 more than twice
+/// the scaled most, where that takes one. The 1 px shift is that check's
+/// control: 50 of its pixels were more than twice the step off but none
+/// more than twice the most, so a GPU the rule admits could draw every
+/// pixel of it within 36.52 LSB of the true picture.
 #[test]
 fn rung2_modes_6_and_7_match_rung1() {
     let _t = timed("rung2_modes_6_and_7_match_rung1");
@@ -1112,7 +1259,8 @@ fn rung2_modes_6_and_7_match_rung1() {
         "the far SeamLines pair's weights (mode 6) and seam difference (mode 7) at q = 0, read \
          back in linear light on lavapipe against rung 1's: the 512 × 256 equirect, the four \
          band stripes and the 45° seam view at 192², where the seam difference passes 1; the \
-         control reads that view's seam difference back in 8 bits",
+         controls read that view's seam difference back in 8 bits, and draw the −X stripe's \
+         with lens 1's centre moved 1 px and 2 px",
     );
     hold(std::slice::from_mut(&mut row), &pictures, &drawn);
     // Past 1 as drawn, eight times the lenses' light.
@@ -1143,15 +1291,25 @@ fn rung2_modes_6_and_7_match_rung1() {
         above(largest(&linear), 1.0),
     );
     // Rung 7 holds the seam difference to lavapipe's by D32's rule scaled
-    // to it (Picture::steps): the control is held so here, on lavapipe
-    // against lavapipe's own true picture.
+    // to it (Picture::steps): the controls are held so here, on lavapipe
+    // against lavapipe's own true picture. Lens 1's centre moved 2 px is
+    // rung2_on_radv's control, which must fail on every GPU the rule
+    // admits; moved 1 px fails here but need not fail there, and is the
+    // control of that check.
     let (k, p) = find(&pictures, row.name, SHIFTED_KEY);
-    let d = other_driver_drift(p, &mut renderer, gpu, &shifted(), &drawn[k].0);
-    row.measure("control_cx_1px_other_driver_psnr_db", d.psnr);
-    row.measure("control_cx_1px_other_driver_ssim", d.ssim);
-    row.measure("control_cx_1px_other_driver_pixels_past", d.past);
-    row.measure("control_cx_1px_other_driver_max_lsb", d.max_lsb);
-    the_shift_fails(&d, "lavapipe");
+    let theirs = &drawn[k].0;
+    let one = shift_on_lavapipe(&mut row, p, &mut renderer, gpu, theirs, (CX_1_PX, "cx_1px"));
+    must_fail(
+        "lens 1's centre 1 px along x, as a control that fails on every GPU the rule admits",
+        one,
+    );
+    let two = shift_on_lavapipe(&mut row, p, &mut renderer, gpu, theirs, (CX_2_PX, "cx_2px"));
+    if let Err(e) = two {
+        row.fail(format!(
+            "lens 1's centre 2 px along x, rung2_on_radv's control, could pass on a GPU the rule \
+             admits: {e}"
+        ));
+    }
     row.finish();
 }
 
@@ -1337,6 +1495,32 @@ fn the_seam_difference_is_held_to_the_rule_scaled() {
     must_fail("a pixel past the scaled most", judge(&most(36.53), false));
 }
 
+/// A control fails on every driver the rule admits once more than twice
+/// [`OTHER_PIXELS_PAST`] of its pixels are more than twice the step off
+/// on lavapipe, and one is more than twice the most off
+/// ([`fails_on_every_driver`]); a pixel at a tie of its masks, or a NaN,
+/// counts for neither.
+#[test]
+fn a_control_fails_on_every_driver_past_twice_the_rule() {
+    let steps = seam_diff_steps(UNIT);
+    let (twice, twice_most) = (2.0 * steps.past, 2.0 * steps.max);
+    let mut off = vec![Some(0.0); 100];
+    for d in &mut off[..8] {
+        *d = Some(twice + 0.01);
+    }
+    off[8] = Some(twice_most + 0.01);
+    assert_eq!(fails_on_every_driver(&off, steps), Ok(()));
+    let with = |n: usize, v: Option<f64>| {
+        let mut o = off.clone();
+        o[n] = v;
+        fails_on_every_driver(&o, steps)
+    };
+    must_fail("8 pixels past twice the step", with(0, Some(twice)));
+    must_fail("none past twice the most", with(8, Some(twice_most)));
+    must_fail("the most at a tie of the masks", with(8, None));
+    must_fail("the most a NaN", with(8, Some(f64::NAN)));
+}
+
 // Rung 7's rung 2.
 
 /// Rung 7's rung 2: every picture of the tests above on each hardware
@@ -1351,11 +1535,25 @@ fn the_seam_difference_is_held_to_the_rule_scaled() {
 /// values come to there, 18.32 and 36.52 LSB at unit gains
 /// ([`Picture::steps`] has the arithmetic); the count, the PSNR and the
 /// SSIM stay. Each failure names the picture's worst pixels, where they
-/// are and both GPUs' values there. Two controls must fail on each GPU:
-/// the far `SeamLines` equirect with lens 1 yawed 0.5° against
-/// lavapipe's true picture, by D32's rule, and the −X stripe's seam
-/// difference with lens 1's centre moved 1 px ([`shifted`]), by the
-/// scaled rule and by each clause it widened.
+/// are and both pictures' values there, this GPU's against lavapipe's or
+/// rung 1's.
+///
+/// Two controls must fail on each GPU. The first is the far `SeamLines`
+/// equirect with lens 1 yawed 0.5° against lavapipe's true picture, by
+/// D32's rule. The second is the −X stripe's seam difference with lens
+/// 1's centre moved 2 px, 4.2's own plant ([`shifted`], [`CX_2_PX`]), by
+/// the scaled rule and by each clause it widened. That one fails on
+/// every GPU the rule admits by construction, not by how far a driver
+/// happens to drift: such a GPU draws it within 18.32 LSB of lavapipe's
+/// drawing at all but 4 pixels and within 36.52 at those, so a pixel more
+/// than twice a threshold off on lavapipe is still past the threshold on
+/// the GPU ([`fails_on_every_driver`]). The test checks that on its own
+/// lavapipe before any GPU, and fails if it doesn't hold. On the cloud's
+/// lavapipe 1677 pixels were more than 36.64 LSB off, where it takes more
+/// than 8, and 14 more than 73.04, where it takes one. Lens 1's centre
+/// moved 1 px, which `rung2_modes_6_and_7_match_rung1` holds on
+/// lavapipe, had none past 73.04, so a GPU the rule admits could pass it
+/// on the most, and it is not held here.
 #[test]
 #[ignore = "tier2: needs a GPU (RADV or ANV)"]
 fn rung2_on_radv() {
@@ -1379,8 +1577,25 @@ fn rung2_on_radv() {
     ]
     .concat();
     let lavapipe = gpu();
-    let drawn = both_ways(&mut StillRenderer::new(lavapipe), lavapipe, &pictures);
+    let mut lavapipe_renderer = StillRenderer::new(lavapipe);
+    let drawn = both_ways(&mut lavapipe_renderer, lavapipe, &pictures);
     let mut failures = Vec::new();
+    // The seam difference's control, lens 1's centre moved 2 px, fails on
+    // every GPU the scaled rule admits if this run's lavapipe draws it far
+    // enough off its true picture. Said at once as well, since a control
+    // that then passes on a GPU panics before the list is.
+    let (sk, sp) = find(&pictures, MODES_ROW, SHIFTED_KEY);
+    let rig = shifted(CX_2_PX);
+    let (got, theirs) = held_against(sp, &mut lavapipe_renderer, lavapipe, &rig, &drawn[sk].0);
+    let off = settled_off(sp, &rig, &got, &theirs, sp.steps());
+    if let Err(e) = fails_on_every_driver(&off, sp.steps()) {
+        let f = format!(
+            "{MODES_ROW} {SHIFTED_KEY} with lens 1's centre 2 px, the control each GPU must \
+             fail, could pass on a GPU the rule admits, by lavapipe's drawing of it: {e}"
+        );
+        eprintln!("FAIL {f}");
+        failures.push(f);
+    }
     for g in &gpus {
         let name = Driver::of(g).describe();
         // This GPU's failures begin here; each is named for it below.
@@ -1426,13 +1641,12 @@ fn rung2_on_radv() {
             "lens 1 yawed 0.5° on the GPU, against lavapipe's true picture",
             judge(&d, false),
         );
-        let (k, p) = find(&pictures, MODES_ROW, SHIFTED_KEY);
-        let s = other_driver_drift(p, &mut renderer, g, &shifted(), &drawn[k].0);
-        the_shift_fails(&s, &name);
+        let s = other_driver_drift(sp, &mut renderer, g, &rig, &drawn[sk].0);
+        the_shift_fails(&s, CX_2_PX, &name);
         bench::note(format!(
             "rung2_on_radv on {name}: {} pictures, the worst against lavapipe's {worst_psnr:.2} \
              dB and {worst_lsb:.2} LSB as held; lens 1 yawed 0.5° {:.2} dB and {:.0} LSB; lens \
-             1's centre 1 px on {SHIFTED_KEY} {:.2} dB, {:.0} pixels past {} LSB, {:.2} LSB at \
+             1's centre 2 px on {SHIFTED_KEY} {:.2} dB, {:.0} pixels past {} LSB, {:.2} LSB at \
              most",
             pictures.len(),
             d.psnr,

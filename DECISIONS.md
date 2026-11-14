@@ -11292,14 +11292,29 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   other-driver rule's two LSB thresholds by what a driver's steps in
   each lens's display values come to there: each block's largest gain
   times the sRGB EOTF's slope at 1 (2.4/1.055), summed, and one f16
-  step more, which makes 18.32 and 36.52 LSB at unit gains. The count,
-  the PSNR and the SSIM stay. Odin's RX 7600 under RADV at 1a7a64e had
-  put 6 and 7 pixels of the equirect's and the −X stripe's seam
-  difference past D32's 4 LSB, at most 6 and 5, and failed on the count
-  alone. The seam difference's control, lens 1's centre moved 1 px,
-  fails the scaled rule by each clause the scaling widened (2202 pixels
-  past 18.32 LSB and 61.66 LSB at most on lavapipe), and each failure
-  names its picture's worst pixels.
+  step more, which makes 18.32 and 36.52 LSB at unit gains. That takes
+  D32's steps as how far each lens's display value itself may move,
+  leaving out its 8-bit rounding (with it, 22.87 and 41.07 LSB), and the
+  count, the PSNR and the SSIM stay, so the rule errs strict in three
+  places and is wider than its arithmetic in none. Odin's RX 7600 under
+  RADV at 1a7a64e had put 6 and 7 pixels of the equirect's and the −X
+  stripe's seam difference past D32's 4 LSB, at most 6 and 5, and failed
+  on the count alone. Most of that distance was lavapipe's own: against
+  rung 1, the RX 7600's seam difference on the −X stripe measured 71.74
+  dB with no channel more than 0.0016 off, and lavapipe's 51.52 dB with
+  a channel 0.0172 off; on the equirect, 80.45 dB against lavapipe's
+  60.71 dB. On each GPU the seam difference's control is lens 1's
+  centre moved 2 px (4.2's plant), which must fail the scaled rule by
+  each clause the scaling widened. It does so on every driver the rule
+  admits by construction: such a driver draws it within the rule of
+  lavapipe's drawing, and on lavapipe 1677 of its pixels are more than
+  twice 18.32 LSB off, where it takes more than 8, and 14 more than
+  twice 36.52, where it takes one. The test checks that on its own
+  lavapipe before any GPU. Lens 1's centre moved 1 px fails the scaled
+  rule on lavapipe in Tier 1 (2202 pixels past 18.32 LSB, 61.66 LSB at
+  most) but has no pixel more than 73.04 LSB off, so a driver the rule
+  admits could pass it on the most: it is that check's control, not the
+  GPU's. Each failure names its picture's worst pixels.
 
 P-SHADE, the pass's cost on odin (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K;
 `bench_stitch_pass`), is pending odin, and with it the RADV goldens. On a
