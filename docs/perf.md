@@ -285,9 +285,21 @@ Current benchmarks:
   no report has run it yet.
 - **`bench_stitch_pass`** (M3.7, M3 plan 4.3's P-SHADE,
   `crates/render/tests/upload.rs`): the projection pass's GPU time with
-  a lens pair stitched against an equirect frame drawn, at 1080p and
-  4K; the plan's pass is 0.8 ms at 1080p and 2.0 ms at 4K on odin's
-  RADV. M3.7's unit (b) writes it; until then it is an ignored stub.
+  the X5's 8K pair, two 8-bit NV12 lenses of 3840² stitched by synth's
+  X5-like rig (`fs_rig`), against a 5.7K 8-bit NV12 equirect frame
+  drawn (`fs_project`), at 1920×1080 and 3840×2160, rectilinear 90° on
+  the +X side seam, where both lenses are sampled across the band:
+  `stitch 3840x3840 8-bit NV12 pair, …` and `project 5760x2880 8-bit
+  NV12, …` in ms, each run the mean of 60 passes, the median of
+  `SPHERECUT_BENCH_RUNS` runs after one to warm up. A note gives
+  `fs_project`'s baseline from `bench_upload_5k7` on odin (0.22 ms and
+  0.77 ms, M3 plan amendment 6) and P-SHADE's verdict: the stitch
+  within 0.8 ms at 1080p and 2.0 ms at 4K passes; a miss names the
+  plan's redirect, an analytic Jacobian for the LOD in place of the
+  five rays, then a cheaper mask, neither built. The verdict never
+  fails the test. `stitch_bench_smoke` runs it small on lavapipe in
+  Tier 1, with no verdict. No report has run it yet (below, "Pending
+  odin").
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
@@ -1523,6 +1535,15 @@ Tier 2 passed as at 0b3ab9b (59 passed, 0 failed, 1 skipped, against
 100 % on all five clips at a UI p99 of 17.1 to 17.2 ms (:47-52), and
 the zero-copy tests and `vaapi_render_matches_software` passed.
 
+Pending odin (M3.7, the stitch in the projection pass, DECISIONS D66):
+no report has these rows yet.
+
+| Row | Measured by | Asks |
+|---|---|---|
+| P-SHADE, pending odin | `bench_stitch_pass` | the stitched pass within 0.8 ms at 1080p and 2.0 ms at 4K on RADV (M3 plan 4.3); a miss names the redirect |
+| `frame <insv>` stitched still, wall time, pending odin | the `view N: frame … s` lines of `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` (synth's `InsvSpec::small()`, 2 × 384², each run a process of its own, under zero copy and in software) | recorded, no gate |
+| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | within the floors lavapipe's runs set, by the other-driver rule (D32) |
+
 ### Framework 13 Pro (Intel Xe3, Arch)
 
 Not available yet.
@@ -1533,3 +1554,13 @@ For scale only (4 vCPUs, FFmpeg 6.1.1, not a target machine): the X5 8K30
 take decodes in software at about 12 frames per second for one 3840²
 stream at a time. Playback needs both streams at 29.97 fps, so this is far
 from real time.
+
+Tier 1's times there, debug builds on lavapipe, for scale too: at
+a54d908 (M3.7), `cargo test` took 49.4 s for spherecut-render, 141.1 s
+for spherecut-agent and 104.7 s for spherecut-cli, once each with the
+tests built. The goldens binary took 17.54 s alone, against 9.81 s with
+M3.7's `dfish_seam` and `dfish_views` rows and rung 2's tests left out
+(17.52 s in the crate's run); `rig_shader` 0.74 s, `upload` 6.42 s,
+`pipelines` 0.87 s, agent's `rung3` 2.25 s and `look` 6.02 s, cli's
+`frame_insv` 1.72 s and `tier2_frame`'s Tier 1 tests 2.56 s. M3 plan
+19.6 gives M3.7 7 s (D66 has the overrun).
