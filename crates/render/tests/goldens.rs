@@ -1428,15 +1428,15 @@ impl<'g> Run<'g> {
         );
     }
 
-    /// A lens pair row's pictures, all that [`Self::render_pair`] drew for
-    /// it in order (its controls' among them) and the strips it read
-    /// ([`Self::drew_strips`]), `hash` over the `n` of them, against those it blessed: on the driver build that blessed
-    /// it (its adapter and driver info, the same-driver rule a stored
-    /// PNG is held to) and from the same source, they must be the same
-    /// bytes, or a render moved (the M3.7 review's N6: D66's "three runs
-    /// identical", held on every run, check rows' among them). Another
-    /// driver, a changed source, a blessing or a Tier 2 run holds nothing
-    /// here.
+    /// A lens pair row's pictures, all that [`Self::render_pair`] drew
+    /// for it in order (its controls' among them) and the strips it read
+    /// ([`Self::drew_strips`]), `hash` over the `n` of them, against
+    /// those it blessed: on the driver build that blessed it (its adapter
+    /// and driver info, the same-driver rule a stored PNG is held to) and
+    /// from the same source, they must be the same bytes, or a render
+    /// moved (the M3.7 review's N6: D66's "three runs identical", held on
+    /// every run, check rows' among them). Another driver, a changed
+    /// source, a blessing or a Tier 2 run holds nothing here.
     fn hold_pictures(&mut self, entry: &Map<String, Value>, image: bool, hash: &Value, n: usize) {
         if self.mode != (Mode::Golden { bless: false }) {
             return;

@@ -11220,13 +11220,14 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
 - `tests/pipelines.rs`: every pipeline builds, each uniform matches its
   WGSL struct offset by offset (control: `Rig` at 400 bytes for 416),
   and `fs_project_holds_no_rig_global` by naga's analysis.
-- `tests/rig_shader.rs`, 14 tests against `render_rig_of` by D32's
+- `tests/rig_shader.rs`, 15 tests against `render_rig_of` by D32's
   reference rule: the stitch, modes 4 to 7, the ring no feather weighs,
   the mirror pair's tie, the mask in angle at an LOD where the margin
   passes θ_max (control: the unguarded cosine form), level 0, a lens
   with no image, blur in linear light, `render_yuv`, the refusals of
-  `render_from` and `pack`, a side unlike its slot, the GPU's strips
-  against `strips_of`, and `rig_lod_map` against mode 3. 0.75 to 0.76 s
+  `render_from` and `pack`, a side unlike its slot, a rig packed for
+  other slots than those bound (`record` refuses it), the GPU's strips
+  against `strips_of`, and `rig_lod_map` against mode 3. 0.73 to 0.77 s
   of its 0.8.
 - `tests/upload.rs`: `a_pair_renders_alike_on_every_upload_path`, bytes,
   buffers, imports and each mixed pair bit for bit (control: the
