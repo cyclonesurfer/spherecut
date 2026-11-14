@@ -1,9 +1,10 @@
 //! `spherecut frame` on a camera's two-lens file (M3 plan 14's frame row;
-//! M3.5's unit (d)): stitched with the file's calibration and the
-//! `Known` geometry through `agent::still::Still::open_pair`, on the CPU
-//! reference until M3.7, with `--lens`, `--seam`, `--geometry`,
-//! `--stitch-distance` and `--projection equirect`, which also renders an
-//! equirect file whole.
+//! M3.5's unit (d), M3.7's unit (d)): stitched with the file's
+//! calibration and the `Known` geometry through
+//! `agent::still::Still::open_pair`, on the GPU (lavapipe here) by
+//! default and on the CPU reference under `--reference`, with `--lens`,
+//! `--seam`, `--geometry`, `--stitch-distance` and `--projection
+//! equirect`, which also renders an equirect file whole.
 //!
 //! The files: synth's `InsvSpec::small()` (2 × 384², 30 lossless
 //! frames), written once a binary, for the tests whose pictures matter;
@@ -12,16 +13,21 @@
 //! with no calibration. Each is written once into a folder of this
 //! binary's, kept for the run and removed by the next run once this one
 //! has ended. Each test runs its controls beside its own checks, through
-//! `must_fail`.
+//! `must_fail`. The `--reference` runs the GPU's pictures are held to are
+//! run once a binary ([`reference_equirect`], [`reference_lens0`]),
+//! whichever test asks first.
 //!
-//! Budget (4.1 rule 5, 19.6): 1 s of the M3.5 row's 3 s, rung 3's 2 s
-//! being the rest. Each test prints its time and the suite's.
+//! Budget (4.1 rule 5, 19.6): 1.9 s, the binary's measured time on the
+//! cloud host with the GPU's runs (1.74 to 1.84 s; 1.56 to 1.59 s before
+//! M3.7 added them), within the 2.5 s M3.7 allows it. Each test prints
+//! its time and the suite's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod document;
 #[allow(dead_code)]
 mod insv;
+mod lavapipe;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,6 +42,7 @@ use spherecut_core::TimeSpec;
 use spherecut_core::cancel::StopSource;
 use spherecut_media::backend::SeekMode;
 use spherecut_media::{Source, mp4};
+use spherecut_render::compare::{View, psnr, sample_diff};
 use spherecut_render::reference::{self, RigOptions};
 use spherecut_render::{Depth, Image, Pixels, ViewParams};
 use spherecut_sphere::orient::Ypr;
@@ -49,7 +56,7 @@ use spherecut_testkit::control::must_fail;
 use document::document;
 
 /// The suite's budget in seconds (amendment 5, 19.6).
-const BUDGET_S: f64 = 1.0;
+const BUDGET_S: f64 = 1.9;
 
 /// When the suite's first test began.
 static BEGAN: OnceLock<Instant> = OnceLock::new();
@@ -279,7 +286,13 @@ fn spherecut() -> Command {
 /// pick an adapter or `--reference`, and decoding in software unless
 /// they pick a decoder.
 fn frame(file: &Path, out: &Path, args: &[&str]) -> Ran {
+    frame_in(file, out, args, &[])
+}
+
+/// [`frame`] with `env` set.
+fn frame_in(file: &Path, out: &Path, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Ran {
     let mut cmd = spherecut();
+    cmd.envs(env.iter().copied());
     cmd.arg("frame").arg(file).arg("-o").arg(out).arg("--json");
     if !args
         .iter()
@@ -370,6 +383,40 @@ fn same_picture(got: &Image, want: &Image) -> Result<(), String> {
             a[i],
             b[i]
         )),
+    }
+}
+
+/// A picture's samples in unit scale.
+fn unit(img: &Image) -> Vec<f64> {
+    match &img.pixels {
+        Pixels::Rgb8(p) => p.iter().map(|&v| f64::from(v) / 255.0).collect(),
+        Pixels::Rgb16(p) => p.iter().map(|&v| f64::from(v) / 65535.0).collect(),
+        Pixels::LinearF32(p) => p.iter().map(|&v| f64::from(v)).collect(),
+    }
+}
+
+/// D32's CPU rule for a picture against the CPU reference's: PSNR at
+/// least 36 dB, the floor's least, and no channel more than 0.1 off, as
+/// `frame.rs`'s `within_cpu_rule` holds one frame.
+fn within_cpu_rule(got: &Image, want: &Image) -> Result<(), String> {
+    if (got.width, got.height) != (want.width, want.height) {
+        return Err(format!(
+            "{}x{} against {}x{}",
+            got.width, got.height, want.width, want.height
+        ));
+    }
+    let (a, b) = (unit(got), unit(want));
+    let (w, h) = (got.width as usize, got.height as usize);
+    let db = psnr(View::new(w, h, 3, &a), View::new(w, h, 3, &b)).unwrap();
+    let far = a
+        .iter()
+        .zip(&b)
+        .map(|(x, y)| sample_diff(*x, *y))
+        .fold(0.0, f64::max);
+    if db >= 36.0 && far <= 0.1 {
+        Ok(())
+    } else {
+        Err(format!("PSNR {db:.2} dB, a channel {far:.3} off"))
     }
 }
 
@@ -489,6 +536,52 @@ fn black_about_the_axes(img: &Image) -> Result<(), String> {
     Ok(())
 }
 
+// The runs the GPU's are held to.
+
+/// The stitched equirect's flags: `small()`'s frame 5, the whole sphere
+/// at 512 × 256, under binding=direct, infinitely far.
+const STITCHED: [&str; 10] = [
+    "--projection",
+    "equirect",
+    "--size",
+    "512x256",
+    "--geometry",
+    "binding=direct",
+    "--stitch-distance",
+    "inf",
+    "--frame",
+    "5",
+];
+
+/// `--lens 0`'s flags: `small()`'s track 0 at frame 5, as coded.
+const LENS0: [&str; 6] = ["--lens", "0", "--size", "384x384", "--frame", "5"];
+
+/// `frame --reference` of `small()` with [`STITCHED`]'s flags, run once a
+/// binary: `frame_insv_reference_matches_the_library` holds it to the
+/// library, and `frame_insv_stitches_on_the_gpu` the GPU's to it.
+fn reference_equirect() -> &'static (Ran, PathBuf) {
+    static RAN: OnceLock<(Ran, PathBuf)> = OnceLock::new();
+    RAN.get_or_init(|| {
+        let out = outputs("reference").join("asked.png");
+        let mut args = vec!["--reference"];
+        args.extend_from_slice(&STITCHED);
+        (frame(small_file(), &out, &args), out)
+    })
+}
+
+/// `frame --reference --lens 0` of `small()`, run once a binary:
+/// `frame_insv_shows_a_lens_and_the_seam` reads its corner code, and
+/// `frame_insv_stitches_on_the_gpu` holds the GPU's to it.
+fn reference_lens0() -> &'static (Ran, PathBuf) {
+    static RAN: OnceLock<(Ran, PathBuf)> = OnceLock::new();
+    RAN.get_or_init(|| {
+        let out = outputs("lens-and-seam").join("lens-small-0.png");
+        let mut args = vec!["--reference"];
+        args.extend_from_slice(&LENS0);
+        (frame(small_file(), &out, &args), out)
+    })
+}
+
 // The tests.
 
 /// `frame <insv> --reference` writes the picture the library makes
@@ -510,15 +603,13 @@ fn frame_insv_reference_matches_the_library() {
         "--frame",
         "5",
     ];
+    // The first, asked for, is reference_equirect's run.
     let runs: [(&str, &[&str]); 3] = [
-        (
-            "asked",
-            &["--geometry", "binding=direct", "--stitch-distance", "inf"],
-        ),
+        ("asked", &[]),
         ("without --geometry", &["--stitch-distance", "inf"]),
         ("at the default distance", &["--geometry", "binding=direct"]),
     ];
-    let (want, ran) = std::thread::scope(|s| {
+    let (want, asked, ran) = std::thread::scope(|s| {
         let want = s.spawn(|| {
             let pair = PairOptions {
                 geometry: Some(bound(file, Binding::Direct)),
@@ -530,15 +621,16 @@ fn frame_insv_reference_matches_the_library() {
             };
             library(file, &pair, 5, turn(0.0, 0.0, 0.0), (512, 256))
         });
-        let ran = each(&runs, |(name, extra)| {
+        let asked = s.spawn(reference_equirect);
+        let ran = each(&runs[1..], |(name, extra)| {
             let mut args = common.to_vec();
             args.extend_from_slice(extra);
             let out = dir.join(format!("{name}.png"));
             (frame(file, &out, &args), out)
         });
-        (want.join().unwrap(), ran)
+        (want.join().unwrap(), asked.join().unwrap(), ran)
     });
-    let (asked, out) = &ran[0];
+    let (asked, out) = asked;
     let r = asked.ok();
     assert_eq!(r["renderer"], "reference", "{r}");
     assert_eq!(r["gpu"], Value::Null, "{r}");
@@ -562,7 +654,7 @@ fn frame_insv_reference_matches_the_library() {
     // the default distance, 2 m, with no --stitch-distance, each a
     // picture of its own.
     for (k, (name, _)) in runs.iter().enumerate().skip(1) {
-        let (ran, out) = &ran[k];
+        let (ran, out) = &ran[k - 1];
         let r = ran.ok();
         if k == 1 {
             assert_eq!(r["stitch"]["geometry"]["status"], "provisional", "{r}");
@@ -573,25 +665,25 @@ fn frame_insv_reference_matches_the_library() {
     }
 }
 
-/// Whether a run is the refusal until M3.7: `not_equirect`, its exit,
-/// both hints (`--reference` for the CPU's stitch, and M3.7 for the
-/// GPU's) beside `--equirect`'s, not M1's "stitching arrives in M3",
-/// which a pair `--reference` stitches makes untrue, and nothing written
-/// to `out` or beside it.
-fn refused_until_m3_7(ran: &Ran, out: &Path) -> Result<(), String> {
+/// Whether a run is the refusal of a pair whose calibration can't be
+/// read: `not_equirect` by its exit, "no calibration" in the message
+/// with the hint that `--lens 0|1` shows each lens, never the refusal
+/// M3.5 gave until M3.7 ("the GPU's stitch arrives in M3.7"), and
+/// nothing written to `out` or beside it.
+fn refused_for_its_calibration(ran: &Ran, out: &Path) -> Result<(), String> {
     if ran.code() != "not_equirect" {
         return Err(format!("{} / {}", ran.doc, ran.stderr));
     }
     if ran.status != Some(frame_exit("not_equirect") as i32) {
         return Err(format!("exit {:?}", ran.status));
     }
-    for hint in ["--reference", "M3.7", "--equirect"] {
-        if !ran.message().contains(hint) {
-            return Err(format!("no {hint:?} in {:?}", ran.message()));
+    for words in ["no calibration", "--lens 0|1"] {
+        if !ran.message().contains(words) {
+            return Err(format!("no {words:?} in {:?}", ran.message()));
         }
     }
-    if ran.message().contains("stitching arrives in M3") {
-        return Err(format!("M1's words in {:?}", ran.message()));
+    if ran.message().contains("arrives in M3.7") {
+        return Err(format!("M3.5's words in {:?}", ran.message()));
     }
     if out.exists() || !temp_files(out.parent().unwrap()).is_empty() {
         return Err("something was written".into());
@@ -599,58 +691,143 @@ fn refused_until_m3_7(ran: &Ran, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Without `--reference`, `frame <insv>` fails with a clear error until
-/// M3.7 stitches on the GPU, and writes nothing; `--equirect` still
-/// renders the file's first stream as M1 did.
+/// Without `--reference`, `frame <insv>` stitches on the GPU (lavapipe):
+/// `small()`'s frame 5 under binding=direct, infinitely far, within D32's
+/// CPU rule of `--reference`'s picture of it (`reference_equirect`), with
+/// renderer `gpu`, the adapter, and both lenses at the reference's pts;
+/// `--lens 0` within the rule of `--reference --lens 0`'s; and `--seam
+/// weights`, whose red and blue sum to 255. A pair whose calibration
+/// can't be read is `not_equirect`, "no calibration", with the hint that
+/// `--lens 0|1` shows each lens, and `--equirect` renders the first
+/// stream as M1 did. The controls: binding=reversed's picture is outside
+/// the rule, the stitch's own picture isn't a weights picture, and M3.5's
+/// refusal ("the GPU's stitch arrives in M3.7") isn't the refusal.
 #[test]
-fn frame_insv_needs_reference_until_m3_7() {
-    let _t = timed("frame_insv_needs_reference_until_m3_7");
-    let file = pair_file();
-    let dir = outputs("needs-reference");
-    let cases: [(&str, &[&str]); 3] = [
-        ("gpu", &["--size", "64x32"]),
-        ("equirect", &["--size", "64x32", "--equirect"]),
-        ("reference", &["--size", "64x32", "--reference"]),
+fn frame_insv_stitches_on_the_gpu() {
+    let _t = timed("frame_insv_stitches_on_the_gpu");
+    let dir = outputs("gpu");
+    let reversed: Vec<&str> = STITCHED
+        .iter()
+        .map(|a| match *a {
+            "binding=direct" => "binding=reversed",
+            a => a,
+        })
+        .collect();
+    let weights = [
+        "--projection",
+        "equirect",
+        "--size",
+        "512x256",
+        "--seam",
+        "weights",
     ];
-    let ran = each(&cases, |(name, args)| {
-        let out = dir.join(format!("{name}.png"));
-        (frame(file, &out, args), out)
+    let small: [(&str, &[&str]); 4] = [
+        ("stitched", &STITCHED),
+        ("reversed", &reversed),
+        ("lens0", &LENS0),
+        ("weights", &weights),
+    ];
+    type Other<'a> = (&'a str, fn() -> &'static Path, &'a [&'a str]);
+    let others: [Other; 2] = [
+        (
+            "no-calibration",
+            || pair(Some(InsvFault::NoCalibration)),
+            &["--size", "64x32"],
+        ),
+        ("equirect", pair_file, &["--size", "64x32", "--equirect"]),
+    ];
+    let (reference, lens0, ran, other_runs) = std::thread::scope(|s| {
+        let reference = s.spawn(reference_equirect);
+        let lens0 = s.spawn(reference_lens0);
+        let other_runs = s.spawn(|| {
+            each(&others, |(name, file, args)| {
+                let out = dir.join(format!("{name}.png"));
+                (frame(file(), &out, args), out)
+            })
+        });
+        let ran = each(&small, |(name, args)| {
+            let out = dir.join(format!("{name}.png"));
+            (frame(small_file(), &out, args), out)
+        });
+        (
+            reference.join().unwrap(),
+            lens0.join().unwrap(),
+            ran,
+            other_runs.join().unwrap(),
+        )
     });
-    let (gpu, out) = &ran[0];
-    refused_until_m3_7(gpu, out).unwrap();
-    // --equirect: the first stream as an equirect, on the GPU, no stitch.
-    let r = ran[1].0.ok();
+    let [
+        (stitched, stitched_out),
+        (reversed, reversed_out),
+        (lens, lens_out),
+        (weights, weights_out),
+    ] = &ran[..]
+    else {
+        unreachable!()
+    };
+    let r = stitched.ok();
+    assert_eq!(r["renderer"], "gpu", "{r}");
+    assert_eq!(r["gpu"]["device_type"], "cpu", "{r}");
+    assert_eq!(r["view"]["projection"], "equirect", "{r}");
+    assert_eq!(r["stitch"]["geometry"]["status"], "user", "{r}");
+    assert_eq!(r["stitch"]["distance_m"], Value::Null, "{r}");
+    let want = reference.0.ok();
+    assert_eq!(want["renderer"], "reference", "{want}");
+    let pts: Vec<&Value> = r["stitch"]["lenses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| &l["pts"])
+        .collect();
+    assert_eq!(pts.len(), 2, "{r}");
+    assert_eq!(pts[0], pts[1], "{r}");
+    assert_eq!(pts[0], &r["frame"]["pts"], "{r}");
+    assert_eq!(r["frame"]["pts"], want["frame"]["pts"], "{r}");
+    assert_eq!(r["frame"]["time"]["frame"], 5, "{r}");
+    let (gpu, cpu) = (load(stitched_out), load(&reference.1));
+    within_cpu_rule(&gpu, &cpu).unwrap();
+    // The control: binding=reversed, on the GPU.
+    assert_eq!(reversed.ok()["renderer"], "gpu");
+    must_fail(
+        "binding=reversed against binding=direct's reference",
+        within_cpu_rule(&load(reversed_out), &cpu),
+    );
+    // --lens 0, flat on the GPU.
+    let r = lens.ok();
     assert_eq!(r["renderer"], "gpu", "{r}");
     assert_eq!(r["source"]["stream"], 0, "{r}");
     assert_eq!(r["stitch"], Value::Null, "{r}");
-    // The controls: --reference stitches; and M3.5's first words, which
-    // still said M1's "stitching arrives in M3" (look's, compare's and
-    // the project tools', which don't stitch a pair).
-    let (reference, out) = &ran[2];
-    assert_eq!(reference.ok()["renderer"], "reference");
-    must_fail("--reference", refused_until_m3_7(reference, out));
-    let mut doc = gpu.doc.clone();
+    assert_eq!(lens0.0.ok()["renderer"], "reference");
+    within_cpu_rule(&load(lens_out), &load(&lens0.1)).unwrap();
+    // --seam weights, and the control: the stitch's own picture.
+    assert_eq!(weights.ok()["renderer"], "gpu");
+    weights_sum_to_one(&load(weights_out)).unwrap();
+    must_fail("the stitch's picture as weights", weights_sum_to_one(&gpu));
+    // No calibration: the refusal, and M3.5's for the control.
+    let [(uncalibrated, uncalibrated_out), (equirect, _)] = &other_runs[..] else {
+        unreachable!()
+    };
+    refused_for_its_calibration(uncalibrated, uncalibrated_out).unwrap();
+    let mut doc = uncalibrated.doc.clone();
     doc["error"]["message"] = format!(
-        "{} is Insta360 dual fisheye: stitching arrives in M3; --reference stitches it on \
-         the CPU, and the GPU's stitch arrives in M3.7; --equirect renders it as equirect \
-         anyway",
-        file.display()
+        "{}; --reference stitches it on the CPU, and the GPU's stitch arrives in M3.7",
+        uncalibrated.message()
     )
     .into();
-    let m1_words = Ran {
-        status: gpu.status,
+    let m3_5_words = Ran {
+        status: uncalibrated.status,
         doc,
         stderr: String::new(),
     };
-    must_fail("M1's words", refused_until_m3_7(&m1_words, &ran[0].1));
-}
-
-/// Without `--reference`, `frame <insv>` stitches on the GPU, its
-/// picture held to the reference's by D32's reference rule.
-#[test]
-#[ignore = "M3.7 unit (d)"]
-fn frame_insv_stitches_on_the_gpu() {
-    todo!()
+    must_fail(
+        "M3.5's words",
+        refused_for_its_calibration(&m3_5_words, uncalibrated_out),
+    );
+    // --equirect: the first stream as an equirect, on the GPU, no stitch.
+    let r = equirect.ok();
+    assert_eq!(r["renderer"], "gpu", "{r}");
+    assert_eq!(r["source"]["stream"], 0, "{r}");
+    assert_eq!(r["stitch"], Value::Null, "{r}");
 }
 
 /// `--lens 0` and `--lens 1` show one lens raw, its corner code naming
@@ -662,7 +839,7 @@ fn frame_insv_shows_a_lens_and_the_seam() {
     let _t = timed("frame_insv_shows_a_lens_and_the_seam");
     let dir = outputs("lens-and-seam");
     let seams = ["weights", "difference"];
-    let (lens_cases, lenses, seamed) = std::thread::scope(|s| {
+    let (lens_cases, mut lenses, small0, seamed) = std::thread::scope(|s| {
         let seamed = s.spawn(|| {
             each(&seams, |seam| {
                 let out = dir.join(format!("seam-{seam}.png"));
@@ -690,7 +867,9 @@ fn frame_insv_shows_a_lens_and_the_seam() {
             .into_iter()
             .flat_map(|(f, name)| [(f, name, 0), (f, name, 1)])
             .collect();
-        let lenses = each(&lens_cases, |(file, name, n)| {
+        // small()'s lens 0 is reference_lens0's run.
+        let small0 = s.spawn(reference_lens0);
+        let lenses = each(&lens_cases[1..], |(file, name, n)| {
             let out = dir.join(format!("lens-{name}-{n}.png"));
             let lens = n.to_string();
             let ran = frame(
@@ -708,8 +887,22 @@ fn frame_insv_shows_a_lens_and_the_seam() {
             );
             (ran, out)
         });
-        (lens_cases, lenses, seamed.join().unwrap())
+        (
+            lens_cases,
+            lenses,
+            small0.join().unwrap(),
+            seamed.join().unwrap(),
+        )
     });
+    let small0 = (
+        Ran {
+            status: small0.0.status,
+            doc: small0.0.doc.clone(),
+            stderr: small0.0.stderr.clone(),
+        },
+        small0.1.clone(),
+    );
+    lenses.insert(0, small0);
     for ((_, name, n), (ran, out)) in lens_cases.iter().zip(&lenses) {
         let r = ran.ok();
         assert_eq!(r["renderer"], "reference", "{r}");
@@ -816,11 +1009,12 @@ fn frame_insv_warns_of_damage_and_an_assumed_geometry() {
 /// message); and each of `--lens`, `--seam`, `--geometry` and
 /// `--stitch-distance` is a usage error with `--project`, `--equirect`
 /// or `--stream`, or on a file that isn't a camera's pair, as `--lens`
-/// is with any of the other three; and a pair under `--reference` with
-/// `--decoder vaapi` or `vulkan` is one too, since a pair decodes in
-/// software until M3.7. The controls: binding=direct and
-/// binding=reversed render different pictures, and `--decoder software`
-/// on the pair isn't refused.
+/// is with any of the other three. A pair decodes as any file does: a
+/// hardware decoder that isn't there (VA-API on a render node that
+/// isn't, Vulkan Video with the loader shown lavapipe alone) is
+/// `hw_unavailable`, exit 3, on the GPU and under `--reference` alike.
+/// The controls: binding=direct and binding=reversed render different
+/// pictures, and `--decoder software` on the pair decodes.
 #[test]
 fn frame_insv_takes_geometry_and_distance() {
     let _t = timed("frame_insv_takes_geometry_and_distance");
@@ -898,10 +1092,26 @@ fn frame_insv_takes_geometry_and_distance() {
         conflicts.push([new[0], *flag].concat());
     }
     let projects: Vec<Vec<&str>> = new.iter().map(|f| f.to_vec()).collect();
-    // The decoders a pair can't use until M3.7.
-    let decoders: [&[&str]; 2] = [
-        &["--reference", "--size", "64x32", "--decoder", "vaapi"],
-        &["--reference", "--size", "64x32", "--decoder", "vulkan"],
+    // The decoders that aren't there, as on a one-stream file
+    // (frame.rs's rows): the loader shown lavapipe alone has no Vulkan
+    // Video, and a render node that isn't has no VA-API.
+    let icd = lavapipe::lavapipe_icd();
+    let only_lavapipe = [
+        ("VK_DRIVER_FILES", icd.as_os_str()),
+        ("VK_ICD_FILENAMES", icd.as_os_str()),
+    ];
+    let vaapi = ["--decoder", "vaapi", "--render-node", "/nonexistent"];
+    type Env<'a> = &'a [(&'a str, &'a std::ffi::OsStr)];
+    let decoders: [(Vec<&str>, Env); 3] = [
+        (
+            [&["--reference", "--size", "64x32"][..], &vaapi].concat(),
+            &[],
+        ),
+        (
+            vec!["--reference", "--size", "64x32", "--decoder", "vulkan"],
+            &only_lavapipe,
+        ),
+        ([&["--size", "64x32"][..], &vaapi].concat(), &[]),
     ];
     let project = |args: &Vec<&str>| {
         let o = spherecut()
@@ -922,7 +1132,11 @@ fn frame_insv_takes_geometry_and_distance() {
     let (parsed_runs, bad_runs, conflict_runs, project_runs, plain_runs, decoder_runs, pictures) =
         std::thread::scope(|s| {
             let parsed_runs = s.spawn(|| each(&parsed, |args| frame(&missing, &out, args)));
-            let decoder_runs = s.spawn(|| each(&decoders, |args| frame(pair_file(), &out, args)));
+            let decoder_runs = s.spawn(|| {
+                each(&decoders, |(args, env)| {
+                    frame_in(pair_file(), &out, args, env)
+                })
+            });
             let bad_runs = s.spawn(|| each(&bad, |(args, _)| frame(&missing, &out, args)));
             let conflict_runs = s.spawn(|| each(&conflicts, |args| frame(pair_file(), &out, args)));
             let project_runs = s.spawn(|| each(&projects, project));
@@ -1002,14 +1216,14 @@ fn frame_insv_takes_geometry_and_distance() {
             ran.message()
         );
     }
-    for (args, ran) in decoders.iter().zip(&decoder_runs) {
-        refuses_decoder(ran).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+    for ((args, _), ran) in decoders.iter().zip(&decoder_runs) {
+        misses_decoder(ran).unwrap_or_else(|e| panic!("{args:?}: {e}"));
     }
     let [(direct, direct_out), (reversed, reversed_out)] = &pictures[..] else {
         unreachable!()
     };
     // The control: the same pair under --reference, decoded in software.
-    must_fail("--decoder software", refuses_decoder(direct));
+    must_fail("--decoder software", misses_decoder(direct));
     for ran in [direct, reversed] {
         let r = ran.ok();
         assert_eq!(r["stitch"]["geometry"]["status"], "user", "{r}");
@@ -1027,10 +1241,13 @@ fn frame_insv_takes_geometry_and_distance() {
     );
 }
 
-/// Whether a run refused `--decoder` as a usage error: exit 2, `usage`,
-/// and the flag named in its message.
-fn refuses_decoder(ran: &Ran) -> Result<(), String> {
-    if ran.status == Some(2) && ran.code() == "usage" && ran.message().contains("--decoder") {
+/// Whether a run failed for want of the decoder asked for, as on a
+/// one-stream file: `hw_unavailable`, exit 3, with no picture.
+fn misses_decoder(ran: &Ran) -> Result<(), String> {
+    if ran.status == Some(frame_exit("hw_unavailable") as i32)
+        && ran.code() == "hw_unavailable"
+        && ran.doc["ok"] == false
+    {
         Ok(())
     } else {
         Err(format!("exit {:?}: {}", ran.status, ran.doc))

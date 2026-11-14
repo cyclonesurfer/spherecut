@@ -29,6 +29,7 @@ use spherecut_sphere::rig::Status;
 use super::{Ctx, sequence};
 use crate::error::{ToolError, codes};
 use crate::limits::CHECK_BYTES;
+use crate::still;
 use crate::text;
 
 /// What the file is checked for, beyond the rules that always hold.
@@ -871,12 +872,25 @@ fn youtube_360(f: &File, rules: &mut Vec<Rule>, tips: &mut Vec<Advice>) {
 }
 
 /// `spherical_metadata` failed: the fix depends on what the picture is.
+/// An Insta360 pair whose calibration reads ([`still::pair_reads`]) is
+/// never called unstitched: frame and look stitch it, and a project of
+/// it renders from M3.11. One whose calibration doesn't read is shown as
+/// its lenses, in project create's words.
 fn no_sphere(f: &File) -> Rule {
     let (message, fix) = match f.layout() {
-        Layout::Insta360DualFisheye
-        | Layout::DjiDualFisheye
-        | Layout::GoProEac
-        | Layout::LowResCompanion => (
+        Layout::Insta360DualFisheye if still::pair_reads(f.r) => (
+            "it is an Insta360 camera's pair of lenses, with no spherical metadata: frame and \
+             look stitch it",
+            "make a project of it with project create, which render renders as a tagged \
+             equirect from M3.11",
+        ),
+        Layout::Insta360DualFisheye => (
+            "it is an Insta360 camera's pair of lenses with no calibration: shown as its \
+             lenses, with no spherical metadata",
+            "frame --lens 0|1 and look show each lens as coded; the camera maker's app makes \
+             a tagged equirect of it",
+        ),
+        Layout::DjiDualFisheye | Layout::GoProEac | Layout::LowResCompanion => (
             "it is the camera's own unstitched recording, with no spherical metadata",
             "stitch it to equirect first (the camera maker's app does, and tags it)",
         ),

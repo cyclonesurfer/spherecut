@@ -52,7 +52,7 @@ use spherecut_render::dmabuf::{self, Imported, Importer};
 use spherecut_render::reference::RigOptions;
 use spherecut_render::vkshare::Copied;
 use spherecut_render::{
-    AdapterChoice, Depth, Filter, Gpu, Image, LensFrame, Pixels, Placement, PlaneSource,
+    AdapterChoice, DebugMode, Depth, Filter, Gpu, Image, LensFrame, Pixels, Placement, PlaneSource,
     RenderError, SlotShape, SourceFrames, Stereo, StillOptions, StillRenderer, ViewParams,
     reference, upload, wgpu,
 };
@@ -276,12 +276,29 @@ fn choose_stream<'r>(
     }
 }
 
-/// What `not_equirect` says an Insta360 file is, after "{file} is ":
-/// look's, compare's and the project tools' words, as none of them
-/// stitches a pair. frame, whose `--reference` does, words its refusal
-/// of a pair without the clause after the colon (`cli::frame`'s
-/// `flags`).
-pub const INSTA360_UNSTITCHED: &str = "Insta360 dual fisheye: stitching arrives in M3";
+/// What `not_equirect` says an Insta360 file is, after "{file} is ",
+/// when its calibration reads ([`pair_reads`]): not one equirect, but a
+/// pair that frame and look stitch (M3.7) and a project renders from
+/// M3.11. The words compare's refusal of a file and a project's doubt
+/// give, through [`equirect_doubt`]; frame and look reach the pair
+/// through [`Still::open_pair`] instead.
+pub const INSTA360_PAIR: &str = "an Insta360 camera's pair of lenses (dual fisheye), not one \
+                                 equirect: frame and look stitch it, and project create makes a \
+                                 project of it, which render renders from M3.11";
+
+/// What `not_equirect` says an Insta360 file is, after "{file} is ",
+/// when its calibration doesn't read: in project create's words for it
+/// (`no_calibration`), which look shows so.
+pub const INSTA360_NO_CALIBRATION: &str =
+    "an Insta360 camera's pair of lenses (dual fisheye) with no calibration: shown as its lenses";
+
+/// Whether `report` names a camera's pair of lenses whose calibration
+/// reads: probe found its two lens tracks, and a calibration string a
+/// stitch takes, for which the built-in table gives a geometry. Such a
+/// file is never called unstitched: frame and look stitch it.
+pub fn pair_reads(report: &ProbeReport) -> bool {
+    report.camera_file.lenses.is_some() && report.camera_file.geometry.is_some()
+}
 
 /// Whether the file is a stitched equirect: tagged so (Spherical Video
 /// V2's `equi` in an MP4 or MOV file, the `Projection` element FFmpeg
@@ -340,7 +357,10 @@ fn check_equirect(report: &ProbeReport, stream: &StreamInfo) -> Result<(), Failu
         .map(|v| format!("{}x{}", v.width, v.height))
         .unwrap_or_else(|| "of unknown size".into());
     match report.camera.as_ref().map(|c| c.layout) {
-        Some(Layout::Insta360DualFisheye) => Err(refuse(INSTA360_UNSTITCHED.into())),
+        Some(Layout::Insta360DualFisheye) if pair_reads(report) => {
+            Err(refuse(INSTA360_PAIR.into()))
+        }
+        Some(Layout::Insta360DualFisheye) => Err(refuse(INSTA360_NO_CALIBRATION.into())),
         Some(Layout::DjiDualFisheye) => Err(refuse(
             "DJI dual fisheye, one stream per lens: stitching arrives in M3".into(),
         )),
@@ -1621,7 +1641,9 @@ impl<'g> StillPair<'g> {
     /// FFmpeg's Vulkan images on path B, imported as DMA-BUFs with zero
     /// copy (both held until the render is done), else from the frames'
     /// bytes. Several views are a frame's over the shutter, averaged for
-    /// motion blur as for one frame.
+    /// motion blur as for one frame. The weights and the seam difference
+    /// (`RigDebug`'s modes 6 and 7) are read back linear and coded with no
+    /// OETF, as the CPU reference writes them.
     ///
     /// With no GPU it is the CPU reference: the two frames made ready
     /// once (`render::reference::LensPair`, kept for the next view of the
@@ -1683,10 +1705,15 @@ impl<'g> StillPair<'g> {
         size: (u32, u32),
         look: Look,
     ) -> Result<Image, Failure> {
+        let debug = self.options.mode().map_err(render_error)?;
+        // The weights and the seam difference are values, not light: read
+        // back as the linear target holds them and coded here with no
+        // OETF, as the CPU reference writes them and `quantize` codes them.
+        let values = matches!(debug, DebugMode::Weights | DebugMode::SeamDiff);
         let opts = StillOptions {
             filter: look.filter,
-            depth: look.depth,
-            debug: self.options.mode().map_err(render_error)?,
+            depth: if values { Depth::Linear } else { look.depth },
+            debug,
             ..StillOptions::default()
         };
         let frames = &decoded.frames;
@@ -1721,7 +1748,15 @@ impl<'g> StillPair<'g> {
         } else {
             render([PlaneSource::Bytes; 2])
         };
-        image.map_err(render_error)
+        let image = image.map_err(render_error)?;
+        Ok(match (values, image.pixels) {
+            (true, Pixels::LinearF32(v)) => Image {
+                width: image.width,
+                height: image.height,
+                pixels: codes(v.into_iter().map(f64::from), look.depth),
+            },
+            (_, pixels) => Image { pixels, ..image },
+        })
     }
 }
 
@@ -1761,17 +1796,20 @@ pub fn render_error(e: RenderError) -> Failure {
 /// GPU stores them: what [`Still::render`] and [`StillPair::render`] make
 /// of the CPU reference's picture, for a test that renders its own.
 pub fn quantize(img: &reference::ImageF64, depth: Depth) -> Image {
-    let code = |v: f64, max: f64| (v.clamp(0.0, 1.0) * max).round();
-    let pixels = match depth {
-        Depth::Sixteen => {
-            Pixels::Rgb16(img.data.iter().map(|&v| code(v, 65535.0) as u16).collect())
-        }
-        _ => Pixels::Rgb8(img.data.iter().map(|&v| code(v, 255.0) as u8).collect()),
-    };
     Image {
         width: img.width,
         height: img.height,
-        pixels,
+        pixels: codes(img.data.iter().copied(), depth),
+    }
+}
+
+/// `values`, each clamped to 0 to 1, as `depth`'s codes rounded to
+/// nearest: 16-bit for [`Depth::Sixteen`], else 8-bit.
+fn codes(values: impl Iterator<Item = f64>, depth: Depth) -> Pixels {
+    let code = |v: f64, max: f64| (v.clamp(0.0, 1.0) * max).round();
+    match depth {
+        Depth::Sixteen => Pixels::Rgb16(values.map(|v| code(v, 65535.0) as u16).collect()),
+        _ => Pixels::Rgb8(values.map(|v| code(v, 255.0) as u8).collect()),
     }
 }
 

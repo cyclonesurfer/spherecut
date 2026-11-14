@@ -22,11 +22,14 @@
 //!    [`frame_views`] gives the export them; then probe, through the
 //!    confinement (D24), and the layout: only a stitched equirect
 //!    renders, unless `--equirect` says it is one (a project's clip is),
-//!    or a camera's pair of lenses (an Insta360 file): stitched on the
-//!    CPU under `--reference` until M3.7 ([`Still::open_pair`], with
-//!    `--geometry`, `--stitch-distance` and `--seam`), or one lens raw
-//!    with `--lens`; the pair's flags on any other file are a usage
-//!    error, and probe's `bad_trailer` warnings are the run's too;
+//!    or a camera's pair of lenses (an Insta360 file): stitched
+//!    ([`Still::open_pair`], with `--geometry`, `--stitch-distance` and
+//!    `--seam`) on the GPU, or on the CPU under `--reference`, both
+//!    lenses decoded as any stream is (M3.7), or one lens raw with
+//!    `--lens`; a pair that can't be stitched (no calibration, or one
+//!    that can't be read) is `not_equirect` with `--lens 0|1`'s hint;
+//!    the pair's flags on any other file are a usage error, and probe's
+//!    `bad_trailer` warnings are the run's too;
 //! 5. the GPU, unless `--reference` renders on the CPU (exit 3 without
 //!    one);
 //! 6. the decoder, on the render node of the GPU that renders (D39 has the
@@ -64,7 +67,7 @@ use spherecut_media::probe::{ProbeReport, codes as probe_codes};
 use spherecut_render::output::{frame_views, view_at};
 use spherecut_render::project::OutKind;
 use spherecut_render::reference::{RigDebug, RigOptions};
-use spherecut_render::{AdapterChoice, Depth, Filter, Image, ViewParams};
+use spherecut_render::{AdapterChoice, Depth, Filter, Gpu, Image, ViewParams};
 use spherecut_sphere::orient::Ypr;
 use spherecut_sphere::perspective::{Lens, Projection};
 use spherecut_sphere::rig::{
@@ -153,9 +156,8 @@ pub struct FrameArgs {
     pub filter: FilterArg,
     /// auto tries VA-API on the GPU's render node and falls back to
     /// software; vaapi and vulkan fail instead (exit 3). A camera's pair
-    /// stitched with --reference decodes in software until M3.7 and
-    /// refuses vaapi and vulkan (exit 2); --lens decodes as any stream
-    /// does.
+    /// decodes each lens so, stitched on the GPU or with --reference, as
+    /// --lens does its one.
     #[arg(long, value_enum, default_value_t = DecoderArg::Auto)]
     pub decoder: DecoderArg,
     /// The DRM render node to decode on [default: the rendering GPU's,
@@ -173,9 +175,8 @@ pub struct FrameArgs {
     /// The video stream, by FFmpeg's index [default: the first].
     #[arg(long, value_name = "N")]
     pub stream: Option<usize>,
-    /// Render with the CPU reference (f64, slow) instead of the GPU. A
-    /// camera's pair of lenses (an Insta360 file) is stitched only so
-    /// until M3.7 brings the GPU's stitch.
+    /// Render with the CPU reference (f64, slow) instead of the GPU, a
+    /// camera's pair of lenses (an Insta360 file) stitched so too.
     #[arg(long)]
     pub reference: bool,
     /// A camera's pair: lens N alone (0 or 1, by probe's lenses.tracks),
@@ -188,10 +189,10 @@ pub struct FrameArgs {
         conflicts_with_all = ["seam", "geometry", "stitch_distance", "equirect", "stream"],
     )]
     pub lens: Option<u8>,
-    /// A camera's pair's seam, through the view, with --reference:
-    /// weights paints calibration block 0's weight red and block 1's
-    /// blue; difference paints |lens 0 − lens 1| × 8 in linear light where
-    /// both see, black elsewhere, clipped at 1 in the PNG.
+    /// A camera's pair's seam, through the view, on the GPU or with
+    /// --reference: weights paints calibration block 0's weight red and
+    /// block 1's blue; difference paints |lens 0 − lens 1| × 8 in linear
+    /// light where both see, black elsewhere, clipped at 1 in the PNG.
     #[arg(long, value_enum, conflicts_with_all = ["equirect", "stream"])]
     pub seam: Option<SeamArg>,
     /// A camera's pair's geometry, key by key over the built-in table's
@@ -218,8 +219,9 @@ pub struct FrameArgs {
     /// Keep the frame on the device, with no copy through the CPU (slice
     /// 5b): VA-API exports it as DMA-BUFs and the GPU imports them, or,
     /// with `--decoder vulkan`, Vulkan Video decodes on the renderer's own
-    /// device and the frame is copied out on the GPU. Fails (exit 3) when
-    /// the device, its driver or the decoder can't.
+    /// device and the frame is copied out on the GPU; a camera's pair
+    /// keeps both lenses so. Fails (exit 3) when the device, its driver
+    /// or the decoder can't.
     #[arg(long, conflicts_with = "reference")]
     pub zero_copy: bool,
     /// Replace what is at the output, if it is a regular file.
@@ -350,6 +352,25 @@ pub enum DepthArg {
 pub enum FilterArg {
     Iso,
     Aniso,
+}
+
+impl FilterArg {
+    /// The filter as the JSON result names it.
+    fn word(self) -> &'static str {
+        match self {
+            FilterArg::Iso => "iso",
+            FilterArg::Aniso => "aniso",
+        }
+    }
+}
+
+impl From<FilterArg> for Filter {
+    fn from(f: FilterArg) -> Filter {
+        match f {
+            FilterArg::Iso => Filter::Isotropic,
+            FilterArg::Aniso => Filter::Anisotropic,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -1131,23 +1152,7 @@ impl Job {
             ));
         }
         let lens = self.args.lens.filter(|_| pair);
-        if pair && self.args.reference && lens.is_none() {
-            // A pair decodes in software until M3.7: a hardware decoder
-            // named is the flags' fault, not the file's.
-            let hardware = match self.args.decoder {
-                DecoderArg::Vaapi => Some("vaapi"),
-                DecoderArg::Vulkan => Some("vulkan"),
-                DecoderArg::Auto | DecoderArg::Software => None,
-            };
-            if let Some(name) = hardware {
-                return Err(failure(
-                    codes::USAGE,
-                    format!(
-                        "--decoder {name}: {file} is a camera's pair of lenses, which decode in \
-                         software until M3.7; give --decoder auto or software"
-                    ),
-                ));
-            }
+        if pair && lens.is_none() {
             return self.run_pair(tmp, &shot, src, &report, &stop);
         }
         let opts = match lens {
@@ -1162,35 +1167,8 @@ impl Job {
         let probed = still::probed(report, &opts, &stop, &mut self.warnings)
             .map_err(|e| self.flags(e, pair))?;
 
-        // Step 5. The filter is the one rendered with: iso where aniso was
-        // asked for and the device can't; with --project, the export's.
-        let mut filter = shot.filter.unwrap_or(FilterArg::Iso);
-        let gpu = if self.args.reference {
-            None
-        } else {
-            let gpu = still::gpu(&self.args.adapter(), &opts)?;
-            gpu.check_size(shot.size).map_err(|e| match shot.sequence {
-                None => failure(codes::USAGE, format!("--size: {e}")),
-                Some(_) => still::render_error(e),
-            })?;
-            still::check_gpu(&gpu, &opts)?;
-            filter = match shot.filter {
-                Some(FilterArg::Aniso) if !gpu.caps.anisotropy => {
-                    self.warn(
-                        codes::warnings::ANISOTROPY_UNAVAILABLE,
-                        format!(
-                            "{} has no anisotropic filtering: rendering with --filter iso",
-                            gpu.caps.info.name
-                        ),
-                    );
-                    FilterArg::Iso
-                }
-                Some(f) => f,
-                None if gpu.caps.anisotropy => FilterArg::Aniso,
-                None => FilterArg::Iso,
-            };
-            Some(gpu)
-        };
+        // Step 5.
+        let (gpu, filter) = self.gpu(&shot, &opts)?;
         stop.go_on()?;
 
         // Step 6.
@@ -1208,10 +1186,7 @@ impl Job {
                 Some(_) => still::Draw::Coded,
                 None => still::Draw::View,
             },
-            filter: match filter {
-                FilterArg::Iso => Filter::Isotropic,
-                FilterArg::Aniso => Filter::Anisotropic,
-            },
+            filter: filter.into(),
             depth: self.args.depth(),
         };
         let image = still.render(&decoded, &shot.views, size, look)?;
@@ -1235,10 +1210,7 @@ impl Job {
             },
             depth: self.depth_bits(),
             view: shot.view,
-            filter: match filter {
-                FilterArg::Iso => "iso",
-                FilterArg::Aniso => "aniso",
-            },
+            filter: filter.word(),
             renderer: if gpu.is_some() { "gpu" } else { "reference" },
             decode: still.decode_info(&decoded),
             gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
@@ -1251,11 +1223,49 @@ impl Job {
         Ok(Done { result, line })
     }
 
-    /// Steps 5 to 10 for a camera's pair under `--reference`: no GPU,
-    /// both lens tracks decoded in software and stitched on the CPU
-    /// reference ([`Still::open_pair`]), by the file's calibration and
-    /// the table's geometry, or `--geometry`'s over it, at
-    /// `--stitch-distance`, through the view or `--seam`'s debug mode.
+    /// Step 5: the GPU, unless `--reference` renders on the CPU, and the
+    /// filter rendered with: iso where aniso was asked for and the device
+    /// can't, with a warning; with `--project`, the export's.
+    fn gpu(
+        &mut self,
+        shot: &Shot,
+        opts: &still::Options,
+    ) -> Result<(Option<Gpu>, FilterArg), Failure> {
+        if self.args.reference {
+            return Ok((None, shot.filter.unwrap_or(FilterArg::Iso)));
+        }
+        let gpu = still::gpu(&self.args.adapter(), opts)?;
+        gpu.check_size(shot.size).map_err(|e| match shot.sequence {
+            None => failure(codes::USAGE, format!("--size: {e}")),
+            Some(_) => still::render_error(e),
+        })?;
+        still::check_gpu(&gpu, opts)?;
+        let filter = match shot.filter {
+            Some(FilterArg::Aniso) if !gpu.caps.anisotropy => {
+                self.warn(
+                    codes::warnings::ANISOTROPY_UNAVAILABLE,
+                    format!(
+                        "{} has no anisotropic filtering: rendering with --filter iso",
+                        gpu.caps.info.name
+                    ),
+                );
+                FilterArg::Iso
+            }
+            Some(f) => f,
+            None if gpu.caps.anisotropy => FilterArg::Aniso,
+            None => FilterArg::Iso,
+        };
+        Ok((Some(gpu), filter))
+    }
+
+    /// Steps 5 to 10 for a camera's pair: both lens tracks decoded as any
+    /// stream is (`--decoder`, `--render-node` and `--zero-copy`, which
+    /// imports both lenses) and stitched ([`Still::open_pair`]) on the
+    /// GPU, or on the CPU reference under `--reference`, by the file's
+    /// calibration and the table's geometry, or `--geometry`'s over it,
+    /// at `--stitch-distance`, through the view or `--seam`'s debug mode.
+    /// A pair that can't be stitched is refused with the flags that
+    /// answer it ([`Self::flags`]).
     fn run_pair(
         &mut self,
         tmp: TempFile,
@@ -1265,15 +1275,18 @@ impl Job {
         stop: &still::Stop,
     ) -> Result<Done, Failure> {
         let pair_opts = self.pair_options(src)?;
+        let (gpu, filter) = self.gpu(shot, &shot.opts)?;
+        stop.go_on()?;
         let mut pair = Still::open_pair(
             src,
             report,
-            None,
+            gpu.as_ref(),
             &shot.opts,
             &pair_opts,
             stop,
             &mut self.warnings,
-        )?;
+        )
+        .map_err(|e| self.flags(e, true))?;
         stop.go_on()?;
         // A pair opens only on a calibration that parses, which probe
         // hashes too.
@@ -1290,7 +1303,7 @@ impl Job {
         stop.go_on()?;
         let look = still::Look {
             draw: still::Draw::View,
-            filter: Filter::Isotropic,
+            filter: filter.into(),
             depth: self.args.depth(),
         };
         let image = pair.render(&decoded, &shot.views, shot.size, look)?;
@@ -1330,10 +1343,10 @@ impl Job {
             },
             depth: self.depth_bits(),
             view: shot.view.clone(),
-            filter: "iso",
-            renderer: "reference",
+            filter: filter.word(),
+            renderer: if gpu.is_some() { "gpu" } else { "reference" },
             decode: first.frame_decode_info(&decoded.frames[0]),
-            gpu: None,
+            gpu: gpu.as_ref().map(|g| still::gpu_info(&g.caps.info)),
             color: *decoded.frames[0].color(),
             source: first.source_info(),
             sequence: None,
@@ -1416,23 +1429,15 @@ impl Job {
     }
 
     /// Step 4's errors with the flags that answer them: for a file that
-    /// isn't an equirect, `--equirect`, and for a camera's pair
-    /// `--reference` first; `--stream` for a stream it hasn't. A pair's
-    /// refusal drops M1's "stitching arrives in M3", which look's,
-    /// compare's and the project tools' keep: frame's `--reference`
-    /// stitches one.
+    /// isn't an equirect, `--equirect`, and for a camera's pair that
+    /// can't be stitched (no calibration, or one that can't be read)
+    /// `--lens 0|1` first, which shows each lens as coded; `--stream` for
+    /// a stream it hasn't.
     fn flags(&self, mut e: Failure, pair: bool) -> Failure {
         match (e.code, self.args.stream) {
             (codes::NOT_EQUIRECT, _) => {
                 if pair {
-                    let hint = "--reference stitches it on the CPU, and the GPU's stitch \
-                                arrives in M3.7";
-                    e.message = match e.message.strip_suffix(still::INSTA360_UNSTITCHED) {
-                        Some(head) => format!(
-                            "{head}a camera's pair of lenses (Insta360 dual fisheye): {hint}"
-                        ),
-                        None => format!("{}; {hint}", e.message),
-                    };
+                    e.message.push_str("; --lens 0|1 shows each lens as coded");
                 }
                 e.message
                     .push_str("; --equirect renders it as equirect anyway");
