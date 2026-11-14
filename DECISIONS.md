@@ -10517,19 +10517,19 @@ Revisit if: a camera composes its angles outside the Euler space (it
 lands as `Extrinsics::Fitted`, 8.7); clips 8 and 10 fail the gross
 rule; or takes 14 and 15 contradict what clips 8 to 10 showed.
 
-*Updated 2026-11-14 (M3.7, F025):* each lens's band is centred where
-it sees the seam, not at 90°. At q > 0 lens b sees the seam's plane
-δ_b = atan(q c_b·a_b) past 90° (0.46° on the X5's baseline at
-0.5 m⁻¹, 3.06° at 3.34), so 6.2's feather about 90° left a band where
-both lenses weigh only 2(h − δ) wide, 3.89° of a 10° band on x5_like
-at 3.34 m⁻¹, and at a feather of 0 a ring that both covered and neither
+*Updated 2026-11-14 (M3.7, F025):* each lens's band is centred where it
+sees the seam, not at 90°. At q > 0 lens b, its centre at p_b, sees the
+seam's plane δ_b = atan(q p_b·a_b) past 90° (0.46° on the X5's baseline
+at 0.5 m⁻¹, 3.06° at 3.34), so 6.2's feather about 90° left a band where
+both lenses weigh only 2(h − δ) wide, 3.89° of a 10° band on x5_like at
+3.34 m⁻¹, and at a feather of 0 a ring that both covered and neither
 weighed. `Rig::band_centre` gives c_b = 90° + δ_b, and `Rig::weights`
 blends over c_b ± h_b, with `Rig::feather_at`'s h_b = min(h, max(room_b,
 0.5°)), not below 0, and room_b = min(θ_max, θ_frame) less the margin's
 angle at the footprint's LOD less c_b. Where no feather weighs a
 direction a lens covers, the covering lens nearer its band's centre, by
-θ_b − c_b, takes it whole, ½ each at a tie: where the δ_b are equal
-that is the lens of the smaller θ, as the bullet above has it.
+θ_b − c_b, takes it whole, ½ each at a tie: where the δ_b are equal that
+is the lens of the smaller θ, as the bullet above has it.
 `Tune::feather_deg`'s bound keeps no δ, since `feather_at` shrinks h
 where the band would pass the mask. On the same rig the band is now
 10.052° on average across the seam (sphere's
@@ -11236,14 +11236,14 @@ What:
 Departures from the plan's row:
 
 - The band's centre (F025). 10.3 and 6.2 centred each lens's feather on
-  90°, but at q > 0 a lens sees the seam's plane δ_b = atan(q c_b·a_b)
-  further out (0.46° on the X5's baseline at 0.5 m⁻¹, 3.06° at 3.34), so
-  the band both lenses weighed was 2(h − δ) wide: 3.89° of a 10° band on
-  x5_like at 3.34 m⁻¹. It is now centred at c_b = 90° + δ_b, with h_b =
-  min(h, max(room_b, 0.5°)), room_b = min(θ_max, θ_frame) less the
-  margin's angle less c_b, and the same rig gives a band of 10.052° on
-  average. The row's "at most min(θ_max, θ_frame) − 90°" is that room,
-  from c_b instead of 90°.
+  90°, but at q > 0 a lens, its centre at p_b, sees the seam's plane
+  δ_b = atan(q p_b·a_b) further out (0.46° on the X5's baseline at 0.5
+  m⁻¹, 3.06° at 3.34), so the band both lenses weighed was 2(h − δ)
+  wide: 3.89° of a 10° band on x5_like at 3.34 m⁻¹. It is now centred at
+  c_b = 90° + δ_b, with h_b = min(h, max(room_b, 0.5°)), room_b =
+  min(θ_max, θ_frame) less the margin's angle less c_b, and the same rig
+  gives a band of 10.052° on average. The row's "at most min(θ_max,
+  θ_frame) − 90°" is that room, from c_b instead of 90°.
 - `fs_eac` and `fs_project_caps` wait for M3.18 and M3.20; group 2's
   layout and its caps-off groups are built now, so an equirect with caps
   later changes no layout.
@@ -11355,42 +11355,44 @@ Tested (Tier 1 on lavapipe; every check with a control that must fail):
   GPU's. Each failure names its picture's worst pixels.
 
 P-SHADE, the pass's cost on odin (≤ 0.8 ms at 1080p, ≤ 2.0 ms at 4K;
-`bench_stitch_pass`), passed on odin's RX 7600 under RADV at 1a7a64e
-(PR #40, `hw-reports/m37-1a7a64e/`): the stitch took 0.49 ms at 1080p
-and 1.90 and 1.88 ms at 4K, the medians of three in each of two runs
-(0.48 to 0.50 ms and 1.84 to 1.94 ms across their samples), against
-`fs_project`'s 0.22 and 0.77 ms on the same frames, so 0.10 to 0.12 ms
-to spare at 4K and neither redirect needed. On a miss the redirect would
-have been an analytic Jacobian for the LOD in place of the five rays,
-then a cheaper mask. The same run passed the zero-copy pair tests at 0
-LSB on both views (the reversed binding 92 LSB off, no slot mismatch)
-and `goldens_on_host_llvmpipe`, and failed the two checks unit (e) then
+`bench_stitch_pass`), passed on odin's RX 7600 under RADV at 1a7a64e (PR
+#40, `hw-reports/m37-1a7a64e/`): the stitch took 0.49 ms at 1080p and
+1.90 and 1.88 ms at 4K, the medians of three in each of two runs (0.48
+to 0.50 ms and 1.84 to 1.94 ms across their samples), against amendment
+6's `fs_project` baseline of 0.22 and 0.77 ms (`bench_upload_5k7`'s
+project rows; the same runs' projection on the stitch's views read 0.20
+to 0.21 and 0.76 to 0.77 ms), so 0.10 to 0.12 ms to spare at 4K and
+neither redirect needed. On a miss the redirect would have been an
+analytic Jacobian for the LOD in place of the five rays, then a cheaper
+mask. The same run passed the zero-copy pair tests at 0 LSB on both
+views (the reversed binding 92 LSB off, no slot mismatch) and
+`goldens_on_host_llvmpipe`, and failed the two checks unit (e) then
 changed in the tests, the poles' implicit-LOD control and the seam
 difference's count (above). odin's rerun of the three goldens tests at
 aef3e69 is recorded in PROGRESS's M3.7 note.
 
-Cost, against 19.6's M3.7 line (what it adds to the goldens binary,
-rung 1's pairs rendered afresh included, at most 7 s), on the cloud's
-four cores in the debug build at aef3e69: the goldens binary takes
-18.27 to 19.69 s (18.95 s on average over six runs), and 10.38 to
-11.23 s (10.65 s) with M3.7's tests left out, so about 8.3 s more. The
-three dfish modules are about 7.8 s of that (the binary takes 10.90 to
-11.47 s without them, 11.19 s on average), and the slice's five harness
-tests about 0.5 s (0.70 to 0.72 s alone). Outside the binary, by each
-test's own cost: `rig_shader.rs` about 0.8 s (0.72 to 0.80 s by its
-clock), `upload.rs`'s pair test and bench smoke 0.16 s,
-`rung3_gpu_render_equals_rung2` about 0.17 s of `rung3.rs`'s 2.20 to
-2.25 s (its `BUDGET_S` raised from 2.0 to 2.3), `frame_insv.rs`'s GPU
-tests about 0.31 s, `look`'s three `.insv` tests about 0.56 s, and
-`tier2_frame.rs`'s two lavapipe checks 0.21 to 0.23 s; `pipelines.rs`
-and `reference_rig.rs` changed tests rather than adding binaries. So
-M3.7 adds about 10.0 s with the modules alone counted in the binary and
-about 10.5 s with its harness tests, past its 7 s by 3.0 to 3.5 s.
-Unit (d) had counted 9.66 s at 93dc284, without `frame_insv.rs`'s GPU
-tests and against the binary's older 9.81 s base. Pat's card on the row
-recommends raising it to 10 s; until Pat answers, the plan keeps 7 s
-with the overrun named (plan amendment 10). No fixture was shrunk and
-no check cut.
+Cost, against 19.6's M3.7 line (what it adds to the goldens binary, rung
+1's pairs rendered afresh included, at most 7 s), on the cloud's four
+cores in the debug build at aef3e69: the goldens binary takes 18.27 to
+19.69 s (18.95 s on average over six runs), and 10.38 to 11.23 s (10.65
+s) with M3.7's tests left out, so about 8.3 s more. The three dfish
+modules are about 7.8 s of that (the binary takes 10.90 to 11.47 s
+without them, 11.19 s on average), and the slice's five harness tests
+about 0.5 s (0.70 to 0.72 s alone). Outside the binary, by each test's
+own cost, or its binary's growth where the test shares one:
+`rig_shader.rs` about 0.8 s (0.72 to 0.80 s by its clock), `upload.rs`'s
+pair test and bench smoke 0.16 s, `rung3_gpu_render_equals_rung2` about
+0.17 s of `rung3.rs`'s 2.20 to 2.25 s (its `BUDGET_S` raised from 2.0 to
+2.3), `frame_insv.rs`'s GPU tests about 0.31 s, `look`'s three `.insv`
+tests about 0.56 s, and `tier2_frame.rs`'s two lavapipe checks 0.21 to
+0.23 s; `pipelines.rs` and `reference_rig.rs` changed tests rather than
+adding binaries. So M3.7 adds about 10.0 s with the modules alone
+counted in the binary and about 10.5 s with its harness tests, past its
+7 s by 3.0 to 3.5 s. Unit (d) had counted 9.66 s at 93dc284, without
+`frame_insv.rs`'s GPU tests and against the binary's older 9.81 s base.
+Pat's card on the row recommends raising it to 10 s; until Pat answers,
+the plan keeps 7 s with the overrun named (plan amendment 10). No
+fixture was shrunk and no check cut.
 
 Considered and not done: an override constant for the stitch, and an
 intermediate equirect (both above); capping the margin for `look`'s
@@ -12689,7 +12691,9 @@ this entry's 15 % line is crossed, by the keyframe rows on the X5's
 stream and the 5.7K clip at the median and at p95. The same run passed
 `gui_decode_behind` (its VA-API run presented every UI frame expected,
 rounded, at a UI p99 of 18.6 ms, with 101 frames drained at 108.0 /
-141.0 ms p50 / p95) and `gui_smoke`'s five runs on Vulkan with no frame
+141.0 ms p50 / p95), which passed twice more on its own, 3 of 3 (99 % of
+the UI frames expected at a UI p99 of 18.9 and 18.5 ms, with 108 and 106
+frames drained), and `gui_smoke`'s five runs on Vulkan with no frame
 drained, and the realtime 10-bit VA-API row showed 4.00 frames a second
 in real time (3 to 9 a second), with the drain at 110.52 / 132.27 ms and
 the download at 66.49 / 67.97 ms at p50 / p95. `download` stays the
