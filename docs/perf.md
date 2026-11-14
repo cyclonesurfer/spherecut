@@ -298,8 +298,8 @@ Current benchmarks:
   plan's redirect, an analytic Jacobian for the LOD in place of the
   five rays, then a cheaper mask, neither built. The verdict never
   fails the test. `stitch_bench_smoke` runs it small on lavapipe in
-  Tier 1, with no verdict. No report has run it yet (below, "Pending
-  odin").
+  Tier 1, with no verdict. odin ran it first at 1a7a64e (PR #40), and
+  P-SHADE passed (below, "M3.7 on odin").
 - **The perf clips** (DECISIONS D37): hw-test makes them once, with
   libx265 at an average bitrate, into `<cargo target dir>/hw-media/`:
   `hevc8-5k7-30fps-noisy-20s.mp4` and `hevc10-5k7-30fps-noisy-20s.mp4`
@@ -1535,17 +1535,42 @@ Tier 2 passed as at 0b3ab9b (59 passed, 0 failed, 1 skipped, against
 100 % on all five clips at a UI p99 of 17.1 to 17.2 ms (:47-52), and
 the zero-copy tests and `vaapi_render_matches_software` passed.
 
-Pending odin (M3.7, the stitch in the projection pass, DECISIONS D66):
-odin's run at 1a7a64e failed two of the stitch's goldens checks on
-RADV, the poles' implicit-LOD control and rung 2's seam difference on
-the count of pixels past 4 LSB (D66 has both, and what changed), and
-these rows wait on its rerun.
+The drained rows ran at acd9d6f (PR #39,
+`hw-reports/stall-confirm-acd9d6f/`, its report's lines 175 to 222; 4 of
+4 passed in 1302 s). Median / p95 in ms, each drained row against the
+plain row of the same run:
 
-| Row | Measured by | Asks |
-|---|---|---|
-| P-SHADE, pending odin | `bench_stitch_pass` | the stitched pass within 0.8 ms at 1080p and 2.0 ms at 4K on RADV (M3 plan 4.3); a miss names the redirect |
-| `frame <insv>` stitched still, wall time, pending odin | the `view N: frame … s` lines of `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` (synth's `InsvSpec::small()`, 2 × 384², each run a process of its own, under zero copy and in software) | recorded, no gate |
-| The stitch's goldens on RADV, pending odin | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | the rows against their CPU and ideal references and controls, within the floors lavapipe's runs set (D32's CPU rule; never lavapipe's stored PNGs, which `goldens_on_host_llvmpipe` holds by the other-driver rule); `rung2_on_radv` against lavapipe's pictures by the other-driver rule, the seam difference with its LSB thresholds scaled to the linear light it is held in (D66), and against rung 1 by the reference rule |
+| Seek | VA-API | VA-API drained | Drained / plain | Vulkan Video |
+|---|---:|---:|---:|---:|
+| exact, noisy 5760×2880 HEVC | 125.59 / 243.94 | 135.11 / 251.81 | 1.08 / 1.03 | 119.69 / 242.17 |
+| keyframe, noisy 5760×2880 HEVC | 49.20 / 55.94 | 58.63 / 64.83 | 1.19 / 1.16 | 44.46 / 50.41 |
+| exact, X5 3840² stream (8K30) | 182.53 / 370.88 | 188.79 / 377.06 | 1.03 / 1.02 | 183.83 / 378.24 |
+| keyframe, X5 3840² stream | 21.61 / 35.61 | 28.07 / 41.91 | 1.30 / 1.18 | 16.43 / 27.89 |
+| exact, LRV 1664×832 | 17.52 / 22.41 | 18.41 / 23.16 | 1.05 / 1.03 | 16.91 / 21.28 |
+| keyframe, LRV 1664×832 | 4.36 / 4.78 | 4.98 / 5.41 | 1.14 / 1.13 | 3.61 / 4.38 |
+
+A drain costs a seek about 0.6 to 9.5 ms, which weighs most on the
+keyframe seeks, since they decode one frame: they came out 14 to 30 %
+slower at the median and 13 to 18 % at p95, past D79's 15 % line on the
+X5's stream and the 5.7K clip, and the exact seeks 2 to 8 %. The same
+run passed `gui_decode_behind` and `gui_smoke` (nothing drained on
+Vulkan), and the headless VA-API row of
+`bench_playback_realtime_5k7_10bit` showed 4.00 frames a second again,
+with the drain at 110.52 / 132.27 ms and the download at 66.49 / 67.97
+ms at p50 / p95. `download` stays the default, and the cost is Pat's,
+with the card of 2026-11-13 (D79's note of 2026-11-14).
+
+M3.7 on odin (the stitch in the projection pass, DECISIONS D66): PR #40,
+`hw-reports/m37-1a7a64e/`, at 1a7a64e (Mesa 26.2.5, FFmpeg 8.1.3). Its
+whole Tier 2 ran 62 passed, 2 failed and 1 skipped of 65 in 8685 s, and
+a second run of the six new rows alone failed the same two checks with
+the same numbers.
+
+| Row | Measured by | Asks | At 1a7a64e |
+|---|---|---|---|
+| P-SHADE | `bench_stitch_pass` | the stitched pass within 0.8 ms at 1080p and 2.0 ms at 4K on RADV (M3 plan 4.3); a miss names the redirect | passed: 0.49 ms at 1080p in both runs, 1.90 and 1.88 ms at 4K (each the median of three; 0.48 to 0.50 ms and 1.84 to 1.94 ms across them), against `fs_project`'s 0.22 and 0.77 ms, so 0.10 to 0.12 ms to spare at 4K |
+| `frame <insv>` stitched still, wall time | the `view N: frame … s` lines of `zero_copy_pair_frame_matches_the_copy` and `shared_vulkan_pair_frame_matches_the_copy` (synth's `InsvSpec::small()`, 2 × 384², each run a process of its own, under zero copy and in software) | recorded, no gate | path B's two views 0.29 and 0.28 s against software's 0.25 and 0.26 s, VA-API's 0.26 and 0.25 s against 0.25 and 0.24 s (a run alone, 36 s); both tests passed, each view 0 LSB from software, the reversed binding 92 LSB off, no slot mismatch |
+| The stitch's goldens on RADV | `goldens_on_gpu_match_reference`'s `dfish_seam` and `dfish_views` rows, and `rung2_on_radv` | the rows against their CPU and ideal references and controls, within the floors lavapipe's runs set (D32's CPU rule; never lavapipe's stored PNGs, which `goldens_on_host_llvmpipe` holds by the other-driver rule); `rung2_on_radv` against lavapipe's pictures by the other-driver rule, the seam difference with its LSB thresholds scaled to the linear light it is held in (D66), and against rung 1 by the reference rule | two checks failed: the poles' implicit-LOD control, 0 pixels past 2/255 where it must be over 0, and `rung2_on_radv`'s seam difference on the count, 6 and 7 pixels past 4 LSB (at most 6 and 5) under the rule before unit (e) scaled it; every other RADV row met its checks, and `goldens_on_host_llvmpipe` passed. Unit (e) changed both checks in the tests (D66), and odin's rerun at aef3e69 is in PROGRESS's M3.7 note |
 
 ### Framework 13 Pro (Intel Xe3, Arch)
 
@@ -1561,9 +1586,15 @@ from real time.
 Tier 1's times there, debug builds on lavapipe, for scale too: at
 a54d908 (M3.7), `cargo test` took 49.4 s for spherecut-render, 141.1 s
 for spherecut-agent and 104.7 s for spherecut-cli, once each with the
-tests built. The goldens binary took 17.54 s alone, against 9.81 s with
-M3.7's `dfish_seam` and `dfish_views` rows and rung 2's tests left out
-(17.52 s in the crate's run); `rig_shader` 0.74 s, `upload` 6.42 s,
-`pipelines` 0.87 s, agent's `rung3` 2.25 s and `look` 6.02 s, cli's
-`frame_insv` 1.72 s and `tier2_frame`'s Tier 1 tests 2.56 s. M3 plan
-19.6 gives M3.7 7 s (D66 has the overrun).
+tests built. The goldens binary took 17.54 s alone then, against 9.81
+s with M3.7's `dfish_seam` and `dfish_views` rows and rung 2's tests
+left out (17.52 s in the crate's run), and `tier2_frame`'s Tier 1 tests
+2.56 s. At aef3e69, after the slice's fix round and unit (e), the
+goldens binary took 18.27 to 19.69 s alone in six runs (18.95 s on
+average), against 10.38 to 11.23 s with M3.7's tests left out;
+`rig_shader` 0.80 to 0.98 s warm (0.72 to 0.80 s by its own clock), and
+after the fix round `upload` 6.39 s, `pipelines` 0.88 s, agent's
+`rung3` 2.20 to 2.25 s and `look` 6.02 s, and cli's `frame_insv` 1.72
+to 1.74 s. M3 plan 19.6 gives M3.7 7 s; by each test's own cost the
+slice's new Tier 1 adds about 10.0 s, and about 10.5 s with its five
+harness tests (D66; plan amendment 10).
