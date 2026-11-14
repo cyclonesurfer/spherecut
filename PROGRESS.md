@@ -4200,45 +4200,48 @@ M3.10.
   doctest, and `Imported`'s doc claims what the borrow holds. F055: one
   rule for the bless variables (`testkit::bless`: unset, empty and "0"
   are off), and the check and hw-test refuse `SPHERECUT_UPDATE_GOLDENS`
-  and `SPHERECUT_BLESS_PROJECT`; core's `tests/project_file.rs` reads its
-  switch through it. Rung 1's scenes and the attribution moved, not
+  and `SPHERECUT_BLESS_PROJECT`; core's `tests/project_file.rs` reads
+  its switch through it. Rung 1's scenes and the attribution moved, not
   copied, from `tests/instrument.rs` into render's `tests/common`
   (`rung1.rs`, `attribution.rs`), so the goldens binary draws rung 1's
   pairs. The stitch's types: `render::rig` with `RigUniform` (416 bytes,
   the tracks as padding, where plan 10.2 sketched 336) and `pack`, which
   refuses Mei beside KB, a gain that isn't finite and at least 0, and a
   binding other than tracks 0 and 1 once each, but never a side unlike
-  its slot; `SourceRef`; `layouts::view_rig` (group 3) and
-  `layouts::sampler_caps` (group 2); the strip pass through
-  `ViewUniform::strip` (out kind 2) and a public `Projector::record_strip`;
-  the pair's `SourceFrames`, whose frames are `[&dyn VideoPlanes; 2]`;
-  `rig_lod_map`, which is debug mode 3 for a pair; and debug modes 4 to
-  7 for a pair alone (`DebugMode::ALL` keeps its 4 and `RIG` lists 8).
-  goldens.rs names its submodules' tests by their full paths, since with
-  `--exact` a bare name runs nothing. 485b381 alone fails xtask's docs
-  test until 813a86e names `bench_stitch_pass` in perf.md.
+  its slot; `SourceRef`; `layouts::view_rig` (group 0: the view, and the
+  rig at binding 1), the lenses' sources in groups 1 and 3
+  (`layouts::source`), and `layouts::sampler_caps` (group 2); the strip
+  pass through `ViewUniform::strip` (out kind 2) and a public
+  `Projector::record_strip`; `SourceFrames::Pair` (a `LensFrame` for
+  each lens, the rig and the gains), and the goldens' `PairSource`,
+  whose frames are `[&dyn VideoPlanes; 2]`; `rig_lod_map`, which is
+  debug mode 3 for a pair; and debug modes 4 to 7 for a pair alone
+  (`DebugMode::ALL` keeps its 4 and `RIG` lists 8). goldens.rs names its
+  submodules' tests by their full paths, since with `--exact` a bare
+  name runs nothing. 485b381 alone fails xtask's docs test until 813a86e
+  names `bench_stitch_pass` in perf.md.
 - **(a) The stitch (ef29c50 to fe433f2).** F025, by the orchestrator's
-  choice (i): each lens's band is centred where it sees the seam, at
-  c_b = 90° + δ_b with δ_b = atan(q c_b·a_b) (0.46° at q = 0.5 m⁻¹, 3.06°
-  at 3.34), with a half width h_b = min(h, max(room_b, 0.5°)), where
-  room_b is min(θ_max, θ_frame) less the margin's angle less c_b. Where
-  no feather weighs, a direction goes whole to the covering lens nearer
-  its band's centre by θ_b − c_b, half each at a tie. On the X5-like rig
-  at 3.34 m⁻¹ and a 5° feather the band where both lenses weigh widens
-  from 3.8929° to 10.0522° on average. `Rig::weights`, `feather_at` and
-  the reference take it; `validate` and 11.2's bound are unchanged (they
-  have no δ term, and `feather_at` shrinks h), and rung 1's
-  `instrument.json` needed no new blessing. `fs_rig` (`shaders/rig.wgsl`)
-  copies `render_rig` with its departures named, and `reference_rig.rs`
-  holds the stitch apart from 7a06482's weights near 90° (116 pixels,
-  909 f16 steps). `StillRenderer` draws a pair through `render_from` on
-  all three upload paths, alike bit for bit
-  (`a_pair_renders_alike_on_every_upload_path`; control: the buffers
-  swapped between tracks, 23418 of 24576 values differ), and
-  `Run::render_pair` refuses gains other than the pair's (f6b64bb).
-  goldens.rs stores and checks pairs as 10.5 records them.
-  `rig_shader.rs`'s 14 tests (15 after the fix round) hold the shader
-  to `render_rig_of` by D32's reference rule; mode 7 is split into an
+  choice (i): each lens's band is centred where it sees the seam, at c_b
+  = 90° + δ_b with δ_b = atan(q p_b·a_b), p_b the lens's centre in
+  metres (0.46° at q = 0.5 m⁻¹, 3.06° at 3.34), with a half width h_b =
+  min(h, max(room_b, 0.5°)), where room_b is min(θ_max, θ_frame) less
+  the margin's angle less c_b. Where no feather weighs, a direction goes
+  whole to the covering lens nearer its band's centre by θ_b − c_b, half
+  each at a tie. On the X5-like rig at 3.34 m⁻¹ and a 5° feather the
+  band where both lenses weigh widens from 3.8929° to 10.0522° on
+  average. `Rig::weights`, `feather_at` and the reference take it;
+  `validate` and 11.2's bound are unchanged (they have no δ term, and
+  `feather_at` shrinks h), and rung 1's `instrument.json` needed no new
+  blessing. `fs_rig` (`shaders/rig.wgsl`) copies `render_rig` with its
+  departures named, and `reference_rig.rs` holds the stitch apart from
+  7a06482's weights near 90° (116 pixels, 909 f16 steps).
+  `StillRenderer` draws a pair through `render_from` on all three upload
+  paths, alike bit for bit (`a_pair_renders_alike_on_every_upload_path`;
+  control: the buffers swapped between tracks, 23418 of 24576 values
+  differ), and `Run::render_pair` refuses gains other than the pair's
+  (f6b64bb). goldens.rs stores and checks pairs as 10.5 records them.
+  `rig_shader.rs`'s 14 tests (15 after the fix round) hold the shader to
+  `render_rig_of` by D32's reference rule; mode 7 is split into an
   f16-step check on a flat pair and `SeamLines` under the CPU rule, and
   the ties' control draws a rig turned apart (f 150, the lenses turned
   5° towards +X, lens 1's cx 319, a 4° feather). The LOD margin was
@@ -4280,26 +4283,28 @@ M3.10.
   goldens binary went from 10.47 s to 16.12 s.
 - **(d) frame and look on the GPU (d326311 to f73ace6).** `open_pair`
   takes `Options` and opens a pair on the GPU: each lens decodes as
-  `Still::open` decodes one stream, on one shared FFmpeg device, with two
-  copy-outs under path B, two imports under zero copy and the bytes
+  `Still::open` decodes one stream, on one shared FFmpeg device, with
+  two copy-outs under path B, two imports under zero copy and the bytes
   otherwise, and `StillRenderer` draws the pair. frame stitches an
   Insta360 pair on the GPU without `--reference`; `--decoder` works on a
   pair with or without `--reference`, a missing decoder is
-  `hw_unavailable` (exit 3), and M3.5's usage refusal is gone. frame runs
-  `check_pair` before it opens the GPU (`open_pair` and `check_pair`
-  share `pair_parts`). A pair whose calibration reads isn't called
-  unstitched: `not_equirect` gives `INSTA360_PAIR`'s words, and one whose
-  calibration doesn't read `INSTA360_NO_CALIBRATION`'s ("shown as its
-  lenses"), with a `--lens` hint. look stitches an `.insv` whose
-  calibration reads, rendering at `STITCH_MIN_WIDTH` (160 px) or a whole
-  multiple of the tile and shrinking by area (at 128 px a gap would
-  cover 2.7 % of the picture), and shows one without as its lenses; look
-  decodes by the copy path alone, and `look.json` is unchanged.
-  `not_yet`'s advice for a fisheye pair drops `--reference`. Rung 3's
-  GPU half, `rung3_gpu_render_equals_rung2`, is byte for byte on
-  lavapipe (control: the stored reversed binding), and rung 3 decodes in
-  software whatever the host has (6ec3281). Tier 2: the goldens' GPU
-  tests run both dfish lists, `rung2_on_radv` holds rung 2 on a GPU, and
+  `hw_unavailable` (exit 3), and M3.5's usage refusal is gone. frame
+  runs `check_pair` before it opens the GPU (`open_pair` and
+  `check_pair` share `pair_parts`). A pair whose calibration reads isn't
+  called unstitched: `not_equirect` gives `INSTA360_PAIR`'s words, and
+  one whose calibration doesn't read `INSTA360_NO_CALIBRATION`'s ("shown
+  as its lenses"), with a `--lens` hint. look stitches an `.insv` whose
+  calibration reads, rendering an equirect tile narrower than
+  `STITCH_MIN_WIDTH` (160 px) at the smallest whole multiple of its
+  width that reaches 160 px and shrinking it by area (at 128 px a gap
+  would cover 2.7 % of the picture; a camera's or a face's tile renders
+  at its own size), and shows one without as its lenses; look decodes by
+  the copy path alone, and `look.json` is unchanged. `not_yet`'s advice
+  for a fisheye pair drops `--reference`. Rung 3's GPU half,
+  `rung3_gpu_render_equals_rung2`, is byte for byte on lavapipe
+  (control: the stored reversed binding), and rung 3 decodes in software
+  whatever the host has (6ec3281). Tier 2: the goldens' GPU tests run
+  both dfish lists, `rung2_on_radv` holds rung 2 on a GPU, and
   `zero_copy_pair_frame_matches_the_copy` and
   `shared_vulkan_pair_frame_matches_the_copy` hold an `.insv`'s `frame
   --zero-copy` under VA-API and path B to a software decode, strict,
@@ -4397,7 +4402,7 @@ the code first, and each fix shown failing first where it could be):
 **odin** (PR #40, `hw-reports/m37-1a7a64e/`, at 1a7a64e: an RX 7600
 under RADV NAVI33, Mesa 26.2.5, llvmpipe on LLVM 22.1.8, FFmpeg 8.1.3,
 Fedora 44):
-- Run 1, the whole Tier 2 (`hw-test --samples samples --no-tier1`, 8685
+- Run 1, the whole Tier 2 (`hw-test --samples samples --no-tier1`, 8682
   s), exited 1: 62 passed, 2 failed and 1 skipped of 65, against PR
   #38's 59, 0 and 1 of 60. New and passing: `project_create_x5`,
   `bench_stitch_pass`, `zero_copy_pair_frame_matches_the_copy` and
@@ -4429,15 +4434,19 @@ Fedora 44):
   pictures) on the count alone: the equirect's seam difference 60.73 dB,
   SSIM 0.99947, 6 pixels past 4 LSB, at most 6; the −X stripe's 51.55
   dB, SSIM 0.99555, 7 pixels, at most 5. Its control, lens 1 yawed 0.5°,
-  37.86 dB and 60 LSB; the weights (mode 6) 100.58 to 103.13 dB; the
-  unlike gains' stitch 58.78 to 59.18 dB.
+  37.86 dB and 60 LSB; the weights (mode 6) 100.58 to 103.13 dB on the
+  views and the 45° seam and 110.48 dB on the equirect, against floors
+  of 97.74 to 108.25 dB that hold only where a GPU's f32 θ rounds to
+  rung 1's f16 almost everywhere (amendment 10); the unlike gains'
+  stitch 58.78 to 59.18 dB.
 - P-SHADE passed in both runs: "P-SHADE passes: the stitch takes 0.492
   ms at 1920x1080 (at most 0.8), 1.898 ms at 3840x2160 (at most 2)" (run
   2: 0.487 and 1.880 ms). The medians of three were 0.49 ms (0.49 to
   0.50) and 1.90 ms (1.85 to 1.94) in run 1, and 0.49 ms (0.48 to 0.49)
   and 1.88 ms (1.84 to 1.91) in run 2, against `fs_project`'s 0.22 and
-  0.77 ms (amendment 6): 0.10 to 0.12 ms to spare at 4K. The bench ran
-  in 1.17 and 1.15 s.
+  0.77 ms (amendment 6's baseline; the same runs' projection on the
+  stitch's views 0.20 to 0.21 and 0.76 to 0.77 ms): 0.10 to 0.12 ms to
+  spare at 4K. The bench ran in 1.17 and 1.15 s.
 - `zero_copy_pair_frame_matches_the_copy` (VA-API, DMA-BUF) and
   `shared_vulkan_pair_frame_matches_the_copy` (path B) passed: both
   views 0 LSB from software, the reversed binding 92 LSB off, no slot
@@ -4454,15 +4463,15 @@ Fedora 44):
 
 **Open, and known limits:**
 - 19.6's M3.7 row, "the goldens binary + ≤ 7 s", isn't met. The slice's
-  new Tier 1 adds about 10.0 s by each test's own cost (unit (d)
-  counted 9.66 s at 93dc284 without `frame_insv.rs`'s 0.31 s, and about
-  9.5 s after its review; the fix round's 9.9 s took the binary's 17.79 s
-  against the older 9.81 s), and about 10.5 s with the slice's five
-  harness tests, which those counts left in the binary's base
-  (Measured, below). Pat's
-  card on the row, which recommends raising it from 7 s to 10 s, isn't
-  answered; the plan keeps 7 s with the overrun named (amendment 10). No
-  fixture was shrunk and no check cut.
+  new Tier 1 adds about 10.0 s by each test's own cost, or its binary's
+  growth where the test shares one (unit (d) counted 9.66 s at 93dc284
+  without `frame_insv.rs`'s 0.31 s, and about 9.5 s after its review;
+  the fix round's 9.9 s took the binary's 17.79 s against the older 9.81
+  s), and about 10.5 s with the slice's five harness tests, which those
+  counts left in the binary's base (Measured, below). Pat's card on the
+  row, which recommends raising it from 7 s to 10 s, isn't answered; the
+  plan keeps 7 s with the overrun named (amendment 10). No fixture was
+  shrunk and no check cut.
 - `rig_shader.rs` prints its time against a 0.8 s share and takes 0.72
   to 0.80 s by its own clock (0.73 to 0.92 s wall over eight runs in the
   fix round); the share is printed, not asserted.
@@ -4473,10 +4482,10 @@ Fedora 44):
   Known issues), is Pat's with the card of 2026-11-13.
 - From the units, handed on: a `Seam` constructor that takes strips,
   `num()`'s NaN and infinities, and registration on V6 at 768², (b);
-  capping the margin for look's small tiles, not built, since look
-  renders at 160 px or more instead, and `streams_left_out` kept, (d);
-  `fs_eac` (M3.18), and `fs_project`'s caps with the caps' groups
-  (M3.20); for M3.6, the table refusal's wording and a test of it
+  capping the margin for look's small equirect tiles, not built, since
+  look renders them at 160 px or more instead, and `streams_left_out`
+  kept, (d); `fs_eac` (M3.18), and `fs_project`'s caps with the caps'
+  groups (M3.20); for M3.6, the table refusal's wording and a test of it
   through a project and `check`.
 - From unit (e): the seam difference's PSNR and SSIM floors aren't
   derived by its arithmetic (a PSNR scaled as the LSB thresholds are
@@ -4498,8 +4507,8 @@ lavapipe), at aef3e69 unless named:
 - Tier 1 against 19.6's M3.7 row (7 s, the goldens binary's growth with
   rung 1's pairs rendered afresh, and the rest): the goldens binary (28
   passed, 3 ignored) took 18.27 to 19.69 s in six runs (18.95 s on
-  average), from 17.54 s at 93dc284, 17.93 s at f73ace6, 17.79 to 17.80 s
-  after the fix round and 18.53 to 18.80 s in unit (e). Without the
+  average), from 17.54 s at 93dc284, 17.93 s at f73ace6, 17.79 to 17.80
+  s after the fix round and 18.53 to 18.80 s in unit (e). Without the
   three dfish modules (`--skip dfish_seam:: --skip dfish_views:: --skip
   rung2::`, 17 passed) it took 10.90 to 11.47 s (11.19 s on average), so
   the modules add about 7.8 s; without the slice's five harness tests
@@ -4509,15 +4518,16 @@ lavapipe), at aef3e69 unless named:
   warm (1.34 s cold), 0.72 to 0.80 s by its clock; `upload.rs`'s pair
   test and bench smoke 0.16 s; `rung3_gpu_render_equals_rung2` about
   0.17 s of `rung3.rs`'s 2.20 to 2.25 s; `frame_insv.rs`'s GPU tests
-  about 0.31 s; look's three `.insv` tests about 0.56 s, N10's 0.24 s of
-  it; and `tier2_frame.rs`'s two lavapipe checks 0.21 to 0.23 s (the
-  last five as the units measured them). In all about 10.5 s, or about
-  10.0 s with the modules alone counted in the binary. Changed suites, after the fix round: `pipelines.rs` 0.88 s
-  (0.80 s at f73ace6), `reference_rig.rs` 1.62 s, `frame_insv.rs` 1.72
-  to 1.74 s of its 1.9 s, `upload.rs` 6.39 s, look 6.02 s, cli's
-  `contract.rs` 13.56 s, and xtask's binary 1.75 s with 86 tests (1.73 s
-  with 84). M3's budgets sum to 137.5 s in the plan; with the M3.7 row
-  at the measured 10.5 s they would come to about 141 s.
+  about 0.31 s; look's three `.insv` tests about 0.56 s of its binary's
+  growth, N10's 0.24 s of it (0.49 s alone); and `tier2_frame.rs`'s two
+  lavapipe checks 0.21 to 0.23 s (the last five as the units measured
+  them). In all about 10.5 s, or about 10.0 s with the modules alone
+  counted in the binary. Changed suites, after the fix round:
+  `pipelines.rs` 0.88 s (0.80 s at f73ace6), `reference_rig.rs` 1.62 s,
+  `frame_insv.rs` 1.72 to 1.74 s of its 1.9 s, `upload.rs` 6.39 s, look
+  6.02 s, cli's `contract.rs` 13.56 s, and xtask's binary 1.75 s with 86
+  tests (1.73 s with 84). M3's budgets sum to 137.5 s in the plan; with
+  the M3.7 row at the measured 10.5 s they would come to about 141 s.
 - The LOD margin (unit (a), amendment 9's open item): where a tune
   passes the coverage rule by less than the margin, the ring no lens
   covers is a crescent over 65° to 100° of the seam, widest by the two
@@ -6917,14 +6927,14 @@ each slice's merge sweeps the list.
   of 2026-11-13)
 - Plan 19.6's M3.7 row ("the goldens binary + ≤ 7 s") isn't met on the
   4-core cloud box: the slice's new Tier 1 adds about 10.0 s by each
-  test's own cost (the goldens binary's dfish modules about 7.8 s,
-  `rig_shader.rs` about 0.8 s, look's `.insv` tests about 0.56 s,
-  `frame_insv.rs`'s GPU tests about 0.31 s and the rest under 0.25 s
-  each), and about 10.5 s with the slice's five harness tests in the
-  goldens binary (0.5 s). Pat's card recommends
-  raising the row to 10 s and isn't answered; the plan keeps 7 s with
-  the overrun named (amendment 10). No fixture was shrunk and no check
-  cut. (as of 2026-11-14)
+  test's own cost, or its binary's growth where the test shares one (the
+  goldens binary's dfish modules about 7.8 s, `rig_shader.rs` about 0.8
+  s, look's `.insv` tests about 0.56 s, `frame_insv.rs`'s GPU tests
+  about 0.31 s and the rest under 0.25 s each), and about 10.5 s with
+  the slice's five harness tests in the goldens binary (0.5 s). Pat's
+  card recommends raising the row to 10 s and isn't answered; the plan
+  keeps 7 s with the overrun named (amendment 10). No fixture was shrunk
+  and no check cut. (as of 2026-11-14)
 - `rig_shader.rs` prints its time against a 0.8 s share and takes 0.73
   to 0.92 s wall (eight runs in M3.7's fix round; 0.72 to 0.80 s by its
   own clock at aef3e69). The share is printed, not asserted, so a run
