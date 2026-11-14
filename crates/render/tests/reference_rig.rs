@@ -586,17 +586,29 @@ fn band_centre(rig: &Rig, b: usize) -> f64 {
     FRAC_PI_2 + (rig.q * (lens.lens_from_rig * lens.centre_m).z).atan()
 }
 
+/// Where 7a06482 centred every lens's band (a control): on 90°, whatever
+/// q, which F025's centre is only at q = 0.
+fn at_90(_: &Rig, _: usize) -> f64 {
+    FRAC_PI_2
+}
+
 /// 6.2's weights as they stood before a covering lens took what no
 /// feather weighs (a control, and the weights wherever a feather weighs):
 /// each covering lens's 1 − smoothstep over its band's centre ± its own
 /// h, normalised, and both 0 where they sum to 0.
 fn feathers_alone(rig: &Rig, p: &Probe) -> [f64; 2] {
+    feathers_about(rig, p, band_centre)
+}
+
+/// [`feathers_alone`] with each lens's band centred where `centre` puts
+/// it, and its h shrunk by the room the mask leaves past that centre.
+fn feathers_about(rig: &Rig, p: &Probe, centre: fn(&Rig, usize) -> f64) -> [f64; 2] {
     let w = [0, 1].map(|b| {
         if !rig.covers(b, p.d, p.lod[b]) {
             return 0.0;
         }
         let lens = &rig.lenses[b];
-        let c = band_centre(rig, b);
+        let c = centre(rig, b);
         let margin = rig.margin_texels * p.lod[b].max(0.0).exp2() / lens.band_texels_per_radian;
         let room = lens.theta_max.min(lens.theta_frame) - margin - c;
         let h = rig.feather.min(room.max(0.5f64.to_radians())).max(0.0);
@@ -611,7 +623,25 @@ fn feathers_alone(rig: &Rig, p: &Probe) -> [f64; 2] {
 /// (θ_b − c_b), whole (½ each were the two as near), and 0 only where no
 /// lens covers.
 fn taken_whole(rig: &Rig, p: &Probe) -> [f64; 2] {
-    let theta = [0, 1].map(|b| off_axis(rig.ray(b, p.d)) - band_centre(rig, b));
+    taken_whole_about(rig, p, band_centre)
+}
+
+/// The weights as 7a06482 built them (a control): each lens's band
+/// centred on 90°, its h shrunk by the room past 90°, and what no feather
+/// weighs taken whole by the covering lens with the smaller θ, ½ each at
+/// one θ.
+fn weights_at_7a06482(rig: &Rig, p: &Probe) -> [f64; 2] {
+    let w = feathers_about(rig, p, at_90);
+    if w != [0.0; 2] {
+        w
+    } else {
+        taken_whole_about(rig, p, at_90)
+    }
+}
+
+/// [`taken_whole`] with each lens's band centred where `centre` puts it.
+fn taken_whole_about(rig: &Rig, p: &Probe, centre: fn(&Rig, usize) -> f64) -> [f64; 2] {
+    let theta = [0, 1].map(|b| off_axis(rig.ray(b, p.d)) - centre(rig, b));
     match [0, 1].map(|b| rig.covers(b, p.d, p.lod[b])) {
         [true, true] if theta[0] < theta[1] => [1.0, 0.0],
         [true, true] if theta[1] < theta[0] => [0.0, 1.0],
@@ -2075,7 +2105,10 @@ fn masks_match_on_the_scenes_rigs(s: &Scene) {
 /// stitched infinitely far with lens 1 ending at 91° under a feather of
 /// 1°: its mask, less the margin, ends short of where lens 0's feather
 /// does, and lens 0 alone covers the ring between. The feathers alone, as
-/// the weights stood, leave both rings black.
+/// the weights stood, leave both rings black. The weights as 7a06482
+/// built them, each band about 90°, miss the stitch at 2 m (where the
+/// turn closes the seam, both lenses weigh a pixel that one of them sees
+/// between 90° and its step), and give it exactly infinitely far.
 fn rings_no_feather_weighs_are_drawn(s: &Scene) {
     let turned = |yaw: f64| LensTune {
         ypr_deg: [yaw, 0.0, 0.0],
@@ -2117,6 +2150,10 @@ fn rings_no_feather_weighs_are_drawn(s: &Scene) {
         // which leave the ring black; and from the farther lens's light
         // where both cover the ring.
         let (mut own, mut alone, mut farther) = (0.0f64, 0.0f64, 0.0f64);
+        // The stitch's worst miss from its blend by the weights as
+        // 7a06482 built them, each band about 90°, and the pixels whose
+        // weights the two rules give otherwise.
+        let (mut at_90, mut apart) = (0.0f64, 0usize);
         for (n, p) in probes.iter().enumerate() {
             let covers = [0, 1].map(|b| rig.covers(b, p.d, p.lod[b]));
             let covered = covers[0] || covers[1];
@@ -2129,13 +2166,17 @@ fn rings_no_feather_weighs_are_drawn(s: &Scene) {
             };
             let miss = |w: [f64; 2]| pixel_steps(&stitched, n, mixed(w, light));
             let feathers = feathers_alone(rig, p);
+            let old = weights_at_7a06482(rig, p);
+            at_90 = worse(at_90, miss(old));
             if !covered || feathers != [0.0; 2] {
                 own = worse(own, miss(feathers));
+                apart += usize::from(old != feathers);
                 continue;
             }
             let whole = taken_whole(rig, p);
             own = worse(own, miss(whole));
             alone = worse(alone, miss(feathers));
+            apart += usize::from(old != whole);
             if covers == [true; 2] {
                 farther = worse(farther, miss([whole[1], whole[0]]));
             }
@@ -2145,7 +2186,9 @@ fn rings_no_feather_weighs_are_drawn(s: &Scene) {
             "{name}, a {} × {} equirect: a lens covers {} pixels that no feather weighs, and \
              both cover {} more, all drawn; {uncovered} pixels no lens covers; the stitch \
              {own:.4} f16 steps at most from the test's blend, the nearer covering lens taking \
-             those whole; by the feathers alone {alone:.0}, from the farther lens {farther:.0}",
+             those whole; by the feathers alone {alone:.0}, from the farther lens {farther:.0}; \
+             7a06482's weights differ on {apart} pixels, and the stitch is {at_90:.0} steps \
+             from their blend",
             size.0, size.1, ring[0], ring[1]
         );
         assert!(own <= NEAREST, "{name}: {own}");
@@ -2166,8 +2209,18 @@ fn rings_no_feather_weighs_are_drawn(s: &Scene) {
                 "the farther lens taking what no feather weighs",
                 at_most(farther, NEAREST),
             );
+            // Control: at 2 m each step sits 0.46° past 90°, so where the
+            // turn closes the seam both lenses weigh a pixel that one of
+            // them sees past 90°, and 7a06482's steps at 90° give it to
+            // the other alone.
+            assert!(apart > RING_LEAST, "{name}: {apart}");
+            let off = must_fail("the bands at 90° (7a06482)", at_most(at_90, NEAREST));
+            assert!(off > 100.0, "{name}: {off}");
         } else {
             assert!(ring[0] > RING_LEAST, "{name}: {ring:?}");
+            // Infinitely far, F025 centres each band on 90°, as 7a06482
+            // did.
+            assert_eq!((apart, at_90), (0, own), "{name}");
         }
     }
 }
