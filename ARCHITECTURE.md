@@ -723,7 +723,8 @@ All stored time is exact (`spherecut_core::time`):
 
 Built in M1 slice 3 for equirect sources (`spherecut-render`, DECISIONS
 D31; the golden images that hold it, D32, are under Testing tiers);
-stitching and stabilization join the same pass later.
+since M3.7 a camera's lens pair is stitched in the same pass (D66), and
+stabilization joins it in M4.
 
 ```
 VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ LinearTarget ──Encoder──▶ screen or Rgba8Unorm
@@ -775,8 +776,11 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   from a DMA-BUF at that size. `Uploader::upload_imported` copies the
   8-bit planes GPU to GPU into the slot's level 0 and runs deep ones
   through the ingest pass, then the mips, as `upload` does. Each frame
-  is imported afresh, and the caller keeps the frame until the GPU work
-  that read it is done. Path B: `render::vkshare` opens the device
+  is imported afresh; `Importer::import` gives an `Imported` handle that
+  borrows the frame, so the frame outlives the handle (F120), and the
+  caller keeps the frame until the GPU work that read it is done (a
+  pair's still holds both lenses' imports until its render is done).
+  Path B: `render::vkshare` opens the device
   shared, planning a decode queue and two compute queues wgpu never
   uses, one FFmpeg's and one its `Copier`'s. The copier copies a Vulkan
   Video frame's planes, under FFmpeg's frame lock and its timeline
@@ -788,12 +792,28 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   queues besides wgpu's) is planned by `core::vkplan`, which media's
   doctor uses too, so that doctor's `shared_decode` is the renderer's
   answer (slice 9).
-* **`Projector::record`** draws a slot through a `ViewParams`
-  (orientation and `Lens`) into a `LinearTarget`: per pixel a ray from
-  the lens, rotated into the world, its equirect uv, an LOD from central
-  differences of the direction, a trilinear (or anisotropic) tap of each
-  plane, and the 3×4 colour matrix and the sRGB EOTF. Pipelines exist per
-  `Filter` and `DebugMode` and are built on first use.
+* **`Projector::record`** draws a `SourceRef` through a `ViewParams`
+  (orientation and `Lens`) into a `LinearTarget`: one equirect frame's
+  slot, or since M3.7 a lens pair's two slots, by track, with the rig
+  they are stitched by (the stitch on the GPU, below). For an equirect,
+  per pixel a ray from the lens, rotated into the world, its equirect
+  uv, an LOD from central differences of the direction, a trilinear (or
+  anisotropic) tap of each plane, and the 3×4 colour matrix and the
+  sRGB EOTF. Pipelines are keyed by `Filter`, `DebugMode`, pass
+  (project, flat or strip) and `SourceKind` (`Equirect` or `Rig`), and
+  built on first use or ahead of a draw (`prepare`, `prepare_flat`,
+  `prepare_rig`, `prepare_strip`), outside the map's lock. An equirect's
+  draw binds the view (group 0), its slot (group 1) and the sampler
+  (group 2), as before M3.7; a pair's binds the view with the rig at
+  binding 1 (each `LinearTarget`'s `rig_group`), block 0's slot, the
+  sampler with the caps uniform and a cap texture
+  (`layouts::sampler_caps`: until M3.20 one of the projector's four
+  caps-off groups) and block 1's slot (group 3). `record` refuses a
+  debug mode the source has no form for (4 to 7 with an equirect
+  frame), and a pair whose rig doesn't read tracks 0 and 1, one each,
+  or was packed for slots of other sizes than those bound.
+  `Projector::record_strip` is the strip pass (`fs_rig_strip`): one lens
+  of a pair unwrapped about the seam on `StripSpec::dir`'s grid.
   `Projector::record_flat_unchecked` is the flat pass (`fs_flat`, slice
   8): the picture's own texels through the clamp sampler, for the raw
   view and `StillOptions.flat`, against `reference::render_flat`.
@@ -808,7 +828,17 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   at an origin, for egui's frame (slice 7) or an offscreen texture.
 * **`render_still`** (and `StillRenderer`, which keeps its pipelines)
   does all of it headless and reads back an `Image`: 8-bit through the
-  encode pass, 16-bit or linear from the linear target.
+  encode pass, 16-bit or linear from the linear target. `StillRenderer`
+  keeps a slot for each of a pair's tracks, and since M3.7 its
+  `render_blurred` and `render_yuv` (below) take `SourceFrames`: one
+  frame (`One`), or a lens pair with its `Rig` and the frame's gains
+  (`Pair`), each picture a `LensFrame`, its frame and where its planes
+  come from (`PlaneSource`: the frame's bytes, `Imported` textures, or
+  path B's `Buffer`). A pair is packed before any upload, and each lens
+  goes whole into its track's slot by its own path. `render`,
+  `render_imported` and `render_copied` stay one-frame wrappers, and
+  `strips` draws both blocks' strips through the strip pass, with
+  `seam::strip_coverage`'s validity.
 * **For export** *(M2.3, D49)*: a `ViewParams` also says what it
   renders (`out`: the lens, or the whole sphere as equirect, turned by
   its orientation) and may be framed (`Framing`: the lens spans a
@@ -841,6 +871,19 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   the stitch is black only where no lens covers, and `fs_rig`'s `weigh`
   copies the rule. `RigDebug` writes a lens alone, the weights or the
   seam difference instead (the plan's debug modes 4 to 7).
+* **The stitch on the GPU** *(M3.7, D66)*: `shaders/rig.wgsl`, appended
+  to `project.wgsl` in one module (`layouts::PROJECT_WGSL`), adds
+  `fs_rig`, which copies `render_rig` as built, and `fs_rig_strip`, one
+  lens unwrapped about the seam (`ViewUniform::strip`), beside
+  `fs_project` and `fs_flat`. `render::rig::pack` is the one place a
+  `Rig`'s f64 numbers become the shader's f32 (`RigUniform`, by
+  calibration block, for the slots' own sizes and with the frame's
+  gains). A pair draws every debug mode (`DebugMode::RIG`): 4 to 7 as
+  `RigDebug` writes them, and 3 the LOD of the lens that weighs more
+  (`reference::rig_lod_map`). `fs_project`'s layout is unchanged and
+  holds no rig global (`fs_project_holds_no_rig_global`). D66 has the
+  uniform's fields, the bind groups, the departures from the plan and
+  the tests.
 * **A pair made ready once** *(M3.4, D65)*: `reference::LensPair` is a
   pair's two pictures with their mip chains in f64, and nothing of a
   rig. `render_rig_of` and `seam::strips_of` take the pair and, with
@@ -881,13 +924,14 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   `Signature::term_se_deg` tells the two apart. The estimator's floors
   were set on synthetic strips and have met no footage.
 
-What is still planned *(M3 on)*, for every source type: in WGSL, "direction on the
-unit sphere → texel(s)" for the GoPro EAC pair and calibrated dual
-fisheye, with the view orientation composed with the stabilization
-rotation, lenses blended across the seam, and the colour pipeline in
-float before the output. Stitching, stabilization and reframing then
-happen in one pass shared by the viewer and the exporter, and an
-intermediate equirect exists only as the output of a 360 export.
+What is still planned *(M3 on)*: the stitch in the viewer (M3.10) and
+the exporter (M3.11); `fs_eac` for the GoPro EAC pair (M3.18); the
+poles' caps (`fs_project_caps` and each media's caps groups, M3.20);
+the view orientation composed with the stabilization rotation (M4);
+and the colour pipeline in float before the output (M7). Stitching,
+stabilization and reframing then happen in one pass shared by the
+viewer and the exporter, and an intermediate equirect exists only as
+the output of a 360 export.
 
 ## Export *(M2.4 and M2.5, D52)*
 
