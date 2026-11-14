@@ -4390,7 +4390,7 @@ the code first, and each fix shown failing first where it could be):
   diff acd9d6f` on them is empty).
 - **(d) The note and the check.** This unit wrote this note and plan
   amendment 10, corrected D66 in place (its Cost paragraph and P-SHADE),
-  dated notes on D32, D63, D64, D65 and D79, and perf.md's rows, ran the
+  dated notes on D25, D32, D63, D65 and D79, and perf.md's rows, ran the
   touched properties at 100,000 cases, and runs the check once after its
   last commit (below).
 
@@ -6254,7 +6254,7 @@ each slice's merge sweeps the list.
   against 4.36 ms at the median on the LRV (1.14, and 1.13 at p95), 28.07
   against 21.61 ms on the X5's 3840² stream (1.30 and 1.18) and 58.63
   against 49.20 ms on the 5.7K clip (1.19 and 1.16); exact seeks came
-  within 3 to 8 %. A drain costs a seek about 0.6 to 9.5 ms, which weighs
+  within 2 to 8 %. A drain costs a seek about 0.6 to 9.5 ms, which weighs
   most on the short keyframe seeks. `download` stays the default (D79's
   note); a follow-up could skip the drain on a seek's landing download,
   and the choice is Pat's, with the card of 2026-11-13, which asks
