@@ -51,8 +51,8 @@ use super::common::rung1::{
 use super::common::{Frame, Kind, color, frame};
 use super::{
     CPU_FLOOR_DB, CPU_MARGIN_DB, CPU_MAX_CHANNEL, IDEAL_MARGIN_DB, Mode, PairSource, Row, Run,
-    UPDATE, bless, diff_dir_beside, eotf, gpu, max_diff, num, oetf, pair_geometry, psnr_in,
-    psnr_of, run_these, unit, view_about,
+    Stitched, UPDATE, bless, diff_dir_beside, eotf, gpu, max_diff, num, oetf, pair_geometry,
+    psnr_in, psnr_of, run_these, sides, unit, view_about,
 };
 
 /// Where these rows' images and manifest live.
@@ -107,7 +107,8 @@ fn x5_source<'a>(
 ) -> PairSource<'a> {
     let x5 = x5();
     let geometry = pair_geometry(&x5.planted, tune, r_m);
-    PairSource::new(name, frames, &x5.cal, geometry, gains)
+    let rig = sphere_rig(&x5.cal, &x5.planted, tune, FRONT_TRACK, sides(frames)).unwrap();
+    PairSource::new(name, frames, &x5.cal, geometry, &rig, gains)
 }
 
 /// One of rung 1's pairs as the planes a source records.
@@ -129,7 +130,7 @@ fn render(
     rig: &Rig,
     shot: &Shot,
     debug: DebugMode,
-) -> Option<Image> {
+) -> Option<Stitched> {
     let opts = StillOptions {
         debug,
         ..StillOptions::default()
@@ -582,7 +583,14 @@ fn v6_source() -> PairSource<'static> {
     let v6 = v6();
     let geometry = pair_geometry(&v6_planted(rendered_reading()), &far(), f64::INFINITY);
     let frames: [&dyn VideoPlanes; 2] = [&v6.frames[0], &v6.frames[1]];
-    PairSource::new("v6_seamlines", frames, &x5_like_v6(), geometry, UNIT)
+    PairSource::new(
+        "v6_seamlines",
+        frames,
+        &x5_like_v6(),
+        geometry,
+        &v6.as_rendered,
+        UNIT,
+    )
 }
 
 /// The registration the GPU's strips measure (8.2, 8.3): the far
@@ -812,7 +820,7 @@ fn dfish_exposure_match(run: &mut Run<'_>) {
     ) else {
         return;
     };
-    let [lens_0, lens_1, lens_1_off] = [&lens_0, &lens_1, &lens_1_off].map(unit);
+    let [lens_0, lens_1, lens_1_off] = [&*lens_0, &*lens_1, &*lens_1_off].map(unit);
     // Where both lenses cover, less the pixels where either at unit gain
     // passes 95 % of the display's light, which a gain could carry past
     // white.

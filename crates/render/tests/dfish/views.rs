@@ -47,9 +47,9 @@ use super::common::rung1::{
 };
 use super::{
     CONTROL_BAD_OVER, CPU_FLOOR_DB, CPU_MARGIN_DB, CPU_MAX_CHANNEL, IDEAL_MARGIN_DB, IDEAL_MIN_LOD,
-    IDEAL_N_CHECKER, LOWER, Mode, PairSource, Row, Run, SQUARE, TWIN_THRESHOLD, UPDATE, bad, bless,
-    diff_dir_beside, gpu, ideal_check, ideal_dir, ideal_dir_in, lens, max_diff, num, pair_geometry,
-    psnr_of, rgb_unit, run_these, unit, view_about, ypr,
+    IDEAL_N_CHECKER, LOWER, Mode, PairSource, Row, Run, SQUARE, Stitched, TWIN_THRESHOLD, UPDATE,
+    bad, bless, diff_dir_beside, gpu, ideal_check, ideal_dir, ideal_dir_in, lens, max_diff, num,
+    pair_geometry, psnr_of, rgb_unit, run_these, sides, unit, view_about, ypr,
 };
 
 /// Where these rows' images and manifest live.
@@ -110,7 +110,8 @@ fn dfish_view_rows() {
 fn x5_source<'a>(name: &str, frames: [&'a dyn VideoPlanes; 2], tune: &Tune) -> PairSource<'a> {
     let x5 = x5();
     let geometry = pair_geometry(&x5.planted, tune, f64::INFINITY);
-    PairSource::new(name, frames, &x5.cal, geometry, UNIT)
+    let rig = sphere_rig(&x5.cal, &x5.planted, tune, FRONT_TRACK, sides(frames)).unwrap();
+    PairSource::new(name, frames, &x5.cal, geometry, &rig, UNIT)
 }
 
 /// One of rung 1's pairs as the planes a source records.
@@ -308,7 +309,7 @@ fn render(
     rig: &Rig,
     shot: &Shot,
     debug: DebugMode,
-) -> Option<Image> {
+) -> Option<Stitched> {
     let opts = StillOptions {
         debug,
         ..StillOptions::default()
@@ -1044,6 +1045,7 @@ fn dfish_kb_rig(run: &mut Run<'_>) {
             [&kb.frames[0], &kb.frames[1]],
             &x5.cal,
             geometry,
+            &kb.rig,
             UNIT,
         );
         let Some(got) = render(run, &pair, &kb.rig, &shot, DebugMode::Off) else {

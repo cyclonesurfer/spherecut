@@ -47,8 +47,13 @@
 //! removes the PNGs its own manifest doesn't list; and [`rung2`], the
 //! shader's stitch held to rung 1's, which stores floors alone, in
 //! `goldens/rung2.json`. They share rung 1's pairs (`tests/common/rung1.rs`)
-//! with the rest of the binary, rendered once a run. Their tests carry
-//! the module's path, `dfish_seam::dfish_seam_rows`,
+//! with the rest of the binary, rendered once a run. A pair row's entry
+//! records its source (the calibration's FNV-64, the geometry with R,
+//! the gains and both lenses' FNV-64), and keeps only a picture that the
+//! rig those build drew ([`PairSource::rig`]; a control's is refused): a
+//! change in how a rig is built from them is a change in code the rows
+//! hold, and reads as a changed render, not a changed source. Their
+//! tests carry the module's path, `dfish_seam::dfish_seam_rows`,
 //! `dfish_views::dfish_view_rows` and `rung2::rung2_x5_like_matches_rung1`
 //! among them, which a filter given `--exact` spells out whole: the bare
 //! name with `--exact` matches no test, runs nothing and passes.
@@ -326,18 +331,24 @@ struct PairSource<'a> {
     calibration_fnv64: u64,
     /// The geometry the rig is built under and the scene's distance R.
     geometry: Value,
+    /// The rig built from that calibration under that geometry: the one
+    /// whose picture of the pair [`Run::stored_pair`] keeps (the M3.7
+    /// review's N8).
+    rig: Rig,
     /// The frame's gains, by calibration block.
     gains: [[f64; 3]; 2],
 }
 
 impl<'a> PairSource<'a> {
     /// The pair `frames` (by track) of the scene `name`, seen through
-    /// `cal` under `geometry` ([`pair_geometry`]), with `gains`.
+    /// `cal` under `geometry` ([`pair_geometry`]), with `gains`; `rig` is
+    /// the rig `cal` and `geometry` build.
     fn new(
         name: &str,
         frames: [&'a dyn VideoPlanes; 2],
         cal: &CalibTruth,
         geometry: Value,
+        rig: &Rig,
         gains: [[f64; 3]; 2],
     ) -> PairSource<'a> {
         PairSource {
@@ -345,6 +356,7 @@ impl<'a> PairSource<'a> {
             frames,
             calibration_fnv64: calibration_fnv64(cal),
             geometry,
+            rig: *rig,
             gains,
         }
     }
@@ -385,10 +397,31 @@ impl<'a> PairSource<'a> {
     }
 }
 
+/// A lens pair's picture ([`Run::render_pair`]), and whether the pair's
+/// own rig ([`PairSource::rig`]) drew it.
+struct Stitched {
+    image: Image,
+    by_source_rig: bool,
+}
+
+impl std::ops::Deref for Stitched {
+    type Target = Image;
+
+    fn deref(&self) -> &Image {
+        &self.image
+    }
+}
+
 /// FNV-64 of a calibration synth makes: of its every number, as `Debug`
 /// writes them (each to the shortest digits that read back as it).
 fn calibration_fnv64(cal: &CalibTruth) -> u64 {
     spherecut_testkit::fnv64(format!("{cal:?}").as_bytes())
+}
+
+/// Each lens's side in pixels, by track: the `sides` a pair's rig is
+/// built with for `frames` (`sphere_rig`'s).
+fn sides(frames: [&dyn VideoPlanes; 2]) -> [u32; 2] {
+    frames.map(|f| f.size().0)
 }
 
 /// The geometry a pair's rig is built under, for [`PairSource`]: synth's
@@ -1116,7 +1149,8 @@ impl<'g> Run<'g> {
     /// [`StillRenderer::render_blurred`] renders a pair of its frames'
     /// bytes, or records why it couldn't. `gains` must be the pair's own,
     /// which its manifest entry records: other gains are a failure, and
-    /// nothing is rendered.
+    /// nothing is rendered. `rig` may be any, a control's among them, and
+    /// the picture says whether it was the pair's own ([`Stitched`]).
     #[allow(clippy::too_many_arguments)]
     fn render_pair(
         &mut self,
@@ -1126,7 +1160,7 @@ impl<'g> Run<'g> {
         view: &ViewParams,
         size: (u32, u32),
         opts: StillOptions,
-    ) -> Option<Image> {
+    ) -> Option<Stitched> {
         if gains != pair.gains {
             self.fail(format!(
                 "render_pair's gains {gains:?} aren't the pair's {:?}, which its manifest \
@@ -1145,7 +1179,10 @@ impl<'g> Run<'g> {
             .renderer
             .render_blurred(self.gpu, source, views, size, &opts)
         {
-            Ok(img) => Some(img),
+            Ok(image) => Some(Stitched {
+                image,
+                by_source_rig: *rig == pair.rig,
+            }),
             Err(e) => {
                 self.fail(format!("render_blurred of a pair: {e} ({})", e.code()));
                 None
@@ -1333,8 +1370,17 @@ impl<'g> Run<'g> {
 
     /// [`Self::stored`] for a row that renders a lens pair: the image
     /// against its stored golden, its entry recording the pair as
-    /// [`Self::end_pair_check`] does.
-    fn stored_pair(&mut self, what: &str, got: &Image, pair: &PairSource<'_>, view: Value) {
+    /// [`Self::end_pair_check`] does. A picture that the pair's own rig
+    /// didn't draw, a control's, isn't the source its entry records: it
+    /// is a failure, and nothing is stored.
+    fn stored_pair(&mut self, what: &str, got: &Stitched, pair: &PairSource<'_>, view: Value) {
+        if !got.by_source_rig {
+            self.fail(format!(
+                "{what} was drawn by a rig other than its source's, which the calibration and \
+                 geometry its entry records build: only that rig's picture is stored"
+            ));
+            return;
+        }
         let about = pair.about();
         self.store(what, got, (&about, Some(&about)), pair.hashes(), view);
     }
@@ -3817,6 +3863,7 @@ impl TinyPair {
             [&self.frames[0], &self.frames[1]],
             &x5_like(),
             geometry,
+            &self.rig,
             [[1.0; 3]; 2],
         )
     }
@@ -4035,6 +4082,38 @@ fn a_changed_pair_is_not_compared_as_a_render() {
     );
     let own = run.render_pair(&pair, &t.rig, pair.gains, &v, size, StillOptions::default());
     must_fail("the pair's own gains refused", own.is_none());
+}
+
+/// A stored pair row keeps only a picture its source's own rig drew, the
+/// rig built from the calibration and geometry its entry records (the
+/// M3.7 review's N8): one a control's rig drew is refused, and nothing is
+/// stored.
+///
+/// The tiny pair drawn by its rig with the feather at 0 and stored: the
+/// run fails, naming the rig. Control: drawn by its own rig, it is
+/// stored.
+#[test]
+fn a_pair_drawn_by_another_rig_isnt_stored() {
+    let s = scratch("pair-rig");
+    let t = tiny_pair();
+    let pair = t.source();
+    let (v, size) = (ViewParams::equirect(DQuat::IDENTITY), (64, 32));
+    let refused = |rig: &Rig| {
+        let mut run = Run::at(gpu(), Mode::Golden { bless: true }, &s.dir, &s.diffs);
+        run.begin("pair_stored");
+        let drawn = run.render_pair(&pair, rig, pair.gains, &v, size, StillOptions::default());
+        if let Some(img) = drawn {
+            run.stored_pair("the tiny pair", &img, &pair, view_about(&v, size));
+        }
+        eprintln!("{:?}", run.failures);
+        run.failures.len() == 1 && run.failures[0].contains("rig other than its source's")
+    };
+    let hard = Rig {
+        feather: 0.0,
+        ..t.rig
+    };
+    assert!(refused(&hard), "a hard switch's picture stored");
+    must_fail("the pair's own rig's picture refused", refused(&t.rig));
 }
 
 #[test]
