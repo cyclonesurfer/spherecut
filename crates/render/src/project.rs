@@ -310,7 +310,8 @@ pub enum SourceRef<'a> {
         /// By track, as `reference::render_rig` takes the pictures.
         lenses: [&'a GpuFrame; 2],
         /// [`crate::rig::pack`]'s, whose `tracks` say which slot each
-        /// calibration block reads.
+        /// calibration block reads, packed for these slots' own sizes
+        /// ([`crate::rig::SlotGeom::of`]).
         rig: &'a RigUniform,
     },
 }
@@ -351,21 +352,36 @@ impl SourceRef<'_> {
         }
     }
 
-    /// Refuses a source that `debug` has no form for, and a pair whose
-    /// rig doesn't read tracks 0 and 1, one each.
+    /// Refuses a source that `debug` has no form for, a pair whose rig
+    /// doesn't read tracks 0 and 1, one each, and a pair whose rig was
+    /// packed for a slot of another size than the one its block reads:
+    /// `fs_rig` divides a texel by the packed size, so it would sample
+    /// the wrong place (the M3.7 review's N1 and N3).
     fn check(&self, debug: DebugMode) -> Result<(), RenderError> {
         if !debug.draws(self.kind()) {
             return Err(RenderError::Invalid(format!(
                 "debug mode {debug:?} draws a lens pair: an equirect frame has no such mode"
             )));
         }
-        if let SourceRef::Rig { rig, .. } = self
-            && self.blocks().is_none()
-        {
+        let SourceRef::Rig { rig, .. } = self else {
+            return Ok(());
+        };
+        let Some(blocks) = self.blocks() else {
             return Err(RenderError::Invalid(format!(
                 "the rig's blocks read tracks {:?}: a pair has tracks 0 and 1, one a block",
                 rig.tracks
             )));
+        };
+        for (b, slot) in blocks.into_iter().enumerate() {
+            let (w, h) = slot.shape().size;
+            let [pw, ph, ..] = rig.lens[b].slot;
+            if pw != w as f32 || ph != h as f32 {
+                return Err(RenderError::Invalid(format!(
+                    "block {b}'s lens was packed for a {pw}x{ph} slot, and track {}'s slot is \
+                     {w}x{h}: rig::pack takes each slot's own size",
+                    rig.tracks[b]
+                )));
+            }
         }
         Ok(())
     }
@@ -844,7 +860,8 @@ impl Projector {
     /// projection per target per submission. `Device` when the device is
     /// lost ([`Gpu::check`]); `Invalid` for a mode the source has no form
     /// for (4 to 7 with an equirect frame), and for a pair whose rig
-    /// doesn't read tracks 0 and 1, one each.
+    /// doesn't read tracks 0 and 1, one each, or was packed for slots of
+    /// other sizes than those bound.
     #[allow(clippy::too_many_arguments)]
     pub fn record<'s>(
         &self,
@@ -928,7 +945,8 @@ impl Projector {
     /// [`DebugMode::Lens1`], the calibration block whose strip is drawn.
     /// One strip per target per submission, as [`Self::record`].
     /// `Invalid` for another mode, a target of another extent, and a rig
-    /// that doesn't read tracks 0 and 1, one each.
+    /// that doesn't read tracks 0 and 1, one each, or was packed for slots
+    /// of other sizes than `lenses`.
     #[allow(clippy::too_many_arguments)]
     pub fn record_strip(
         &self,

@@ -32,8 +32,9 @@ use spherecut_render::rig::{SlotGeom, pack};
 use spherecut_render::seam::{StripSpec, strip_coverage, strips_of};
 use spherecut_render::yuv::{self, YuvLayout};
 use spherecut_render::{
-    DebugMode, Depth, Image, LensFrame as StillLens, PlaneSource, RenderError, RigUniform,
-    SourceFrames, StillOptions, StillRenderer, ViewParams,
+    DebugMode, Depth, GpuFrame, Image, LensFrame as StillLens, LinearTarget, PlaneSource,
+    RenderError, RigUniform, SlotShape, SourceFrames, SourceRef, StillOptions, StillRenderer,
+    ViewParams, wgpu,
 };
 use spherecut_sphere::fisheye::{Canonical, KbLens, LensModel, Model, Unified};
 use spherecut_sphere::perspective::{Lens, Projection};
@@ -53,7 +54,7 @@ use common::{Frame, Kind, color, gpu};
 const BUDGET_S: f64 = 0.8;
 
 /// The binary's tests.
-const TESTS: [&str; 14] = [
+const TESTS: [&str; 15] = [
     "fs_rig_matches_render_rig_of",
     "fs_rig_modes_4_to_7_follow_the_blocks",
     "fs_rig_weights_light_the_ring_no_feather_weighs",
@@ -66,6 +67,7 @@ const TESTS: [&str; 14] = [
     "render_from_refuses_what_has_no_gpu_form",
     "pack_refuses_what_the_gpu_cant_draw",
     "pack_keeps_a_side_unlike_its_slot",
+    "record_refuses_a_rig_packed_for_other_slots",
     "gpu_strips_match_strips_of",
     "rig_lod_map_matches_mode_3",
 ];
@@ -1557,6 +1559,91 @@ fn pack_keeps_a_side_unlike_its_slot() {
         rule(&got_past, &wrapped),
     );
     eprintln!("past the edge against the left edge's light: {off}");
+}
+
+/// `Projector::record` and `record_strip` refuse a pair whose rig was
+/// packed for slots of other sizes than those bound (the M3.7 review's N1
+/// and N3): `fs_rig` divides a texel by the packed size, so it would
+/// sample the wrong place, and the CPU reference, which divides by the
+/// picture's own, can't see it.
+///
+/// The X5 rig packed for two 192² slots, drawn with a 384² slot on
+/// either track, is `Invalid` in both passes, naming the slot; so is a
+/// rig packed for a 192² and a 384² slot with its blocks on tracks 1 and
+/// 0, drawn with the slots swapped. Control: the slots each rig was
+/// packed for record, the blocks' tracks swapped too.
+#[test]
+fn record_refuses_a_rig_packed_for_other_slots() {
+    let _time = timed("record_refuses_a_rig_packed_for_other_slots");
+    let s = small();
+    let r = renderer();
+    let projector = r.projector();
+    let filter = StillOptions::default().filter;
+    let slot = |side: u32| {
+        GpuFrame::new(
+            gpu(),
+            &SlotShape::of(s.far[0].layout(), (side, side)).unwrap(),
+        )
+        .unwrap()
+    };
+    let (own, big) = (slot(SMALL), slot(2 * SMALL));
+    let spec = StripSpec {
+        px_per_deg: 0.25,
+        ..StripSpec::TIER1
+    };
+    let view = ViewParams::equirect(DQuat::IDENTITY);
+    let target = LinearTarget::new(gpu(), (32, 16)).unwrap();
+    let strip = LinearTarget::new(gpu(), spec.size()).unwrap();
+    // Both passes of `rig` over `lenses`, by track, recorded and never
+    // submitted: what each says.
+    let both = |lenses: [&GpuFrame; 2], rig: &RigUniform| {
+        let mut enc = gpu()
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        let source = SourceRef::Rig { lenses, rig };
+        [
+            projector.record(
+                &mut enc,
+                source,
+                &view,
+                &target,
+                filter,
+                DebugMode::Off,
+                None,
+            ),
+            projector.record_strip(
+                &mut enc,
+                lenses,
+                rig,
+                &spec,
+                &strip,
+                filter,
+                DebugMode::Lens0,
+            ),
+        ]
+    };
+    let refused = |lenses: [&GpuFrame; 2], rig: &RigUniform| -> Result<(), String> {
+        match both(lenses, rig) {
+            [Err(RenderError::Invalid(a)), Err(RenderError::Invalid(b))]
+                if a.contains("slot") && b.contains("slot") =>
+            {
+                Ok(())
+            }
+            said => Err(format!("{said:?}")),
+        }
+    };
+    let packed = pack(&s.far_rig, [SlotGeom::of(&own); 2], UNIT).unwrap();
+    refused([&own, &big], &packed).unwrap();
+    refused([&big, &own], &packed).unwrap();
+    let mut crossed = s.far_rig;
+    let [t0, t1] = [crossed.lenses[0].track, crossed.lenses[1].track];
+    (crossed.lenses[0].track, crossed.lenses[1].track) = (t1, t0);
+    let mixed = pack(&crossed, [SlotGeom::of(&own), SlotGeom::of(&big)], UNIT).unwrap();
+    refused([&big, &own], &mixed).unwrap();
+    for (lenses, rig) in [([&own, &own], &packed), ([&own, &big], &mixed)] {
+        let said = must_fail("the slots the rig was packed for", refused(lenses, rig));
+        assert!(said.contains("Ok(())"), "{said}");
+    }
 }
 
 /// `StillRenderer::strips` matches `seam::strips_of` on the strips' grid.
