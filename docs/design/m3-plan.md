@@ -1556,8 +1556,12 @@ symbol); an amendment's are at its own date.*
       at 0 LSB on both views, with no slot mismatch and no GFX11 R8 signature.
       `goldens_on_host_llvmpipe` passed. Two checks failed, the poles' implicit-LOD control in
       `goldens_on_gpu_match_reference` and the seam difference's count in `rung2_on_radv`, and unit
-      (e) changed both (above); every other RADV row met its checks. The rerun at aef3e69:
-      ODIN RERUN PENDING.
+      (e) changed both (above); every other RADV row met its checks. odin's rerun at aef3e69 (PR
+      #41) passed `goldens_on_gpu_match_reference`, `goldens_on_host_llvmpipe` and `rung2_on_radv`
+      twice, every line the same: the poles' camera-track control 65303 to 65410 pixels at 255 LSB
+      on RADV and llvmpipe, RADV's implicit-LOD pictures 0 pixels apart (measured only), and the
+      seam difference's control (lens 1's centre moved 2 px) 5344 pixels past 18.32 LSB, where the
+      held picture is 51.55 dB and 5.87 LSB.
     - **The M3.7 row's budget (19.6; Pat's card).** The slice's new Tier 1 adds about 10.0 s on the
       cloud's four cores by each test's own cost, or its binary's growth where the test shares one
       (the goldens binary's dfish modules about 7.8 s, `rig_shader.rs` about 0.8 s, look's `.insv`

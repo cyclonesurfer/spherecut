@@ -11369,7 +11369,8 @@ views (the reversed binding 92 LSB off, no slot mismatch) and
 `goldens_on_host_llvmpipe`, and failed the two checks unit (e) then
 changed in the tests, the poles' implicit-LOD control and the seam
 difference's count (above). odin's rerun of the three goldens tests at
-aef3e69 is recorded in PROGRESS's M3.7 note.
+aef3e69 (PR #41) passed all three twice, every line the same, and is
+recorded in PROGRESS's M3.7 note.
 
 Cost, against 19.6's M3.7 line (what it adds to the goldens binary, rung
 1's pairs rendered afresh included, at most 7 s), on the cloud's four

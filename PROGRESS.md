@@ -4457,9 +4457,19 @@ Fedora 44):
   in 0.14 s.
 - Unit (e) changed render's goldens tests alone (`dfish/views.rs`,
   `dfish/rung2.rs`, `goldens.rs` and `dfish_views/manifest.json`),
-  besides the docs. odin reruns `goldens_on_gpu_match_reference`,
-  `goldens_on_host_llvmpipe` and `rung2_on_radv` at aef3e69. The
-  rerun's verdict: ODIN RERUN PENDING.
+  besides the docs. odin reran `goldens_on_gpu_match_reference`,
+  `goldens_on_host_llvmpipe` and `rung2_on_radv` at aef3e69 twice (PR
+  #41, `hw/odin-2026-11-14-m37-rerun`): all three passed both times
+  (142 s with the build, then 38 s), every line the same in both runs.
+  The poles on RADV: no bad pixel, the implicit-LOD pictures 0 pixels
+  apart (at most 1 LSB, measured only), the camera-track control 65409
+  and 65303 pixels at 255 LSB, the reach control 2723 and 753 pixels; on
+  llvmpipe no bad pixel, implicit 55 and 25 (at most 3 LSB), the track
+  control 65410 and 65311, the reach 681 and 255. `rung2_on_radv`'s
+  note: "87 pictures, the worst against lavapipe's 51.55 dB and 5.87 LSB
+  as held"; its control, lens 1's centre moved 2 px, put 5344 pixels
+  past 18.32 LSB on the −X stripe's seam difference (21.01 dB, 89.30 LSB
+  at most), and lens 1 yawed 0.5° read 37.86 dB and 60 LSB as before.
 
 **Open, and known limits:**
 - 19.6's M3.7 row, "the goldens binary + ≤ 7 s", isn't met. The slice's
@@ -6945,8 +6955,9 @@ each slice's merge sweeps the list.
   difference's count of pixels past 4 LSB (6 and 7). Unit (e) changed
   both checks in the tests (a pole control by geometry; the seam
   difference's thresholds scaled to its linear light), and odin's rerun
-  at aef3e69 is in M3.7's note. `bench_playback_stitched_samples` still
-  skips without clip 12. (as of 2026-11-14)
+  at aef3e69 (PR #41) passed all three rows twice (M3.7's note).
+  `bench_playback_stitched_samples` still skips without clip 12. (as of
+  2026-11-14)
 - From M3.7's units, still open: rung 2's seam difference keeps D32's
   PSNR and SSIM floors, which its arithmetic doesn't derive (odin's
   SSIM of 0.99555 was 0.00055 above 0.995); `rung2.json` gains its new
@@ -6984,8 +6995,8 @@ each slice's merge sweeps the list.
    making job and shows plan 11.4's warning and advice, and M3.11 lifts
    `not_yet`. Plan amendments 5 to 10 record what M3.4, M3.8, the
    review-fix slice, M3.5, M3.9 and M3.7 settled for the slices after
-   them. odin's rerun of M3.7's goldens rows at aef3e69 is in M3.7's
-   note. Pat's questions where M3.7 changes them: the card on 19.6's M3.7
+   them. odin's rerun of M3.7's goldens rows at aef3e69 passed (PR #41,
+   M3.7's note). Pat's questions where M3.7 changes them: the card on 19.6's M3.7
    row (about 10.0 to 10.5 s against 7 s; the card recommends 10 s, and
    the plan keeps 7 s with the overrun named until Pat answers); the LOD
    margin, which M3.7 measured (a crescent of up to 0.206°, 2.2 px at
