@@ -2180,15 +2180,18 @@ matter only on 6.1; on 8.1.3 and 9.0.2 the pool has no cap, and nothing
 is lost.
 
 *Updated 2026-11-14 (M3.7, D66):* zero copy reaches a still of a
-camera's pair. `frame --zero-copy` and `look` on an Insta360 pair import
-each lens's VA-API frame by itself and hold both imports until the
-render is done; on Vulkan Video both lenses decode on one FFmpeg device
-that shares the renderer's, and each is copied out of FFmpeg's image by
-itself (path B). Either way `StillRenderer` draws the pair from each
-lens's own `PlaneSource`. `a_pair_renders_alike_on_every_upload_path`
-holds the bytes, the buffers, the imports and every mixed pair of them
-to one picture bit for bit on lavapipe (control: the buffers swapped
-between the tracks). `zero_copy_pair_frame_matches_the_copy` and
+camera's pair. `frame --zero-copy` on an Insta360 pair imports each
+lens's VA-API frame by itself and holds both imports until the render is
+done; on Vulkan Video (`--zero-copy --decoder vulkan`) both lenses
+decode on one FFmpeg device that shares the renderer's, and each is
+copied out of FFmpeg's image by itself (path B). Either way
+`StillRenderer` draws the pair from each lens's own `PlaneSource`.
+`look` stitches a pair on the GPU too, but decodes both lenses by the
+copy path, as it decodes any file: it has no zero-copy option.
+`a_pair_renders_alike_on_every_upload_path` holds the bytes, the
+buffers, the imports and every mixed pair of them to one picture bit for
+bit on lavapipe (control: the buffers swapped between the tracks).
+`zero_copy_pair_frame_matches_the_copy` and
 `shared_vulkan_pair_frame_matches_the_copy` hold an `.insv`'s `frame
 --zero-copy` to a software decode on odin, strictly, and read each
 lens's slot back to label one that holds other bytes than its frame's
@@ -11174,16 +11177,17 @@ What:
   isn't there is `hw_unavailable`, exit 3. The weights and the seam
   difference are read back linear and coded with no OETF, as the CPU
   reference writes them. `look` at such a file draws the GPU's stitch in
-  view, sphere, cube and sheet; a stitched equirect tile under 160 px
-  wide is rendered a whole number of times larger, at 160 or more, and
-  scaled down by area (`image::shrink`), amendment 5's first choice:
-  the margin grows with λ, so an equirect coarser than about 2.5° a
-  pixel has a gap at the seam that no lens covers (2.7 % of the X5-like
-  rig's picture at 128 px wide, none from 160). A
-  pair without a calibration is shown as its lenses with
-  `no_calibration`. The hints follow (`INSTA360_PAIR`,
-  `INSTA360_NO_CALIBRATION`; `INSTA360_UNSTITCHED` is gone), and
-  `not_yet`'s advice for a camera's project drops `--reference`.
+  view, sphere, cube and sheet, both lenses decoded by the copy path, as
+  look decodes any file (it has no zero copy); a stitched equirect tile
+  under 160 px wide is rendered a whole number of times larger, at 160
+  or more, and scaled down by area (`image::shrink`), amendment 5's
+  first choice: the margin grows with λ, so an equirect coarser than
+  about 2.5° a pixel has a gap at the seam that no lens covers (2.7 % of
+  the X5-like rig's picture at 128 px wide, none from 160). A pair
+  without a calibration is shown as its lenses with `no_calibration`.
+  The hints follow (`INSTA360_PAIR`, `INSTA360_NO_CALIBRATION`;
+  `INSTA360_UNSTITCHED` is gone), and `not_yet`'s advice for a camera's
+  project drops `--reference`.
 
 Departures from the plan's row:
 
