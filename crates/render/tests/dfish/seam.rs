@@ -167,14 +167,17 @@ fn floor_of(run: &Run<'_>, key: &str) -> Option<f64> {
 /// when blessing (3 dB under what it measured, never below 36 dB) and no
 /// channel more than 0.1 off. Gives the PSNR.
 fn cpu_check(run: &mut Run<'_>, key: &str, got: &Image, cpu: &ImageF64) -> f64 {
-    let size = (got.width, got.height);
-    let g = unit(got);
-    let p = psnr_of(size, &g, &cpu.data);
+    cpu_rule(run, key, (got.width, got.height), &unit(got), &cpu.data)
+}
+
+/// [`cpu_check`] on a render of `size` already in [0, 1].
+fn cpu_rule(run: &mut Run<'_>, key: &str, size: (u32, u32), got: &[f64], cpu: &[f64]) -> f64 {
+    let p = psnr_of(size, got, cpu);
     let ok = run.calibrated(&format!("{key}_psnr_db"), p, CPU_MARGIN_DB, CPU_FLOOR_DB);
-    let m = max_diff(&g, &cpu.data);
+    let m = max_diff(got, cpu);
     let ok = run.at_most(&format!("{key}_max_channel"), m, CPU_MAX_CHANNEL) && ok;
     if !ok {
-        run.write_diffs(key, size, &g, &cpu.data);
+        run.write_diffs(key, size, got, cpu);
     }
     p
 }
@@ -899,6 +902,62 @@ fn largest_step(bins: &[(f64, usize)], apart: usize) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// The feather's control, a hard switch: the true rig's tune with h = 0,
+/// made once for the binary.
+fn hard() -> &'static Rig {
+    static RIG: OnceLock<Rig> = OnceLock::new();
+    RIG.get_or_init(|| tuned(|t| t.feather_deg = 0.0))
+}
+
+/// The CPU reference's stitch of the far `SeamLines` pair through view
+/// `k`'s stripe by the hard switch ([`hard`]), at unit gains, made once
+/// for the binary.
+fn cpu_hard_stripe(k: usize) -> &'static ImageF64 {
+    static STRIPES: [OnceLock<ImageF64>; 4] = [const { OnceLock::new() }; 4];
+    STRIPES[k].get_or_init(|| stitch(both(lines()), hard(), UNIT, &view(k), RigDebug::Off))
+}
+
+/// How many pixels of view `k`'s stripe the hard switch's step gives to
+/// neither lens alone, where both cover and each lies on the same side of
+/// its band's centre, so that `Rig::weights`' rule decides them (F025):
+/// those where both lie inside, which it gives ½ each, and those where
+/// both lie past, which it gives the nearer lens.
+fn decided_by_the_rule(k: usize) -> [usize; 2] {
+    let rig = hard();
+    let (v, size) = view(k);
+    let mut counts = [0; 2];
+    for (x, y) in (0..size.1).flat_map(|y| (0..size.0).map(move |x| (x, y))) {
+        let d = v.dir(size, f64::from(x) + 0.5, f64::from(y) + 0.5);
+        if !(0..2).all(|b| rig.covers(b, d, 0.0)) {
+            continue;
+        }
+        let inside = [0, 1].map(|b| {
+            let ray = rig.ray(b, d);
+            ray.x.hypot(ray.y).atan2(ray.z) < rig.band_centre(b)
+        });
+        match inside {
+            [true, true] => counts[0] += 1,
+            [false, false] => counts[1] += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+/// `image`, a render of view `k`'s stripe, with a dark ring planted on
+/// the seam: the pixels of the two bins of [`feather_bins`] that the seam
+/// parts black, as a stitch shows them that weighs neither lens there.
+fn ringed(image: &[f64], k: usize) -> Vec<f64> {
+    let seam = FEATHER_BINS - 1..=FEATHER_BINS;
+    let mut out = image.to_vec();
+    for (n, bin) in feather_bins(k).iter().enumerate() {
+        if bin.is_some_and(|b| seam.contains(&b)) {
+            out[3 * n..3 * n + 3].fill(0.0);
+        }
+    }
+    out
+}
+
 /// The fewest pixels a feather bin may hold.
 const FEATHER_MIN_PIXELS: f64 = 50.0;
 
@@ -915,10 +974,8 @@ const CONTROL_NEIGHBOUR_LSB: f64 = 4.0;
 /// from the seam, changes by under 1 LSB between neighbouring bins. What
 /// the two renders share cancels: the scene's own detail, which against
 /// the ideal moves a bin's mean by up to 2 LSB on its own (recorded
-/// beside, `against_ideal_step_lsb`), and the stitch's own error, which
-/// the side seams' rows hold to the CPU reference and the ideal (a dark
-/// ring where neither lens weighs among it). What is left is the gain's
-/// step, as the feather spreads it.
+/// beside, `against_ideal_step_lsb`), and the stitch's own error. What is
+/// left is the gain's step, as the feather spreads it.
 ///
 /// Its control is a hard switch, the feather's h = 0, rendered the same
 /// two ways, whose whole step falls between two bins: at least 4 LSB
@@ -926,20 +983,32 @@ const CONTROL_NEIGHBOUR_LSB: f64 = 4.0;
 /// edge at worst, and 10.5's 8 LSB between bins two apart on the views
 /// whose seam lies at mid-grey or brighter. +X's lies at the ramp's dark
 /// end, and its step two bins apart is recorded and not held.
+///
+/// A hard switch leaves pixels at the seam to the weights rule (F025):
+/// where both lenses lie inside their band's centre it gives ½ each, and
+/// where both lie past it the nearer lens, and how many of each the
+/// stripe holds is recorded. A fault there that both renders share, a
+/// dark ring where the stitch weighs neither lens, would cancel in the
+/// difference, and no other row stitches at h = 0 (the side seams' rows
+/// stitch at the default tune, where both feathers weigh across the
+/// seam), so the switch's stripe at unit gains is held to the CPU
+/// reference's stitch of it by the CPU rule. Its control is that stripe
+/// with a dark ring planted on the seam ([`ringed`]), which must miss the
+/// rule: a channel more than 0.1 off, and the PSNR under the floor.
 fn dfish_feather(run: &mut Run<'_>) {
     let x5 = x5();
     let frames: [&dyn VideoPlanes; 2] = [&lines()[0], quarter_ev_lens_1()];
     let name = "x5_seamlines, lens 1 at +0.25 EV";
     let pair = x5_source(name, frames, &far(), f64::INFINITY, UNIT);
     let plain = lines_source();
-    let hard = tuned(|t| t.feather_deg = 0.0);
+    let hard = hard();
     for (k, key) in VIEW_KEYS.iter().enumerate() {
         let shot = view(k);
         let renders = [
             (&pair, &x5.rig),
             (&plain, &x5.rig),
-            (&pair, &hard),
-            (&plain, &hard),
+            (&pair, hard),
+            (&plain, hard),
         ]
         .map(|(source, rig)| render(run, source, rig, &shot, DebugMode::Off).map(|i| unit(&i)));
         let [
@@ -983,13 +1052,34 @@ fn dfish_feather(run: &mut Run<'_>) {
         } else {
             run.at_least(&format!("{control}_two_bins_lsb"), whole, CONTROL_STEP_LSB);
         }
+
+        // The switch's own light, which the difference cancels.
+        let [halves, nearer] = decided_by_the_rule(k);
+        run.measure(&format!("h0_{key}_halves_pixels"), halves as f64);
+        run.measure(&format!("h0_{key}_nearer_pixels"), nearer as f64);
+        let cpu = &cpu_hard_stripe(k).data;
+        let cpu_key = format!("h0_{key}_cpu");
+        cpu_rule(run, &cpu_key, shot.1, &switched_at_unit, cpu);
+        let ring = ringed(&switched_at_unit, k);
+        let off = max_diff(&ring, cpu);
+        run.over(&format!("{control}_ring_max_channel"), off, CPU_MAX_CHANNEL);
+        if let Some(floor) = floor_of(run, &format!("{cpu_key}_psnr_db")) {
+            let p = psnr_of(shot.1, &ring, cpu);
+            run.measure(&format!("{control}_ring_psnr_db"), p);
+            run.over(
+                &format!("{control}_ring_under_cpu_floor_db"),
+                floor - p,
+                0.0,
+            );
+        }
     }
     let views = (0..VIEWS.len()).map(band_view_about).collect();
     run.end_pair_check(
         "lens 1 at +0.25 EV with the gains off on the four seam views' stripes, against the pair \
          at unit gains: the mean difference by 0.45° of angle from the seam changes by under 1 \
          LSB a bin; control: h = 0, at least 4 LSB between neighbouring bins, and 8 LSB between \
-         bins two apart on −X, +Y and −Y",
+         bins two apart on −X, +Y and −Y; h = 0 at unit gains against the CPU reference by the \
+         CPU rule, control: a dark ring planted on the seam",
         &[&pair, &plain],
         views,
     );
