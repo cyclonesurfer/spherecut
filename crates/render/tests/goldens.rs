@@ -676,7 +676,6 @@ fn max_diff(a: &[f64], b: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
-/// A JSON number, to 4 decimals; ±∞ as a string.
 /// One value as itself, more as a list, in their order: a manifest
 /// entry's sources and views.
 fn one_or_list(mut v: Vec<Value>) -> Value {
@@ -693,6 +692,7 @@ fn bare(v: &Value) -> String {
     v.as_str().map_or_else(|| v.to_string(), str::to_string)
 }
 
+/// A JSON number, to 4 decimals; ±∞ as a string.
 fn num(v: f64) -> Value {
     if v.is_finite() {
         json!((v * 1e4).round() / 1e4)
