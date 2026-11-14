@@ -832,14 +832,15 @@ VideoPlanes ──Uploader──▶ GpuFrame (slot) ──Projector──▶ Lin
   shader does since M3.7: for each lens the parallax-corrected ray, a
   footprint from the pixel's own rays and its LOD, the mask, trilinear
   taps, the lens's gain in linear light, and the blend by the rig's
-  weights. The weights sum to 1 wherever a lens covers: where no
-  feather weighs a direction that a lens covers, the covering lens with
-  the smaller θ takes it whole (`Rig::weights`, D63's note of
-  2026-11-10), so the stitch is black only where no lens covers, and the
-  shader copies the rule. Each lens's band is centred where it sees the
-  seam, at c_b = 90° + δ_b (F025, D64's note of 2026-11-14). `RigDebug`
-  writes a lens alone, the weights or the seam difference instead (the
-  plan's debug modes 4 to 7).
+  weights. Each lens's band is centred where it sees the seam, at c_b =
+  90° + δ_b (F025, D64's note of 2026-11-14). The weights sum to 1
+  wherever a lens covers: where no feather weighs a direction that a
+  lens covers, the covering lens nearer its band's centre, by θ_b − c_b,
+  takes it whole, ½ each at a tie (the smaller θ where δ_0 = δ_1;
+  `Rig::weights`, D63's note of 2026-11-10 and D64's of 2026-11-14), so
+  the stitch is black only where no lens covers, and `fs_rig`'s `weigh`
+  copies the rule. `RigDebug` writes a lens alone, the weights or the
+  seam difference instead (the plan's debug modes 4 to 7).
 * **A pair made ready once** *(M3.4, D65)*: `reference::LensPair` is a
   pair's two pictures with their mip chains in f64, and nothing of a
   rig. `render_rig_of` and `seam::strips_of` take the pair and, with
